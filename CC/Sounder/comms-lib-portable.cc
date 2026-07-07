@@ -10,11 +10,15 @@
  * this compiles on the DGX Spark.
  */
 #include <algorithm>
+#include <cassert>
+#include <chrono>
 #include <complex>
 #include <condition_variable>
 #include <cstdlib>
 #include <functional>
+#include <iostream>
 #include <mutex>
+#include <queue>
 #include <thread>
 #include <vector>
 
@@ -189,4 +193,109 @@ std::vector<std::complex<float>> CommsLib::correlate_mt(
     out[k] = std::complex<float>(outr[k], outi[k]);
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Beacon detection (find_beacon), moved here from comms-lib-avx.cc so the whole
+// UE detection path is portable and builds on aarch64 (the DGX Spark). It uses
+// the portable matched filter (correlate_mt) plus the trivial portable kernels
+// below, replacing the x86-only abs2_avx / auto_corr_mult_avx.
+// ---------------------------------------------------------------------------
+namespace {
+// |z|^2 per element (auto-vectorizes). == abs2_avx(vector<complex<float>>).
+std::vector<float> Abs2(const std::vector<std::complex<float>>& f) {
+  std::vector<float> out(f.size());
+  for (size_t i = 0; i < f.size(); ++i) {
+    const float re = f[i].real();
+    const float im = f[i].imag();
+    out[i] = re * re + im * im;
+  }
+  return out;
+}
+
+// out[i] = f[i] * conj(f[i-dly]), 0 for i < dly. Reinforces the double peak of a
+// 2-rep beacon. == auto_corr_mult_avx(f, dly, conj=true).
+std::vector<std::complex<float>> AutoCorrMult(
+    const std::vector<std::complex<float>>& f, int dly) {
+  std::vector<std::complex<float>> out(f.size(), std::complex<float>(0, 0));
+  for (size_t i = static_cast<size_t>(dly); i < f.size(); ++i) {
+    out[i] = f[i] * std::conj(f[i - dly]);
+  }
+  return out;
+}
+
+// Trailing box-window sum: out[i] = sum(f[i-window .. i-1]), f[<0]=0. O(n)
+// running sum, == correlate_avx_s(f, ones(window)) but ~window x cheaper.
+std::vector<float> TrailingWindowSum(const std::vector<float>& f,
+                                     size_t window) {
+  std::vector<float> out(f.size());
+  double run = 0.0;  // double accumulator: no drift over long windows
+  for (size_t i = 0; i < f.size(); ++i) {
+    if (i >= 1) run += f[i - 1];
+    if (i >= window + 1) run -= f[i - 1 - window];
+    out[i] = static_cast<float>(run);
+  }
+  return out;
+}
+}  // namespace
+
+// Correlate against the 2-rep Gold beacon, reinforce the double peak, threshold
+// against trailing local energy, return the first peak index (or -1).
+int CommsLib::find_beacon_avx(
+    const std::vector<std::complex<float>>& raw_samples,
+    const std::vector<std::complex<float>>& match_samples, float corr_scale) {
+  const int seqLen = static_cast<int>(match_samples.size());
+#ifdef TEST_BENCH
+  const auto t0 = std::chrono::steady_clock::now();
+#endif
+  const std::vector<std::complex<float>> gold_corr =
+      CommsLib::correlate_mt(raw_samples, match_samples);
+#ifdef TEST_BENCH
+  const auto t1 = std::chrono::steady_clock::now();
+#endif
+  const std::vector<std::complex<float>> gold_auto_corr =
+      AutoCorrMult(gold_corr, seqLen);
+  const std::vector<float> peak_metric = Abs2(gold_auto_corr);
+#ifdef TEST_BENCH
+  const auto t2 = std::chrono::steady_clock::now();
+#endif
+  const std::vector<float> corr_abs = Abs2(gold_corr);
+  const std::vector<float> thresh = TrailingWindowSum(corr_abs, seqLen);
+#ifdef TEST_BENCH
+  const auto t3 = std::chrono::steady_clock::now();
+#endif
+  assert(peak_metric.size() == thresh.size());
+  std::queue<int> valid_peaks;
+  for (size_t i = 0; i < peak_metric.size(); ++i) {
+    if (corr_scale * peak_metric[i] > thresh[i]) {
+      valid_peaks.push(static_cast<int>(i));
+    }
+  }
+#ifdef TEST_BENCH
+  const auto t4 = std::chrono::steady_clock::now();
+  const auto us = [](auto a, auto b) {
+    return std::chrono::duration<double, std::micro>(b - a).count();
+  };
+  std::cout << "Correlate took " << us(t0, t1) << " usec\n"
+            << "AutoCorr+Abs took " << us(t1, t2) << " usec\n"
+            << "Threshold took " << us(t2, t3) << " usec\n"
+            << "PeakDetect took " << us(t3, t4) << " usec" << std::endl;
+#endif
+  if (valid_peaks.empty()) valid_peaks.push(-1);
+  return valid_peaks.front();
+}
+
+// Real-time entry: cint16 samples straight from the radio -> cfloat -> detect.
+ssize_t CommsLib::find_beacon_avx(
+    const std::complex<int16_t>* raw_samples,
+    const std::vector<std::complex<float>>& match_samples, size_t check_window,
+    float corr_scale) {
+  static constexpr float kShortMaxFloat = 32767.0f;
+  std::vector<std::complex<float>> sync_compare(check_window);
+  for (size_t i = 0; i < check_window; ++i) {
+    sync_compare[i] = std::complex<float>(
+        static_cast<float>(raw_samples[i].real()) / kShortMaxFloat,
+        static_cast<float>(raw_samples[i].imag()) / kShortMaxFloat);
+  }
+  return CommsLib::find_beacon_avx(sync_compare, match_samples, corr_scale);
 }
