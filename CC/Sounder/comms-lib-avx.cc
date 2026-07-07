@@ -82,9 +82,9 @@ int CommsLib::find_beacon_avx(
   struct timespec tv, tv2;
   clock_gettime(CLOCK_MONOTONIC, &tv);
 
-  // correlate signal with beacon
+  // correlate signal with beacon (portable + threaded matched filter)
   std::vector<std::complex<float>> gold_corr_avx =
-      CommsLib::correlate_avx(raw_samples, match_samples);
+      CommsLib::correlate_mt(raw_samples, match_samples);
   clock_gettime(CLOCK_MONOTONIC, &tv2);
 #ifdef TEST_BENCH
   double diff1 =

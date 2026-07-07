@@ -70,6 +70,7 @@ INCLUDE_DIRECTORIES( "../../include" )
 add_executable(comm-testbench test-main.cc
 	${SOURCE_DIR}/comms-lib.cc
 	${SOURCE_DIR}/comms-lib-avx.cc
+	${SOURCE_DIR}/comms-lib-portable.cc
 	${SOURCE_DIR}/utils.cc)
 target_link_libraries(comm-testbench
 	-lpthread --enable-threadsafe
@@ -88,5 +89,6 @@ target_compile_definitions(comm-testbench PRIVATE TEST_BENCH)
 # including the DGX Spark once the ARM/NEON port lands.
 add_executable(correlator-rate-bench bench-correlator-rate.cc
 	${SOURCE_DIR}/comms-lib-avx.cc
+	${SOURCE_DIR}/comms-lib-portable.cc
 	${SOURCE_DIR}/utils.cc)
 target_link_libraries(correlator-rate-bench -lpthread)

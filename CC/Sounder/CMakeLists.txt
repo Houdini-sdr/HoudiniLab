@@ -176,6 +176,7 @@ set(SOUNDER_SOURCES ${PURE_UHD_SOURCES}
     BaseRadioSet-calibrate-analog.cc
     comms-lib.cc
     comms-lib-avx.cc
+    comms-lib-portable.cc
     utils.cc
     signalHandler.cpp)
 
