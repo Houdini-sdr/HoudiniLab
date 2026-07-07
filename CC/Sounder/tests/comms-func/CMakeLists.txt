@@ -66,16 +66,27 @@ endif()
 
 set(SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../..)
 
-add_definitions(-DTEST_BENCH)
-
 INCLUDE_DIRECTORIES( "../../include" )
 add_executable(comm-testbench test-main.cc
 	${SOURCE_DIR}/comms-lib.cc
 	${SOURCE_DIR}/comms-lib-avx.cc
 	${SOURCE_DIR}/utils.cc)
-target_link_libraries(comm-testbench 
+target_link_libraries(comm-testbench
 	-lpthread --enable-threadsafe
 	${SOURCE_DIR}/mufft/libmuFFT.a
        	${SOURCE_DIR}/mufft/libmuFFT-sse.a
 	${SOURCE_DIR}/mufft/libmuFFT-sse3.a
 	${SOURCE_DIR}/mufft/libmuFFT-avx.a)
+# TEST_BENCH turns on find_beacon_avx's internal per-stage timing prints and
+# correlation-data dumps -- wanted for this diagnostic testbench, but NOT for
+# the throughput benchmark below, where it would dominate the measurement.
+target_compile_definitions(comm-testbench PRIVATE TEST_BENCH)
+
+# Correlator sample-rate benchmark. The beacon correlator path
+# (CommsLib::find_beacon_avx) uses no FFT, so this links only comms-lib-avx +
+# utils and builds without muFFT -- deliberately, so it can run anywhere,
+# including the DGX Spark once the ARM/NEON port lands.
+add_executable(correlator-rate-bench bench-correlator-rate.cc
+	${SOURCE_DIR}/comms-lib-avx.cc
+	${SOURCE_DIR}/utils.cc)
+target_link_libraries(correlator-rate-bench -lpthread)
