@@ -11,7 +11,10 @@
  */
 #include <algorithm>
 #include <complex>
+#include <condition_variable>
 #include <cstdlib>
+#include <functional>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -19,7 +22,7 @@
 
 namespace {
 // Thread count for correlate_mt: explicit request wins; else SOUNDER_CORR_THREADS
-// env; else 1 (single-threaded until a persistent pool replaces per-call spawn).
+// env; else 1. Capped at the pool size (hardware concurrency) at dispatch.
 unsigned ResolveThreads(unsigned requested) {
   if (requested > 0) return requested;
   if (const char* e = std::getenv("SOUNDER_CORR_THREADS")) {
@@ -28,6 +31,93 @@ unsigned ResolveThreads(unsigned requested) {
   }
   return 1u;
 }
+
+// Persistent fork-join pool: worker threads are created once and reused, so
+// per-frame correlation pays no thread-creation cost (the per-call std::thread
+// spawn it replaces made threading a net loss on the rig host). Not reentrant
+// -- find_beacon runs one correlation at a time.
+class ForkJoinPool {
+ public:
+  static ForkJoinPool& Instance() {
+    static ForkJoinPool inst;
+    return inst;
+  }
+  unsigned size() const { return n_; }
+
+  // Split [0,total) into `parts` contiguous chunks; run body(k0,k1) on each.
+  // The calling thread runs chunk 0; workers run the rest. Blocks until done.
+  void Run(size_t total, unsigned parts,
+           const std::function<void(size_t, size_t)>& body) {
+    parts = std::min<unsigned>(parts, n_);
+    if (parts <= 1) {
+      body(0, total);
+      return;
+    }
+    const size_t chunk = (total + parts - 1) / parts;
+    {
+      std::lock_guard<std::mutex> lk(m_);
+      body_ = &body;
+      remaining_ = parts - 1;
+      for (unsigned p = 1; p < parts; ++p) {
+        const size_t k0 = std::min(total, static_cast<size_t>(p) * chunk);
+        const size_t k1 = std::min(total, k0 + chunk);
+        queue_.push_back({k0, k1});
+      }
+    }
+    cv_work_.notify_all();
+    body(0, std::min(total, chunk));  // caller executes chunk 0
+    std::unique_lock<std::mutex> lk(m_);
+    cv_done_.wait(lk, [this] { return remaining_ == 0; });
+    body_ = nullptr;
+  }
+
+ private:
+  struct Range {
+    size_t k0, k1;
+  };
+
+  ForkJoinPool() {
+    n_ = std::thread::hardware_concurrency();
+    if (n_ < 1) n_ = 1;
+    for (unsigned i = 0; i + 1 < n_; ++i) {  // n_-1 workers + the caller
+      workers_.emplace_back([this] { Worker(); });
+    }
+  }
+  ~ForkJoinPool() {
+    {
+      std::lock_guard<std::mutex> lk(m_);
+      stop_ = true;
+    }
+    cv_work_.notify_all();
+    for (auto& t : workers_) t.join();
+  }
+  void Worker() {
+    for (;;) {
+      Range r;
+      const std::function<void(size_t, size_t)>* body;
+      {
+        std::unique_lock<std::mutex> lk(m_);
+        cv_work_.wait(lk, [this] { return stop_ || !queue_.empty(); });
+        if (stop_ && queue_.empty()) return;
+        r = queue_.back();
+        queue_.pop_back();
+        body = body_;  // read under lock (stable for the whole Run)
+      }
+      (*body)(r.k0, r.k1);
+      std::lock_guard<std::mutex> lk(m_);
+      if (--remaining_ == 0) cv_done_.notify_one();
+    }
+  }
+
+  unsigned n_ = 1;
+  std::vector<std::thread> workers_;
+  std::vector<Range> queue_;
+  const std::function<void(size_t, size_t)>* body_ = nullptr;
+  size_t remaining_ = 0;
+  bool stop_ = false;
+  std::mutex m_;
+  std::condition_variable cv_work_, cv_done_;
+};
 }  // namespace
 
 // Matched-filter cross-correlation, portable + multi-threaded, equivalent to
@@ -89,17 +179,8 @@ std::vector<std::complex<float>> CommsLib::correlate_mt(
   };
 
   const unsigned nt = ResolveThreads(num_threads);
-  if (nt > 1 && N >= 8192) {  // amortize per-call spawn only on real work
-    std::vector<std::thread> pool;
-    pool.reserve(nt);
-    const size_t chunk = (N + nt - 1) / nt;
-    for (unsigned t = 0; t < nt; ++t) {
-      const size_t k0 = static_cast<size_t>(t) * chunk;
-      const size_t k1 = std::min(N, k0 + chunk);
-      if (k0 >= k1) break;
-      pool.emplace_back(work, k0, k1);
-    }
-    for (auto& th : pool) th.join();
+  if (nt > 1 && N >= 4096) {
+    ForkJoinPool::Instance().Run(N, nt, work);
   } else {
     work(0, N);
   }
