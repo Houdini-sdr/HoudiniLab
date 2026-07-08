@@ -133,6 +133,12 @@ class CommsLib {
       const std::complex<int16_t>* raw_samples,
       const std::vector<std::complex<float>>& match_samples,
       size_t check_window, float corr_scale);
+  // GPU beacon detector (find_beacon_cuda.cu), defined only when built with
+  // -DUSE_CUDA (CMake HOUDINI_USE_CUDA). Same peak index as find_beacon_avx.
+  static ssize_t find_beacon_cuda(
+      const std::complex<int16_t>* raw_samples,
+      const std::vector<std::complex<float>>& match_samples,
+      size_t check_window, float corr_scale);
 
   static std::vector<float> correlate_avx_s(std::vector<float> const& f,
                                             std::vector<float> const& g);

@@ -185,7 +185,22 @@ set(SOUNDER_SOURCES ${PURE_UHD_SOURCES}
     utils.cc
     signalHandler.cpp)
 
-add_executable(sounder 
+# Optional GPU beacon correlator (DGX Spark / GB10). find_beacon_cuda.cu runs
+# the detection pipeline on the GPU over unified memory; the portable CPU
+# find_beacon_avx stays the default and the numeric reference.
+option(HOUDINI_USE_CUDA "Build the GPU beacon correlator (DGX Spark)" OFF)
+if (HOUDINI_USE_CUDA)
+  enable_language(CUDA)
+  set(CMAKE_CUDA_STANDARD 17)
+  if (NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+    set(CMAKE_CUDA_ARCHITECTURES native)
+  endif()
+  add_definitions(-DUSE_CUDA)
+  list(APPEND SOUNDER_SOURCES find_beacon_cuda.cu)
+  message(STATUS "GPU beacon correlator: ENABLED (CUDA arch ${CMAKE_CUDA_ARCHITECTURES})")
+endif()
+
+add_executable(sounder
     main.cc
     ${SOUNDER_SOURCES})
 
