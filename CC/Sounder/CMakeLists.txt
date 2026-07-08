@@ -189,7 +189,7 @@ add_executable(sounder
     main.cc
     ${SOUNDER_SOURCES})
 
-if (${CMAKE_SYSTEM_PROCESSOR} MATCHES "arm") 
+if (${CMAKE_SYSTEM_PROCESSOR} MATCHES "aarch64|arm") 
     set(MUFFT_LIBRARIES
         ${CMAKE_SOURCE_DIR}/mufft/libmuFFT.a)
 else()
