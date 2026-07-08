@@ -43,7 +43,12 @@ if(${CMAKE_C_COMPILER_ID} STREQUAL "GNU")
   message(STATUS "Using GNU compiler, compiler ID ${CMAKE_C_COMPILER_ID}")
   #For Ubuntu 1804 need to keep the c11 std for thread check
   set(CMAKE_C_FLAGS "-std=c11 -Wall")
-  set(CMAKE_CXX_FLAGS "-std=c++17 -Wall -Wextra -march=native")
+  if (CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm")
+    set(ARCH_FLAGS "-mcpu=native")   # ARM (e.g. DGX Spark / Grace): NEON/SVE
+  else()
+    set(ARCH_FLAGS "-march=native")
+  endif()
+  set(CMAKE_CXX_FLAGS "-std=c++17 -Wall -Wextra ${ARCH_FLAGS}")
   set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -O0")
 else()
   message(FATAL_ERROR "Unsupported version of compiler")
