@@ -836,7 +836,7 @@ float Receiver::estimateCFO(const std::vector<std::complex<int16_t>>& sync_buff,
         std::complex<float>(sync_buff[beacon1_id].real() / SHRT_MAX,
                             sync_buff[beacon1_id].imag() / SHRT_MAX);
   }
-  const auto cfo_mult = CommsLib::complex_mult_avx(beacon1, beacon0, true);
+  const auto cfo_mult = CommsLib::complex_mult(beacon1, beacon0, true);
   float phase = 0.0f;
   float prev_phase = 0.0f;
   for (size_t i = 0; i < cfo_mult.size(); i++) {

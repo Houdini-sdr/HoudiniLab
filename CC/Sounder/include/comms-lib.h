@@ -165,6 +165,11 @@ class CommsLib {
   static std::vector<std::complex<int16_t>> complex_mult_avx(
       std::vector<std::complex<int16_t>> const& f,
       std::vector<std::complex<int16_t>> const& g, const bool conj);
+  // Portable element-wise complex multiply (see comms-lib-portable.cc),
+  // equivalent to the float complex_mult_avx. Builds on x86 and aarch64.
+  static std::vector<std::complex<float>> complex_mult(
+      const std::vector<std::complex<float>>& f,
+      const std::vector<std::complex<float>>& g, bool conj);
   //private:
   //    static inline float** init_qpsk();
   //    static inline float** init_qam16();

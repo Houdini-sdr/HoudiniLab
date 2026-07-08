@@ -299,3 +299,18 @@ ssize_t CommsLib::find_beacon_avx(
   }
   return CommsLib::find_beacon_avx(sync_compare, match_samples, corr_scale);
 }
+
+// Element-wise complex multiply, portable equivalent of the float
+// complex_mult_avx: out[i] = f[i] * (conj ? conj(g[i]) : g[i]), size min(f,g).
+// Used by receiver.cc CFO estimation; small (half a beacon) so plain portable
+// C++ is fine, and it builds on aarch64 where complex_mult_avx does not.
+std::vector<std::complex<float>> CommsLib::complex_mult(
+    const std::vector<std::complex<float>>& f,
+    const std::vector<std::complex<float>>& g, bool conj) {
+  const size_t n = std::min(f.size(), g.size());
+  std::vector<std::complex<float>> out(n);
+  for (size_t i = 0; i < n; ++i) {
+    out[i] = conj ? f[i] * std::conj(g[i]) : f[i] * g[i];
+  }
+  return out;
+}
