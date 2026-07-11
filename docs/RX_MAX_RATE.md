@@ -67,6 +67,58 @@ What the app gains (rx-recorder consumer path, readStream fallback kept):
   released immediately after assembly (≤1 held), so worker/overflow
   behavior is unchanged.
 
+## Single-socket drop diagnosis (measured 2026-07-10, rig B)
+
+- **Every kernel drop is a socket-buffer-full event**: `netstat -su` shows
+  packet receive errors == receive buffer errors (97M+). No backlog/softirq
+  drops. The wall is the DRAIN of the socket buffer (the plugin worker's
+  recvmmsg chain — dominated by the kernel->user copy on the worker's
+  core), not kernel protocol processing.
+- **`net.core.rmem_max` on .64 is 256 MB** — half the value HOST_TUNING.md
+  prescribes, so the plugin's 512 MB SO_RCVBUF request is silently clamped.
+- **Buffer size buys a lossless WINDOW, not sustained rate**: window =
+  size / (offered - drained) ~= 180 ms at 512 MB and today's ~22.9 Gbps
+  deficit; 4 GB ~= 1.4 s. Bursts shorter than the window are lossless
+  TODAY — the duty-cycle capture strategy.
+- **Rig-B core map**: cores 15-18 @ 3.98 GHz, 19 @ 4.0 GHz, 5-9 @ 3.9 GHz,
+  0-4/10-14 @ ~2.8 GHz. Worker/IRQ placement across the fast cores is the
+  first experiment (`tools/rx_drop_probe.sh` is the harness; the plugin's
+  `cpu_affinity` stream kwarg pins the worker, no root needed).
+
+### Experiment plan T4 (root one-liners, [user])
+
+```sh
+# larger clamp for the plugin's SO_RCVBUF request (window x4):
+sudo sysctl -w net.core.rmem_max=2147483647
+# let the unprivileged worker actually get SCHED_FIFO (verify first with
+# ps -eLo psr,policy,rtprio,comm during a run — the plugin requests RT 50
+# but needs this to succeed without CAP_SYS_NICE):
+echo 'houdini - rtprio 50' | sudo tee -a /etc/security/limits.conf
+# pin the data-NIC queue IRQs away from the worker's core (find them via
+# grep <iface-driver> /proc/interrupts), e.g. queue IRQ N -> core 17:
+# echo 20000 | sudo tee /proc/irq/N/smp_affinity
+```
+
+Run `tools/rx_drop_probe.sh files/rx-record-max.json --duration 1
+--worker-cpus 19 --app-cpu 18` before/after each change: it reports the
+exact kernel delivered/dropped delta per run.
+
+### The rung between today and AF_XDP (driver-side, software lane)
+
+`[-> propose SH ticket]` — with the diagnosis above, the cheap
+driver-side lifts before AF_XDP, all in the host module's socket setup
+(`stream/udp_comm.cc`):
+
+- `SO_BUSY_POLL` / `SO_PREFER_BUSY_POLL` (+ `napi_defer_hard_irqs` /
+  `gro_flush_timeout` sysctls): the consumer core drives NAPI directly —
+  the classic single-flow UDP win.
+- `UDP_GRO`: kernel coalesces ~8 KB datagrams into ~64 KB segments,
+  dividing per-packet stack cost ~8x (recvmmsg + cmsg segment sizes).
+- **Port-striped multi-socket** (needs HS for the fh_core side): device
+  alternates dst ports across N sockets -> N independent RSS queues,
+  softirq cores, and workers. Matches the observed multi-socket aggregate
+  >= 70 Gbps; the structural single-node answer short of AF_XDP.
+
 ## Ruled out / deferred
 
 - **App-donated recv buffers** (app allocates the memory `recvmmsg`
