@@ -62,7 +62,7 @@ on driver-side transport work (AP-4 and beyond).
 | `device` | `{"driver": "houdinisdr"}` | `Device::make()` kwargs. Add `serial`, etc. here. |
 | `stream` | `{}` | `setupStream()` kwargs forwarded verbatim (`ring_bytes`, `cpu_affinity`, ...). |
 | `channels` | `[0]` | RX channel. Exactly one for now (the combined multi-channel readStream merge is WIP device-side, SH-142/SH-159). |
-| `rate` | `0` | Requested sample rate in Hz; `0` keeps the device rate. A rate the device already advertises goes through `setSampleRate`; a rate **beyond** the advertised set makes rx-recorder step `RX_FAB_CLK` up (doubling per MMCM code, device fail-loud = the ceiling) until the request is covered, then select it. The file records the **actual** rate read back. |
+| `rate` | `0` | Requested sample rate in Hz; `0` keeps the device rate. A rate the device already advertises goes through `setSampleRate`; a rate **outside** the advertised set makes rx-recorder step `RX_FAB_CLK` (doubling toward faster, halving toward slower; device fail-loud = ceiling and floor) until the request is covered, then select it. The file records the **actual** rate read back. |
 | `freq` | — | RF tune in Hz (fine NCO on Houdini). Only applied when present. |
 | `gain` | — | RX gain in dB. Only applied when present. |
 | `antenna` | — | Antenna name. Only applied when present. |

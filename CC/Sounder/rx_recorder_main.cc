@@ -218,23 +218,16 @@ bool fillSlot(SoapySDR::Device* dev, SoapySDR::Stream* stream, short* dest,
 }
 
 // Applies the requested sample rate. Sequence [user]: check the device's
-// advertised rates; while they top out below the request, step the global
-// RX fabric clock up (doubling per MMCM code) and re-check — stop when the
-// request is covered or the device rejects the next clock (its fail-loud
-// defines "max acceptable FAB_CLK", with full revert on its side). Then
-// select the rate normally. RX_FAB_CLK requires all RX streams closed,
-// which holds here (before setupStream); every fresh make() resets the
-// device to defaults, so a high-rate run never leaks into the next session.
+// advertised rates; while the request lies outside them, step the global
+// RX fabric clock (doubling toward faster rates, halving toward slower —
+// the advertised set scales with the clock) and re-check. The device's
+// fail-loud on an unrealizable clock (with full revert on its side)
+// defines both the ceiling and the floor; an 8-step bound is the local
+// backstop. Then select the rate normally. RX_FAB_CLK requires all RX
+// streams closed, which holds here (before setupStream); every fresh
+// make() resets the device to defaults, so an off-default run never
+// leaks into the next session.
 void applySampleRate(SoapySDR::Device* dev, size_t chan, double rate) {
-  // Covered = an advertised rung reaches it, or the current effective rate
-  // (fabric_clock x vld) already equals/exceeds it.
-  const auto coverage = [&](void) {
-    double best = dev->getSampleRate(SOAPY_SDR_RX, chan);
-    for (double rung : dev->listSampleRates(SOAPY_SDR_RX, chan)) {
-      best = std::max(best, rung);
-    }
-    return best;
-  };
   const auto on_ladder = [&](void) {
     for (double rung : dev->listSampleRates(SOAPY_SDR_RX, chan)) {
       if (std::abs(rung - rate) <= (1e-6 * rate)) {
@@ -243,48 +236,65 @@ void applySampleRate(SoapySDR::Device* dev, size_t chan, double rate) {
     }
     return false;
   };
+  // Span of reachable rates at the current clock: the advertised rungs
+  // plus the effective fabric rate (fabric_clock x vld).
+  const auto span = [&](void) {
+    double lo = dev->getSampleRate(SOAPY_SDR_RX, chan);
+    double hi = lo;
+    for (double rung : dev->listSampleRates(SOAPY_SDR_RX, chan)) {
+      lo = std::min(lo, rung);
+      hi = std::max(hi, rung);
+    }
+    return std::make_pair(lo, hi);
+  };
 
   constexpr int kMaxClockSteps = 8;
-  for (int step = 0;
-       (step < kMaxClockSteps) && (coverage() < rate * (1.0 - 1e-6)); step++) {
+  for (int step = 0; step < kMaxClockSteps; step++) {
+    if (on_ladder() == true) {
+      dev->setSampleRate(SOAPY_SDR_RX, chan, rate);
+      return;
+    }
+    const double eff = dev->getSampleRate(SOAPY_SDR_RX, chan);
+    if (std::abs(eff - rate) <= (1e-6 * rate)) {
+      return;  // the clock walk landed the effective rate on it exactly
+    }
+    const auto [lo, hi] = span();
+    double factor = 0.0;
+    if (rate > hi * (1.0 + 1e-6)) {
+      factor = 2.0;
+    } else if (rate < lo * (1.0 - 1e-6)) {
+      factor = 0.5;
+    } else {
+      throw std::runtime_error(
+          "Requested rate is within the advertised span (" +
+          std::to_string(lo / 1e6) + " - " + std::to_string(hi / 1e6) +
+          " MSPS) but is not an advertised rate at any clock");
+    }
     double cur_fab_hz = 0.0;
     try {
       // readSetting format: "<hz> Hz (code C, realized R Hz; ...)"
       cur_fab_hz = std::stod(dev->readSetting("RX_FAB_CLK"));
     } catch (const std::exception&) {
       throw std::runtime_error(
-          "Requested rate exceeds the advertised rates and RX_FAB_CLK is "
-          "not available to raise them (pre-1.12 bitstream?)");
+          "Requested rate is outside the advertised rates and RX_FAB_CLK "
+          "is not available to move them (pre-1.12 bitstream?)");
     }
     if (cur_fab_hz <= 0.0) {
       throw std::runtime_error("RX_FAB_CLK readback is not positive");
     }
     const long long next_fab_hz =
-        static_cast<long long>(std::llround(cur_fab_hz * 2.0));
+        static_cast<long long>(std::llround(cur_fab_hz * factor));
     std::printf(
-        "Advertised rates top out at %.2f MSPS < requested %.2f MSPS; "
+        "Advertised rates span %.2f - %.2f MSPS, requested %.2f MSPS; "
         "stepping RX_FAB_CLK %.0f -> %lld Hz\n",
-        coverage() / 1e6, rate / 1e6, cur_fab_hz, next_fab_hz);
+        lo / 1e6, hi / 1e6, rate / 1e6, cur_fab_hz, next_fab_hz);
     dev->writeSetting("RX_FAB_CLK", std::to_string(next_fab_hz));
   }
-  if (coverage() < rate * (1.0 - 1e-6)) {
-    throw std::runtime_error(
-        "Requested rate unreachable: advertised rates still top out at " +
-        std::to_string(coverage() / 1e6) + " MSPS after clock stepping");
-  }
-  // Select the rate: through setSampleRate when it is a rung; otherwise the
-  // clock walk must have landed the effective rate on it exactly.
-  if (on_ladder() == true) {
-    dev->setSampleRate(SOAPY_SDR_RX, chan, rate);
-  } else {
-    const double eff = dev->getSampleRate(SOAPY_SDR_RX, chan);
-    if (std::abs(eff - rate) > (1e-6 * rate)) {
-      throw std::runtime_error(
-          "Requested rate is neither an advertised rung nor the effective "
-          "fabric rate (" +
-          std::to_string(eff / 1e6) + " MSPS)");
-    }
-  }
+  const auto [lo, hi] = span();
+  throw std::runtime_error(
+      "Requested rate unreachable: advertised rates still span " +
+      std::to_string(lo / 1e6) + " - " + std::to_string(hi / 1e6) +
+      " MSPS after clock stepping");
 }
 
 int runCapture(const Sounder::RxRecorderConfig& cfg) {
