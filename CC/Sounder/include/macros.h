@@ -55,6 +55,26 @@ struct SampleBuffer {
   std::atomic_int* pkt_buf_inuse;
 };
 
+// pkt_buf_inuse slot accounting: one bit per ring slot, packed
+// sizeof(std::atomic_int) slots per atomic word (historical layout — only
+// the low bits of each word are used). Producers claim before writing a
+// slot, the consumer releases after draining it; both sides must agree on
+// the bit math, so use these instead of re-deriving it (receiver.cc still
+// carries older hand-coded copies of the same formula).
+inline bool sample_buf_try_claim(std::atomic_int* pkt_buf_inuse, size_t slot) {
+  const int bit = 1 << (slot % sizeof(std::atomic_int));
+  const size_t offs = slot / sizeof(std::atomic_int);
+  const int old = std::atomic_fetch_or(&pkt_buf_inuse[offs], bit);
+  return ((old & bit) == 0);  // false: slot was already claimed
+}
+
+inline bool sample_buf_release(std::atomic_int* pkt_buf_inuse, size_t slot) {
+  const int bit = 1 << (slot % sizeof(std::atomic_int));
+  const size_t offs = slot / sizeof(std::atomic_int);
+  const int old = std::atomic_fetch_and(&pkt_buf_inuse[offs], ~bit);
+  return ((old & bit) != 0);  // false: slot was already free (double release)
+}
+
 struct Packet {
   uint32_t frame_id;
   uint32_t slot_id;

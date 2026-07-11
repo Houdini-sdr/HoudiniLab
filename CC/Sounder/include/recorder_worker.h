@@ -1,5 +1,5 @@
 /*
- Copyright (c) 2018-2020
+ Copyright (c) 2018-2026
  RENEW OPEN SOURCE LICENSE: http://renew-wireless.org/license
  
 ----------------------------------------------------------------------
@@ -11,20 +11,20 @@
 
 #include "config.h"
 #include "hdf5_lib.h"
-#include "receiver.h"
+#include "recorder_worker_interface.h"
 
 namespace Sounder {
-class RecorderWorker {
+class RecorderWorker : public RecorderWorkerInterface {
  public:
   RecorderWorker(Config* in_cfg, size_t antenna_offset, size_t num_antennas);
-  ~RecorderWorker();
+  ~RecorderWorker() override;
 
-  void init(void);
-  void finalize(void);
-  void record(int tid, Packet* pkt, NodeType node_type);
+  void init(void) override;
+  void finalize(void) override;
+  void record(int tid, Packet* pkt, NodeType node_type) override;
 
-  inline size_t num_antennas(void) { return num_antennas_; }
-  inline size_t antenna_offset(void) { return antenna_offset_; }
+  inline size_t num_antennas(void) const override { return num_antennas_; }
+  inline size_t antenna_offset(void) const override { return antenna_offset_; }
 
  private:
   Config* cfg_;

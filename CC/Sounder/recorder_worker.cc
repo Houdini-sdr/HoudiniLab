@@ -9,6 +9,8 @@
 
 #include "include/recorder_worker.h"
 
+#include <cassert>
+
 #include "include/logger.h"
 #include "include/macros.h"
 #include "include/utils.h"

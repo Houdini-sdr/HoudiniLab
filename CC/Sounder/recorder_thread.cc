@@ -1,5 +1,5 @@
 /*
- Copyright (c) 2018-2022, Rice University 
+ Copyright (c) 2018-2026, Rice University 
  RENEW OPEN SOURCE LICENSE: http://renew-wireless.org/license
 
 ---------------------------------------------------------------------
@@ -14,18 +14,18 @@
 #include "include/utils.h"
 
 namespace Sounder {
-RecorderThread::RecorderThread(Config* in_cfg, size_t thread_id, int core,
-                               size_t queue_size, size_t antenna_offset,
-                               size_t num_antennas, bool wait_signal)
+RecorderThread::RecorderThread(std::unique_ptr<RecorderWorkerInterface> worker,
+                               size_t packet_data_length, size_t thread_id,
+                               int core, size_t queue_size, bool wait_signal)
     : event_queue_(queue_size),
       producer_token_(event_queue_),
-      worker_(in_cfg, antenna_offset, num_antennas),
+      worker_(std::move(worker)),
       thread_(),
       id_(thread_id),
+      packet_data_length_(packet_data_length),
       core_alloc_(core),
       wait_signal_(wait_signal) {
-  packet_data_length_ = in_cfg->getPacketDataLength();
-  worker_.init();
+  worker_->init();
   running_ = false;
 }
 
@@ -68,8 +68,10 @@ bool RecorderThread::DispatchWork(Event_data event) {
   if (this->event_queue_.try_enqueue(this->producer_token_, event) == 0) {
     MLPD_WARN("Queue limit has reached! try to increase queue size.\n");
     if (this->event_queue_.enqueue(this->producer_token_, event) == 0) {
+      // Report failure instead of throwing: callers own the policy (the
+      // scheduler throws; rx-recorder aborts gracefully), and a throw here
+      // would terminate() when Stop() dispatches during stack unwinding.
       MLPD_ERROR("Record task enqueue failed\n");
-      throw std::runtime_error("Record task enqueue failed");
       ret = false;
     }
   }
@@ -103,8 +105,8 @@ void RecorderThread::DoRecording(void) {
 
   moodycamel::ConsumerToken ctok(this->event_queue_);
   MLPD_INFO("Recording thread %zu has %zu antennas starting at %zu\n",
-            this->id_, this->worker_.num_antennas(),
-            this->worker_.antenna_offset());
+            this->id_, this->worker_->num_antennas(),
+            this->worker_->antenna_offset());
 
   Event_data event;
   bool ret = false;
@@ -128,7 +130,7 @@ void RecorderThread::DoRecording(void) {
       this->HandleEvent(event);
     }
   }
-  this->worker_.finalize();
+  this->worker_->finalize();
 }
 
 void RecorderThread::HandleEvent(Event_data event) {
@@ -143,13 +145,11 @@ void RecorderThread::HandleEvent(Event_data event) {
       char* cur_ptr_buffer = event.buffer[buffer_id].buffer.data() +
                              (buffer_offset * packet_length);
 
-      this->worker_.record(this->id_, reinterpret_cast<Packet*>(cur_ptr_buffer),
-                           event.node_type);
+      this->worker_->record(this->id_,
+                            reinterpret_cast<Packet*>(cur_ptr_buffer),
+                            event.node_type);
       /* Free up the buffer memory */
-      int bit = 1 << (buffer_offset % sizeof(std::atomic_int));
-      int offs = (buffer_offset / sizeof(std::atomic_int));
-      std::atomic_fetch_and(&event.buffer[buffer_id].pkt_buf_inuse[offs],
-                            ~bit);  // now empty
+      sample_buf_release(event.buffer[buffer_id].pkt_buf_inuse, buffer_offset);
     }
   }
 }

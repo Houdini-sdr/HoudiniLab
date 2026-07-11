@@ -1,5 +1,5 @@
 /*
- Copyright (c) 2018-2022, Rice University 
+ Copyright (c) 2018-2026, Rice University 
  RENEW OPEN SOURCE LICENSE: http://renew-wireless.org/license
 
 ----------------------------------------------------------------------
@@ -8,8 +8,11 @@
 */
 #include "include/scheduler.h"
 
+#include <memory>
+
 #include "include/logger.h"
 #include "include/macros.h"
+#include "include/recorder_worker.h"
 #include "include/signalHandler.hpp"
 #include "include/utils.h"
 
@@ -194,8 +197,10 @@ void Scheduler::do_it() {
           i, (i * thread_antennas), ((i + 1) * thread_antennas) - 1,
           thread_antennas);
       Sounder::RecorderThread* new_recorder = new Sounder::RecorderThread(
-          this->cfg_, i, thread_core, (this->rx_thread_buff_size_ * kQueueSize),
-          (i * thread_antennas), thread_antennas, true);
+          std::make_unique<Sounder::RecorderWorker>(
+              this->cfg_, (i * thread_antennas), thread_antennas),
+          this->cfg_->getPacketDataLength(), i, thread_core,
+          (this->rx_thread_buff_size_ * kQueueSize), true);
       new_recorder->Start();
       this->recorders_.push_back(new_recorder);
     }
