@@ -110,12 +110,30 @@ run confirms). Findings:
   (0.51 ns/sample at this rate) produced 5434 false backward-jump events
   under the original +-1-sample tolerance; now ceil(2 ns x rate) — re-run
   shows zero. Unit-tested.
-- **Observation for the fpga/software lanes** (behavior only): RFDC
-  `ADC0.1` interrupt storm during the high-Fs configuration —
-  `IntrStatus=0x8000000F [FIFOUSRDAT_OF/UF FIFOMRGNIND_OF/UF FIFO_OVR]`,
-  ~500k interrupts in one session. Our capture channel's data was
-  unaffected (loss fully accounted by socket drops), but the storm is
-  worth their eyes when the SH tickets get picked up.
+- **Observation for the fpga/software lanes**: RFDC `ADC0.1` interrupt
+  storm — `IntrStatus=0x8000000F [FIFOUSRDAT_OF/UF FIFOMRGNIND_OF/UF
+  FIFO_OVR]`, ~500k interrupts in one session, log lines interleaved
+  with the RX_FAB_CLK walk phase (before capture start). Our capture
+  channel (ADC0.0) was unaffected — loss fully accounted by socket
+  drops. **Untraced hypothesis [user]:** the storm correlates with the
+  clock change: tiles power up at TILE granularity, so the sibling
+  block ADC0.1 is live through the MMCM relock + DynamicPLLConfig
+  retune with nobody draining or resetting its FIFO — it rides the
+  clock change "confused". For the software lane's eyes alongside the
+  SH tickets (AP-2/AP-4 handoffs).
+
+Additional validated points (2026-07-10, symmetric-walk build):
+
+- **491.52 MSPS (one clock up-step): 7500/7500 slots, ZERO gaps** — a
+  fully clean rung beyond the default ladder (~2 GB/s to disk sustained).
+- **The clock menu is exact**: `fabric = PL_CLK/2^code`, menu
+  15.36/30.72/61.44/122.88/245.76 MHz (device fail-loud names it).
+- **`listSampleRates` after a clock move advertises ONLY the effective
+  rate** (fabric x vld) — the decim rungs exist at the default clock
+  only. Consequence: sub-30.72 MSPS rates are genuinely not offered
+  (15.36 MSPS probe: the walk stepped 30.72 -> 15.36 MHz, span collapsed
+  to {122.88}, next halving rejected at the floor — clean fail-loud,
+  device untouched).
 
 Conclusion: **AP-3 capture support is DONE and honest at max rate** —
 the file stays time-true with exact accounting under 35 % loss. Lossless
