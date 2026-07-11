@@ -18,6 +18,7 @@
 #ifndef SOUNDER_RX_RECORDER_GRID_H_
 #define SOUNDER_RX_RECORDER_GRID_H_
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <vector>
@@ -46,7 +47,15 @@ struct GridCheck {
 
 class TimeGridTracker {
  public:
-  explicit TimeGridTracker(double rate) : rate_(rate) {}
+  // Jitter tolerance: timeNs is integer nanoseconds and both the stamp and
+  // the t0 anchor round independently (+-1 ns each), so above ~1 GSPS the
+  // quantization exceeds one sample period — tolerate 2 ns worth of
+  // samples, floor 1. (Measured: false +-2-sample backward jumps at
+  // 1.966 GSPS with a fixed +-1 tolerance.)
+  explicit TimeGridTracker(double rate)
+      : rate_(rate),
+        tolerance_(std::max<int64_t>(
+            1, static_cast<int64_t>(std::ceil(2e-9 * rate)))) {}
 
   // Check a stamped read whose first sample is about to be emitted at
   // absolute file position `position` (in samples). The first stamp
@@ -62,10 +71,10 @@ class TimeGridTracker {
     const int64_t expected_position =
         static_cast<int64_t>(std::llround((time_ns - t0_) * rate_ / 1e9));
     const int64_t delta = expected_position - position;
-    // |delta| <= 1: tick->ns->sample rounding jitter, not a real gap.
-    if (delta > 1) {
+    // |delta| <= tolerance_: timestamp rounding jitter, not a real gap.
+    if (delta > tolerance_) {
       result.pad_samples = static_cast<size_t>(delta);
-    } else if (delta < -1) {
+    } else if (delta < -tolerance_) {
       result.backward = true;
     }
     return result;
@@ -79,6 +88,7 @@ class TimeGridTracker {
 
  private:
   double rate_;
+  int64_t tolerance_;
   bool has_t0_ = false;
   long long t0_ = 0;
 };
