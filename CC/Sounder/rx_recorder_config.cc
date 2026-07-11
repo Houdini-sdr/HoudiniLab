@@ -89,6 +89,10 @@ RxRecorderConfig::RxRecorderConfig(const std::string& json_file,
   if (samps_per_slot_ == 0) {
     throw std::runtime_error("samps_per_slot must be > 0");
   }
+  read_chunk_samps_ = conf.value("read_chunk_samps", 16384u);
+  if (read_chunk_samps_ == 0) {
+    throw std::runtime_error("read_chunk_samps must be > 0");
+  }
   buffer_slots_ = conf.value("buffer_slots", 512u);
   if (buffer_slots_ < 2) {
     throw std::runtime_error("buffer_slots must be >= 2");

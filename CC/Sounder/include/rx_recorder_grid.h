@@ -1,0 +1,88 @@
+/*
+ Copyright (c) 2018-2026, Rice University
+ RENEW OPEN SOURCE LICENSE: http://renew-wireless.org/license
+
+----------------------------------------------------------------------
+ Sample-time grid bookkeeping for the rx-recorder tool.
+
+ The capture file promises a linear map: sample k lives at hardware
+ time t0 + k/rate. TimeGridTracker anchors t0 at the first stamped
+ read and, at every later stamp, compares where the read's samples
+ WOULD land (the emit position) against where the timestamp says they
+ BELONG. A positive difference is a stream gap (dropped packets): the
+ capture loop inserts that many placeholder zeros first, so one gap
+ cannot time-shift the whole remainder of the file. Extents of
+ untrusted samples are recorded for the file's /Data/Gaps table.
+---------------------------------------------------------------------
+*/
+#ifndef SOUNDER_RX_RECORDER_GRID_H_
+#define SOUNDER_RX_RECORDER_GRID_H_
+
+#include <cmath>
+#include <cstdint>
+#include <vector>
+
+namespace Sounder {
+
+// Why samples in a /Data/Gaps extent are untrusted.
+enum GapCause : int64_t {
+  kGapTimeJump = 0,    // stream gap detected via timestamps (UDP/kernel loss)
+  kGapHostRing = 1,    // host ring wrapped; slot never recorded (row zeroed)
+  kGapWriteError = 2,  // HDF5 write failed for the slot
+  kGapBackward = 3,    // timestamp went backward (anomaly marker, n = 0)
+};
+
+struct GapExtent {
+  int64_t start_sample;  // first untrusted sample index in the file
+  int64_t n_samples;     // extent length (0 for anomaly markers)
+  int64_t cause;         // GapCause
+};
+
+// Result of checking one stamped read against the grid.
+struct GridCheck {
+  size_t pad_samples = 0;  // zeros to emit BEFORE the read's samples
+  bool backward = false;   // timestamp moved backward (no pad)
+};
+
+class TimeGridTracker {
+ public:
+  explicit TimeGridTracker(double rate) : rate_(rate) {}
+
+  // Check a stamped read whose first sample is about to be emitted at
+  // absolute file position `position` (in samples). The first stamp
+  // anchors t0 so that grid time of sample 0 = t0.
+  GridCheck onStamp(long long time_ns, int64_t position) {
+    GridCheck result;
+    if (has_t0_ == false) {
+      // Anchor: t0 = stamp time projected back to sample 0.
+      t0_ = time_ns - sampleToNs(position);
+      has_t0_ = true;
+      return result;
+    }
+    const int64_t expected_position =
+        static_cast<int64_t>(std::llround((time_ns - t0_) * rate_ / 1e9));
+    const int64_t delta = expected_position - position;
+    // |delta| <= 1: tick->ns->sample rounding jitter, not a real gap.
+    if (delta > 1) {
+      result.pad_samples = static_cast<size_t>(delta);
+    } else if (delta < -1) {
+      result.backward = true;
+    }
+    return result;
+  }
+
+  inline bool has_t0(void) const { return has_t0_; }
+  inline long long t0(void) const { return t0_; }
+  inline long long sampleToNs(int64_t sample) const {
+    return static_cast<long long>(std::llround(sample * 1e9 / rate_));
+  }
+
+ private:
+  double rate_;
+  bool has_t0_ = false;
+  long long t0_ = 0;
+};
+
+}; /* End namespace Sounder */
+
+#endif /* SOUNDER_RX_RECORDER_GRID_H_ */

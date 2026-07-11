@@ -11,6 +11,13 @@
  worth of CS16 samples through a RecorderThread into HDF5, then tears
  down and reports timing gaps / overruns. No beacons, no schedules,
  no TDD -- plain receive-now-for-x-seconds.
+
+ Sample-time integrity: the file promises sample k lives at
+ FIRST_SAMPLE_TIME_NS + k/RATE. Stream gaps (dropped packets) are
+ detected from per-read timestamps, repaired by inserting placeholder
+ zeros so one gap cannot shift the rest of the file, and recorded as
+ untrusted extents in /Data/Gaps (see rx_recorder_grid.h and
+ docs/RX_GAP_AWARENESS.md).
 ---------------------------------------------------------------------
 */
 
@@ -25,6 +32,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <iostream>
 #include <memory>
 #include <vector>
@@ -33,6 +41,7 @@
 #include "include/macros.h"
 #include "include/recorder_thread.h"
 #include "include/rx_recorder_config.h"
+#include "include/rx_recorder_grid.h"
 #include "include/rx_recorder_worker.h"
 #include "include/signalHandler.hpp"
 #include "include/version_config.h"
@@ -57,65 +66,74 @@ struct CaptureStats {
   size_t slots_dropped = 0;  // ring full: HDF5 writer could not keep up
   size_t read_timeouts = 0;
   size_t overflow_returns = 0;     // OVERFLOW returned by readStream itself
-  size_t gap_events = 0;           // forward timeNs jumps between reads
+  size_t gap_events = 0;           // stream gaps detected via timestamps
   size_t backward_time_jumps = 0;  // timeNs went backward (resync/rollover)
-  double est_lost_samples = 0.0;
-  size_t status_overflows = 0;  // OVERFLOW events from readStreamStatus
+  double est_lost_samples = 0.0;   // sum of inserted placeholder samples
+  size_t status_overflows = 0;     // OVERFLOW events from readStreamStatus
   size_t status_other = 0;
-  long long first_sample_time_ns = 0;  // timeNs of the first stamped read
+  long long first_sample_time_ns = 0;  // grid time of file sample 0
   bool has_first_sample_time = false;
 };
 
-// Detects sample loss from per-read timestamps: each read's timeNs should
-// equal the previous stamped time plus the samples read since. This is the
-// reliable drop signal on Houdini -- kernel-level UDP drops never show up
-// in the overflow counters, only as time gaps.
-class TimeGapTracker {
- public:
-  explicit TimeGapTracker(double rate) : rate_(rate) {}
+// Capture-thread bookkeeping threaded through fillSlot: the sample-time
+// grid, the untrusted-extent list, and the staging machinery that lets
+// placeholder zeros be inserted BEFORE a late-arriving read's samples.
+struct CaptureState {
+  explicit CaptureState(double rate, size_t chunk_samps)
+      : grid(rate), chunk(2 * chunk_samps) {}
 
-  void onRead(int num_samps, int flags, long long time_ns,
-              CaptureStats& stats) {
-    if ((flags & SOAPY_SDR_HAS_TIME) != 0) {
-      if (stats.has_first_sample_time == false) {
-        stats.first_sample_time_ns = time_ns;
-        stats.has_first_sample_time = true;
-      }
-      if (has_last_ == true) {
-        const double expected_ns =
-            static_cast<double>(last_time_ns_) +
-            (static_cast<double>(samps_since_last_) * 1e9 / rate_);
-        const double gap_ns = static_cast<double>(time_ns) - expected_ns;
-        const double sample_period_ns = 1e9 / rate_;
-        if (gap_ns > sample_period_ns) {
-          stats.gap_events++;
-          stats.est_lost_samples += gap_ns * rate_ / 1e9;
-        } else if (gap_ns < -sample_period_ns) {
-          // Time went backward (hardware-time resync / tick rollover):
-          // count it separately, never subtract from the loss estimate.
-          stats.backward_time_jumps++;
-        }
-      }
-      has_last_ = true;
-      last_time_ns_ = time_ns;
-      samps_since_last_ = num_samps;
-    } else if (has_last_ == true) {
-      samps_since_last_ += num_samps;
-    }
-  }
-
- private:
-  double rate_;
-  bool has_last_ = false;
-  long long last_time_ns_ = 0;
-  size_t samps_since_last_ = 0;
+  CaptureStats stats;
+  Sounder::TimeGridTracker grid;
+  std::vector<Sounder::GapExtent> extents;
+  int64_t grid_pos = 0;        // absolute samples emitted onto the grid
+  size_t pad_remaining = 0;    // placeholder zeros still owed to the grid
+  size_t last_read_samps = 0;  // uncertainty span for widened extents
+  std::vector<short> chunk;    // staging buffer for one readStream call
+  size_t chunk_len = 0;        // samples staged
+  size_t chunk_off = 0;        // samples already emitted from staging
+  // Driver guarantees every readStream buffer is time-contiguous (breaks
+  // at gaps). Without it a mid-read gap is located only to the enclosing
+  // read, so extents widen by last_read_samps. See docs/RX_GAP_AWARENESS.md.
+  bool exact_gaps = false;
 };
 
-// Reads exactly samps_per_slot samples into dest (interleaved CS16 shorts).
+// Checks a stamped read against the grid: anchors t0, schedules placeholder
+// zeros for forward gaps, records untrusted extents.
+void onStampedChunk(long long time_ns, CaptureState& state) {
+  const bool first = (state.grid.has_t0() == false);
+  const Sounder::GridCheck check = state.grid.onStamp(time_ns, state.grid_pos);
+  if (first == true) {
+    state.stats.first_sample_time_ns = state.grid.t0();
+    state.stats.has_first_sample_time = true;
+    return;
+  }
+  if (check.pad_samples > 0) {
+    state.stats.gap_events++;
+    state.stats.est_lost_samples += static_cast<double>(check.pad_samples);
+    int64_t start = state.grid_pos;
+    if (state.exact_gaps == false) {
+      // Gap position is only known to the enclosing read: widen the
+      // untrusted extent backward over the previous read's samples.
+      start = std::max<int64_t>(
+          0, state.grid_pos - static_cast<int64_t>(state.last_read_samps));
+    }
+    const int64_t length =
+        static_cast<int64_t>(check.pad_samples) + (state.grid_pos - start);
+    state.extents.push_back({start, length, Sounder::kGapTimeJump});
+    state.pad_remaining = check.pad_samples;
+  } else if (check.backward == true) {
+    state.stats.backward_time_jumps++;
+    state.extents.push_back({state.grid_pos, 0, Sounder::kGapBackward});
+  }
+}
+
+// Fills dest with exactly samps_per_slot grid samples: placeholder zeros
+// owed from detected gaps, staged samples, then fresh readStream chunks.
 // Returns false when the capture should stop (fatal error or shutdown).
 bool fillSlot(SoapySDR::Device* dev, SoapySDR::Stream* stream, short* dest,
-              const Sounder::RxRecorderConfig& cfg, TimeGapTracker& gaps,
-              CaptureStats& stats, std::atomic<bool>& running) {
+              const Sounder::RxRecorderConfig& cfg, CaptureState& state,
+              std::atomic<bool>& running) {
+  const size_t slot_samps = cfg.samps_per_slot();
   size_t filled = 0;
   size_t consecutive_timeouts = 0;
   size_t consecutive_overflows = 0;
@@ -124,18 +142,41 @@ bool fillSlot(SoapySDR::Device* dev, SoapySDR::Stream* stream, short* dest,
   // a permanent overflow state would otherwise spin here forever.
   constexpr size_t kMaxConsecutiveOverflows = 10000;
 
-  while ((filled < cfg.samps_per_slot()) && (running.load() == true) &&
+  while ((filled < slot_samps) && (running.load() == true) &&
          (SignalHandler::gotExitSignal() == false)) {
-    void* buffs[1] = {dest + (2 * filled)};
+    // 1) Placeholder zeros owed to the grid from a detected gap.
+    if (state.pad_remaining > 0) {
+      const size_t n = std::min(state.pad_remaining, slot_samps - filled);
+      std::memset(dest + (2 * filled), 0, n * 2 * sizeof(short));
+      filled += n;
+      state.grid_pos += static_cast<int64_t>(n);
+      state.pad_remaining -= n;
+      continue;
+    }
+    // 2) Staged samples from the last readStream call.
+    if (state.chunk_off < state.chunk_len) {
+      const size_t n =
+          std::min(state.chunk_len - state.chunk_off, slot_samps - filled);
+      std::memcpy(dest + (2 * filled),
+                  state.chunk.data() + (2 * state.chunk_off),
+                  n * 2 * sizeof(short));
+      filled += n;
+      state.chunk_off += n;
+      state.grid_pos += static_cast<int64_t>(n);
+      continue;
+    }
+    // 3) Read a fresh chunk into staging.
+    const size_t request =
+        std::min(state.chunk.size() / 2, slot_samps - filled);
+    void* buffs[1] = {state.chunk.data()};
     int flags = 0;
     long long time_ns = 0;
-    const int ret =
-        dev->readStream(stream, buffs, cfg.samps_per_slot() - filled, flags,
-                        time_ns, cfg.rx_timeout_us());
+    const int ret = dev->readStream(stream, buffs, request, flags, time_ns,
+                                    cfg.rx_timeout_us());
     // A 0-element return makes no progress either -- treat it as a timeout
     // so a stalled stream cannot spin this loop forever.
     if ((ret == SOAPY_SDR_TIMEOUT) || (ret == 0)) {
-      stats.read_timeouts++;
+      state.stats.read_timeouts++;
       if (++consecutive_timeouts >= kMaxConsecutiveTimeouts) {
         MLPD_ERROR("readStream: %zu consecutive timeouts, aborting capture\n",
                    consecutive_timeouts);
@@ -145,7 +186,7 @@ bool fillSlot(SoapySDR::Device* dev, SoapySDR::Stream* stream, short* dest,
       continue;
     }
     if (ret == SOAPY_SDR_OVERFLOW) {
-      stats.overflow_returns++;
+      state.stats.overflow_returns++;
       consecutive_timeouts = 0;  // the stream is alive, just lossy
       if (++consecutive_overflows >= kMaxConsecutiveOverflows) {
         MLPD_ERROR(
@@ -164,10 +205,16 @@ bool fillSlot(SoapySDR::Device* dev, SoapySDR::Stream* stream, short* dest,
     }
     consecutive_timeouts = 0;
     consecutive_overflows = 0;
-    gaps.onRead(ret, flags, time_ns, stats);
-    filled += static_cast<size_t>(ret);
+    state.chunk_len = static_cast<size_t>(ret);
+    state.chunk_off = 0;
+    if ((flags & SOAPY_SDR_HAS_TIME) != 0) {
+      // May schedule pads: the staged chunk then emits AFTER them, which
+      // places its first sample exactly where the timestamp says it belongs.
+      onStampedChunk(time_ns, state);
+    }
+    state.last_read_samps = state.chunk_len;
   }
-  return (filled == cfg.samps_per_slot());
+  return (filled == slot_samps);
 }
 
 int runCapture(const Sounder::RxRecorderConfig& cfg) {
@@ -196,9 +243,10 @@ int runCapture(const Sounder::RxRecorderConfig& cfg) {
     dev->setAntenna(SOAPY_SDR_RX, chan, cfg.antenna());
   }
 
+  const SoapySDR::Kwargs hw_info = dev->getHardwareInfo();
   Sounder::RxCaptureMeta meta;
   meta.hardware_key = dev->getHardwareKey();
-  meta.hardware_info = SoapySDR::KwargsToString(dev->getHardwareInfo());
+  meta.hardware_info = SoapySDR::KwargsToString(hw_info);
   meta.actual_rate = dev->getSampleRate(SOAPY_SDR_RX, chan);
   meta.actual_freq = dev->getFrequency(SOAPY_SDR_RX, chan);
   meta.actual_gain = dev->getGain(SOAPY_SDR_RX, chan);
@@ -241,13 +289,17 @@ int runCapture(const Sounder::RxRecorderConfig& cfg) {
   // Scratch packet: keeps the stream drained when the ring is full.
   std::vector<char> scratch(packet_length);
 
-  CaptureStats stats;
-  TimeGapTracker gaps(meta.actual_rate);
+  CaptureState state(meta.actual_rate, cfg.read_chunk_samps());
+  // Proposed driver capability (see docs/RX_GAP_AWARENESS.md): every read
+  // buffer is time-contiguous, so gap extents need no widening.
+  state.exact_gaps = (hw_info.count("rx_gap_break") != 0) &&
+                     (hw_info.at("rx_gap_break") == "1");
+  CaptureStats& stats = state.stats;
 
   {
     auto worker = std::make_unique<Sounder::RxRecorderWorker>(&cfg, meta);
-    // Raw handle outlives the move: used to hand the capture-start times to
-    // the worker before its Stop event (see setStartTimes's ordering note).
+    // Raw handle outlives the move: used to hand the capture-start times and
+    // gap extents to the worker before its Stop event (queue-ordered).
     Sounder::RxRecorderWorker* worker_raw = worker.get();
     // The ring claim protocol caps in-flight events at num_slots; 2x is
     // ample queue slack.
@@ -265,7 +317,7 @@ int runCapture(const Sounder::RxRecorderConfig& cfg) {
       running = false;
     }
     // Approximate capture start; the exact time of file sample 0 is the
-    // first read's timeNs (FIRST_SAMPLE_TIME_NS), captured by the tracker.
+    // grid anchor (FIRST_SAMPLE_TIME_NS), set at the first stamped read.
     long long start_hw_time_ns = 0;
     if (act == 0) {
       try {
@@ -285,15 +337,18 @@ int runCapture(const Sounder::RxRecorderConfig& cfg) {
         // the stream drained so the device-side ring does not also fill.
         // The slot's row stays zeros in the file; time alignment is kept.
         stats.slots_dropped++;
+        state.extents.push_back({state.grid_pos,
+                                 static_cast<int64_t>(cfg.samps_per_slot()),
+                                 Sounder::kGapHostRing});
         Packet* trash = reinterpret_cast<Packet*>(scratch.data());
-        fillSlot(dev.get(), stream, trash->data, cfg, gaps, stats, running);
+        fillSlot(dev.get(), stream, trash->data, cfg, state, running);
         continue;
       }
 
       Packet* pkt = reinterpret_cast<Packet*>(ring.buffer.data() +
                                               cursor * packet_length);
       new (pkt) Packet(slot_idx, 0 /*slot*/, 0 /*cell*/, 0 /*ant*/);
-      if (fillSlot(dev.get(), stream, pkt->data, cfg, gaps, stats, running) ==
+      if (fillSlot(dev.get(), stream, pkt->data, cfg, state, running) ==
           false) {
         // Incomplete slot (shutdown or error): release the claim, don't record.
         sample_buf_release(ring.pkt_buf_inuse, cursor);
@@ -345,6 +400,7 @@ int runCapture(const Sounder::RxRecorderConfig& cfg) {
     // ahead of the writer thread's finalize.
     worker_raw->setStartTimes(start_hw_time_ns, stats.first_sample_time_ns,
                               stats.has_first_sample_time);
+    worker_raw->setGapExtents(state.extents);
     recorder.Stop();
     // RecorderThread's destructor joins after the queue drains, closing the
     // HDF5 file, so the summary below reports on a finished file.
@@ -357,12 +413,17 @@ int runCapture(const Sounder::RxRecorderConfig& cfg) {
               stats.slots_recorded, meta.total_slots,
               stats.slots_recorded * cfg.samps_per_slot() / meta.actual_rate);
   std::printf("Dropped slots (host): %zu\n", stats.slots_dropped);
-  std::printf("Time-gap events     : %zu (est. %.0f samples lost)\n",
-              stats.gap_events, stats.est_lost_samples);
+  std::printf(
+      "Stream gaps         : %zu (%.0f placeholder samples inserted, "
+      "%s extents)\n",
+      stats.gap_events, stats.est_lost_samples,
+      state.exact_gaps ? "exact" : "read-widened");
   if (stats.backward_time_jumps > 0) {
     std::printf("Backward time jumps : %zu (timestamps not monotonic)\n",
                 stats.backward_time_jumps);
   }
+  std::printf("Untrusted extents   : %zu (see /Data/Gaps)\n",
+              state.extents.size());
   std::printf("Overflows           : %zu readStream / %zu status events\n",
               stats.overflow_returns, stats.status_overflows);
   std::printf("Read timeouts       : %zu, other status events: %zu\n",

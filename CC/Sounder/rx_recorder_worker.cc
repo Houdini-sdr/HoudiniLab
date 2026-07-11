@@ -8,6 +8,8 @@
 */
 #include "include/rx_recorder_worker.h"
 
+#include <algorithm>
+
 #include "include/logger.h"
 
 namespace Sounder {
@@ -55,6 +57,62 @@ void RxRecorderWorker::setStartTimes(long long hw_time_ns,
   has_first_sample_time_ = has_first_sample;
 }
 
+void RxRecorderWorker::setGapExtents(const std::vector<GapExtent>& extents) {
+  capture_extents_ = extents;
+}
+
+void RxRecorderWorker::writeGapTable(void) {
+  std::vector<GapExtent> gap_extents = capture_extents_;
+  gap_extents.insert(gap_extents.end(), write_error_extents_.begin(),
+                     write_error_extents_.end());
+  std::sort(gap_extents.begin(), gap_extents.end(),
+            [](const GapExtent& a, const GapExtent& b) {
+              return a.start_sample < b.start_sample;
+            });
+
+  // Columns: start_sample, n_samples, start_time_ns, cause. Time is the
+  // grid time of the extent's first sample; 0 when no time anchor exists.
+  const double rate = meta_.actual_rate;
+  std::vector<int64_t> rows;
+  rows.reserve(gap_extents.size() * 4);
+  for (const GapExtent& g : gap_extents) {
+    const int64_t start_time_ns =
+        has_first_sample_time_
+            ? first_sample_time_ns_ + static_cast<int64_t>(std::llround(
+                                          g.start_sample * 1e9 / rate))
+            : 0;
+    rows.push_back(g.start_sample);
+    rows.push_back(g.n_samples);
+    rows.push_back(start_time_ns);
+    rows.push_back(g.cause);
+  }
+  hdf5_->writeTableInt64("Gaps", 4, rows);
+  hdf5_->write_attribute(
+      "GAP_COLUMNS",
+      std::string("start_sample,n_samples,start_time_ns,"
+                  "cause(0=time_jump,1=host_ring,2=write_error,3=backward)"));
+
+  // Union length: extents can overlap (a stream gap detected while a
+  // host-ring drop was already discarding the same slot).
+  int64_t untrusted = 0;
+  int64_t cover_end = -1;
+  for (const GapExtent& g : gap_extents) {
+    if (g.n_samples <= 0) {
+      continue;  // anomaly markers
+    }
+    const int64_t s = std::max(g.start_sample, cover_end);
+    const int64_t e = g.start_sample + g.n_samples;
+    if (e > s) {
+      untrusted += e - s;
+      cover_end = e;
+    }
+  }
+  // double (not the size_t overload, which truncates to uint32): exact to
+  // 2^53 samples, far past any capture, and convenient for readers.
+  hdf5_->write_attribute("TOTAL_UNTRUSTED_SAMPLES",
+                         static_cast<double>(untrusted));
+}
+
 void RxRecorderWorker::finalize(void) {
   if ((hdf5_ == nullptr) || (finalized_ == true)) {
     return;
@@ -65,6 +123,7 @@ void RxRecorderWorker::finalize(void) {
     // overstates the capture; this attribute is the exact written count.
     hdf5_->write_attribute("SLOTS_RECORDED", slots_written_);
     hdf5_->write_attribute("WRITE_ERRORS", write_errors_);
+    this->writeGapTable();
     // int64 ns does not fit the numeric attribute overloads (the size_t
     // one truncates to uint32); strings keep full precision.
     hdf5_->write_attribute("START_HW_TIME_NS",
@@ -122,8 +181,12 @@ void RxRecorderWorker::record(int tid, Packet* pkt, NodeType node_type) {
     slots_written_++;
   } catch (H5::Exception& e) {
     // Contain HDF5 failures to the slot: an escape from the writer thread
-    // would std::terminate the whole capture. Reported via WRITE_ERRORS.
+    // would std::terminate the whole capture. Reported via WRITE_ERRORS
+    // and as a /Data/Gaps extent (the row's content is not trustworthy).
     write_errors_++;
+    const int64_t n = static_cast<int64_t>(cfg_->samps_per_slot());
+    write_error_extents_.push_back(
+        {static_cast<int64_t>(pkt->frame_id) * n, n, kGapWriteError});
     MLPD_ERROR("HDF5 write failed for slot %u: %s\n", pkt->frame_id,
                e.getCDetailMsg());
   }

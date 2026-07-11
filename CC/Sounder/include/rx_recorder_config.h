@@ -46,6 +46,10 @@ class RxRecorderConfig {
   inline double duration_sec(void) const { return duration_sec_; }
   // Samples (CS16 elements) per recorded slot == HDF5 row.
   inline size_t samps_per_slot(void) const { return samps_per_slot_; }
+  // Max samples per readStream call. Bounds how precisely a mid-read
+  // stream gap can be located (the driver only stamps a read's first
+  // sample), at a small extra readStream-call cost.
+  inline size_t read_chunk_samps(void) const { return read_chunk_samps_; }
   // RX ring: number of slot-sized packets buffered between the RX loop
   // and the HDF5 writer thread.
   inline size_t buffer_slots(void) const { return buffer_slots_; }
@@ -68,6 +72,7 @@ class RxRecorderConfig {
   std::string antenna_;
   double duration_sec_;
   size_t samps_per_slot_;
+  size_t read_chunk_samps_;
   size_t buffer_slots_;
   long rx_timeout_us_;
   std::string output_file_;

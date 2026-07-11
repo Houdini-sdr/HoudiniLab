@@ -12,10 +12,12 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "hdf5_lib.h"
 #include "recorder_worker_interface.h"
 #include "rx_recorder_config.h"
+#include "rx_recorder_grid.h"
 
 namespace Sounder {
 
@@ -51,18 +53,32 @@ class RxRecorderWorker : public RecorderWorkerInterface {
   void setStartTimes(long long hw_time_ns, long long first_sample_ns,
                      bool has_first_sample);
 
+  // Untrusted-sample extents observed by the capture thread (stream gaps,
+  // host-ring drops). Same ordering contract as setStartTimes: call before
+  // the recorder Stop event. Merged with this worker's own write-error
+  // extents into the /Data/Gaps table at finalize.
+  void setGapExtents(const std::vector<GapExtent>& extents);
+
   inline size_t num_antennas(void) const override {
     return cfg_->channels().size();
   }
   inline size_t antenna_offset(void) const override { return 0; }
 
  private:
+  void writeGapTable(void);
+
   const RxRecorderConfig* cfg_;
   RxCaptureMeta meta_;
   std::unique_ptr<Hdf5Lib> hdf5_;
   long long start_hw_time_ns_ = 0;
   long long first_sample_time_ns_ = 0;
   bool has_first_sample_time_ = false;
+  // Two owners, merged at finalize: capture_extents_ is written once by the
+  // capture thread (setGapExtents, before the Stop event); write_error_extents_
+  // only by the writer thread in record(). Never the same vector -- record()
+  // can still be draining queued slots when setGapExtents runs.
+  std::vector<GapExtent> capture_extents_;
+  std::vector<GapExtent> write_error_extents_;
   size_t slots_written_ = 0;
   size_t write_errors_ = 0;
   bool finalized_ = false;

@@ -52,18 +52,20 @@ Live-node config facts (deployed fine-I/Q bitstream, fpga >= 1.8):
 | `gain` | — | RX gain in dB. Only applied when present. |
 | `antenna` | — | Antenna name. Only applied when present. |
 | `duration_sec` | `1.0` | Capture length; converted to slots with the actual rate. |
-| `samps_per_slot` | `65536` | CS16 samples per slot (= one HDF5 row = one readStream fill). |
+| `samps_per_slot` | `65536` | CS16 samples per slot (= one HDF5 row). |
+| `read_chunk_samps` | `16384` | Max samples per `readStream` call; bounds how precisely a stream gap is located (see drop accounting). |
 | `buffer_slots` | `512` | Host ring between the RX loop and the HDF5 writer thread. |
 | `rx_timeout_us` | `1000000` | Per-`readStream` timeout. 10 consecutive timeouts abort. |
 | `output_file` | auto | Defaults to `<storepath>/rx_record_<timestamp>.h5`. |
 
 ## Output layout
 
-HDF5 group `Data`, dataset `Samples` with dims
+HDF5 group `Data` with two datasets: `Samples`, dims
 `{slot, 1, 1, channel, 2*samps_per_slot}` (interleaved I,Q int16 — the
-Houdini wire format, HS-25). Attributes record the *actual* device state:
-`FREQ`, `RATE`, `GAIN`, `ANTENNA`, `CHANNELS`, `SLOT_SAMP_LEN`,
-`DURATION_SEC_REQUESTED`, `FORMAT`, `HW_KEY`, `HW_INFO`.
+Houdini wire format, HS-25), and `Gaps`, the `(n, 4)` int64
+untrusted-extent table (see drop accounting below). Attributes record the
+*actual* device state: `FREQ`, `RATE`, `GAIN`, `ANTENNA`, `CHANNELS`,
+`SLOT_SAMP_LEN`, `DURATION_SEC_REQUESTED`, `FORMAT`, `HW_KEY`, `HW_INFO`.
 
 Capture bookkeeping attributes (written at finalize):
 
@@ -79,24 +81,37 @@ Capture bookkeeping attributes (written at finalize):
 Both time attributes are strings: int64 ns does not fit the numeric
 attribute overloads.
 
-## Drop accounting
+## Drop accounting and the sample-time grid
 
-Three separate loss signals, all reported in the end-of-run summary:
+The file promises a linear time grid: sample `k` lives at
+`FIRST_SAMPLE_TIME_NS + k/RATE`. Three loss signals feed it, all reported
+in the end-of-run summary AND recorded as extents in `/Data/Gaps`:
 
-- **Time-gap events** — per-read `timeNs` discontinuities vs. the sample
-  counter. On Houdini this is the *only* reliable signal for kernel-level
-  UDP drops (they never appear in overflow counters). Only forward jumps
-  count as loss; backward jumps (hardware-time resync) are counted and
-  reported separately, never subtracted.
+- **Stream gaps** — per-read `timeNs` discontinuities vs. the emit
+  position. On Houdini this is the *only* signal for kernel-level UDP
+  drops (they never appear in overflow counters). A detected forward gap
+  inserts that many **placeholder zeros** before the late samples, so one
+  gap cannot time-shift the rest of the file. Backward jumps
+  (hardware-time resync) are flagged, never padded or subtracted.
 - **Dropped slots (host)** — the HDF5 writer fell behind and the host ring
-  wrapped. The slot's row stays zeroed in the file so time alignment is
-  preserved.
-- **Overflows** — device/ring overflow events from `readStream` /
-  `readStreamStatus`.
+  wrapped. The slot's row stays zeroed in the file; grid intact.
+- **Write errors** — HDF5 failed a slot write; the row's content is not
+  trustworthy.
 
-Known limit: a gap is located to the nearest `readStream` boundary, not
-the exact samples — the driver knows more (per-packet `tickCount`) than
-the readStream API can express. AP-2 tracks the improvement.
+`/Data/Gaps` is an `(n, 4)` int64 table, columns
+`{start_sample, n_samples, start_time_ns, cause}` with cause codes
+`0=time_jump, 1=host_ring, 2=write_error, 3=backward` (also in the
+`GAP_COLUMNS` attribute). `TOTAL_UNTRUSTED_SAMPLES` (float64) is the union
+length for quick screening: trust the capture iff it is 0.
+
+Precision: today a stream gap is located to the enclosing `readStream`
+call, so its extent is widened by up to `read_chunk_samps` (default 16384;
+smaller = finer localization, more calls). The driver knows the exact
+missing samples (per-packet `tickCount`) but the readStream API cannot
+express mid-read gaps — `docs/RX_GAP_AWARENESS.md` documents the behavior
+and the proposed break-at-gap driver contract (AP-2 `[→ propose SH
+ticket]`). When the driver ships it (capability kwarg `rx_gap_break=1`,
+auto-probed), extents become sample-exact with no schema change.
 
 ## Design notes
 
