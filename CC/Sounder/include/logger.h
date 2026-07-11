@@ -19,6 +19,7 @@
  * @author Hideaki, modified by Anuj
  */
 
+#include <cstdint>
 #include <ctime>
 #include <string>
 
