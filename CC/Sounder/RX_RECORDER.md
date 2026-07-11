@@ -40,6 +40,21 @@ Live-node config facts (deployed fine-I/Q bitstream, fpga >= 1.8):
 - The host needs `net.core.rmem_max >= 536870912` (the plugin's SO_RCVBUF
   request); `setupStream` warns when the grant is short.
 
+## Max-rate RAM-window capture (`files/rx-record-max.json`)
+
+`"rate": 1966080000` (1.96608 GSPS CS16 ~= 62.9 Gbps) is beyond the
+standard ladder: rx-recorder walks `RX_FAB_CLK` 30.72 -> 245.76 MHz
+(effective rate = fabric x vld, vld = 8 on the deployed bitstream). At
+this rate the disk is NOT in the capture path (~7.86 GB/s demand): the
+config sizes the host ring as the capture window — 16384 slots x 1 M
+samples = 64 GiB of RAM, an ~8 s window — and the HDF5 writer drains it
+during + after the capture ("draining queued slots..." until the summary
+prints). Budgets + design + measured results: `../../docs/RX_MAX_RATE.md`.
+Measured at this rate: ~35 % steady-state kernel-socket loss (single
+UDP socket sustains ~40 Gbps) — the file stays time-true with the loss
+exactly accounted in `/Data/Gaps`; lossless max-rate capture is gated
+on driver-side transport work (AP-4 and beyond).
+
 ## Config (`files/rx-record.json`)
 
 | Key | Default | Meaning |
@@ -47,7 +62,7 @@ Live-node config facts (deployed fine-I/Q bitstream, fpga >= 1.8):
 | `device` | `{"driver": "houdinisdr"}` | `Device::make()` kwargs. Add `serial`, etc. here. |
 | `stream` | `{}` | `setupStream()` kwargs forwarded verbatim (`ring_bytes`, `cpu_affinity`, ...). |
 | `channels` | `[0]` | RX channel. Exactly one for now (the combined multi-channel readStream merge is WIP device-side, SH-142/SH-159). |
-| `rate` | `0` | Requested sample rate in Hz; `0` keeps the device rate. The file records the **actual** rate read back. |
+| `rate` | `0` | Requested sample rate in Hz; `0` keeps the device rate. A rate the device already advertises goes through `setSampleRate`; a rate **beyond** the advertised set makes rx-recorder step `RX_FAB_CLK` up (doubling per MMCM code, device fail-loud = the ceiling) until the request is covered, then select it. The file records the **actual** rate read back. |
 | `freq` | — | RF tune in Hz (fine NCO on Houdini). Only applied when present. |
 | `gain` | — | RX gain in dB. Only applied when present. |
 | `antenna` | — | Antenna name. Only applied when present. |

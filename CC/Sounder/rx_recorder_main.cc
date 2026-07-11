@@ -217,6 +217,76 @@ bool fillSlot(SoapySDR::Device* dev, SoapySDR::Stream* stream, short* dest,
   return (filled == slot_samps);
 }
 
+// Applies the requested sample rate. Sequence [user]: check the device's
+// advertised rates; while they top out below the request, step the global
+// RX fabric clock up (doubling per MMCM code) and re-check — stop when the
+// request is covered or the device rejects the next clock (its fail-loud
+// defines "max acceptable FAB_CLK", with full revert on its side). Then
+// select the rate normally. RX_FAB_CLK requires all RX streams closed,
+// which holds here (before setupStream); every fresh make() resets the
+// device to defaults, so a high-rate run never leaks into the next session.
+void applySampleRate(SoapySDR::Device* dev, size_t chan, double rate) {
+  // Covered = an advertised rung reaches it, or the current effective rate
+  // (fabric_clock x vld) already equals/exceeds it.
+  const auto coverage = [&](void) {
+    double best = dev->getSampleRate(SOAPY_SDR_RX, chan);
+    for (double rung : dev->listSampleRates(SOAPY_SDR_RX, chan)) {
+      best = std::max(best, rung);
+    }
+    return best;
+  };
+  const auto on_ladder = [&](void) {
+    for (double rung : dev->listSampleRates(SOAPY_SDR_RX, chan)) {
+      if (std::abs(rung - rate) <= (1e-6 * rate)) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  constexpr int kMaxClockSteps = 8;
+  for (int step = 0;
+       (step < kMaxClockSteps) && (coverage() < rate * (1.0 - 1e-6)); step++) {
+    double cur_fab_hz = 0.0;
+    try {
+      // readSetting format: "<hz> Hz (code C, realized R Hz; ...)"
+      cur_fab_hz = std::stod(dev->readSetting("RX_FAB_CLK"));
+    } catch (const std::exception&) {
+      throw std::runtime_error(
+          "Requested rate exceeds the advertised rates and RX_FAB_CLK is "
+          "not available to raise them (pre-1.12 bitstream?)");
+    }
+    if (cur_fab_hz <= 0.0) {
+      throw std::runtime_error("RX_FAB_CLK readback is not positive");
+    }
+    const long long next_fab_hz =
+        static_cast<long long>(std::llround(cur_fab_hz * 2.0));
+    std::printf(
+        "Advertised rates top out at %.2f MSPS < requested %.2f MSPS; "
+        "stepping RX_FAB_CLK %.0f -> %lld Hz\n",
+        coverage() / 1e6, rate / 1e6, cur_fab_hz, next_fab_hz);
+    dev->writeSetting("RX_FAB_CLK", std::to_string(next_fab_hz));
+  }
+  if (coverage() < rate * (1.0 - 1e-6)) {
+    throw std::runtime_error(
+        "Requested rate unreachable: advertised rates still top out at " +
+        std::to_string(coverage() / 1e6) + " MSPS after clock stepping");
+  }
+  // Select the rate: through setSampleRate when it is a rung; otherwise the
+  // clock walk must have landed the effective rate on it exactly.
+  if (on_ladder() == true) {
+    dev->setSampleRate(SOAPY_SDR_RX, chan, rate);
+  } else {
+    const double eff = dev->getSampleRate(SOAPY_SDR_RX, chan);
+    if (std::abs(eff - rate) > (1e-6 * rate)) {
+      throw std::runtime_error(
+          "Requested rate is neither an advertised rung nor the effective "
+          "fabric rate (" +
+          std::to_string(eff / 1e6) + " MSPS)");
+    }
+  }
+}
+
 int runCapture(const Sounder::RxRecorderConfig& cfg) {
   std::atomic<bool> running(true);
 
@@ -231,7 +301,7 @@ int runCapture(const Sounder::RxRecorderConfig& cfg) {
 
   const size_t chan = cfg.channels().at(0);
   if (cfg.rate() > 0.0) {
-    dev->setSampleRate(SOAPY_SDR_RX, chan, cfg.rate());
+    applySampleRate(dev.get(), chan, cfg.rate());
   }
   if (cfg.has_freq() == true) {
     dev->setFrequency(SOAPY_SDR_RX, chan, cfg.freq());
@@ -401,6 +471,10 @@ int runCapture(const Sounder::RxRecorderConfig& cfg) {
     worker_raw->setStartTimes(start_hw_time_ns, stats.first_sample_time_ns,
                               stats.has_first_sample_time);
     worker_raw->setGapExtents(state.extents);
+    std::printf(
+        "Capture done (%zu slots); draining queued slots to disk "
+        "(RAM-window captures may take a while)...\n",
+        stats.slots_recorded);
     recorder.Stop();
     // RecorderThread's destructor joins after the queue drains, closing the
     // HDF5 file, so the summary below reports on a finished file.

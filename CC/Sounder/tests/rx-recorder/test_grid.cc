@@ -1,6 +1,7 @@
 // Unit test for TimeGridTracker: t0 anchoring, forward-gap pads, jitter
 // tolerance, backward jumps, and no-drift over accumulated rounding.
 #include <cstdio>
+
 #include "include/rx_recorder_grid.h"
 
 #define CHECK(cond)                                                        \
@@ -62,6 +63,21 @@ int main() {
     CHECK(g.t0() == t0);  // projected back to sample 0
     c = g.onStamp(ns_of(2000), 2000);
     CHECK(c.pad_samples == 0 && !c.backward);
+  }
+  {  // High-rate quantization: at 1.966 GSPS (0.51 ns/sample) +-2-sample
+     // deltas are timeNs rounding, not gaps; a real 5000-sample gap still pads.
+    TimeGridTracker g(1.96608e9);
+    auto ns_hi = [&](int64_t sample) {
+      return t0 +
+             static_cast<long long>(std::llround(sample * 1e9 / 1.96608e9));
+    };
+    g.onStamp(ns_hi(0), 0);
+    GridCheck c = g.onStamp(ns_hi(65536) + 1, 65536);  // +1 ns ~ +2 samples
+    CHECK(c.pad_samples == 0 && !c.backward);
+    c = g.onStamp(ns_hi(131072) - 1, 131072);  // -1 ns ~ -2 samples
+    CHECK(c.pad_samples == 0 && !c.backward);
+    c = g.onStamp(ns_hi(196608 + 5000), 196608);
+    CHECK(c.pad_samples > 4990 && c.pad_samples < 5010);
   }
   std::printf("PASS: TimeGridTracker (anchor, gap, jitter, backward, drift)\n");
   return 0;
