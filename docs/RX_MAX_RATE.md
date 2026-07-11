@@ -87,6 +87,41 @@ What the app gains (rx-recorder consumer path, readStream fallback kept):
   RAM-window captures may land first without it. Escalate on evidence,
   not anticipation.
 
+## Measured results (2026-07-10, rig B, fpga v1.19 / device 2695498b)
+
+The step-2 max-rate RAM-window attempt ran END-TO-END at **1.96608 GSPS**
+(8 s, 15000 x 1M-sample slots, 64 GiB ring, ~59 GiB file; repeated 2 s
+run confirms). Findings:
+
+- **The RX_FAB_CLK walk works as designed** — three doublings
+  (30.72 -> 245.76 MHz), and `listSampleRates` DOES rescale with the
+  fabric clock (advertised top tracked 245.76 -> 491.52 -> 983.04 MSPS),
+  so the coverage check is live, not static. Fresh `make()` resets the
+  clock (documented; observed — each run starts at the 245.76 default).
+- **Loss is steady-state ~35 %, NOT startup-heavy**: flat per-second
+  profile across all 8 s => sustained single-socket goodput ~= **40 Gbps**
+  of the 62.9 offered. Extents: ~84k gaps, nearly all > 4096 samples
+  (mean ~67k, max 13.3M ~= 6.8 ms).
+- **Zero host-ring drops, zero plugin-ring overflows, zero readStream
+  overflows**: the app + plugin drained everything the kernel delivered.
+  The wall is the kernel-socket recv path, upstream of the plugin —
+  confirming the ladder: AP-4 (fewer copies) buys CPU headroom, but
+  sustained 62.9 Gbps needs the AF_XDP/multi-queue tier.
+- **Grid tolerance was rate-corrected**: integer-ns `timeNs` quantization
+  (0.51 ns/sample at this rate) produced 5434 false backward-jump events
+  under the original +-1-sample tolerance; now ceil(2 ns x rate) — re-run
+  shows zero. Unit-tested.
+- **Observation for the fpga/software lanes** (behavior only): RFDC
+  `ADC0.1` interrupt storm during the high-Fs configuration —
+  `IntrStatus=0x8000000F [FIFOUSRDAT_OF/UF FIFOMRGNIND_OF/UF FIFO_OVR]`,
+  ~500k interrupts in one session. Our capture channel's data was
+  unaffected (loss fully accounted by socket drops), but the storm is
+  worth their eyes when the SH tickets get picked up.
+
+Conclusion: **AP-3 capture support is DONE and honest at max rate** —
+the file stays time-true with exact accounting under 35 % loss. Lossless
+sustained 62.9 Gbps is gated on driver-side work (AP-4 and beyond).
+
 ## Order of operations
 
 1. Live rig validation at ladder rates (AP-1 close) — includes `fio`
