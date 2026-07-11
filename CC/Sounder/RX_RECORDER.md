@@ -49,9 +49,11 @@ this rate the disk is NOT in the capture path (~7.86 GB/s demand): the
 config sizes the host ring as the capture window — 16384 slots x 1 M
 samples = 64 GiB of RAM, an ~8 s window — and the HDF5 writer drains it
 during + after the capture ("draining queued slots..." until the summary
-prints). Budgets + design: `../../docs/RX_MAX_RATE.md`. Expect kernel-drop
-gap extents at this rate until the AP-4 zero-copy path lands; the file
-stays time-true regardless.
+prints). Budgets + design + measured results: `../../docs/RX_MAX_RATE.md`.
+Measured at this rate: ~35 % steady-state kernel-socket loss (single
+UDP socket sustains ~40 Gbps) — the file stays time-true with the loss
+exactly accounted in `/Data/Gaps`; lossless max-rate capture is gated
+on driver-side transport work (AP-4 and beyond).
 
 ## Config (`files/rx-record.json`)
 
