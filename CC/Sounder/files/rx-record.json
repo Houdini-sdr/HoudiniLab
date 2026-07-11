@@ -1,0 +1,14 @@
+{
+  "device": {
+    "driver": "houdinisdr"
+  },
+  "stream": {},
+  "channels": [0],
+  "rate": 0,
+  "freq": 1000000000,
+  "duration_sec": 2.0,
+  "samps_per_slot": 65536,
+  "buffer_slots": 512,
+  "rx_timeout_us": 1000000,
+  "output_file": ""
+}

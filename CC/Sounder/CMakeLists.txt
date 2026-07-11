@@ -199,7 +199,22 @@ target_link_libraries(sounder -lpthread --enable-threadsafe ${GFLAGS_LIBRARIES} 
     ${HDF5_LIBRARIES}
     ${MUFFT_LIBRARIES})
 
-add_library(sounder_module MODULE 
+# Timed RX capture to HDF5 via SoapySDR (Houdini SDR). Deliberately lean:
+# no muFFT / comms-lib / radio-set classes -- just the recorder pipeline.
+add_executable(rx-recorder
+    rx_recorder_main.cc
+    rx_recorder_config.cc
+    rx_recorder_worker.cc
+    recorder_thread.cc
+    hdf5_lib.cc
+    utils.cc
+    signalHandler.cpp)
+
+target_link_libraries(rx-recorder -lpthread ${GFLAGS_LIBRARIES}
+    ${SoapySDR_LIBRARIES}
+    ${HDF5_LIBRARIES})
+
+add_library(sounder_module MODULE
     ${SOUNDER_SOURCES})
 
 target_link_libraries(sounder_module -lpthread --enable-threadsafe ${GFLAGS_LIBRARIES} ${UHD_LIBRARIES}

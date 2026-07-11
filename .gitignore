@@ -6,6 +6,7 @@ Beamformer/build/*
 Beamformer/build/CMakeFiles/*
 Sounder/CMakeFiles/*
 Sounder/CMakeCache*
+CC/Sounder/build/
 
 sounder
 *.com
