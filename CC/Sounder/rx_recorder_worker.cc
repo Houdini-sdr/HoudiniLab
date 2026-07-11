@@ -78,8 +78,7 @@ void RxRecorderWorker::writeGapTable(void) {
   for (const GapExtent& g : gap_extents) {
     const int64_t start_time_ns =
         has_first_sample_time_
-            ? first_sample_time_ns_ + static_cast<int64_t>(std::llround(
-                                          g.start_sample * 1e9 / rate))
+            ? first_sample_time_ns_ + Sounder::sampleToNs(g.start_sample, rate)
             : 0;
     rows.push_back(g.start_sample);
     rows.push_back(g.n_samples);
@@ -89,8 +88,9 @@ void RxRecorderWorker::writeGapTable(void) {
   hdf5_->writeTableInt64("Gaps", 4, rows);
   hdf5_->write_attribute(
       "GAP_COLUMNS",
-      std::string("start_sample,n_samples,start_time_ns,"
-                  "cause(0=time_jump,1=host_ring,2=write_error,3=backward)"));
+      std::string(
+          "start_sample,n_samples,start_time_ns,"
+          "cause(0=time_jump,1=host_ring,2=write_error,3=backward,4=resync)"));
 
   // Union length: extents can overlap (a stream gap detected while a
   // host-ring drop was already discarding the same slot).
@@ -123,14 +123,21 @@ void RxRecorderWorker::finalize(void) {
     // overstates the capture; this attribute is the exact written count.
     hdf5_->write_attribute("SLOTS_RECORDED", slots_written_);
     hdf5_->write_attribute("WRITE_ERRORS", write_errors_);
-    this->writeGapTable();
     // int64 ns does not fit the numeric attribute overloads (the size_t
-    // one truncates to uint32); strings keep full precision.
+    // one truncates to uint32); strings keep full precision. Written
+    // BEFORE the gap table: the timing anchor must not be lost to a
+    // gap-table write failure.
     hdf5_->write_attribute("START_HW_TIME_NS",
                            std::to_string(start_hw_time_ns_));
     if (has_first_sample_time_ == true) {
       hdf5_->write_attribute("FIRST_SAMPLE_TIME_NS",
                              std::to_string(first_sample_time_ns_));
+    }
+    // Isolated: a Gaps failure must still reach the managed close below.
+    try {
+      this->writeGapTable();
+    } catch (H5::Exception& e) {
+      MLPD_ERROR("HDF5 gap table write failed: %s\n", e.getCDetailMsg());
     }
     hdf5_->closeDataset();
     hdf5_->closeFile();

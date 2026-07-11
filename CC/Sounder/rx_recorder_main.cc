@@ -67,7 +67,8 @@ struct CaptureStats {
   size_t read_timeouts = 0;
   size_t overflow_returns = 0;     // OVERFLOW returned by readStream itself
   size_t gap_events = 0;           // stream gaps detected via timestamps
-  size_t backward_time_jumps = 0;  // timeNs went backward (resync/rollover)
+  size_t backward_time_jumps = 0;  // timeNs went backward (quantization)
+  size_t time_resyncs = 0;         // time-base jumps: grid re-anchored
   double est_lost_samples = 0.0;   // sum of inserted placeholder samples
   size_t status_overflows = 0;     // OVERFLOW events from readStreamStatus
   size_t status_other = 0;
@@ -105,6 +106,14 @@ void onStampedChunk(long long time_ns, CaptureState& state) {
   if (first == true) {
     state.stats.first_sample_time_ns = state.grid.t0();
     state.stats.has_first_sample_time = true;
+    return;
+  }
+  if (check.resync == true) {
+    // Hardware time-base changed under us: absolute time alignment is
+    // broken from here on (the marker records where); the grid continues
+    // relative to the new anchor instead of zero-filling the capture.
+    state.stats.time_resyncs++;
+    state.extents.push_back({state.grid_pos, 0, Sounder::kGapResync});
     return;
   }
   if (check.pad_samples > 0) {
@@ -228,37 +237,40 @@ bool fillSlot(SoapySDR::Device* dev, SoapySDR::Stream* stream, short* dest,
 // make() resets the device to defaults, so an off-default run never
 // leaks into the next session.
 void applySampleRate(SoapySDR::Device* dev, size_t chan, double rate) {
-  const auto on_ladder = [&](void) {
-    for (double rung : dev->listSampleRates(SOAPY_SDR_RX, chan)) {
-      if (std::abs(rung - rate) <= (1e-6 * rate)) {
-        return true;
-      }
-    }
-    return false;
+  // One device snapshot per iteration (each query is a remote round-trip):
+  // the advertised rungs plus the effective fabric rate (fabric_clock x
+  // vld), from which ladder membership and the reachable span both derive.
+  struct RateView {
+    bool on_ladder = false;
+    double eff = 0.0;
+    double lo = 0.0;
+    double hi = 0.0;
   };
-  // Span of reachable rates at the current clock: the advertised rungs
-  // plus the effective fabric rate (fabric_clock x vld).
-  const auto span = [&](void) {
-    double lo = dev->getSampleRate(SOAPY_SDR_RX, chan);
-    double hi = lo;
+  const auto snapshot = [&](void) {
+    RateView v;
+    v.eff = dev->getSampleRate(SOAPY_SDR_RX, chan);
+    v.lo = v.eff;
+    v.hi = v.eff;
     for (double rung : dev->listSampleRates(SOAPY_SDR_RX, chan)) {
-      lo = std::min(lo, rung);
-      hi = std::max(hi, rung);
+      v.on_ladder |= (std::abs(rung - rate) <= (1e-6 * rate));
+      v.lo = std::min(v.lo, rung);
+      v.hi = std::max(v.hi, rung);
     }
-    return std::make_pair(lo, hi);
+    return v;
   };
 
   constexpr int kMaxClockSteps = 8;
   for (int step = 0; step < kMaxClockSteps; step++) {
-    if (on_ladder() == true) {
+    const RateView view = snapshot();
+    if (view.on_ladder == true) {
       dev->setSampleRate(SOAPY_SDR_RX, chan, rate);
       return;
     }
-    const double eff = dev->getSampleRate(SOAPY_SDR_RX, chan);
-    if (std::abs(eff - rate) <= (1e-6 * rate)) {
+    if (std::abs(view.eff - rate) <= (1e-6 * rate)) {
       return;  // the clock walk landed the effective rate on it exactly
     }
-    const auto [lo, hi] = span();
+    const double lo = view.lo;
+    const double hi = view.hi;
     double factor = 0.0;
     if (rate > hi * (1.0 + 1e-6)) {
       factor = 2.0;
@@ -290,10 +302,10 @@ void applySampleRate(SoapySDR::Device* dev, size_t chan, double rate) {
         lo / 1e6, hi / 1e6, rate / 1e6, cur_fab_hz, next_fab_hz);
     dev->writeSetting("RX_FAB_CLK", std::to_string(next_fab_hz));
   }
-  const auto [lo, hi] = span();
+  const RateView view = snapshot();
   throw std::runtime_error(
       "Requested rate unreachable: advertised rates still span " +
-      std::to_string(lo / 1e6) + " - " + std::to_string(hi / 1e6) +
+      std::to_string(view.lo / 1e6) + " - " + std::to_string(view.hi / 1e6) +
       " MSPS after clock stepping");
 }
 
@@ -505,6 +517,12 @@ int runCapture(const Sounder::RxRecorderConfig& cfg) {
   if (stats.backward_time_jumps > 0) {
     std::printf("Backward time jumps : %zu (timestamps not monotonic)\n",
                 stats.backward_time_jumps);
+  }
+  if (stats.time_resyncs > 0) {
+    std::printf(
+        "Time-base resyncs   : %zu (absolute time alignment broken at the "
+        "marked samples)\n",
+        stats.time_resyncs);
   }
   std::printf("Untrusted extents   : %zu (see /Data/Gaps)\n",
               state.extents.size());

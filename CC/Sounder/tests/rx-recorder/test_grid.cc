@@ -79,6 +79,23 @@ int main() {
     c = g.onStamp(ns_hi(196608 + 5000), 196608);
     CHECK(c.pad_samples > 4990 && c.pad_samples < 5010);
   }
+  {  // Time-base jumps beyond kMaxGapSeconds re-anchor instead of padding.
+    TimeGridTracker g(rate);
+    g.onStamp(ns_of(0), 0);
+    const long long hour = 3'600'000'000'000LL;
+    GridCheck c = g.onStamp(ns_of(16384) + hour, 16384);  // +1 h forward
+    CHECK(c.resync && c.pad_samples == 0 && !c.backward);
+    // Grid continues cleanly from the new anchor...
+    c = g.onStamp(ns_of(32768) + hour, 32768);
+    CHECK(!c.resync && c.pad_samples == 0 && !c.backward);
+    // ...real gaps under the cap still pad after the re-anchor...
+    c = g.onStamp(ns_of(49152 + 5000) + hour, 49152);
+    CHECK(c.pad_samples == 5000);
+    // ...and an absurd backward jump also re-anchors (it would otherwise
+    // pin every later stamp as a backward event).
+    c = g.onStamp(ns_of(65536) - hour, 65536);
+    CHECK(c.resync && c.pad_samples == 0 && !c.backward);
+  }
   std::printf("PASS: TimeGridTracker (anchor, gap, jitter, backward, drift)\n");
   return 0;
 }

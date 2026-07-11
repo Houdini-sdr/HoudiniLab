@@ -87,9 +87,10 @@ Capture bookkeeping attributes (written at finalize):
 - `SLOTS_RECORDED` — exact number of slot rows written (the dataset shape
   grows in 2000-row windows and overstates the capture).
 - `WRITE_ERRORS` — slots lost to HDF5 write failures (0 on a clean run).
-- `FIRST_SAMPLE_TIME_NS` — the **exact** hardware time of file sample 0:
-  the `timeNs` of the first stamped `readStream`. Use this for time
-  alignment.
+- `FIRST_SAMPLE_TIME_NS` — the grid t0: the hardware time of file
+  sample 0, back-projected from the first stamped `readStream` (equals
+  that read's `timeNs` only when no unstamped reads precede it). Use
+  this for time alignment.
 - `START_HW_TIME_NS` — `getHardwareTime()` right after stream activation.
   Approximate (excludes in-flight latency); prefer `FIRST_SAMPLE_TIME_NS`.
 
@@ -106,8 +107,17 @@ in the end-of-run summary AND recorded as extents in `/Data/Gaps`:
   position. On Houdini this is the *only* signal for kernel-level UDP
   drops (they never appear in overflow counters). A detected forward gap
   inserts that many **placeholder zeros** before the late samples, so one
-  gap cannot time-shift the rest of the file. Backward jumps
-  (hardware-time resync) are flagged, never padded or subtracted.
+  gap cannot time-shift the rest of the file. Backward jumps are flagged,
+  never padded or subtracted.
+  **Detection resolution:** `timeNs` is integer nanoseconds, so drops of
+  `<= ceil(2ns x RATE)` samples (1 at ladder rates, 4 at 1.966 GSPS) are
+  indistinguishable from stamp rounding — they are absorbed as a bounded
+  standing offset and surface (padded in full) once cumulative drift
+  exceeds that tolerance.
+  **Time-base jumps:** a stamp more than ~10 s off the grid is a hardware
+  time-base change (e.g. a concurrent `setHardwareTime`), not loss — the
+  grid re-anchors and a `cause=4` (resync) marker records where; absolute
+  `FIRST_SAMPLE_TIME_NS`-based times are invalid past that marker.
 - **Dropped slots (host)** — the HDF5 writer fell behind and the host ring
   wrapped. The slot's row stays zeroed in the file; grid intact.
 - **Write errors** — HDF5 failed a slot write; the row's content is not
@@ -115,7 +125,7 @@ in the end-of-run summary AND recorded as extents in `/Data/Gaps`:
 
 `/Data/Gaps` is an `(n, 4)` int64 table, columns
 `{start_sample, n_samples, start_time_ns, cause}` with cause codes
-`0=time_jump, 1=host_ring, 2=write_error, 3=backward` (also in the
+`0=time_jump, 1=host_ring, 2=write_error, 3=backward, 4=resync` (also in the
 `GAP_COLUMNS` attribute). `TOTAL_UNTRUSTED_SAMPLES` (float64) is the union
 length for quick screening: trust the capture iff it is 0.
 
