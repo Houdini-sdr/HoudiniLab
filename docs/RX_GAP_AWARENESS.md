@@ -99,7 +99,10 @@ Notes for the ticket, from the app side:
   `{start_sample, n_samples, start_time_ns, cause}` covering stream gaps,
   host-ring drops, and HDF5 write errors, plus a `TOTAL_UNTRUSTED_SAMPLES`
   attribute.
-- Precision today: gap extents widened to the enclosing read
-  (`read_chunk_samps`, default 16384). The moment the driver ships
-  break-at-gap + the capability kwarg, the same files become sample-exact
-  with no schema change.
+- Precision: the driver shipped break-at-gap + the `rx_gap_break=1`
+  capability (SH-253, observed landed 2026-07-10) and later the SH-254
+  direct-buffer path (per-packet stamps) — on current drivers extents
+  are sample-exact via either path, with the read-widened accounting
+  kept as the older-driver fallback. Current behavior is documented in
+  `CC/Sounder/RX_RECORDER.md` (drop accounting); this doc remains the
+  evidence package behind the contract.
