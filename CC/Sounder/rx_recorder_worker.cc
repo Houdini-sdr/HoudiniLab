@@ -37,6 +37,14 @@ void RxRecorderWorker::init(void) {
   hdf5_->write_attribute("FORMAT", std::string("CS16"));
   hdf5_->write_attribute("HW_KEY", meta_.hardware_key);
   hdf5_->write_attribute("HW_INFO", meta_.hardware_info);
+  hdf5_->write_attribute("READ_PATH", meta_.read_path);
+  hdf5_->write_attribute("GAPS_EXACT", meta_.gaps_exact ? 1 : 0);
+  hdf5_->write_attribute("STREAM_ARGS", meta_.stream_args);
+  if (meta_.tx_replay_enabled == true) {
+    hdf5_->write_attribute("TX_REPLAY_FREQ_ACTUAL", meta_.tx_replay_freq_actual);
+    hdf5_->write_attribute("TX_REPLAY_AMP", meta_.tx_replay_amp);
+    hdf5_->write_attribute("TX_REPLAY_CHANNEL", meta_.tx_replay_channel);
+  }
 
   const hsize_t IQ = 2 * cfg_->samps_per_slot();
   const std::array<hsize_t, kDsDimsNum> total_dims = {MAX_FRAME_INC, 1, 1,

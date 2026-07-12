@@ -38,6 +38,22 @@ operation.
 
 ## Recommendation: the standard direct-buffer API (the "good enough" rung)
 
+> **STATUS 2026-07-12: LANDED driver-side + consumed app-side; validation
+> staged.** The software lane shipped the acquire/release API (SH-254) on
+> `feat/sh258-afxdp-ingest` exactly as recommended below — one acquire =
+> one packet with its own per-packet tick stamp, probe =
+> `getNumDirectAccessBuffers > 0` (no hardware-info key). The same branch
+> ships AF_XDP zero-copy ingest (SH-258, `rx_xsk` stream kwarg) and the
+> `HOUDINI_MTU` make-arg (SH-259) — the "kitchen sink" tier arrived
+> together with this rung, and their silicon leg measured **99.92 %
+> captured at 1966.08 MSPS** (paired geometry `HOUDINI_MTU=3512`, NIC MTU
+> 3498, `rx_xsk=require`) vs ~18 % NIC-ring loss on the socket path.
+> rx-recorder now has the acquire/release consumer (`direct_rx`
+> auto/require/off, `SampleSource` in `include/rx_recorder_capture.h`,
+> radio-free unit tests) and a releasable demo config
+> (`CC/Sounder/files/rx-record-demo.json`). Rig validation matrix:
+> §validation below.
+
 SoapySDR sanctions zero-copy reads: `getNumDirectAccessBuffers` /
 `getDirectAccessBufferAddrs` / `acquireReadBuffer` / `releaseReadBuffer`
 (base class defaults to unsupported). **The Houdini host plugin's ring is
@@ -105,6 +121,13 @@ exact kernel delivered/dropped delta per run.
 
 ### The rung between today and AF_XDP (driver-side, software lane)
 
+> **STATUS 2026-07-12:** AF_XDP itself landed (SH-258) before this rung
+> was picked up, so the rung is now the **socket-fallback** improvement
+> path only (rigs without the caps bundle / paired MTU, `rx_xsk=off|auto`
+> fallback). Busy-poll and UDP_GRO remain valid there; port-striped
+> multi-socket is likely mooted (the multi-queue answer is xsk now).
+> Handoff stands at reduced priority.
+
 `[-> propose SH ticket]` — with the diagnosis above, the cheap
 driver-side lifts before AF_XDP, all in the host module's socket setup
 (`stream/udp_comm.cc`):
@@ -136,7 +159,11 @@ driver-side lifts before AF_XDP, all in the host module's socket setup
   measurement shows the kernel→user copy or single-socket recv is the
   actual wall — likely eventually true for *sustained* 62.9 Gbps, but
   RAM-window captures may land first without it. Escalate on evidence,
-  not anticipation.
+  not anticipation. **RESOLVED 2026-07-12: the measured 35 % single-socket
+  wall was that evidence — the software lane shipped AF_XDP zero-copy
+  (SH-258) on their own initiative; consumed via the `rx_xsk` stream
+  kwarg with no app-side code (the consumer surface is unchanged on both
+  ingest paths).**
 
 ## Measured results (2026-07-10, rig B, fpga v1.19 / device 2695498b)
 
@@ -200,5 +227,44 @@ sustained 62.9 Gbps is gated on driver-side work (AP-4 and beyond).
 2. **[DONE — results above]** Max-rate RAM-window capture attempt with the *current* readStream
    path (measure, don't assume: the copy chain may already hold for
    8-10 s windows — 3 copies ≈ 47 GB/s of ~273 GB/s).
-3. Direct-buffer API (AP-4 → SH) + rx-recorder acquire/release consumer.
-4. AF_XDP-class work only if (2)/(3) measurements demand it.
+3. **[DONE driver + app 2026-07-12 — validation staged]** Direct-buffer
+   API (AP-4 → SH-254, landed) + rx-recorder acquire/release consumer
+   (implemented, radio-free-tested; silicon validation below).
+4. **[DONE driver-side — SH-258]** AF_XDP zero-copy ingest, consumed via
+   `rx_xsk` + the `HOUDINI_MTU=3512` paired geometry (demo config).
+
+## Validation matrix (next quiet rig window) {#validation}
+
+Ship the arc to the rig worktree first (bundle procedure), rebuild
+`rx-recorder`, and re-run the radio-free ctest suite on aarch64. Then,
+in order — each run inspected with `tools/inspect_rx_record.py` and,
+for loss runs, bracketed by `tools/rx_drop_probe.sh` deltas:
+
+- **V1 (no root): SH-254 consumer regression on the socket path.**
+  Default geometry, `direct_rx` auto (expect `READ_PATH=direct`,
+  `GAPS_EXACT=1`) at 245.76 and 491.52 MSPS (the known-clean rungs):
+  expect `TOTAL_UNTRUSTED_SAMPLES=0`, byte-identical trust reports vs a
+  `direct_rx=off` control run.
+- **V2 (no root): exact-extent validation at a lossy rate** (the staged
+  AP-2 tail, now two independent exact paths): max-rate socket-path
+  capture ~1 s; extents must equal pads (`inspect_rx_record.py` trust
+  report + gapstats-style sum check); compare `direct_rx=off` (SH-253
+  break-at-gap exactness) vs `direct_rx=require` (per-packet exactness)
+  — the two gap tables should agree to the detection-resolution bound.
+- **V3 ([user] root, coordinate the NIC MTU with the correlator work —
+  3498 breaks the default-8192 geometry while set):** provision the caps
+  bundle on `rx-recorder` + `ip link set <data-iface> mtu 3498`, then
+  `files/rx-record-demo.json` (rx_xsk=require + direct_rx=require, 8 s):
+  target near-lossless (driver leg measured 99.92 % captured; every
+  residual drop must appear in `/Data/Gaps`).
+- **V4: drop-probe matrix** at max rate — {socket, xsk} x {readstream,
+  direct} x worker `cpu_affinity` {default, 19} (+ the staged T4 root
+  one-liners for the socket legs): kernel delivered/dropped deltas and
+  app CPU. Decides the demo config's final affinity numbers and whether
+  the socket-fallback rung (busy-poll/GRO) is still worth an SH ask.
+- **V5: AP-5 tone verification** (`tx_replay` section implemented;
+  prereq: confirm rig-B DAC→ADC loopback cabling): first
+  `files/rx-record-tone.json` at the clean 245.76 MSPS rung
+  (`--tone auto` verdict clean on a gap-free capture), then a demo-rate
+  capture with the tone — slot-boundary phase continuity cross-checks
+  the gap table under real loss.

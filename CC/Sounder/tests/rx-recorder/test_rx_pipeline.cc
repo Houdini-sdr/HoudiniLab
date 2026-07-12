@@ -51,9 +51,17 @@ int main() {
     conf << "{ \"channels\": [0], \"duration_sec\": 1.0, "
          << "\"samps_per_slot\": " << kSamps << ", "
          << "\"buffer_slots\": " << kRingSlots << ", "
+         << "\"direct_rx\": \"require\", "
+         << "\"tx_replay\": { \"freq\": 20e6, \"channel\": 1 }, "
          << "\"output_file\": \"" << out_path << "\" }";
   }
   Sounder::RxRecorderConfig cfg(conf_path, "/tmp");
+  CHECK(cfg.direct_rx() == "require");
+  CHECK(cfg.has_tx_replay() == true);
+  CHECK(cfg.tx_replay_freq() == 20e6);
+  CHECK(cfg.tx_replay_amp() == 0.25);     // default
+  CHECK(cfg.tx_replay_channel() == 1);
+  CHECK(cfg.tx_replay_n_addrs() == 4096);  // default = full BRAM depth
 
   Sounder::RxCaptureMeta meta;
   meta.hardware_key = "TESTHW";

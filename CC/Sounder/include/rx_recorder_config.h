@@ -54,6 +54,21 @@ class RxRecorderConfig {
   // and the HDF5 writer thread.
   inline size_t buffer_slots(void) const { return buffer_slots_; }
   inline long rx_timeout_us(void) const { return rx_timeout_us_; }
+  // Zero-copy read path (SH-254 acquire/release): "auto" engages it when
+  // the driver supports it, "require" fails loud when it doesn't, "off"
+  // forces the readStream path. Mirrors the driver's rx_xsk idiom.
+  inline const std::string& direct_rx(void) const { return direct_rx_; }
+  // Loopback verification tone (AP-5, test-only): the capture's own device
+  // handle arms a tx_mode=replay stream so a KNOWN signal rides the
+  // DAC->ADC loopback for the whole capture. Off unless the "tx_replay"
+  // config section is present.
+  inline bool has_tx_replay(void) const { return has_tx_replay_; }
+  // Requested baseband tone frequency in Hz; snapped to the nearest
+  // n_addrs replay-RAM bin at arm time (the actual is recorded).
+  inline double tx_replay_freq(void) const { return tx_replay_freq_; }
+  inline double tx_replay_amp(void) const { return tx_replay_amp_; }
+  inline size_t tx_replay_channel(void) const { return tx_replay_channel_; }
+  inline size_t tx_replay_n_addrs(void) const { return tx_replay_n_addrs_; }
   inline const std::string& output_file(void) const { return output_file_; }
 
   inline size_t getPacketDataLength(void) const {
@@ -75,6 +90,12 @@ class RxRecorderConfig {
   size_t read_chunk_samps_;
   size_t buffer_slots_;
   long rx_timeout_us_;
+  std::string direct_rx_;
+  bool has_tx_replay_ = false;
+  double tx_replay_freq_ = 0.0;
+  double tx_replay_amp_ = 0.25;
+  size_t tx_replay_channel_ = 0;
+  size_t tx_replay_n_addrs_ = 4096;
   std::string output_file_;
 };
 

@@ -50,17 +50,62 @@ config sizes the host ring as the capture window — 16384 slots x 1 M
 samples = 64 GiB of RAM, an ~8 s window — and the HDF5 writer drains it
 during + after the capture ("draining queued slots..." until the summary
 prints). Budgets + design + measured results: `../../docs/RX_MAX_RATE.md`.
-Measured at this rate: ~35 % steady-state kernel-socket loss (single
-UDP socket sustains ~40 Gbps) — the file stays time-true with the loss
-exactly accounted in `/Data/Gaps`; lossless max-rate capture is gated
-on driver-side transport work (AP-4 and beyond).
+Measured at this rate over the kernel-socket path: ~35 % steady-state
+loss (single UDP socket sustains ~40 Gbps) — the file stays time-true
+with the loss exactly accounted in `/Data/Gaps`. Lossless max-rate
+capture is the zero-copy demo config below.
+
+## Zero-copy demo capture (`files/rx-record-demo.json`) — 1 ch @ 1.96608 GSPS
+
+The releasable single-channel max-rate configuration: the driver's
+AF_XDP zero-copy ingest (SH-258) plus the direct-buffer read path
+(SH-254, `direct_rx` below). Everything is `require`-mode on purpose —
+the config either engages the whole zero-copy chain or fails loud with
+the exact remedy in the error text. The pieces:
+
+- `"HOUDINI_MTU": 3512` (device make-arg, SH-259) — the paired wire
+  geometry. Zero-copy needs the whole frame inside one 4 KiB UMEM chunk
+  (wire <= 3840 bytes); the default 8192 geometry cannot engage it.
+- `"rx_xsk": "require"` (stream kwarg, SH-258) — AF_XDP zero-copy
+  ingest, NIC DMA directly into the driver ring (`auto` falls back to
+  the kernel socket with one INFO line; `off` never probes).
+- `"direct_rx": "require"` (rx-recorder key) — the SH-254
+  acquire/release read path: samples are assembled straight from the
+  driver ring into the HDF5 row, and every wire packet carries its own
+  hardware timestamp, so `/Data/Gaps` extents are sample-exact.
+- `cpu_affinity` / `rt_priority` — pin the driver's recv worker to a
+  fast core (rig-B core map: 19 is the 4.0 GHz core) and request
+  SCHED_FIFO (works via the capability bundle below).
+
+Host prerequisites (one-time provisioning, root — see
+`SoapyHoudiniSDR/docs/RX_XSK_INGEST.md`):
+
+```sh
+# capability bundle on the binary that loads the plugin:
+sudo setcap cap_net_raw,cap_net_admin,cap_bpf,cap_ipc_lock,cap_sys_nice+ep \
+    ./build/rx-recorder
+# data-NIC MTU must cover the paired wire frame (3512 - 14):
+sudo ip link set <data-iface> mtu 3498
+```
+
+Caveats: file capabilities trigger glibc secure-exec, which ignores
+`LD_LIBRARY_PATH`/`LD_PRELOAD` — the plugin is found via
+`SOAPY_SDR_PLUGIN_PATH` (a plain getenv), which the run recipe above
+already sets. Do NOT add `rx_xsk_nic_reconcile` on a shared rig: it
+would silently move the NIC MTU under every other tool using the
+default 8192 geometry (the correlator work runs at MTU 9000).
+
+The driver lane's silicon leg at this exact pairing measured 99.92 %
+captured (vs ~18 % NIC-ring loss on the socket path) — the app-side
+validation matrix for this config is staged in
+`../../docs/RX_MAX_RATE.md` §validation.
 
 ## Config (`files/rx-record.json`)
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `device` | `{"driver": "houdinisdr"}` | `Device::make()` kwargs. Add `serial`, etc. here. |
-| `stream` | `{}` | `setupStream()` kwargs forwarded verbatim (`ring_bytes`, `cpu_affinity`, ...). |
+| `device` | `{"driver": "houdinisdr"}` | `Device::make()` kwargs. Add `serial`, `remote`, `HOUDINI_MTU` (wire geometry, SH-259), etc. here. |
+| `stream` | `{}` | `setupStream()` kwargs forwarded verbatim (`ring_bytes`, `cpu_affinity`, `rt_priority`, `rx_xsk`, ...). Recorded in the file's `STREAM_ARGS`. |
 | `channels` | `[0]` | RX channel. Exactly one for now (the combined multi-channel readStream merge is WIP device-side, SH-142/SH-159). |
 | `rate` | `0` | Requested sample rate in Hz; `0` keeps the device rate. A rate the device already advertises goes through `setSampleRate`; a rate **outside** the advertised set makes rx-recorder step `RX_FAB_CLK` (doubling toward faster, halving toward slower; device fail-loud = ceiling and floor) until the request is covered, then select it. The file records the **actual** rate read back. |
 | `freq` | — | RF tune in Hz (fine NCO on Houdini). Only applied when present. |
@@ -70,8 +115,40 @@ on driver-side transport work (AP-4 and beyond).
 | `samps_per_slot` | `65536` | CS16 samples per slot (= one HDF5 row). |
 | `read_chunk_samps` | `16384` | Max samples per `readStream` call; bounds how precisely a stream gap is located (see drop accounting). |
 | `buffer_slots` | `512` | Host ring between the RX loop and the HDF5 writer thread. |
-| `rx_timeout_us` | `1000000` | Per-`readStream` timeout. 10 consecutive timeouts abort. |
+| `rx_timeout_us` | `1000000` | Per-read (readStream or acquire) timeout. 10 consecutive timeouts abort. |
+| `direct_rx` | `"auto"` | Zero-copy read path (SH-254 `acquireReadBuffer`/`releaseReadBuffer`): `auto` engages it when the driver advertises direct-access buffers, `require` fails loud when it doesn't, `off` forces `readStream`. Same value idiom as the driver's `rx_xsk`. |
+| `tx_replay` | absent | Loopback verification tone (AP-5, test-only): `{"freq": <Hz baseband>, "amp": <0..1, default 0.25>, "channel": <0=DAC0.0 / 1=DAC2.0, default 0>, "n_addrs": <loop length <= 4096, default 4096>}`. See the section below. |
 | `output_file` | auto | Defaults to `<storepath>/rx_record_<timestamp>.h5`. |
+
+## Loopback verification tone (`files/rx-record-tone.json`) — AP-5, test-only
+
+With a `tx_replay` config section, the capture's **own device handle**
+arms a `tx_mode=replay` TX stream before the RX stream opens: the
+requested baseband tone is bin-snapped to the `n_addrs` replay-RAM loop
+(seamless phase at the wrap), loaded via `writeStream` (one element =
+one complex CS16 sample = one replay-RAM word, depth 4096/channel), and
+looped continuously by the RTL from `activateStream` until teardown —
+the validated SH-124/126 path (`rx_tx_loopback.ipynb`). Single-handle is
+load-bearing: the tone's lifetime IS the replay stream's lifetime
+(closeStream releases the DAC tile refcount), and a concurrent second
+handle is out-of-contract (SH-251).
+
+Prereq: the rig's DAC→ADC loopback cable (DAC0.0 → the ADC feeding RX
+channel 0 — confirm rig-B cabling state first). The file records
+`TX_REPLAY_FREQ_ACTUAL` (the snapped frequency actually playing),
+`TX_REPLAY_AMP`, `TX_REPLAY_CHANNEL`. Verification:
+
+```sh
+tools/inspect_rx_record.py capture.h5 --tone auto
+```
+
+checks the tone's slot-boundary phase continuity against `/Data/Gaps` —
+an unexplained phase jump means samples were lost WITHOUT being
+accounted, the exact failure mode AP-2's gap accounting must never have
+(exit 1). The RX-observed tone frequency depends on the mixer/NCO
+mapping (the fine-I/Q mixer conjugates the frequency axis), so `--tone
+auto` detection is the normal mode; the armed DAC-baseband value is
+printed for context.
 
 ## Output layout
 
@@ -81,6 +158,13 @@ Houdini wire format, HS-25), and `Gaps`, the `(n, 4)` int64
 untrusted-extent table (see drop accounting below). Attributes record the
 *actual* device state: `FREQ`, `RATE`, `GAIN`, `ANTENNA`, `CHANNELS`,
 `SLOT_SAMP_LEN`, `DURATION_SEC_REQUESTED`, `FORMAT`, `HW_KEY`, `HW_INFO`.
+
+Capture-path provenance attributes: `READ_PATH` (`direct` or
+`readstream` — which read path actually engaged), `GAPS_EXACT` (int
+1/0 — whether `/Data/Gaps` extents are sample-exact or read-widened),
+`STREAM_ARGS` (the `setupStream` kwargs as sent, e.g. the `rx_xsk`
+request). When a `tx_replay` tone was armed: `TX_REPLAY_FREQ_ACTUAL`
+(Hz, bin-snapped), `TX_REPLAY_AMP`, `TX_REPLAY_CHANNEL`.
 
 Capture bookkeeping attributes (written at finalize):
 
@@ -129,14 +213,18 @@ in the end-of-run summary AND recorded as extents in `/Data/Gaps`:
 `GAP_COLUMNS` attribute). `TOTAL_UNTRUSTED_SAMPLES` (float64) is the union
 length for quick screening: trust the capture iff it is 0.
 
-Precision: today a stream gap is located to the enclosing `readStream`
-call, so its extent is widened by up to `read_chunk_samps` (default 16384;
-smaller = finer localization, more calls). The driver knows the exact
-missing samples (per-packet `tickCount`) but the readStream API cannot
-express mid-read gaps — `docs/RX_GAP_AWARENESS.md` documents the behavior
-and the proposed break-at-gap driver contract (AP-2 `[→ propose SH
-ticket]`). When the driver ships it (capability kwarg `rx_gap_break=1`,
-auto-probed), extents become sample-exact with no schema change.
+Precision: extents are sample-exact (`GAPS_EXACT=1`) on either of two
+independent paths, both auto-probed. On the `direct_rx` path exactness
+is structural — one acquire = one wire packet with its own hardware
+`tickCount` stamp, so a gap can only lie at a span boundary. On the
+`readStream` path it comes from the driver's break-at-gap contract
+(SH-253, advertised as `rx_gap_break=1` in `getHardwareInfo`): every
+returned buffer is time-contiguous. Against an older driver with
+neither, a stream gap is located only to the enclosing `readStream`
+call and its extent is widened by up to `read_chunk_samps` (default
+16384; smaller = finer localization, more calls) —
+`docs/RX_GAP_AWARENESS.md` documents the evidence and the contract.
+The schema is identical in all cases.
 
 ## Design notes
 
@@ -145,3 +233,11 @@ writer thread) drives an `RxRecorderWorker` through
 `RecorderWorkerInterface` — the same interface the full sounder's
 `RecorderWorker` implements. The binary deliberately links only
 SoapySDR + HDF5 + gflags (no muFFT, no comms-lib, no radio-set classes).
+
+The capture loop itself is a source-agnostic state machine
+(`include/rx_recorder_capture.h`): `fillSlot()` assembles slots from a
+`SampleSource` — `ReadStreamSource` (staging chunk) or
+`DirectBufferSource` (borrowed driver-ring slots, ≤1 held, released the
+moment a span drains) — and is unit-tested radio-free against scripted
+sources (`tests/rx-recorder/test_capture_paths.cc`: gaps, widening,
+resyncs, abort thresholds, both span shapes).
