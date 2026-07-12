@@ -53,16 +53,16 @@ prints). Budgets + design + measured results: `../../docs/RX_MAX_RATE.md`.
 Measured at this rate over the kernel-socket path: ~35 % steady-state
 loss (single UDP socket sustains ~40 Gbps) — the file stays time-true
 with the loss exactly accounted in `/Data/Gaps`. The zero-copy demo
-config below cuts the loss but, on the rx-recorder consumer as it
-stands, does NOT yet reach lossless at this rate (see its caveat).
+config below reaches **99.998 %** at this rate (validated 8 s,
+2026-07-12) — use it for max-rate work.
 
 ## Zero-copy demo capture (`files/rx-record-demo.json`) — 1 ch @ 1.96608 GSPS
 
 The releasable single-channel max-rate configuration: the driver's
-AF_XDP zero-copy ingest (SH-258) plus the direct-buffer read path
-(SH-254, `direct_rx` below). Everything is `require`-mode on purpose —
-the config either engages the whole zero-copy chain or fails loud with
-the exact remedy in the error text. The pieces:
+AF_XDP zero-copy ingest (SH-258) consumed through `readStream`.
+Validated 2026-07-12 (TDD baseline): **8 s at 1.96608 GSPS =
+99.9979 % captured** (one 0.166 ms start-transient gap), NIC-ledger
+exact. The pieces:
 
 - `"HOUDINI_MTU": 3512` (device make-arg, SH-259) — the paired wire
   geometry. Zero-copy needs the whole frame inside one 4 KiB UMEM chunk
@@ -70,13 +70,24 @@ the exact remedy in the error text. The pieces:
 - `"rx_xsk": "require"` (stream kwarg, SH-258) — AF_XDP zero-copy
   ingest, NIC DMA directly into the driver ring (`auto` falls back to
   the kernel socket with one INFO line; `off` never probes).
-- `"direct_rx": "require"` (rx-recorder key) — the SH-254
-  acquire/release read path: samples are assembled straight from the
-  driver ring into the HDF5 row, and every wire packet carries its own
-  hardware timestamp, so `/Data/Gaps` extents are sample-exact.
+- `"direct_rx": "off"` (rx-recorder key) — **deliberate at max rate.**
+  The paired geometry carries only 848 samples/packet ⇒ 2.32 M
+  acquires/s; the per-packet acquire/release consumer sustains ~78 %
+  of wire and loses 20+ % (measured), while `readStream` amortizes the
+  per-packet work inside the plugin's tight loop and keeps up with
+  headroom. Extents stay sample-exact via the driver's break-at-gap
+  contract (`rx_gap_break`). Keep `direct_rx` auto/require at ladder
+  rates, where the per-packet budget is ample (V1) and per-packet
+  stamps are structurally exact.
+- `"ring_bytes": 1073741824` (stream kwarg) — deepens the UMEM/driver
+  ring from the 256 MB default (a 28 ms absorb window at max rate) to
+  ~112 ms, riding out scheduler/writer jitter.
 - `cpu_affinity` / `rt_priority` — pin the driver's recv worker to a
-  fast core (rig-B core map: 19 is the 4.0 GHz core) and request
-  SCHED_FIFO (works via the capability bundle below).
+  fast core **that does not own the NIC queue's IRQ**: rig B maps
+  mlx5_comp N → CPU N and the plugin engages q19, so core 19 belongs
+  to q19's NAPI — pin the worker to 18 (SCHED_FIFO via the capability
+  bundle below). Optionally confine the app to other fast cores
+  (`taskset -c 15,16,17`); measured worth ~0.01 % — hygiene.
 
 Host prerequisites (one-time provisioning, root — see
 `SoapyHoudiniSDR/docs/RX_XSK_INGEST.md`):
@@ -96,19 +107,14 @@ already sets. Do NOT add `rx_xsk_nic_reconcile` on a shared rig: it
 would silently move the NIC MTU under every other tool using the
 default 8192 geometry (the correlator work runs at MTU 9000).
 
-The driver lane's silicon leg at this exact pairing measured 99.92 %
-captured — but that is the **driver-ingest boundary**. Measured
-end-to-end through this recorder on the TDD baseline (fpga v1.20 /
-v0.2.0, 2026-07-12), the zero-copy chain engages correctly yet the
-capture still loses **~22–25 % at 1.96608 GSPS** (reproducible; the
-AF_XDP fill-ring starves — `RX ring full — hardware dropping` — and
-`taskset` onto the fast cores does not help, so it is the ~15.7 GB/s
-consumer throughput, not core placement). Every dropped sample is
-exactly accounted in `/Data/Gaps` and cross-verifies against
-`inspect_rx_record.py`. So today this config is an **honest-accounting**
-max-rate capture, not a lossless one; closing the consumer gap is the
-open V4 work. Full record + the validation matrix:
-`../../docs/RX_MAX_RATE.md` §validation.
+History: the first on-silicon runs of this config (with
+`direct_rx=require`) lost ~22–25 % — root-caused the same day to the
+per-packet acquire/release consumer at the 848-sample zc quantum plus
+the 256 MB ring's short absorb window, with a 50 ms starvation-exit
+stall from the worker's poll timeout (NOT core placement, NOT memory
+bandwidth). The recipe above closes it. Full causal record, the A/B
+ladder, and the validation matrix: `../../docs/RX_MAX_RATE.md`
+§validation.
 
 ## Config (`files/rx-record.json`)
 

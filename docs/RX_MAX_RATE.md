@@ -72,6 +72,56 @@ operation.
 > the open V4 work (UMEM/fill-ring depth vs. writer→RAM-ring drain
 > coupling vs. memory-bandwidth); until then the demo is a
 > **honest-accounting** max-rate capture, not a lossless one.
+> *(Superseded same day — V4 root-caused and resolved; next block.)*
+
+> **STATUS 2026-07-12 (V4 root-cause session): SOLVED — max-rate capture
+> is near-lossless end-to-end.** The ~22–25 % was NOT raw consumer copy
+> throughput and NOT core placement. Three coupled causes, isolated by
+> /Data/Gaps forensics on the lossy captures + config-only A/B runs:
+>
+> 1. **Per-packet acquire/release overhead at the zc wire quantum.** The
+>    paired geometry carries **848 samples/packet** (every gap length is
+>    a multiple of 848, ±1 stamp rounding) ⇒ **2.32 M acquires/s** at
+>    1.96608 GSPS — a 431 ns/packet budget. The direct-path consumer
+>    pays two virtual API calls + a per-packet grid stamp check and
+>    sustains only ~78 % of wire; the granularity estimate above
+>    (~975 k/s, "fits with headroom") was computed for 8 KB packets and
+>    does not transfer to the 3.4 KB zc geometry. **`direct_rx=off`
+>    (readStream, 64 Ki-sample chunks — per-packet work amortized in the
+>    plugin's tight internal loop; still sample-exact via rx_gap_break)
+>    removes the whole deficit: 2 s at max rate = 99.989 % on the STOCK
+>    256 MB ring.** The extra staging copy is cheaper than 2.32 M/s of
+>    API-call overhead — at this quantum the "zero-copy" rung inverts.
+> 2. **The 256 MB UMEM (= driver ring) is only a 28 ms absorb window.**
+>    At a ~20 % deficit it fills from empty in ~140 ms — the loss was a
+>    ring-occupancy **sawtooth** (0 %-loss stretches of 145–162 ms
+>    alternating with 50–65 %-loss churn at 100 ms scale), not a steady
+>    22 %. Depth lever = `ring_bytes`: direct-path 2 s with
+>    `ring_bytes=4 GiB` captured 99.983 % (whole deficit absorbed).
+>    Depth masks the deficit for bounded windows; it does not fix rate.
+> 3. **Starvation-exit dead air = the worker's 50 ms poll timeout.** Max
+>    gap 50.2–50.5 ms in EVERY lossy run: once the fill ring hits zero
+>    the NIC delivers nothing, so the xsk worker sleeps its full
+>    `recv_timeout_ms=50` with nothing to wake it while app releases
+>    accumulate unposted. `[→ propose SH ticket]` — kick/short-poll on
+>    starvation exit; expose `recv_timeout_ms`.
+>
+> Ruled out by A/B at 256 MB + direct: worker moved off the NAPI core
+> (19.4 %), + app confined to fast cores 15–17 (20.9 %) — placement is
+> hygiene, not the cause; memory bandwidth (the two-copy readStream path
+> sustains 62.9 Gbps against the same concurrent HDF5 writer). Rig-B
+> fact behind the hygiene: **mlx5_comp N → CPU N identity IRQ mapping**,
+> so the old `cpu_affinity=19` put the SCHED_FIFO-50 worker on q19's own
+> NAPI core — prefer 18. Diagnostic fingerprints for the future: modal
+> clean-run of exactly 64 packets during churn (NAPI budget slivers) and
+> the 50 ms max-gap cap.
+>
+> **V3 validated the full demo:** 8 s, readStream + `rx_xsk=require` +
+> `ring_bytes=1 GiB` + worker on 18 (app `taskset -c 15,16,17`):
+> 15000/15000 slots, ONE 0.166 ms gap 1.3 ms into the capture =
+> **99.9979 % captured**, NIC-ledger exact (`rx_out_of_buffer` +385 =
+> 385 × 848). Without any pinning (worker 19, no taskset): 99.987 %.
+> The demo config now ships this recipe.
 
 SoapySDR sanctions zero-copy reads: `getNumDirectAccessBuffers` /
 `getDirectAccessBufferAddrs` / `acquireReadBuffer` / `releaseReadBuffer`
@@ -319,6 +369,37 @@ if later superseded):
 - **V2 / V3-demo-8s / V4 matrix — NOT RUN.** V4 (UMEM depth, writer/ring
   drain coupling, memory-BW) is now the priority: it owns the max-rate
   consumer-loss root cause above, ahead of the socket-fallback SH ask.
+  *(V4 + V3 completed later the same day — records below.)*
+
+### Results — 2026-07-12 later session (V4 root cause + V3)
+
+Same TDD baseline, same worktree/binary. Full causal analysis in the V4
+STATUS block above; run ledger (all 1.96608 GSPS, loss cross-checked
+against `ethtool rx_out_of_buffer` deltas):
+
+- **V4 — DONE (root-caused).** Gap-table forensics on the three lossy
+  captures: 848-sample packet quantum; bimodal loss (0 % stretches of
+  145–162 ms = the 256 MB ring filling at the deficit, alternating with
+  50–65 % churn); modal clean-run exactly 64 packets (NAPI budget);
+  max gap = the 50 ms worker poll timeout in every run. Config-only
+  A/B ladder (2 s runs): baseline direct+256 MB **21.9–24.6 %** loss →
+  worker `cpu_affinity=18` (off the q19 NAPI core; rig-B maps
+  mlx5_comp N→CPU N) **19.4 %** → + app `taskset -c 15,16,17`
+  **20.9 %** (placement ruled out) → direct + `ring_bytes=4 GiB`
+  **0.017 %** (99.983 %, deficit absorbed) → **`direct_rx=off`, stock
+  256 MB ring: 0.011 %** (99.989 %) — the per-packet direct-path
+  consumer was the deficit. Residual gaps in clean runs sit in the
+  first ~50 ms (start transient).
+- **V3 — DONE.** Full 8 s demo recipe (readStream + xsk +
+  `ring_bytes=1 GiB`, worker 18, app 15–17): 15000/15000 slots, one
+  0.166 ms gap at 1.3 ms = **99.9979 %**; NIC ledger exact (+385 pkts
+  × 848). Shipped-shape control (worker 19, no taskset, 2 s):
+  99.987 %. Evidence files kept in rig `~/rx_logs`:
+  `rx_record_20260712_180113.h5` (2 s readStream clean),
+  `rx_record_20260712_180254.h5` (8 s V3).
+- **V2 — residual (deprioritized).** Both exact-extent paths now have
+  clean and lossy validated legs; the same-run direct-vs-readstream
+  gap-table cross-compare remains unrun.
 - **Rig left:** NIC `enp1s0f1np1` at **MTU 3498** (reconcile set-and-leave;
   restore `sudo ip link set enp1s0f1np1 mtu 9000` before the correlator's
   8192 geometry runs). rmem_max still 256 MB (moot on the xsk path).
