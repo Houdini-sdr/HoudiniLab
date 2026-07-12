@@ -52,8 +52,9 @@ during + after the capture ("draining queued slots..." until the summary
 prints). Budgets + design + measured results: `../../docs/RX_MAX_RATE.md`.
 Measured at this rate over the kernel-socket path: ~35 % steady-state
 loss (single UDP socket sustains ~40 Gbps) — the file stays time-true
-with the loss exactly accounted in `/Data/Gaps`. Lossless max-rate
-capture is the zero-copy demo config below.
+with the loss exactly accounted in `/Data/Gaps`. The zero-copy demo
+config below cuts the loss but, on the rx-recorder consumer as it
+stands, does NOT yet reach lossless at this rate (see its caveat).
 
 ## Zero-copy demo capture (`files/rx-record-demo.json`) — 1 ch @ 1.96608 GSPS
 
@@ -96,8 +97,17 @@ would silently move the NIC MTU under every other tool using the
 default 8192 geometry (the correlator work runs at MTU 9000).
 
 The driver lane's silicon leg at this exact pairing measured 99.92 %
-captured (vs ~18 % NIC-ring loss on the socket path) — the app-side
-validation matrix for this config is staged in
+captured — but that is the **driver-ingest boundary**. Measured
+end-to-end through this recorder on the TDD baseline (fpga v1.20 /
+v0.2.0, 2026-07-12), the zero-copy chain engages correctly yet the
+capture still loses **~22–25 % at 1.96608 GSPS** (reproducible; the
+AF_XDP fill-ring starves — `RX ring full — hardware dropping` — and
+`taskset` onto the fast cores does not help, so it is the ~15.7 GB/s
+consumer throughput, not core placement). Every dropped sample is
+exactly accounted in `/Data/Gaps` and cross-verifies against
+`inspect_rx_record.py`. So today this config is an **honest-accounting**
+max-rate capture, not a lossless one; closing the consumer gap is the
+open V4 work. Full record + the validation matrix:
 `../../docs/RX_MAX_RATE.md` §validation.
 
 ## Config (`files/rx-record.json`)

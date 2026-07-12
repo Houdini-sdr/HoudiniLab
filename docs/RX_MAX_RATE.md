@@ -54,6 +54,25 @@ operation.
 > (`CC/Sounder/files/rx-record-demo.json`). Rig validation matrix:
 > §validation below.
 
+> **STATUS 2026-07-12 (later): rig-validated on the TDD baseline
+> (fpga v1.20 `da4c9d4c` / device+host v0.2.0, `tdd=1`).** Build + 4/4
+> radio-free ctest on aarch64; 245.76 MSPS 2 s clean (7500/7500, 0 loss,
+> `READ_PATH=direct` even on the socket ingest); AP-5 loopback tone
+> verified on silicon (§validation V5). **New max-rate finding:** the
+> demo config's zero-copy chain ENGAGES correctly (reconcile
+> NIC→3498, `zero-copy RX engaged q19`), but end-to-end capture at
+> 1.96608 GSPS loses **~22–25 % (reproducible: 24.6/21.9/22.7 % over 3×
+> 2 s runs)** — the AF_XDP fill-ring starves (`RX ring full — hardware
+> dropping`), NOT fixed by `taskset` onto the fast-core cluster, so it is
+> the recorder-consumer's ~15.7 GB/s throughput, not app-thread core
+> placement. The **99.92 % is the driver-ingest boundary** and does not
+> carry through our HDF5 consumer at max rate. Every dropped sample is
+> exactly accounted in `/Data/Gaps` (sample-exact, `direct`) and
+> cross-verified program↔inspect. Isolating/fixing the consumer bound is
+> the open V4 work (UMEM/fill-ring depth vs. writer→RAM-ring drain
+> coupling vs. memory-bandwidth); until then the demo is a
+> **honest-accounting** max-rate capture, not a lossless one.
+
 SoapySDR sanctions zero-copy reads: `getNumDirectAccessBuffers` /
 `getDirectAccessBufferAddrs` / `acquireReadBuffer` / `releaseReadBuffer`
 (base class defaults to unsupported). **The Houdini host plugin's ring is
@@ -268,3 +287,38 @@ for loss runs, bracketed by `tools/rx_drop_probe.sh` deltas:
   (`--tone auto` verdict clean on a gap-free capture), then a demo-rate
   capture with the tone — slot-boundary phase continuity cross-checks
   the gap table under real loss.
+
+### Results — 2026-07-12 rig B (TDD baseline fpga v1.20 / v0.2.0)
+
+Ran on `arc/rx-recorder` @ `6f392c9`, worktree rebuilt from the bundle;
+4/4 radio-free ctest green on aarch64. Records (evidence — not deleted
+if later superseded):
+
+- **V1 — DONE (clean rungs).** 245.76 MSPS 2 s, `direct_rx=auto`:
+  7500/7500, `TOTAL_UNTRUSTED_SAMPLES=0`, `READ_PATH=direct`,
+  `GAPS_EXACT=1`. Note the direct-buffer path engaged even on the
+  **kernel-socket** ingest (rx_xsk auto→socket at the default 8192
+  geometry) — the SH-254 and SH-258 paths compose. 491.52-rung control
+  not re-run this session.
+- **V5 — DONE (clean-rung leg).** `files/rx-record-tone.json` at
+  245.76 MSPS, tone armed on the capture's own handle (19.92 MHz
+  bin-snapped from 20 MHz), `inspect --tone auto`: detected −19.92 MHz
+  @ 87.9 dB, 7499 boundaries, **0 unexplained phase jumps**, verdict
+  clean (exit 0). First on-silicon exercise of the AP-5 arm path. The
+  demo-rate (lossy) tone leg was not run.
+- **ZC max-rate (the demo config) — CHAIN OK, NOT LOSSLESS.** require-mode
+  AF_XDP + direct at 1.96608 GSPS, `rx_xsk_nic_reconcile=1` (driver set
+  NIC 9000→3498, set-and-leave). Zero-copy engaged (q19, 4 KiB chunks);
+  **~22–25 % loss, reproducible** (969.0 / 861.6 / 894.0 M samples over
+  3× 2 s), steady-state (s0 27.5 % / s1 21.8 %), cause = NIC fill-ring
+  starvation (`RX ring full — hardware dropping`). `taskset -c 15-19` did
+  NOT help ⇒ not app-thread placement. All loss exactly in `/Data/Gaps`,
+  cross-verified. Confirmed the require-mode fail-loud: the same config at
+  the default NIC 9000 (no reconcile) refuses the XDP attach and aborts
+  without touching the NIC.
+- **V2 / V3-demo-8s / V4 matrix — NOT RUN.** V4 (UMEM depth, writer/ring
+  drain coupling, memory-BW) is now the priority: it owns the max-rate
+  consumer-loss root cause above, ahead of the socket-fallback SH ask.
+- **Rig left:** NIC `enp1s0f1np1` at **MTU 3498** (reconcile set-and-leave;
+  restore `sudo ip link set enp1s0f1np1 mtu 9000` before the correlator's
+  8192 geometry runs). rmem_max still 256 MB (moot on the xsk path).
