@@ -59,3 +59,4 @@ venv
 
 # Database
 renew.db
+CC/Sounder/tests/rx-recorder/build/

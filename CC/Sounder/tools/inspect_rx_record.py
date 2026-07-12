@@ -77,6 +77,11 @@ def print_trust(attrs, gaps, n_slots, samps_per_slot, rate):
     print(f"  slots recorded        : {n_slots} ({total} samples, "
           f"{total / rate:.3f} s)")
     print(f"  write errors          : {attr_num(attrs, 'WRITE_ERRORS')}")
+    if "READ_PATH" in attrs:
+        exact = attr_num(attrs, "GAPS_EXACT", -1)
+        exactness = {1: "sample-exact", 0: "read-widened"}.get(exact, "?")
+        print(f"  read path             : {scalar(attrs['READ_PATH'])} "
+              f"({exactness} extents)")
     print(f"  untrusted samples     : {untrusted:.0f} "
           f"({100.0 * untrusted / max(total, 1):.2f} %)")
     if gaps.shape[0] == 0:
@@ -272,6 +277,13 @@ def main():
 
     status = 0
     if args.tone is not None:
+        if "TX_REPLAY_FREQ_ACTUAL" in attrs:
+            # Armed by rx-recorder's tx_replay section (bin-snapped DAC
+            # baseband). The RX-observed frequency additionally depends on
+            # the mixer/NCO mapping, so this is context, not an assertion.
+            armed = float(scalar(attrs["TX_REPLAY_FREQ_ACTUAL"]))
+            print(f"file records an armed TX-replay tone: "
+                  f"{armed / 1e6:.6f} MHz DAC baseband")
         status = 1 if tone_phase_check(samples, gaps, n_slots, samps_per_slot,
                                        rate, args.tone) > 0 else 0
 

@@ -1,0 +1,22 @@
+{
+  "device": {
+    "driver": "houdinisdr",
+    "remote": "168.6.244.22",
+    "HOUDINI_MTU": 3512
+  },
+  "stream": {
+    "rx_xsk": "require",
+    "cpu_affinity": "19",
+    "rt_priority": 50
+  },
+  "channels": [0],
+  "rate": 1966080000,
+  "freq": 100000000,
+  "duration_sec": 8.0,
+  "samps_per_slot": 1048576,
+  "read_chunk_samps": 65536,
+  "buffer_slots": 16384,
+  "rx_timeout_us": 1000000,
+  "direct_rx": "require",
+  "output_file": ""
+}

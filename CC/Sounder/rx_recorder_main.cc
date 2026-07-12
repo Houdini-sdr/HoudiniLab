@@ -32,7 +32,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdio>
-#include <cstring>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <vector>
@@ -40,6 +40,7 @@
 #include "include/logger.h"
 #include "include/macros.h"
 #include "include/recorder_thread.h"
+#include "include/rx_recorder_capture.h"
 #include "include/rx_recorder_config.h"
 #include "include/rx_recorder_grid.h"
 #include "include/rx_recorder_worker.h"
@@ -61,170 +62,232 @@ struct DeviceUnmaker {
 };
 using DevicePtr = std::unique_ptr<SoapySDR::Device, DeviceUnmaker>;
 
-struct CaptureStats {
-  size_t slots_recorded = 0;
-  size_t slots_dropped = 0;  // ring full: HDF5 writer could not keep up
-  size_t read_timeouts = 0;
-  size_t overflow_returns = 0;     // OVERFLOW returned by readStream itself
-  size_t gap_events = 0;           // stream gaps detected via timestamps
-  size_t backward_time_jumps = 0;  // timeNs went backward (quantization)
-  size_t time_resyncs = 0;         // time-base jumps: grid re-anchored
-  double est_lost_samples = 0.0;   // sum of inserted placeholder samples
-  size_t status_overflows = 0;     // OVERFLOW events from readStreamStatus
-  size_t status_other = 0;
-  long long first_sample_time_ns = 0;  // grid time of file sample 0
-  bool has_first_sample_time = false;
+// AP-5 loopback verification tone: the capture's OWN device handle arms a
+// tx_mode=replay stream so a known tone rides the DAC->ADC loopback for
+// the capture's whole lifetime (a second handle is out-of-contract, and
+// the tone's lifetime IS the stream's lifetime: closeStream releases the
+// DAC tile refcount). Load contract (validated flow rx_tx_loopback.ipynb
+// + the host writeStream(TX,replay) source): one writeStream element =
+// one complex CS16 sample = one u32 replay-RAM word (I in [15:0]), the
+// playout loop length = the total loaded fill, activateStream starts the
+// continuous RTL loop, deactivate/close stop and release it.
+class TxReplayTone {
+ public:
+  TxReplayTone(SoapySDR::Device* dev, const Sounder::RxRecorderConfig& cfg)
+      : dev_(dev) {
+    const size_t chan = cfg.tx_replay_channel();
+    const size_t n = cfg.tx_replay_n_addrs();
+    // The bin grid is set by the DAC COMPLEX input rate (Fs_dac/interp),
+    // exposed via TX channel info; getSampleRate(TX) is the fallback.
+    double dac_rate = 0.0;
+    const SoapySDR::Kwargs info = dev_->getChannelInfo(SOAPY_SDR_TX, chan);
+    if (info.count("rfdc_effective_rate_hz") != 0) {
+      dac_rate = std::stod(info.at("rfdc_effective_rate_hz"));
+    } else {
+      dac_rate = dev_->getSampleRate(SOAPY_SDR_TX, chan);
+    }
+    if (dac_rate <= 0.0) {
+      throw std::runtime_error(
+          "tx_replay: DAC complex rate unavailable on TX channel " +
+          std::to_string(chan));
+    }
+    // Snap to the nearest n-sample loop bin: the replayed loop is then
+    // phase-seamless at the wrap — the exact property the --tone
+    // phase-continuity verification leans on.
+    const long long k = std::max<long long>(
+        1LL, std::llround(cfg.tx_replay_freq() * static_cast<double>(n) /
+                          dac_rate));
+    actual_freq_ = static_cast<double>(k) * dac_rate / static_cast<double>(n);
+
+    // Complex tone, interleaved I,Q with I in the low half — the DAC's
+    // CHAI,CHAQ order (flip here if a rig run shows the mirrored image).
+    std::vector<short> ram(2 * n);
+    const double amp = cfg.tx_replay_amp() * 32767.0;
+    for (size_t i = 0; i < n; i++) {
+      const double phase = (2.0 * M_PI * static_cast<double>(k) *
+                            static_cast<double>(i)) /
+                           static_cast<double>(n);
+      ram[2 * i] = static_cast<short>(std::lround(amp * std::cos(phase)));
+      ram[(2 * i) + 1] = static_cast<short>(std::lround(amp * std::sin(phase)));
+    }
+
+    SoapySDR::Kwargs tx_args;
+    tx_args["tx_mode"] = "replay";
+    stream_ = dev_->setupStream(SOAPY_SDR_TX, SOAPY_SDR_CS16,
+                                std::vector<size_t>{chan}, tx_args);
+    if (stream_ == nullptr) {
+      throw std::runtime_error("tx_replay: setupStream(TX, replay) failed");
+    }
+    try {
+      const void* buffs[1] = {ram.data()};
+      int flags = 0;
+      const int ret = dev_->writeStream(stream_, buffs, n, flags,
+                                        0 /*timeNs: a-temporal load*/, 1000000);
+      if (ret != static_cast<int>(n)) {
+        throw std::runtime_error(
+            "tx_replay: replay-RAM load wrote " + std::to_string(ret) +
+            " of " + std::to_string(n) + " samples");
+      }
+      const int act = dev_->activateStream(stream_);
+      if (act != 0) {
+        throw std::runtime_error(std::string("tx_replay: activateStream: ") +
+                                 SoapySDR::errToStr(act));
+      }
+    } catch (...) {
+      dev_->closeStream(stream_);
+      stream_ = nullptr;
+      throw;
+    }
+  }
+
+  ~TxReplayTone() {
+    if (stream_ != nullptr) {
+      dev_->deactivateStream(stream_);
+      dev_->closeStream(stream_);
+    }
+  }
+  TxReplayTone(const TxReplayTone&) = delete;
+  TxReplayTone& operator=(const TxReplayTone&) = delete;
+
+  inline double actual_freq(void) const { return actual_freq_; }
+
+ private:
+  SoapySDR::Device* dev_;
+  SoapySDR::Stream* stream_ = nullptr;
+  double actual_freq_ = 0.0;
 };
 
-// Capture-thread bookkeeping threaded through fillSlot: the sample-time
-// grid, the untrusted-extent list, and the staging machinery that lets
-// placeholder zeros be inserted BEFORE a late-arriving read's samples.
-struct CaptureState {
-  explicit CaptureState(double rate, size_t chunk_samps)
-      : grid(rate), chunk(2 * chunk_samps) {}
+// readStream-backed SampleSource: fetch fills a staging chunk. The span
+// stamp is the read's leading timeNs; with the driver's break-at-gap
+// contract (rx_gap_break=1) every span is time-contiguous.
+class ReadStreamSource : public Sounder::SampleSource {
+ public:
+  ReadStreamSource(SoapySDR::Device* dev, SoapySDR::Stream* stream,
+                   size_t chunk_samps, long timeout_us)
+      : dev_(dev),
+        stream_(stream),
+        chunk_(2 * chunk_samps),
+        timeout_us_(timeout_us) {}
 
-  CaptureStats stats;
-  Sounder::TimeGridTracker grid;
-  std::vector<Sounder::GapExtent> extents;
-  int64_t grid_pos = 0;        // absolute samples emitted onto the grid
-  size_t pad_remaining = 0;    // placeholder zeros still owed to the grid
-  size_t last_read_samps = 0;  // uncertainty span for widened extents
-  std::vector<short> chunk;    // staging buffer for one readStream call
-  size_t chunk_len = 0;        // samples staged
-  size_t chunk_off = 0;        // samples already emitted from staging
-  // Driver guarantees every readStream buffer is time-contiguous (breaks
-  // at gaps). Without it a mid-read gap is located only to the enclosing
-  // read, so extents widen by last_read_samps. See docs/RX_GAP_AWARENESS.md.
-  bool exact_gaps = false;
-};
-
-// Checks a stamped read against the grid: anchors t0, schedules placeholder
-// zeros for forward gaps, records untrusted extents.
-void onStampedChunk(long long time_ns, CaptureState& state) {
-  const bool first = (state.grid.has_t0() == false);
-  const Sounder::GridCheck check = state.grid.onStamp(time_ns, state.grid_pos);
-  if (first == true) {
-    state.stats.first_sample_time_ns = state.grid.t0();
-    state.stats.has_first_sample_time = true;
-    return;
-  }
-  if (check.resync == true) {
-    // Hardware time-base changed under us: absolute time alignment is
-    // broken from here on (the marker records where); the grid continues
-    // relative to the new anchor instead of zero-filling the capture.
-    state.stats.time_resyncs++;
-    state.extents.push_back({state.grid_pos, 0, Sounder::kGapResync});
-    return;
-  }
-  if (check.pad_samples > 0) {
-    state.stats.gap_events++;
-    state.stats.est_lost_samples += static_cast<double>(check.pad_samples);
-    int64_t start = state.grid_pos;
-    if (state.exact_gaps == false) {
-      // Gap position is only known to the enclosing read: widen the
-      // untrusted extent backward over the previous read's samples.
-      start = std::max<int64_t>(
-          0, state.grid_pos - static_cast<int64_t>(state.last_read_samps));
-    }
-    const int64_t length =
-        static_cast<int64_t>(check.pad_samples) + (state.grid_pos - start);
-    state.extents.push_back({start, length, Sounder::kGapTimeJump});
-    state.pad_remaining = check.pad_samples;
-  } else if (check.backward == true) {
-    state.stats.backward_time_jumps++;
-    state.extents.push_back({state.grid_pos, 0, Sounder::kGapBackward});
-  }
-}
-
-// Fills dest with exactly samps_per_slot grid samples: placeholder zeros
-// owed from detected gaps, staged samples, then fresh readStream chunks.
-// Returns false when the capture should stop (fatal error or shutdown).
-bool fillSlot(SoapySDR::Device* dev, SoapySDR::Stream* stream, short* dest,
-              const Sounder::RxRecorderConfig& cfg, CaptureState& state,
-              std::atomic<bool>& running) {
-  const size_t slot_samps = cfg.samps_per_slot();
-  size_t filled = 0;
-  size_t consecutive_timeouts = 0;
-  size_t consecutive_overflows = 0;
-  constexpr size_t kMaxConsecutiveTimeouts = 10;
-  // Overflow returns are instant (event pops, no wait); a driver wedged in
-  // a permanent overflow state would otherwise spin here forever.
-  constexpr size_t kMaxConsecutiveOverflows = 10000;
-
-  while ((filled < slot_samps) && (running.load() == true) &&
-         (SignalHandler::gotExitSignal() == false)) {
-    // 1) Placeholder zeros owed to the grid from a detected gap.
-    if (state.pad_remaining > 0) {
-      const size_t n = std::min(state.pad_remaining, slot_samps - filled);
-      std::memset(dest + (2 * filled), 0, n * 2 * sizeof(short));
-      filled += n;
-      state.grid_pos += static_cast<int64_t>(n);
-      state.pad_remaining -= n;
-      continue;
-    }
-    // 2) Staged samples from the last readStream call.
-    if (state.chunk_off < state.chunk_len) {
-      const size_t n =
-          std::min(state.chunk_len - state.chunk_off, slot_samps - filled);
-      std::memcpy(dest + (2 * filled),
-                  state.chunk.data() + (2 * state.chunk_off),
-                  n * 2 * sizeof(short));
-      filled += n;
-      state.chunk_off += n;
-      state.grid_pos += static_cast<int64_t>(n);
-      continue;
-    }
-    // 3) Read a fresh chunk into staging.
-    const size_t request =
-        std::min(state.chunk.size() / 2, slot_samps - filled);
-    void* buffs[1] = {state.chunk.data()};
+  Sounder::FetchStatus fetch(void) override {
+    void* buffs[1] = {chunk_.data()};
     int flags = 0;
     long long time_ns = 0;
-    const int ret = dev->readStream(stream, buffs, request, flags, time_ns,
-                                    cfg.rx_timeout_us());
+    const int ret = dev_->readStream(stream_, buffs, chunk_.size() / 2, flags,
+                                     time_ns, timeout_us_);
     // A 0-element return makes no progress either -- treat it as a timeout
-    // so a stalled stream cannot spin this loop forever.
+    // so a stalled stream cannot spin the capture loop forever.
     if ((ret == SOAPY_SDR_TIMEOUT) || (ret == 0)) {
-      state.stats.read_timeouts++;
-      if (++consecutive_timeouts >= kMaxConsecutiveTimeouts) {
-        MLPD_ERROR("readStream: %zu consecutive timeouts, aborting capture\n",
-                   consecutive_timeouts);
-        running = false;
-        return false;
-      }
-      continue;
+      return Sounder::FetchStatus::kTimeout;
     }
     if (ret == SOAPY_SDR_OVERFLOW) {
-      state.stats.overflow_returns++;
-      consecutive_timeouts = 0;  // the stream is alive, just lossy
-      if (++consecutive_overflows >= kMaxConsecutiveOverflows) {
-        MLPD_ERROR(
-            "readStream: %zu consecutive overflows with no data, aborting "
-            "capture\n",
-            consecutive_overflows);
-        running = false;
-        return false;
-      }
-      continue;
+      return Sounder::FetchStatus::kOverflow;
     }
     if (ret < 0) {
       MLPD_ERROR("readStream error: %d - %s\n", ret, SoapySDR::errToStr(ret));
-      running = false;
-      return false;
+      return Sounder::FetchStatus::kFatal;
     }
-    consecutive_timeouts = 0;
-    consecutive_overflows = 0;
-    state.chunk_len = static_cast<size_t>(ret);
-    state.chunk_off = 0;
-    if ((flags & SOAPY_SDR_HAS_TIME) != 0) {
-      // May schedule pads: the staged chunk then emits AFTER them, which
-      // places its first sample exactly where the timestamp says it belongs.
-      onStampedChunk(time_ns, state);
-    }
-    state.last_read_samps = state.chunk_len;
+    len_ = static_cast<size_t>(ret);
+    off_ = 0;
+    has_time_ = ((flags & SOAPY_SDR_HAS_TIME) != 0);
+    time_ns_ = time_ns;
+    return Sounder::FetchStatus::kData;
   }
-  return (filled == slot_samps);
-}
+
+  size_t pending(void) const override { return len_ - off_; }
+  const short* data(void) const override { return chunk_.data() + (2 * off_); }
+  void consume(size_t samples) override { off_ += samples; }
+  bool has_time(void) const override { return has_time_; }
+  long long time_ns(void) const override { return time_ns_; }
+
+ private:
+  SoapySDR::Device* dev_;
+  SoapySDR::Stream* stream_;
+  std::vector<short> chunk_;  // staging buffer for one readStream call
+  long timeout_us_;
+  size_t len_ = 0;
+  size_t off_ = 0;
+  bool has_time_ = false;
+  long long time_ns_ = 0;
+};
+
+// Direct-buffer (SH-254 acquire/release) SampleSource: one acquire = one
+// wire packet borrowed from the driver's ring — samples are assembled
+// straight from the ring slot into the HDF5 row (the staging copy is
+// gone). Each packet carries its own hardware tick stamp, so consecutive
+// span stamps locate every gap sample-exactly, independent of the
+// rx_gap_break readStream contract. At most one buffer is held: consume()
+// releases the slot the moment its span is drained, and the destructor
+// releases a partially-consumed hold (run it BEFORE closeStream).
+class DirectBufferSource : public Sounder::SampleSource {
+ public:
+  DirectBufferSource(SoapySDR::Device* dev, SoapySDR::Stream* stream,
+                     long timeout_us)
+      : dev_(dev), stream_(stream), timeout_us_(timeout_us) {}
+
+  ~DirectBufferSource() override {
+    if (held_ == true) {
+      dev_->releaseReadBuffer(stream_, handle_);
+    }
+  }
+
+  Sounder::FetchStatus fetch(void) override {
+    const void* buffs[1] = {nullptr};
+    int flags = 0;
+    long long time_ns = 0;
+    const int ret = dev_->acquireReadBuffer(stream_, handle_, buffs, flags,
+                                            time_ns, timeout_us_);
+    // 0 = a finite burst completed; this stream is continuous, so treat a
+    // progress-less return like a timeout rather than spinning.
+    if ((ret == SOAPY_SDR_TIMEOUT) || (ret == 0)) {
+      return Sounder::FetchStatus::kTimeout;
+    }
+    if (ret == SOAPY_SDR_OVERFLOW) {
+      return Sounder::FetchStatus::kOverflow;
+    }
+    if (ret < 0) {
+      MLPD_ERROR("acquireReadBuffer error: %d - %s\n", ret,
+                 SoapySDR::errToStr(ret));
+      return Sounder::FetchStatus::kFatal;
+    }
+    held_ = true;
+    payload_ = static_cast<const short*>(buffs[0]);
+    len_ = static_cast<size_t>(ret);
+    off_ = 0;
+    has_time_ = ((flags & SOAPY_SDR_HAS_TIME) != 0);
+    time_ns_ = time_ns;
+    return Sounder::FetchStatus::kData;
+  }
+
+  size_t pending(void) const override { return len_ - off_; }
+  const short* data(void) const override { return payload_ + (2 * off_); }
+  void consume(size_t samples) override {
+    off_ += samples;
+    if (off_ >= len_) {
+      // Hand the ring slot back the moment the span is drained, so the
+      // driver ring never backs up behind the app (<= 1 buffer held).
+      dev_->releaseReadBuffer(stream_, handle_);
+      held_ = false;
+      payload_ = nullptr;
+      len_ = 0;
+      off_ = 0;
+    }
+  }
+  bool has_time(void) const override { return has_time_; }
+  long long time_ns(void) const override { return time_ns_; }
+
+ private:
+  SoapySDR::Device* dev_;
+  SoapySDR::Stream* stream_;
+  long timeout_us_;
+  size_t handle_ = 0;
+  const short* payload_ = nullptr;
+  bool held_ = false;
+  size_t len_ = 0;
+  size_t off_ = 0;
+  bool has_time_ = false;
+  long long time_ns_ = 0;
+};
 
 // Applies the requested sample rate. Sequence [user]: check the device's
 // advertised rates; while the request lies outside them, step the global
@@ -356,6 +419,22 @@ int runCapture(const Sounder::RxRecorderConfig& cfg) {
               cfg.duration_sec(), meta.actual_rate / 1e6, chan);
   std::printf("  freq %.6f MHz, gain %.1f dB, antenna '%s'\n",
               meta.actual_freq / 1e6, meta.actual_gain, meta.antenna.c_str());
+
+  // AP-5: arm the loopback verification tone before the RX stream opens;
+  // the object's lifetime (this scope) keeps it playing past the capture.
+  std::unique_ptr<TxReplayTone> tx_tone;
+  if (cfg.has_tx_replay() == true) {
+    tx_tone = std::make_unique<TxReplayTone>(dev.get(), cfg);
+    meta.tx_replay_enabled = true;
+    meta.tx_replay_freq_actual = tx_tone->actual_freq();
+    meta.tx_replay_amp = cfg.tx_replay_amp();
+    meta.tx_replay_channel = cfg.tx_replay_channel();
+    std::printf(
+        "  tx_replay tone armed: %.6f MHz baseband (requested %.6f MHz), "
+        "amp %.2f, DAC channel %zu\n",
+        meta.tx_replay_freq_actual / 1e6, cfg.tx_replay_freq() / 1e6,
+        meta.tx_replay_amp, meta.tx_replay_channel);
+  }
   std::printf("  %zu slots x %zu samples (%.1f MB) -> %s\n", meta.total_slots,
               cfg.samps_per_slot(),
               meta.total_slots * cfg.getPacketDataLength() / 1e6,
@@ -370,6 +449,55 @@ int runCapture(const Sounder::RxRecorderConfig& cfg) {
     throw std::runtime_error("setupStream failed");
   }
 
+  // SH-254 zero-copy read path. Support is advertised by a non-zero
+  // direct-access buffer count (on the Houdini driver: single-channel RX
+  // only); there is deliberately no getHardwareInfo key for it.
+  const bool direct_supported = (dev->getNumDirectAccessBuffers(stream) > 0);
+  bool use_direct = false;
+  if (cfg.direct_rx() == "require") {
+    if (direct_supported == false) {
+      dev->closeStream(stream);
+      throw std::runtime_error(
+          "direct_rx=require, but the driver advertises no direct-access "
+          "buffers on this stream (needs the SH-254 acquire/release API, "
+          "single-channel RX)");
+    }
+    use_direct = true;
+  } else if (cfg.direct_rx() == "auto") {
+    use_direct = direct_supported;
+  }
+
+  // Extent exactness: every source span must be time-contiguous. Direct
+  // mode has it structurally (one acquire = one wire packet, per-packet
+  // stamps); readStream needs the driver's break-at-gap capability AND
+  // the per-stream rx_gap_break knob (default on) not disabled by the
+  // config's stream args (driver bool spelling: false/0/empty = off).
+  bool gap_break = (hw_info.count("rx_gap_break") != 0) &&
+                   (hw_info.at("rx_gap_break") == "1");
+  if (const auto it = stream_args.find("rx_gap_break");
+      it != stream_args.end()) {
+    const std::string& v = it->second;
+    gap_break = gap_break && (v != "false") && (v != "0") && (v.empty() == false);
+  }
+  const bool exact_gaps = (use_direct == true) || (gap_break == true);
+  meta.read_path = use_direct ? "direct" : "readstream";
+  meta.gaps_exact = exact_gaps;
+  meta.stream_args = SoapySDR::KwargsToString(stream_args);
+  std::printf("  read path: %s (%s extents)\n", meta.read_path.c_str(),
+              exact_gaps ? "sample-exact" : "read-widened");
+  if (meta.stream_args.empty() == false) {
+    std::printf("  stream args: %s\n", meta.stream_args.c_str());
+  }
+
+  std::unique_ptr<Sounder::SampleSource> source;
+  if (use_direct == true) {
+    source = std::make_unique<DirectBufferSource>(dev.get(), stream,
+                                                  cfg.rx_timeout_us());
+  } else {
+    source = std::make_unique<ReadStreamSource>(
+        dev.get(), stream, cfg.read_chunk_samps(), cfg.rx_timeout_us());
+  }
+
   const size_t packet_length = sizeof(Packet) + cfg.getPacketDataLength();
   const size_t num_slots = cfg.buffer_slots();
   SampleBuffer ring;
@@ -381,12 +509,12 @@ int runCapture(const Sounder::RxRecorderConfig& cfg) {
   // Scratch packet: keeps the stream drained when the ring is full.
   std::vector<char> scratch(packet_length);
 
-  CaptureState state(meta.actual_rate, cfg.read_chunk_samps());
-  // Proposed driver capability (see docs/RX_GAP_AWARENESS.md): every read
-  // buffer is time-contiguous, so gap extents need no widening.
-  state.exact_gaps = (hw_info.count("rx_gap_break") != 0) &&
-                     (hw_info.at("rx_gap_break") == "1");
-  CaptureStats& stats = state.stats;
+  Sounder::CaptureState state(meta.actual_rate);
+  state.exact_gaps = exact_gaps;
+  Sounder::CaptureStats& stats = state.stats;
+  const std::function<bool(void)> interrupt_poll = [](void) {
+    return SignalHandler::gotExitSignal();
+  };
 
   {
     auto worker = std::make_unique<Sounder::RxRecorderWorker>(&cfg, meta);
@@ -433,15 +561,16 @@ int runCapture(const Sounder::RxRecorderConfig& cfg) {
                                  static_cast<int64_t>(cfg.samps_per_slot()),
                                  Sounder::kGapHostRing});
         Packet* trash = reinterpret_cast<Packet*>(scratch.data());
-        fillSlot(dev.get(), stream, trash->data, cfg, state, running);
+        Sounder::fillSlot(*source, trash->data, cfg.samps_per_slot(), state,
+                          running, interrupt_poll);
         continue;
       }
 
       Packet* pkt = reinterpret_cast<Packet*>(ring.buffer.data() +
                                               cursor * packet_length);
       new (pkt) Packet(slot_idx, 0 /*slot*/, 0 /*cell*/, 0 /*ant*/);
-      if (fillSlot(dev.get(), stream, pkt->data, cfg, state, running) ==
-          false) {
+      if (Sounder::fillSlot(*source, pkt->data, cfg.samps_per_slot(), state,
+                            running, interrupt_poll) == false) {
         // Incomplete slot (shutdown or error): release the claim, don't record.
         sample_buf_release(ring.pkt_buf_inuse, cursor);
         break;
@@ -466,6 +595,9 @@ int runCapture(const Sounder::RxRecorderConfig& cfg) {
     }
 
     // ---- Teardown -------------------------------------------------------
+    // Drop the source first: a held direct-buffer borrow is invalidated
+    // by (de)activation and must be released while the stream is open.
+    source.reset();
     dev->deactivateStream(stream);
     // Drain async status events; the event type is the return code. Bounded:
     // a driver that keeps returning a non-exit code must not spin us forever
@@ -509,6 +641,7 @@ int runCapture(const Sounder::RxRecorderConfig& cfg) {
               stats.slots_recorded, meta.total_slots,
               stats.slots_recorded * cfg.samps_per_slot() / meta.actual_rate);
   std::printf("Dropped slots (host): %zu\n", stats.slots_dropped);
+  std::printf("Read path           : %s\n", meta.read_path.c_str());
   std::printf(
       "Stream gaps         : %zu (%.0f placeholder samples inserted, "
       "%s extents)\n",

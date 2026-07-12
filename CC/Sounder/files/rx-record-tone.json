@@ -1,0 +1,21 @@
+{
+  "device": {
+    "driver": "houdinisdr",
+    "remote": "168.6.244.22"
+  },
+  "stream": {},
+  "channels": [0],
+  "rate": 245760000,
+  "duration_sec": 2.0,
+  "samps_per_slot": 65536,
+  "read_chunk_samps": 16384,
+  "buffer_slots": 512,
+  "rx_timeout_us": 1000000,
+  "direct_rx": "auto",
+  "tx_replay": {
+    "freq": 20000000,
+    "amp": 0.25,
+    "channel": 0
+  },
+  "output_file": ""
+}

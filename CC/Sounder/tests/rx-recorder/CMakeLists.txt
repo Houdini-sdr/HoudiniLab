@@ -4,7 +4,8 @@ project(rx-recorder-tests CXX)
 # Radio-free tests for the rx-recorder pipeline: build + run without
 # SoapySDR or hardware (only HDF5 + pthread). Mirrors the standalone
 # style of ../comms-func.
-#   cmake ./ && make && ./test_grid && ./test_rx_pipeline && ./test_h5_error
+#   cmake ./ && make && ./test_grid && ./test_capture_paths \
+#     && ./test_rx_pipeline && ./test_h5_error
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_FLAGS "-std=c++17 -Wall -Wextra -O2")
@@ -27,9 +28,12 @@ set(RX_RECORDER_TEST_SOURCES
     ${SOUNDER_DIR}/hdf5_lib.cc
     ${SOUNDER_DIR}/utils.cc)
 
-# Pure header test: no HDF5, no pipeline sources.
+# Pure header tests: no HDF5, no pipeline sources.
 add_executable(test_grid test_grid.cc)
 target_link_libraries(test_grid -lpthread)
+
+add_executable(test_capture_paths test_capture_paths.cc)
+target_link_libraries(test_capture_paths -lpthread)
 
 add_executable(test_rx_pipeline test_rx_pipeline.cc ${RX_RECORDER_TEST_SOURCES})
 target_link_libraries(test_rx_pipeline ${HDF5_LIBRARIES} -lpthread)
@@ -39,5 +43,6 @@ target_link_libraries(test_h5_error ${HDF5_LIBRARIES} -lpthread)
 
 enable_testing()
 add_test(NAME grid COMMAND test_grid)
+add_test(NAME capture_paths COMMAND test_capture_paths)
 add_test(NAME pipeline COMMAND test_rx_pipeline)
 add_test(NAME h5_error COMMAND test_h5_error)

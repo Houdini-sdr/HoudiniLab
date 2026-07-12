@@ -99,6 +99,39 @@ RxRecorderConfig::RxRecorderConfig(const std::string& json_file,
   }
   rx_timeout_us_ = conf.value("rx_timeout_us", 1000000L);
 
+  // Same value idiom as the driver's rx_xsk stream kwarg.
+  direct_rx_ = conf.value("direct_rx", std::string("auto"));
+  if ((direct_rx_ != "auto") && (direct_rx_ != "require") &&
+      (direct_rx_ != "off")) {
+    throw std::runtime_error("direct_rx must be auto|require|off, got '" +
+                             direct_rx_ + "'");
+  }
+
+  // Optional loopback verification tone (AP-5): absent = disabled.
+  has_tx_replay_ = conf.contains("tx_replay");
+  if (has_tx_replay_ == true) {
+    const json& tx = conf.at("tx_replay");
+    tx_replay_freq_ = tx.value("freq", 0.0);
+    if (tx_replay_freq_ <= 0.0) {
+      throw std::runtime_error("tx_replay.freq (Hz, baseband) must be > 0");
+    }
+    tx_replay_amp_ = tx.value("amp", 0.25);
+    if ((tx_replay_amp_ <= 0.0) || (tx_replay_amp_ > 1.0)) {
+      throw std::runtime_error("tx_replay.amp must be in (0, 1]");
+    }
+    tx_replay_channel_ = tx.value("channel", 0u);
+    if (tx_replay_channel_ > 1) {
+      throw std::runtime_error(
+          "tx_replay.channel must be 0 (DAC0.0) or 1 (DAC2.0)");
+    }
+    tx_replay_n_addrs_ = tx.value("n_addrs", 4096u);
+    // RFCORE_TX_RAM_DEPTH = 4096 complex samples/channel; the playout
+    // loop length equals the loaded fill.
+    if ((tx_replay_n_addrs_ == 0) || (tx_replay_n_addrs_ > 4096)) {
+      throw std::runtime_error("tx_replay.n_addrs must be 1..4096");
+    }
+  }
+
   output_file_ = conf.value("output_file", std::string());
   if (output_file_.empty()) {
     // Best-effort create of the store directory (single level, like "logs").

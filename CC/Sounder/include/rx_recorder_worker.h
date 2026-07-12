@@ -31,6 +31,18 @@ struct RxCaptureMeta {
   double actual_gain = 0.0;
   std::string antenna;
   size_t total_slots = 0;
+  // Capture-path provenance: which read path actually engaged ("direct"
+  // or "readstream"), whether /Data/Gaps extents are sample-exact, and
+  // the setupStream kwargs as sent (records e.g. the rx_xsk request).
+  std::string read_path = "readstream";
+  bool gaps_exact = false;
+  std::string stream_args;
+  // AP-5 loopback tone provenance (attributes written only when armed).
+  // freq_actual is the bin-snapped frequency the DAC really plays.
+  bool tx_replay_enabled = false;
+  double tx_replay_freq_actual = 0.0;
+  double tx_replay_amp = 0.0;
+  size_t tx_replay_channel = 0;
 };
 
 class RxRecorderWorker : public RecorderWorkerInterface {
