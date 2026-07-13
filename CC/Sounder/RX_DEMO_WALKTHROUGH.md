@@ -1,35 +1,29 @@
 # Running the max rate RX demo capture, step by step
 
-This walkthrough is for someone who has never used this software. It
-goes from an empty machine to a finished analysis: install the
+This walkthrough goes from an empty machine to a finished analysis: install the
 dependencies, build the tool, give the binary the permissions it
 needs, point the demo at your own hardware, run the zero copy demo
 capture (8 seconds of raw RF samples at 1.96608 GSPS, about 59 GB of
 data), verify the result, and read the file in Python. Every step
 shows the exact command and what you should see.
 
-The walkthrough does not assume anything about your network or your
-machine names. Two placeholders appear throughout; substitute your own
-values:
-
+Two placeholders appear throughout add your own values:
 - `<radio-ip>`: the address of your Houdini radio node (the RFSoC
   running the Houdini server).
 - `<data-iface>`: the name of the 100 GbE network interface on your
   capture host that is cabled to the radio's data port (find yours
   with `ip -br link`).
 
-Reference material lives in `RX_RECORDER.md` (all config keys) and
-`../../docs/RX_MAX_RATE.md` (design and measurements); you do not need
-either to follow this page.
+Additional reference material lives in `RX_RECORDER.md` (all config keys) and
+`../../docs/RX_MAX_RATE.md` (design and measurements).
 
-Validated result for this exact recipe (2026-07-12, on our validation
-bench): 15000 of 15000 slots recorded, 99.998 percent of samples
+Validated results: 15000 of 15000 slots recorded, 99.998 percent of samples
 captured, and the few lost samples exactly listed in the file's gap
 table.
 
 ## 1. What the demo does
 
-- `rx-recorder` is a command line tool. It opens the Houdini SDR
+- `rx-recorder` is a command line tool. It opens the Houdini SDR device
   through SoapySDR, sets the sample rate, streams raw I/Q samples over
   the 100 GbE link, and writes them to one HDF5 file.
 - At the demo rate the stream is 7.86 GB/s, which is faster than most
@@ -59,7 +53,7 @@ table.
 
 ### 2.2 Shortcut if your host is already provisioned
 
-If someone already set this host up, verify with the four checks below
+You can verify the host provising with the four checks below
 and, if they all pass, jump straight to section 3:
 
 ```sh
@@ -94,12 +88,11 @@ install for it.
 
 ### 2.4 SoapySDR and the Houdini driver plugin
 
-`rx-recorder` talks to the radio through SoapySDR (a vendor neutral
-SDR API, version 0.7 or newer) plus the Houdini host plugin (the
-driver that knows this specific radio). Both are built and installed
-by the SoapyHoudiniSDR repository's host install; follow that repo's
-host README first. That install normally lands in a Python virtual
-environment prefix; activate it so `$VIRTUAL_ENV` is set, then verify:
+`rx-recorder` talks to the radio through SoapySDR, SoapyRemote and the 
+Houdini host plugin (the driver that knows this specific radio). To install
+the SoapyHoudiniSDR host follow that repo's host README first. That install 
+normally lands in a Python virtual environment prefix; activate it so 
+`$VIRTUAL_ENV` is set, then verify:
 
 ```sh
 source <your-houdini-venv>/bin/activate
