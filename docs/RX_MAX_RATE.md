@@ -114,7 +114,8 @@ operation.
 > so the old `cpu_affinity=19` put the SCHED_FIFO-50 worker on q19's own
 > NAPI core — prefer 18. Diagnostic fingerprints for the future: modal
 > clean-run of exactly 64 packets during churn (NAPI budget slivers) and
-> the 50 ms max-gap cap.
+> the 50 ms max-gap cap — `CC/Sounder/tools/gap_forensics.py` extracts
+> all of them from a capture's `/Data/Gaps`.
 >
 > **V3 validated the full demo:** 8 s, readStream + `rx_xsk=require` +
 > `ring_bytes=1 GiB` + worker on 18 (app `taskset -c 15,16,17`):
