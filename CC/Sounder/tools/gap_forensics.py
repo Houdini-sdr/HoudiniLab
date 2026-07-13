@@ -106,11 +106,16 @@ def report(path, bucket_ms):
 
         tol = max(1, int(round(2e-9 * rate)))  # stamp-rounding bound
         q, cover = estimate_quantum(L, tol)
-        print(f"  packet quantum estimate: {q} samples/packet "
-              f"({100.0 * cover:.1f} % of unique gap lengths are "
-              f"multiples, +/-{tol})")
-        top = np.argsort(np.bincount(L))[-6:][::-1]
-        top = [(int(v), int((L == v).sum())) for v in top if (L == v).sum() > 0]
+        if q > 1:
+            print(f"  packet quantum estimate: {q} samples/packet "
+                  f"({100.0 * cover:.1f} % of unique gap lengths are "
+                  f"multiples, +/-{tol})")
+        else:
+            print("  no clean packet quantum found (mixed or "
+                  "non-packet-aligned loss)")
+        lv, lc = np.unique(L, return_counts=True)
+        order = np.argsort(lc)[::-1][:6]
+        top = [(int(lv[i]), int(lc[i])) for i in order]
         print(f"  top gap lengths (len, count): {top}")
         print(f"  gap len: min {L.min()} med {int(np.median(L))} "
               f"mean {L.mean():.0f} max {L.max()} "
@@ -129,8 +134,11 @@ def report(path, bucket_ms):
             sp = np.diff(S[order]) - L[order][:-1]
             sv, sc = np.unique(sp, return_counts=True)
             tops = np.argsort(sc)[-6:][::-1]
-            pkts = [f"{int(sv[i])} (={sv[i] / q:.1f} pkt) x{int(sc[i])}"
-                    for i in tops]
+            if q > 1:
+                pkts = [f"{int(sv[i])} (={sv[i] / q:.1f} pkt) x{int(sc[i])}"
+                        for i in tops]
+            else:
+                pkts = [f"{int(sv[i])} x{int(sc[i])}" for i in tops]
             print(f"  top clean-run lengths between gaps: {pkts}")
             print(f"    (a modal run of exactly 64 packets = NAPI-budget "
                   f"sliver fingerprint)")
