@@ -229,6 +229,13 @@ in the end-of-run summary AND recorded as extents in `/Data/Gaps`:
 `GAP_COLUMNS` attribute). `TOTAL_UNTRUSTED_SAMPLES` (float64) is the union
 length for quick screening: trust the capture iff it is 0.
 
+Two analysis tools read the table: `tools/inspect_rx_record.py` renders
+the trust report (how much loss, is the file usable — plus `--tone`
+verification), and `tools/gap_forensics.py` fingerprints the loss
+*structure* on a lossy capture (wire packet quantum, ring-occupancy
+sawtooth, NAPI-budget slivers, poll-timeout stalls — the mechanism
+signatures from the V4 root-cause work, `docs/RX_MAX_RATE.md`).
+
 Precision: extents are sample-exact (`GAPS_EXACT=1`) on either of two
 independent paths, both auto-probed. On the `direct_rx` path exactness
 is structural — one acquire = one wire packet with its own hardware
