@@ -3,27 +3,39 @@
 This walkthrough is for someone who has never used this software. It
 goes from an empty machine to a finished analysis: install the
 dependencies, build the tool, give the binary the permissions it
-needs, run the zero copy demo capture (8 seconds of raw RF samples at
-1.96608 GSPS, about 59 GB of data), verify the result, and read the
-file in Python. Every step shows the exact command and what you should
-see. Reference material lives in `RX_RECORDER.md` (all config keys)
-and `../../docs/RX_MAX_RATE.md` (design and measurements); you do not
-need either to follow this page.
+needs, point the demo at your own hardware, run the zero copy demo
+capture (8 seconds of raw RF samples at 1.96608 GSPS, about 59 GB of
+data), verify the result, and read the file in Python. Every step
+shows the exact command and what you should see.
 
-Validated result for this exact recipe (2026-07-12, rig B): 15000 of
-15000 slots recorded, 99.998 percent of samples captured, and the few
-lost samples exactly listed in the file's gap table.
+The walkthrough does not assume anything about your network or your
+machine names. Two placeholders appear throughout; substitute your own
+values:
+
+- `<radio-ip>`: the address of your Houdini radio node (the RFSoC
+  running the Houdini server).
+- `<data-iface>`: the name of the 100 GbE network interface on your
+  capture host that is cabled to the radio's data port (find yours
+  with `ip -br link`).
+
+Reference material lives in `RX_RECORDER.md` (all config keys) and
+`../../docs/RX_MAX_RATE.md` (design and measurements); you do not need
+either to follow this page.
+
+Validated result for this exact recipe (2026-07-12, on our validation
+bench): 15000 of 15000 slots recorded, 99.998 percent of samples
+captured, and the few lost samples exactly listed in the file's gap
+table.
 
 ## 1. What the demo does
 
 - `rx-recorder` is a command line tool. It opens the Houdini SDR
-  (an RFSoC board on the bench network), sets the sample rate, streams
-  raw I/Q samples over the 100 GbE link, and writes them to one HDF5
-  file.
-- At the demo rate the stream is 7.86 GB/s, which is faster than the
-  disk. The tool therefore records into a large RAM buffer during the
-  capture and writes the file to disk afterwards. You will see these
-  two phases in the console output.
+  through SoapySDR, sets the sample rate, streams raw I/Q samples over
+  the 100 GbE link, and writes them to one HDF5 file.
+- At the demo rate the stream is 7.86 GB/s, which is faster than most
+  disks. The tool therefore records into a large RAM buffer; the disk
+  writer runs alongside the capture and finishes the file after the
+  capture ends. You will see that tail phase in the console output.
 - Samples arrive in "slots" of 1,048,576 samples (4 MiB). One slot is
   one row of the HDF5 dataset. An 8 second capture is 15000 slots.
 - If any samples are lost in transport, the tool inserts placeholder
@@ -33,33 +45,33 @@ lost samples exactly listed in the file's gap table.
 
 ## 2. Install everything (from nothing)
 
-### 2.1 The machines involved
+### 2.1 What you need before starting
 
-- The capture host: a Linux machine with a 100 GbE NIC cabled to the
-  radio's data port. On our bench this is rig B,
-  `ssh houdini@168.6.244.64`.
-- The radio: the RFSoC at `168.6.244.22`. It must be powered, running
-  the Houdini server, and on the validated firmware (fpga v1.20,
-  device and host plugin v0.2.0). Board bring-up is owned by the
-  SoapyHoudiniSDR and Houdini-Streaming projects and is not covered
-  here; if you did not set the board up yourself, ask whoever did.
+- A capture host: a Linux machine (x86_64 or aarch64) with a 100 GbE
+  NIC cabled to the radio's data port, at least 80 GB of free RAM, and
+  at least 100 GB of free disk per capture.
+- A Houdini radio node at `<radio-ip>`: powered, running the Houdini
+  server, on validated firmware (fpga v1.20, device and host plugin
+  v0.2.0 or a stack your team has blessed). Board bring-up is owned by
+  the SoapyHoudiniSDR and Houdini-Streaming projects and is not
+  covered here; if you did not set the board up yourself, ask whoever
+  did.
 
-### 2.2 Shortcut if you are on rig B
+### 2.2 Shortcut if your host is already provisioned
 
-Rig B is already fully provisioned. Verify with the four checks below
+If someone already set this host up, verify with the four checks below
 and, if they all pass, jump straight to section 3:
 
 ```sh
-ls ~/repos/HoudiniLab-rx/CC/Sounder/build/rx-recorder     # binary exists
-getcap ~/repos/HoudiniLab-rx/CC/Sounder/build/rx-recorder # caps present (2.6)
-ip link show enp1s0f1np1 | head -1                        # mtu 3498 (2.7)
-source ~/houdini_test/bin/activate && python -c "import h5py, numpy"
+ls <path-to-HoudiniLab>/CC/Sounder/build/rx-recorder   # binary exists
+getcap <path-to-HoudiniLab>/CC/Sounder/build/rx-recorder  # caps (2.6)
+ip link show <data-iface> | head -1                    # mtu 3498 (2.7)
+python -c "import h5py, numpy"                         # analysis env (2.8)
 ```
 
 ### 2.3 System packages
 
-On Ubuntu (22.04 or 24.04, x86_64 or aarch64), install the build tools
-and libraries:
+On Ubuntu (22.04 or 24.04), install the build tools and libraries:
 
 ```sh
 sudo apt install build-essential cmake git \
@@ -84,18 +96,16 @@ install for it.
 
 `rx-recorder` talks to the radio through SoapySDR (a vendor neutral
 SDR API, version 0.7 or newer) plus the Houdini host plugin (the
-driver that knows this specific radio). The plugin is built and
-installed from the SoapyHoudiniSDR repository; follow that repo's host
-README. On our rigs the whole stack is installed into a Python
-virtual environment prefix at `~/houdini_test`.
-
-Verify the stack is present (rig style install):
+driver that knows this specific radio). Both are built and installed
+by the SoapyHoudiniSDR repository's host install; follow that repo's
+host README first. That install normally lands in a Python virtual
+environment prefix; activate it so `$VIRTUAL_ENV` is set, then verify:
 
 ```sh
-source ~/houdini_test/bin/activate
+source <your-houdini-venv>/bin/activate
 export SOAPY_SDR_PLUGIN_PATH=$VIRTUAL_ENV/lib/SoapySDR/modules0.8-3
-SoapySDRUtil --info          # prints versions and the module list
-ls $SOAPY_SDR_PLUGIN_PATH    # must contain a Houdini .so module
+SoapySDRUtil --info            # prints versions and module paths
+ls $SOAPY_SDR_PLUGIN_PATH      # must contain a Houdini .so module
 ```
 
 If `SoapySDRUtil` is missing or the module directory has no Houdini
@@ -104,12 +114,11 @@ Nothing in this walkthrough can work without it.
 
 ### 2.5 Get and build rx-recorder
 
-Clone the HoudiniLab repository (on rig B the checkout already exists
-at `~/repos/HoudiniLab-rx`; skip the clone there):
+Clone the HoudiniLab repository wherever you keep source:
 
 ```sh
-git clone <your HoudiniLab remote> ~/repos/HoudiniLab
-cd ~/repos/HoudiniLab/CC/Sounder
+git clone <your HoudiniLab remote> ~/HoudiniLab
+cd ~/HoudiniLab/CC/Sounder
 ```
 
 Configure and build. The `-DCMAKE_PREFIX_PATH` line tells CMake to
@@ -138,7 +147,7 @@ Notes:
 
 The zero copy network path bypasses the kernel's normal socket stack,
 so the binary needs five Linux capabilities. Without them the demo
-refuses to start. Ask someone with sudo to run:
+refuses to start. Run (or ask your admin to run):
 
 ```sh
 sudo setcap cap_net_raw,cap_net_admin,cap_bpf,cap_ipc_lock,cap_sys_nice+ep \
@@ -180,26 +189,26 @@ Two important gotchas:
 ### 2.7 Set the data NIC packet size (needs root, once per boot)
 
 The zero copy path requires the data interface to use a specific
-packet size limit (MTU 3498; on rig B the interface is
-`enp1s0f1np1`). Check:
+packet size limit (MTU 3498). Check:
 
 ```sh
-ip link show enp1s0f1np1 | head -1
+ip link show <data-iface> | head -1
 ```
 
 The line must contain `mtu 3498`. If it shows another value (for
-example 9000), ask someone with sudo to run:
+example 9000):
 
 ```sh
-sudo ip link set enp1s0f1np1 mtu 3498
+sudo ip link set <data-iface> mtu 3498
 ```
 
-Warning for shared rigs: other tools (for example the correlator work)
-expect MTU 9000 on this interface. If you change it, tell the other
-users, and restore it when you are done:
+Warning for shared hosts: other tools on your bench may expect a
+different MTU on this interface (the default Houdini wire geometry
+uses 9000). If you change it, tell the other users, and restore it
+when you are done:
 
 ```sh
-sudo ip link set enp1s0f1np1 mtu 9000
+sudo ip link set <data-iface> mtu 9000
 ```
 
 If the MTU is wrong the demo does not damage anything; it refuses to
@@ -208,9 +217,8 @@ start with a clear error (see section 8).
 ### 2.8 Python environment for analysis
 
 The verification and reading steps (sections 6 and 7) need Python
-with three packages. On the rigs, reuse the existing environment
-(`source ~/houdini_test/bin/activate`; it already has them). On a
-fresh machine:
+with three packages. You can reuse the Houdini venv from 2.4 if it has
+them, or make a separate one:
 
 ```sh
 python3 -m venv ~/rxdemo-venv
@@ -218,25 +226,51 @@ source ~/rxdemo-venv/bin/activate
 pip install numpy h5py matplotlib
 ```
 
+### 2.9 Point the demo at your bench (edit the config)
+
+The demo configuration `files/rx-record-demo.json` ships with values
+from our validation bench. Open it in an editor and adapt two entries
+to your bench; leave everything else exactly as shipped (rate, wire
+geometry, `ring_bytes`, and `direct_rx` are the validated recipe).
+
+1. `"remote"` (inside `"device"`): REQUIRED. Set it to `<radio-ip>`,
+   your radio's address. With more than one radio on a network,
+   discovery alone is ambiguous, so always pin it.
+2. `"cpu_affinity"` (inside `"stream"`): OPTIONAL tuning. This pins
+   the driver's receive worker thread to one CPU core. The shipped
+   value is a core number from our bench and means nothing on yours.
+   Two sensible choices:
+   - Simplest: delete the `"cpu_affinity"` and `"rt_priority"` lines.
+     The demo runs unpinned; on our bench that cost about 0.01
+     percent extra startup loss, nothing more.
+   - Tuned: pick a fast core that does NOT service the data queue's
+     interrupt. Find the interrupt mapping with
+     `grep <data-iface-driver> /proc/interrupts` (for a Mellanox NIC
+     the rows are named `mlx5_comp<N>`) and
+     `cat /proc/irq/<irq>/effective_affinity_list`; on many systems
+     queue N is serviced by CPU N. Choose a different core and put
+     its number in `"cpu_affinity"`. Pinning the worker onto the
+     interrupt's own core makes loss WORSE, not better.
+
 ## 3. Before every run
 
-Do these three quick checks each time, even on a provisioned rig.
+Do these three quick checks each time, even on a provisioned host.
 
-Check 1: the rig must be free. Only one program may stream from the
+Check 1: the host must be free. Only one program may stream from the
 radio at a time, and another CPU heavy job on the host will cause
 sample loss:
 
 ```sh
-ps aux | grep -iE "soapy|pytest|rx-recorder|correlator" | grep -v grep
+ps aux | grep -iE "soapy|rx-recorder" | grep -v grep
 ```
 
-If this prints anything, stop and come back when the rig is free.
+If this prints anything, stop and find out what is using the radio.
 
 Check 2: enough disk and RAM. Each 8 second run writes about 59 GB
-into `~/rx_logs` and uses about 65 GB of RAM during the capture:
+and uses about 65 GB of RAM during the capture:
 
 ```sh
-df -h ~ | tail -1
+df -h .
 free -g
 ```
 
@@ -246,7 +280,7 @@ start other large programs while the capture runs.
 Check 3: environment set in THIS shell (both lines, every new shell):
 
 ```sh
-source ~/houdini_test/bin/activate
+source <your-houdini-venv>/bin/activate
 export SOAPY_SDR_PLUGIN_PATH=$VIRTUAL_ENV/lib/SoapySDR/modules0.8-3
 ```
 
@@ -255,10 +289,11 @@ export SOAPY_SDR_PLUGIN_PATH=$VIRTUAL_ENV/lib/SoapySDR/modules0.8-3
 Step 1. Go to the tool directory:
 
 ```sh
-cd ~/repos/HoudiniLab-rx/CC/Sounder     # or your clone from 2.5
+cd ~/HoudiniLab/CC/Sounder
 ```
 
-Step 2. Start the capture with the demo configuration:
+Step 2. Start the capture with the demo configuration. `-storepath`
+is the output directory; it is created if missing:
 
 ```sh
 ./build/rx-recorder -conf_file files/rx-record-demo.json -storepath ~/rx_logs
@@ -269,14 +304,16 @@ Step 3. Watch the console. In order you should see:
 1. `Opening device: ...` and several `stepping RX_FAB_CLK ... Hz`
    lines. The tool is raising the radio's internal clock in steps to
    reach the demo rate. This takes tens of seconds; be patient.
-2. `Capture plan: 8.000 s @ 1966.080 MSPS ...` followed by
-   `read path: readstream (sample-exact extents)`.
-3. A pause of up to half a minute with no output. This is the 64 GiB
-   RAM buffer being allocated and cleared. Normal.
-4. `[INFO] xsk: zero-copy RX engaged on enp1s0f1np1 q19 (umem
-   1073741824 B, 4096-B chunks)`. This line is the proof that the fast
-   network path is active. If you do not see it, the run stopped with
-   an error; see section 8.
+2. `Capture plan: 8.000 s @ 1966.080 MSPS ...`.
+3. `[INFO] xsk: zero-copy RX engaged on <data-iface> q<N> (umem
+   1073741824 B, 4096-B chunks)` followed by
+   `read path: readstream (sample-exact extents)`. The engaged line
+   is the proof that the fast network path is active; your interface
+   name and queue number will differ from ours. If the line never
+   appears, the run stopped with an error; see section 8.
+4. A pause of up to half a minute with little or no output. This is
+   the 64 GiB RAM buffer being allocated and cleared. Normal. A few
+   stream activation INFO lines follow.
 5. Eight seconds of capture (usually silent; a warning here means
    samples are being lost, the run still completes and accounts them).
 6. `Capture done (15000 slots); draining queued slots to disk ...`
@@ -288,7 +325,7 @@ The whole run takes a few minutes end to end.
 
 ## 5. Read the summary
 
-A good run looks like this:
+A good run looks like this (numbers from our validation run):
 
 ```
 ==== rx-recorder summary ====
@@ -299,7 +336,7 @@ Stream gaps         : 1 (326480 placeholder samples inserted, exact extents)
 Untrusted extents   : 1 (see /Data/Gaps)
 Overflows           : 0 readStream / 0 status events
 Read timeouts       : 0, other status events: 0
-Output file         : /home/houdini/rx_logs/rx_record_20260712_180254.h5
+Output file         : /home/user/rx_logs/rx_record_<stamp>.h5
 ```
 
 What each line means:
@@ -324,10 +361,11 @@ Run the inspector on the file the summary printed (still in the same
 shell, so the venv is active):
 
 ```sh
-python tools/inspect_rx_record.py ~/rx_logs/rx_record_20260712_180254.h5
+python tools/inspect_rx_record.py ~/rx_logs/rx_record_<stamp>.h5
 ```
 
-It prints the file's metadata, then a trust report:
+It prints the file's metadata, then a trust report (again, numbers
+from our validation run):
 
 ```
 ==== trust report ====
@@ -353,7 +391,8 @@ How to read it:
   (the first second) is the normal startup transient.
 - `payload sanity` proves the file contains live signal rather than
   zeros or a stuck value. With nothing transmitting you should see a
-  noise floor around minus 50 dBFS, as above.
+  noise floor (around minus 50 dBFS on our bench; your level depends
+  on your front end and gain).
 
 If the numbers are bad (percent level loss), the file is still honest;
 diagnose the loss mechanism with:
@@ -375,7 +414,7 @@ paste it into `python` or save it as a script. Replace the file name.
 import h5py
 import numpy as np
 
-path = "/home/houdini/rx_logs/rx_record_20260712_180254.h5"
+path = "/path/to/rx_logs/rx_record_<stamp>.h5"
 f = h5py.File(path, "r")
 data = f["Data"]
 
@@ -428,7 +467,8 @@ f.close()
 ```
 
 Optional: a quick look at the spectrum of one slot (matplotlib is in
-the venv; over ssh, save to a file instead of showing a window):
+the analysis venv; over ssh, save to a file instead of showing a
+window):
 
 ```python
 import matplotlib
@@ -454,18 +494,21 @@ print("wrote slot_spectrum.png")
   error right after a rebuild: the capability bundle is missing from
   the (new) binary. Fix per 2.6.
 - `SoapySDR::Device::make returned null` or no Houdini device found:
-  the plugin path is not set in this shell (section 3, check 3), or
-  the Houdini plugin is not installed (2.4), or the board at
-  `168.6.244.22` is down.
+  the plugin path is not set in this shell (section 3, check 3), the
+  Houdini plugin is not installed (2.4), the config still points at
+  the wrong `remote` address (2.9), or the radio at `<radio-ip>` is
+  down.
 - CMake or build errors: see the notes at the end of 2.5.
 - Error containing "a stream is open": something else is streaming
   from the radio. See section 3, check 1. If you just aborted a run,
   the server side needs a few seconds to clean up; wait 10 seconds
   and retry.
 - Summary shows large `Stream gaps` (percent level): something
-  competed for the host or the link during capture. Verify the rig was
-  quiet, then run `tools/gap_forensics.py` on the file and match the
-  fingerprints in `../../docs/RX_MAX_RATE.md`.
+  competed for the host or the link during capture. Verify the host
+  was quiet, then run `tools/gap_forensics.py` on the file and match
+  the fingerprints in `../../docs/RX_MAX_RATE.md`. Also revisit the
+  `cpu_affinity` choice (2.9): pinning the worker onto the core that
+  services the data queue interrupt causes exactly this.
 - The program was interrupted (Ctrl-C): the file is still valid up to
   the point of interruption, and the summary says so. Partial files
   are safe to inspect the same way.
@@ -479,4 +522,4 @@ ls -lh ~/rx_logs/
 rm ~/rx_logs/rx_record_<stamp>.h5
 ```
 
-If you changed the NIC MTU on a shared rig, restore it (2.7).
+If you changed the NIC MTU on a shared host, restore it (2.7).

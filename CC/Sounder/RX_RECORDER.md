@@ -91,26 +91,23 @@ exact. The pieces:
   fast core **that does not own the NIC queue's IRQ**: rig B maps
   mlx5_comp N → CPU N and the plugin engages q19, so core 19 belongs
   to q19's NAPI — pin the worker to 18 (SCHED_FIFO via the capability
-  bundle below). Optionally confine the app to other fast cores
+  bundle, walkthrough §2.6). Optionally confine the app to other fast cores
   (`taskset -c 15,16,17`); measured worth ~0.01 % — hygiene.
 
-Host prerequisites (one-time provisioning, root — see
-`SoapyHoudiniSDR/docs/RX_XSK_INGEST.md`):
+Host provisioning (the capability bundle on the binary, the data-NIC
+MTU 3498, and the secure-exec caveat that file capabilities bring) is
+walked through step by step in `RX_DEMO_WALKTHROUGH.md` §2.6–2.7 —
+single home, not repeated here. Design background:
+`SoapyHoudiniSDR/docs/RX_XSK_INGEST.md`. Two reference cautions that
+live here:
 
-```sh
-# capability bundle on the binary that loads the plugin:
-sudo setcap cap_net_raw,cap_net_admin,cap_bpf,cap_ipc_lock,cap_sys_nice+ep \
-    ./build/rx-recorder
-# data-NIC MTU must cover the paired wire frame (3512 - 14):
-sudo ip link set <data-iface> mtu 3498
-```
-
-Caveats: file capabilities trigger glibc secure-exec, which ignores
-`LD_LIBRARY_PATH`/`LD_PRELOAD` — the plugin is found via
-`SOAPY_SDR_PLUGIN_PATH` (a plain getenv), which the run recipe above
-already sets. Do NOT add `rx_xsk_nic_reconcile` on a shared rig: it
-would silently move the NIC MTU under every other tool using the
-default 8192 geometry (the correlator work runs at MTU 9000).
+- The shipped `remote` and `cpu_affinity` values in the demo config
+  are bench-specific (our validation bench). Adapt them before running
+  on any other bench — walkthrough §2.9 shows how, including picking a
+  worker core that does not service the data queue's IRQ.
+- Do NOT add `rx_xsk_nic_reconcile` on a shared rig: it would silently
+  move the NIC MTU under every other tool using the default 8192
+  geometry (the correlator work runs at MTU 9000).
 
 History: the first on-silicon runs of this config (with
 `direct_rx=require`) lost ~22–25 % — root-caused the same day to the
