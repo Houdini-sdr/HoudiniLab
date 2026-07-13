@@ -58,6 +58,11 @@ config below reaches **99.998 %** at this rate (validated 8 s,
 
 ## Zero-copy demo capture (`files/rx-record-demo.json`) — 1 ch @ 1.96608 GSPS
 
+> New to this tool? `RX_DEMO_WALKTHROUGH.md` is the step-by-step
+> runbook for this demo — prerequisites, the run, reading the summary,
+> and an h5py example for the produced file. This section is the
+> reference view.
+
 The releasable single-channel max-rate configuration: the driver's
 AF_XDP zero-copy ingest (SH-258) consumed through `readStream`.
 Validated 2026-07-12 (TDD baseline): **8 s at 1.96608 GSPS =
