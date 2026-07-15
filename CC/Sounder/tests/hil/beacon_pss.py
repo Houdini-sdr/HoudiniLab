@@ -190,25 +190,31 @@ def main():
     print(f"\nmatched-filter peak: idx {pk}  |corr| {corr[pk]:.2e}  "
           f"SNR {peak_snr:.1f} dB over median")
 
-    # 4) periodicity: the replay loops every n_sym samples -> peaks should recur
-    thr = 0.5 * corr[pk]
-    peaks = [i for i in range(1, len(corr) - 1)
-             if corr[i] > thr and corr[i] >= corr[i - 1] and corr[i] > corr[i + 1]]
-    gaps = np.diff(peaks) if len(peaks) > 1 else np.array([])
-    good = int(np.sum(np.abs(gaps - n_sym) <= 2)) if len(gaps) else 0
-    if len(peaks) > 1:
-        print(f"found {len(peaks)} peaks > 50% of max; median gap "
-              f"{int(np.median(gaps))} (expect {n_sym}); {good}/{len(gaps)} "
-              f"gaps match the loop period")
+    # 4) fold the matched-filter power at the loop period and integrate. The beacon
+    #    recurs every n_sym samples, so averaging |corr|^2 over the ~thousands of
+    #    replay periods holds the beacon phase steady while the noise variance
+    #    collapses (~1/sqrt(nfold)) -- the beacon phase then stands out cleanly
+    #    among only n_sym stable bins. This is how a UE integrates the periodic SSB.
+    nfold = len(corr) // n_sym
+    prof = (corr[:nfold * n_sym].reshape(nfold, n_sym) ** 2).mean(axis=0)
+    ph = int(np.argmax(prof))
+    mask = np.ones(n_sym, dtype=bool)
+    mask[max(0, ph - 1):ph + 2] = False            # exclude the peak + neighbours
+    mu, sd = float(prof[mask].mean()), float(prof[mask].std())
+    z = (prof[ph] - mu) / (sd + 1e-30)             # detection statistic (sigmas)
+    fold_db = 10.0 * np.log10(prof[ph] / (mu + 1e-30))
+    band_db = 10.0 * np.log10(occ / ref)
+    print(f"folded over {nfold} periods: peak phase {ph}/{n_sym}, "
+          f"{fold_db:.1f} dB over floor, z = {z:.1f} sigma  (band {band_db:.1f} dB)")
 
-    detected = (peak_snr >= 12.0 and 10 * np.log10(occ / ref) >= 6.0
-                and (a.no_tx is False))
+    detected = (not a.no_tx) and z >= 8.0
     print("\nRESULT:",
-          f"BEACON DETECTED @ decimated idx {pk} (peak {peak_snr:.1f} dB, "
-          f"{len(peaks)} periodic hits) -- .21 DAC_A -> .22 ADC_C PSS link OK"
+          f"BEACON DETECTED @ phase {ph}/{n_sym}  (folded z={z:.1f} sigma over "
+          f"{nfold} periods, single-shot peak {peak_snr:.1f} dB) -- "
+          ".21 DAC_A -> .22 ADC_C PSS link OK"
           if detected else
-          "no beacon (peak/band too weak)"
-          + ("" if a.no_tx else " -- try --tx-center / --dac-nco to re-centre on the tooth"))
+          f"no beacon (folded z={z:.1f}, single-shot {peak_snr:.1f} dB)"
+          + ("" if a.no_tx else " -- raise --overdrive / tune --tx-center on the tooth"))
     return 0 if detected else 1
 
 
