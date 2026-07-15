@@ -82,12 +82,12 @@ def main():
     ap.add_argument("--rx-ip", default="168.6.244.22")
     ap.add_argument("--tx-ch", type=int, default=0)
     ap.add_argument("--rx-ch", type=int, default=2)
-    ap.add_argument("--dac-nco", type=float, default=830.0, help="TX carrier (MHz)")
+    ap.add_argument("--dac-nco", type=float, default=820.0, help="TX carrier (MHz)")
     ap.add_argument("--adc-nco", type=float, default=388.8, help="RX NCO (MHz)")
-    ap.add_argument("--tx-rate", type=float, default=30.72, help="TX MSPS (N=2048)")
+    ap.add_argument("--tx-rate", type=float, default=122.88, help="TX MSPS (=RX; TX min is 122.88)")
     ap.add_argument("--rx-rate", type=float, default=122.88, help="RX MSPS")
-    ap.add_argument("--n-fft", type=int, default=2048, help="TX IFFT size")
-    ap.add_argument("--tx-center", type=float, default=10.0,
+    ap.add_argument("--n-fft", type=int, default=8192, help="TX IFFT size (8192@122.88 -> 15 kHz SCS)")
+    ap.add_argument("--tx-center", type=float, default=20.0,
                     help="beacon centre in TX baseband (MHz); DAC_NCO+this = RF")
     ap.add_argument("--rx-search", type=float, default=20.0,
                     help="approx RX baseband centre to search (MHz)")
