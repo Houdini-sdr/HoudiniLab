@@ -37,9 +37,11 @@ import SoapySDR  # noqa: E402
 from SoapySDR import SOAPY_SDR_RX, SOAPY_SDR_TX  # noqa: E402
 import houdini_setup as hs  # noqa: E402
 
-ZC_U = 25          # Zadoff-Chu root (coprime with 127; 5G PSS uses 25/29/34)
-N_SC = 127         # occupied subcarriers (5G PSS length)
-SCS_HZ = 15e3      # subcarrier spacing
+ZC_U = 25          # Zadoff-Chu root (gcd(25,63)=1 -> CAZAC; 5G PSS uses 25/29/34)
+N_SC = 63          # occupied subcarriers: the 4096-sample TX replay BRAM caps N at
+                   # 4096, so @122.88 SCS=30 kHz and 127 SC would be 3.8 MHz (too
+                   # wide for the ~2 MHz tooth); 63 SC = 1.89 MHz fits.
+SCS_HZ = 30e3      # subcarrier spacing (= 122.88 MSPS / 4096)
 
 
 def zc(u, n):
@@ -86,7 +88,7 @@ def main():
     ap.add_argument("--adc-nco", type=float, default=388.8, help="RX NCO (MHz)")
     ap.add_argument("--tx-rate", type=float, default=122.88, help="TX MSPS (=RX; TX min is 122.88)")
     ap.add_argument("--rx-rate", type=float, default=122.88, help="RX MSPS")
-    ap.add_argument("--n-fft", type=int, default=8192, help="TX IFFT size (8192@122.88 -> 15 kHz SCS)")
+    ap.add_argument("--n-fft", type=int, default=4096, help="TX IFFT size (=TX replay BRAM depth)")
     ap.add_argument("--tx-center", type=float, default=20.0,
                     help="beacon centre in TX baseband (MHz); DAC_NCO+this = RF")
     ap.add_argument("--rx-search", type=float, default=20.0,
