@@ -50,13 +50,13 @@ def zc(u, n):
     return np.exp(-1j * np.pi * u * k * (k + 1) / n)
 
 
-def beacon_symbol(n_fft, center_hz, rate_hz, u=ZC_U):
-    """127-ZC on the centre subcarriers of an n_fft IFFT, centred at center_hz.
-    Returns the n_fft-sample complex time-domain symbol (unit-ish amplitude)."""
-    seq = zc(u, N_SC)
+def beacon_symbol(n_fft, center_hz, rate_hz, n_sc, u=ZC_U):
+    """n_sc-length ZC on the centre subcarriers of an n_fft IFFT, centred at
+    center_hz. Returns the n_fft-sample complex time-domain symbol."""
+    seq = zc(u, n_sc)
     X = np.zeros(n_fft, dtype=complex)
     c = int(round(center_hz / (rate_hz / n_fft)))          # centre bin
-    idx = (np.arange(N_SC) - (N_SC // 2) + c) % n_fft       # wrapped SC indices
+    idx = (np.arange(n_sc) - (n_sc // 2) + c) % n_fft       # wrapped SC indices
     X[idx] = seq
     x = np.fft.ifft(X) * n_fft
     return x
@@ -94,6 +94,10 @@ def main():
     ap.add_argument("--rx-search", type=float, default=20.0,
                     help="approx RX baseband centre to search (MHz)")
     ap.add_argument("--decim", type=int, default=32, help="RX decimation (122.88->3.84)")
+    ap.add_argument("--n-sc", type=int, default=31,
+                    help="occupied subcarriers (ZC length); 31*30kHz=0.93 MHz")
+    ap.add_argument("--overdrive", type=float, default=2.0,
+                    help="envelope clip factor to cut OFDM PAPR (raise avg power)")
     ap.add_argument("--amp", type=float, default=0.9)
     ap.add_argument("--secs", type=float, default=0.3)
     ap.add_argument("--cap-mb", type=float, default=16.0)
@@ -102,7 +106,7 @@ def main():
 
     rf = a.dac_nco + a.tx_center
     print(f"TX {a.tx_ip} ch{a.tx_ch} (DAC_A) -> RX {a.rx_ip} ch{a.rx_ch} (ADC_C)")
-    print(f"beacon: ZC-{N_SC} u={ZC_U}, {N_SC*SCS_HZ/1e6:.2f} MHz occupied, "
+    print(f"beacon: ZC-{a.n_sc} u={ZC_U}, {a.n_sc*SCS_HZ/1e6:.2f} MHz occupied, "
           f"TX {a.tx_rate} MSPS N={a.n_fft} centre +{a.tx_center} MHz, "
           f"DAC NCO {a.dac_nco} -> RF {rf:.1f} MHz (tooth), ADC NCO {a.adc_nco}")
 
@@ -118,8 +122,13 @@ def main():
                 txd.setSampleRate(SOAPY_SDR_TX, a.tx_ch, a.tx_rate * 1e6)
             except Exception as e:  # noqa: BLE001
                 print(f"  TX setSampleRate warn: {e}")
-            sym = beacon_symbol(a.n_fft, a.tx_center * 1e6, a.tx_rate * 1e6)
-            sym = sym / np.max(np.abs(sym)) * a.amp
+            sym = beacon_symbol(a.n_fft, a.tx_center * 1e6, a.tx_rate * 1e6, a.n_sc)
+            sym = sym / np.max(np.abs(sym))
+            if a.overdrive > 1.0:                    # clip envelope to cut PAPR
+                sym = sym * a.overdrive
+                m = np.abs(sym); hi = m > 1.0
+                sym[hi] = sym[hi] / m[hi]
+            sym = sym * a.amp
             iq_i16 = np.zeros(2 * a.n_fft, dtype=np.int16)
             iq_i16[0::2] = np.round(np.real(sym) * 32767).astype(np.int16)
             iq_i16[1::2] = np.round(np.imag(sym) * 32767).astype(np.int16)
@@ -169,7 +178,7 @@ def main():
           f"symbol = {n_sym} samples")
 
     # 3) matched filter against the ZC symbol at the decimated rate
-    match = beacon_symbol(n_sym, 0.0, fs_d)
+    match = beacon_symbol(n_sym, 0.0, fs_d, a.n_sc)
     match = match / np.sqrt(np.sum(np.abs(match) ** 2))
     corr = np.abs(np.correlate(dec, match, mode="valid"))
     floor = float(np.median(corr))
