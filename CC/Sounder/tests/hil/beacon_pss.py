@@ -93,9 +93,9 @@ def main():
                     help="beacon centre in TX baseband (MHz); DAC_NCO+this = RF")
     ap.add_argument("--rx-search", type=float, default=20.0,
                     help="approx RX baseband centre to search (MHz)")
-    ap.add_argument("--decim", type=int, default=32, help="RX decimation (122.88->3.84)")
-    ap.add_argument("--n-sc", type=int, default=31,
-                    help="occupied subcarriers (ZC length); 31*30kHz=0.93 MHz")
+    ap.add_argument("--decim", type=int, default=8, help="RX decimation (122.88->15.36)")
+    ap.add_argument("--n-sc", type=int, default=8,
+                    help="occupied subcarriers (ZC length); @240kHz SCS 8 SC=1.92 MHz")
     ap.add_argument("--overdrive", type=float, default=2.0,
                     help="envelope clip factor to cut OFDM PAPR (raise avg power)")
     ap.add_argument("--amp", type=float, default=0.9)
@@ -106,7 +106,7 @@ def main():
 
     rf = a.dac_nco + a.tx_center
     print(f"TX {a.tx_ip} ch{a.tx_ch} (DAC_A) -> RX {a.rx_ip} ch{a.rx_ch} (ADC_C)")
-    print(f"beacon: ZC-{a.n_sc} u={ZC_U}, {a.n_sc*SCS_HZ/1e6:.2f} MHz occupied, "
+    print(f"beacon: ZC-{a.n_sc} u={ZC_U}, "
           f"TX {a.tx_rate} MSPS N={a.n_fft} centre +{a.tx_center} MHz, "
           f"DAC NCO {a.dac_nco} -> RF {rf:.1f} MHz (tooth), ADC NCO {a.adc_nco}")
 
@@ -114,15 +114,18 @@ def main():
     rx_ctx = hs.open_device(node=a.rx_ip, ch=a.rx_ch, verbose=False)
     txd, rxd = tx_ctx["sdr"], rx_ctx["sdr"]
     native, dtype = rx_ctx["native_fmt"], rx_ctx["dtype"]
+    # The TX REPLAY BRAM clocks at the DAC effective rate, NOT the host stream rate
+    # (the working CW test fed tx_iq_tone dac_rate=983.04) -> generate at that rate.
+    dac_rate = float(dict(txd.getChannelInfo(SOAPY_SDR_TX, a.tx_ch)).get(
+        "rfdc_effective_rate_hz", 983.04e6))
+    scs = dac_rate / a.n_fft
+    print(f"  replay rate {dac_rate/1e6:.2f} MSPS -> SCS {scs/1e3:.0f} kHz, "
+          f"occupied {a.n_sc*scs/1e6:.2f} MHz")
 
     tx = None
     try:
         if not a.no_tx:
-            try:
-                txd.setSampleRate(SOAPY_SDR_TX, a.tx_ch, a.tx_rate * 1e6)
-            except Exception as e:  # noqa: BLE001
-                print(f"  TX setSampleRate warn: {e}")
-            sym = beacon_symbol(a.n_fft, a.tx_center * 1e6, a.tx_rate * 1e6, a.n_sc)
+            sym = beacon_symbol(a.n_fft, a.tx_center * 1e6, dac_rate, a.n_sc)
             sym = sym / np.max(np.abs(sym))
             if a.overdrive > 1.0:                    # clip envelope to cut PAPR
                 sym = sym * a.overdrive
@@ -173,7 +176,7 @@ def main():
     h = lowpass(32 * 8 + 1, 1.0 / a.decim)
     dec = np.convolve(ddc, h, mode="same")[::a.decim]
     fs_d = fs / a.decim
-    n_sym = int(round(a.n_fft * fs_d / (a.tx_rate * 1e6)))   # symbol length at fs_d
+    n_sym = int(round(a.n_fft * fs_d / dac_rate))   # replay period at fs_d
     print(f"decimated to {fs_d/1e6:.3f} MSPS ({len(dec)} samples), "
           f"symbol = {n_sym} samples")
 
