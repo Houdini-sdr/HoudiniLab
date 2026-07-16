@@ -118,7 +118,10 @@ def main():
     print(f"TX {a.tx_ip} ch{a.tx_ch} (DAC_A) -> RX {a.rx_ip} ch{a.rx_ch} (ADC_C)  "
           f"tone {a.tone_mhz} MHz  amp {a.amp}")
     tx_ctx = hs.open_device(node=a.tx_ip, ch=a.tx_ch, verbose=False)
-    rx_ctx = hs.open_device(node=a.rx_ip, ch=a.rx_ch, verbose=False)
+    # Single-board loopback (tx_ip == rx_ip): reuse ONE device handle for both
+    # directions -- shared clock (no inter-board CFO), short cable.
+    rx_ctx = (tx_ctx if a.rx_ip == a.tx_ip
+              else hs.open_device(node=a.rx_ip, ch=a.rx_ch, verbose=False))
     txd, rxd = tx_ctx["sdr"], rx_ctx["sdr"]
     native, dtype = rx_ctx["native_fmt"], rx_ctx["dtype"]
     fs_adc = float(dict(rxd.getChannelInfo(SOAPY_SDR_RX, a.rx_ch)).get(
