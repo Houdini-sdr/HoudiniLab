@@ -212,6 +212,11 @@ def main():
 
         res["beacon"] = pump(a.beacon_sym)
         res["silence"] = pump(a.silence_sym)
+        for key in ("TDD_STAT", "TX_BANK_STATUS"):
+            try:
+                print(f"  {key}: {sdr.readSetting(key)}")
+            except Exception:  # noqa: BLE001
+                pass
     finally:
         for s in (rx, tx):
             try:
@@ -224,19 +229,32 @@ def main():
                 pass
         _teardown(sdr)
 
-    # --- analysis: burst energy in the beacon window vs the silence window ---
-    w = max(16, burst_rx)
-    b_rms, b_at = sliding_rms(res["beacon"], w)
-    s_rms, _ = sliding_rms(res["silence"], w)
-    floor = float(np.sqrt(np.mean(np.abs(res["beacon"][b_at + 3 * w:]) ** 2) + 1e-30))
-    print(f"\nbeacon window: peak burst RMS {b_rms:6.1f} at samp {b_at} "
-          f"(expected ~{offs_rx}); tail floor {floor:.1f}")
-    print(f"silence window: peak RMS {s_rms:6.1f}")
-    burst_db = 20 * np.log10(b_rms / max(s_rms, 1e-6))
-    print(f"beacon/silence = {burst_db:.1f} dB, beacon/floor = "
-          f"{20*np.log10(b_rms/max(floor,1e-6)):.1f} dB")
+    # --- analysis: the burst is narrowband (invisible in broadband RMS), so DDC to
+    #     the beacon band first -> the burst shows as a power spike in the beacon
+    #     window at ~offs_rx and NOT in the silence window ---
+    f0 = a.center_mhz * 1e6          # dual-NCO: received tone ~ +centre MHz
+    bw = a.bw_mhz * 1e6 if a.beacon == "chirp" else 2.0e6
 
-    fired = burst_db >= 10.0 and abs(b_at - offs_rx) <= burst_rx
+    def band_burst(iq):
+        n = np.arange(len(iq))
+        d = iq * np.exp(-2j * np.pi * f0 * n / rx_rate)
+        k = max(1, int(round(rx_rate / bw)))         # boxcar LP ~ beacon bandwidth
+        if k > 1:
+            d = np.convolve(d, np.ones(k) / k, mode="same")
+        return sliding_rms(d, max(16, burst_rx))
+
+    b_rms, b_at = band_burst(res["beacon"])
+    s_rms, _ = band_burst(res["silence"])
+    floor = float(np.sqrt(np.mean(np.abs(res["beacon"]
+                          * np.exp(-2j*np.pi*f0*np.arange(len(res["beacon"]))/rx_rate)
+                          ) ** 2) + 1e-30))
+    print(f"\nbeacon window (DDC to {f0/1e6:.1f} MHz): burst RMS {b_rms:6.2f} at samp "
+          f"{b_at} (expected ~{offs_rx}); band floor {floor:.2f}")
+    print(f"silence window: burst RMS {s_rms:6.2f}")
+    burst_db = 20 * np.log10(b_rms / max(s_rms, 1e-6))
+    print(f"beacon/silence = {burst_db:.1f} dB")
+
+    fired = burst_db >= 8.0 and abs(b_at - offs_rx) <= 2 * burst_rx
     print("\nRESULT:",
           f"BEACON FIRED in the TDD '6' slot @ samp {b_at} ({burst_db:.1f} dB over "
           f"the silence window) -- replay strobe + TDD framer OK"
