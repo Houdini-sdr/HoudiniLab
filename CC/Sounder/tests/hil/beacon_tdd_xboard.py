@@ -74,6 +74,9 @@ def main():
     ap.add_argument("--secs", type=float, default=0.4)
     ap.add_argument("--cap-mb", type=float, default=48.0)
     ap.add_argument("--no-strobe", action="store_true", help="guards only (control)")
+    ap.add_argument("--continuous", action="store_true",
+                    help="A/B test: continuous replay (activateStream) instead of "
+                         "the TDD strobe -- isolates strobe-datapath from RF coupling")
     a = ap.parse_args()
 
     print(f"TX {a.tx_ip} ch{a.tx_ch} (DAC_A) [TDD strobe] -> RX {a.rx_ip} ch{a.rx_ch} "
@@ -107,15 +110,19 @@ def main():
         print(f"  replay payload: {label}")
         cs16 = np.ascontiguousarray(i16, dtype=np.int16).view(np.int32)
         tsd.writeStream(tx, [cs16], a.n_load, 0, 0)
-        pattern = ["0"] * a.spf
-        if not a.no_strobe:
-            pattern[0] = "6"
-        tsd.writeSetting("TDD_SCHED", "".join(pattern))
-        if not a.no_strobe:
-            tsd.writeSetting("TDD_REPLAY_STROBE",
-                             f"ch{a.tx_ch}:len={a.n_load // 2},offs={GRID_TICKS}")
-        r = _arm(tsd, symbol_ticks=SYM, symbols_per_frame=a.spf, margin=ARM_MARGIN)
-        assert r.get("accepted") == 1, f"TDD arm rejected: {r}"
+        if a.continuous:
+            tsd.activateStream(tx)                     # continuous replay, no TDD
+            print("  CONTINUOUS replay (activateStream) -- TDD strobe bypassed")
+        else:
+            pattern = ["0"] * a.spf
+            if not a.no_strobe:
+                pattern[0] = "6"
+            tsd.writeSetting("TDD_SCHED", "".join(pattern))
+            if not a.no_strobe:
+                tsd.writeSetting("TDD_REPLAY_STROBE",
+                                 f"ch{a.tx_ch}:len={a.n_load // 2},offs={GRID_TICKS}")
+            r = _arm(tsd, symbol_ticks=SYM, symbols_per_frame=a.spf, margin=ARM_MARGIN)
+            assert r.get("accepted") == 1, f"TDD arm rejected: {r}"
 
         buf, summ = hs.capture_rx(rsd, a.rx_ch, rnative, rdtype, duration_sec=a.secs,
                                   capture_bytes=int(a.cap_mb * 1024 * 1024))
@@ -157,13 +164,14 @@ def main():
     pk = int(np.argmax(corr))
     single = 20 * np.log10(corr[pk] / (np.median(corr) + 1e-30))
 
-    P = int(round(frame_rx))
+    P = burst_rx if a.continuous else int(round(frame_rx))   # loop vs frame period
     nfold = len(corr) // P
     if nfold >= 3:
         prof = (corr[:nfold * P].reshape(nfold, P) ** 2).mean(axis=0)
         ph = int(np.argmax(prof))
         mask = np.ones(P, dtype=bool)
-        mask[max(0, ph - burst_rx):ph + burst_rx] = False
+        g = min(burst_rx, max(4, P // 8))
+        mask[max(0, ph - g):ph + g] = False
         mu, sd = float(prof[mask].mean()), float(prof[mask].std())
         z = (prof[ph] - mu) / (sd + 1e-30)
         fold_db = 10 * np.log10(prof[ph] / (mu + 1e-30))
