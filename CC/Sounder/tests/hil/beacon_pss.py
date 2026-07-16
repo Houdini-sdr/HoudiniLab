@@ -98,6 +98,8 @@ def main():
                     help="occupied subcarriers (ZC length); @240kHz SCS 8 SC=1.92 MHz")
     ap.add_argument("--overdrive", type=float, default=2.0,
                     help="envelope clip factor to cut OFDM PAPR (raise avg power)")
+    ap.add_argument("--fold-max", type=int, default=300,
+                    help="max periods to fold (cap for inter-board clock drift; 0=all)")
     ap.add_argument("--amp", type=float, default=0.9)
     ap.add_argument("--secs", type=float, default=0.3)
     ap.add_argument("--cap-mb", type=float, default=16.0)
@@ -204,6 +206,8 @@ def main():
     #    collapses (~1/sqrt(nfold)) -- the beacon phase then stands out cleanly
     #    among only n_sym stable bins. This is how a UE integrates the periodic SSB.
     nfold = len(corr) // n_sym
+    if a.fold_max and nfold > a.fold_max:      # cap: inter-board clock drift walks
+        nfold = a.fold_max                     # the beacon phase, smearing a long fold
     prof = (corr[:nfold * n_sym].reshape(nfold, n_sym) ** 2).mean(axis=0)
     ph = int(np.argmax(prof))
     mask = np.ones(n_sym, dtype=bool)
