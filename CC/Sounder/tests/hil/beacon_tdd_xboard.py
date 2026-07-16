@@ -59,14 +59,14 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--tx-ip", default="168.6.244.21")
     ap.add_argument("--rx-ip", default="168.6.244.22")
-    ap.add_argument("--tx-ch", type=int, default=0, help="DAC_A = TX ch0 on .21")
-    ap.add_argument("--rx-ch", type=int, default=2, help="ADC_C = RX ch2 on .22")
-    ap.add_argument("--dac-nco", type=float, default=820.0)
-    ap.add_argument("--adc-nco", type=float, default=388.8)
+    ap.add_argument("--tx-ch", type=int, default=1, help="DAC_A = TX ch1 (RFSoC4x2 reversed)")
+    ap.add_argument("--rx-ch", type=int, default=1, help="cable lands on .22 RX ch1")
+    ap.add_argument("--dac-nco", type=float, default=500.0, help="matched NCO (MHz, Zone 1)")
+    ap.add_argument("--adc-nco", type=float, default=500.0, help="matched NCO (MHz, Zone 1)")
     ap.add_argument("--center-mhz", type=float, default=20.0)
     ap.add_argument("--beacon", choices=["chirp", "zc"], default="chirp")
     ap.add_argument("--bw-mhz", type=float, default=30.0)
-    ap.add_argument("--n-sc", type=int, default=8)
+    ap.add_argument("--n-sc", type=int, default=63)
     ap.add_argument("--n-load", type=int, default=2048)
     ap.add_argument("--amp", type=float, default=0.4)
     ap.add_argument("--rx-rate", type=float, default=122.88)
@@ -151,7 +151,8 @@ def main():
     # DDC to the beacon centre, matched-filter with the beacon waveform at rx_rate
     # (rejects the CW LO leakage), then fold at the frame period -> periodic burst.
     n = np.arange(len(iq))
-    ddc = iq * np.exp(-2j * np.pi * a.center_mhz * 1e6 * n / rx_rate)
+    # matched NCO -> the beacon returns at -center (R2C conjugation); DDC to baseband
+    ddc = iq * np.exp(+2j * np.pi * a.center_mhz * 1e6 * n / rx_rate)
     if a.beacon == "chirp":
         mi16, _ = tx_lfm_chirp(a.bw_mhz * 1e6, rx_rate, burst_rx, amp_frac=1.0,
                                center_hz=0.0)
@@ -160,7 +161,10 @@ def main():
     match = (mi16[0::2].astype(np.float64) + 1j * mi16[1::2]).astype(np.complex128)
     match /= np.sqrt(np.sum(np.abs(match) ** 2)) + 1e-30
 
-    corr = matched_filter(ddc, match)
+    # try both conjugation senses (R2C may deliver the beacon conjugated)
+    c0 = matched_filter(ddc, match)
+    c1 = matched_filter(ddc, np.conj(match))
+    corr = c0 if c0.max() >= c1.max() else c1
     pk = int(np.argmax(corr))
     single = 20 * np.log10(corr[pk] / (np.median(corr) + 1e-30))
 
