@@ -147,6 +147,9 @@ def main():
     ap.add_argument("--spf", type=int, default=100, help="symbols per frame")
     ap.add_argument("--beacon-sym", type=int, default=0)
     ap.add_argument("--silence-sym", type=int, default=50)
+    ap.add_argument("--beacon-code", default="6",
+                    help="hex TDD symbol for the beacon slot: bit2 replay_strobe, "
+                         "bit1 rx_gate, bit0 tx_gate ('6'=strobe+rx, '7'=+tx_gate)")
     a = ap.parse_args()
 
     loopback = a.rx_ip == a.tx_ip
@@ -189,7 +192,7 @@ def main():
         sdr.writeStream(tx, [cs16], n_load, 0, 0)      # a-temporal RAM load
 
         pattern = ["0"] * a.spf
-        pattern[a.beacon_sym] = "6"                    # replay_strobe + rx_gate
+        pattern[a.beacon_sym] = a.beacon_code          # beacon slot (default '6')
         pattern[a.silence_sym] = "2"                   # rx_gate only (silence)
         sdr.writeSetting("TDD_SCHED", "".join(pattern))
         sdr.writeSetting("TDD_REPLAY_STROBE",
