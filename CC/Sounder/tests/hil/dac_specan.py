@@ -140,6 +140,11 @@ def main():
         cs16 = np.ascontiguousarray(i16, dtype=np.int16).view(np.int32)
         sdr.writeStream(tx, [cs16], a.n_load, 0, 0)
         sdr.activateStream(tx)
+        got = float(sdr.getFrequency(SOAPY_SDR_TX, a.tx_ch))
+        # sanity on the loaded waveform: a real tone has ~0 DC and finite std
+        iqc = i16[0::2].astype(float) + 1j * i16[1::2]
+        print(f"  NCO set {nco/1e6:.1f} -> readback {got/1e6:.3f} MHz;  RAM tone "
+              f"|mean|={abs(iqc.mean()):.1f} std={iqc.std():.0f} (0-DC, ~{a.amp*32767:.0f})")
         rf_tone, rf_car, rf_img = nco + f_act, nco, nco - f_act
         print(f"  replay tone f_bb={f_act/1e6:.3f} MHz -> expect RF tone {rf_tone/1e6:.2f}, "
               f"carrier {rf_car/1e6:.2f}, image {rf_img/1e6:.2f} MHz  (dac_rate "
@@ -148,11 +153,14 @@ def main():
         sa.connect()
         rbw = a.rbw_khz * 1e3
         if a.scan:
-            print("\n  SCAN (TX on) -- strongest peak per 60-MHz window:")
-            for c in (20, 80, 160, 260, 360, 460, 500, 520, 600, 720, 850, 940):
-                pf, pa = sa.peak(c * 1e6, 60e6, rbw, a.ref_dbm)
+            print("\n  SCAN (TX on) -- peak per window (span excludes DC for low bins):")
+            for c, sp in ((5, 8), (20, 15), (28, 15), (500, 15), (520, 15),
+                          (540, 15), (80, 60), (160, 60), (260, 60), (360, 60),
+                          (460, 60), (600, 60), (720, 60), (850, 60), (940, 60)):
+                pf, pa = sa.peak(c * 1e6, sp * 1e6, rbw, a.ref_dbm)
                 hot = "  <== signal" if pa > -70 else ""
-                print(f"    ~{c:4d} MHz: peak {pf/1e6:8.3f} MHz @ {pa:7.2f} dBm{hot}")
+                print(f"    ~{c:4d} MHz (sp {sp:2d}): peak {pf/1e6:8.3f} MHz @ "
+                      f"{pa:7.2f} dBm{hot}")
             return 0
         wf, wa = sa.peak(nco, a.span_mhz * 1e6, rbw, a.ref_dbm)
         print(f"\n  WIDE sweep @ {nco/1e6:.0f} MHz span {a.span_mhz:.0f} MHz: "
