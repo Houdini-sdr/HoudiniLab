@@ -111,7 +111,8 @@ def main():
           f"DAC NCO {a.dac_nco} -> RF {rf:.1f} MHz (tooth), ADC NCO {a.adc_nco}")
 
     tx_ctx = hs.open_device(node=a.tx_ip, ch=a.tx_ch, verbose=False)
-    rx_ctx = hs.open_device(node=a.rx_ip, ch=a.rx_ch, verbose=False)
+    rx_ctx = (tx_ctx if a.rx_ip == a.tx_ip           # single-board loopback: 1 handle
+              else hs.open_device(node=a.rx_ip, ch=a.rx_ch, verbose=False))
     txd, rxd = tx_ctx["sdr"], rx_ctx["sdr"]
     native, dtype = rx_ctx["native_fmt"], rx_ctx["dtype"]
     # The TX REPLAY BRAM clocks at the DAC effective rate, NOT the host stream rate

@@ -68,7 +68,8 @@ def main():
              if abs(f - 30.72) > 2.0 and f < 60.0]
     print(f"TX {a.tx_ip} ch{a.tx_ch} (DAC_A) -> RX {a.rx_ip} ch{a.rx_ch} (ADC_C)")
     tx_ctx = hs.open_device(node=a.tx_ip, ch=a.tx_ch, verbose=False)
-    rx_ctx = hs.open_device(node=a.rx_ip, ch=a.rx_ch, verbose=False)
+    rx_ctx = (tx_ctx if a.rx_ip == a.tx_ip           # single-board loopback: 1 handle
+              else hs.open_device(node=a.rx_ip, ch=a.rx_ch, verbose=False))
     txd, rxd = tx_ctx["sdr"], rx_ctx["sdr"]
     native, dtype = rx_ctx["native_fmt"], rx_ctx["dtype"]
     dac_rate = float(dict(txd.getChannelInfo(SOAPY_SDR_TX, a.tx_ch)).get(
