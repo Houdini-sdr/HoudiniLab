@@ -82,10 +82,10 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--tx-ip", default="168.6.244.21")
     ap.add_argument("--rx-ip", default="168.6.244.22")
-    ap.add_argument("--tx-ch", type=int, default=0)
-    ap.add_argument("--rx-ch", type=int, default=2)
-    ap.add_argument("--dac-nco", type=float, default=820.0, help="TX carrier (MHz)")
-    ap.add_argument("--adc-nco", type=float, default=388.8, help="RX NCO (MHz)")
+    ap.add_argument("--tx-ch", type=int, default=1, help="DAC_A = TX ch1 (RFSoC4x2 reversed)")
+    ap.add_argument("--rx-ch", type=int, default=1, help="cable lands on .22 RX ch1")
+    ap.add_argument("--dac-nco", type=float, default=500.0, help="matched fine NCO (MHz, Zone 1)")
+    ap.add_argument("--adc-nco", type=float, default=500.0, help="matched fine NCO (MHz, Zone 1)")
     ap.add_argument("--tx-rate", type=float, default=122.88, help="TX MSPS (=RX; TX min is 122.88)")
     ap.add_argument("--rx-rate", type=float, default=122.88, help="RX MSPS")
     ap.add_argument("--n-fft", type=int, default=4096, help="TX IFFT size (=TX replay BRAM depth)")
@@ -164,7 +164,10 @@ def main():
     P = np.abs(np.fft.fftshift(np.fft.fft(seg * np.hanning(len(seg))))) ** 2
     f = np.fft.fftshift(np.fft.fftfreq(len(seg), 1.0 / fs))
     P = np.maximum(P - np.median(P), 0.0)
-    band = (f > (a.rx_search - 3) * 1e6) & (f < (a.rx_search + 3) * 1e6)
+    s = abs(a.rx_search) * 1e6                          # beacon lands at +/-rx_search
+    bp = (f > s - 3e6) & (f < s + 3e6)                  # (sign = R2C mixer convention)
+    bn = (f > -s - 3e6) & (f < -s + 3e6)
+    band = bp if float(np.sum(P[bp])) >= float(np.sum(P[bn])) else bn
     f0 = float(np.sum(f[band] * P[band]) / (np.sum(P[band]) + 1e-30))
     occ = float(np.sum(P[band]))                       # beacon band energy
     ref = float(np.sum(P[(f > 40e6) & (f < 46e6)]) + 1e-30)  # empty-band ref
