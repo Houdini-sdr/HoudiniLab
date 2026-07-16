@@ -74,7 +74,8 @@ def main():
     print(f"TX {args.tx_ip} ch{args.tx_ch} (DAC_A) -> RX {args.rx_ip} "
           f"ch{args.rx_ch} (ADC_C)   mix={args.mix}  no_tx={args.no_tx}")
     tx_ctx = hs.open_device(node=args.tx_ip, ch=args.tx_ch, verbose=False)
-    rx_ctx = hs.open_device(node=args.rx_ip, ch=args.rx_ch, verbose=False)
+    rx_ctx = (tx_ctx if args.rx_ip == args.tx_ip      # single-board loopback: 1 handle
+              else hs.open_device(node=args.rx_ip, ch=args.rx_ch, verbose=False))
     txd, rxd = tx_ctx["sdr"], rx_ctx["sdr"]
     dac_rate = float(dict(txd.getChannelInfo(SOAPY_SDR_TX, args.tx_ch)).get(
         "rfdc_effective_rate_hz", 983.04e6))
