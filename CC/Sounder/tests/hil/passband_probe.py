@@ -60,6 +60,8 @@ def main():
     ap.add_argument("--amp", type=float, default=0.9)
     ap.add_argument("--secs", type=float, default=0.6)
     ap.add_argument("--cap-mb", type=float, default=16.0)
+    ap.add_argument("--no-tx", action="store_true",
+                    help="RX-only control: no comb TX -> any residual is spur/leakage")
     a = ap.parse_args()
 
     # Comb of baseband tones spanning the RX band, skipping the DC guard and the
@@ -83,14 +85,16 @@ def main():
           f"{[round(f,1) for f in combf]}")
 
     tx = None
+    actual = [f * 1e6 for f in combf]                # expected bins (also for --no-tx)
     try:
-        iq_a, actual = hs.tx_replay_comb([f * 1e6 for f in combf], dac_rate,
-                                         a.n_addr, amp_frac=a.amp)
-        tx = txd.setupStream(SOAPY_SDR_TX, "CS16", [a.tx_ch], {"tx_mode": "replay"})
-        txd.setFrequency(SOAPY_SDR_TX, a.tx_ch, dac_nco)
-        cs16 = np.ascontiguousarray(iq_a, dtype=np.int16).view(np.int32)
-        txd.writeStream(tx, [cs16], cs16.size, 0, 0)
-        txd.activateStream(tx)
+        if not a.no_tx:
+            iq_a, actual = hs.tx_replay_comb([f * 1e6 for f in combf], dac_rate,
+                                             a.n_addr, amp_frac=a.amp)
+            tx = txd.setupStream(SOAPY_SDR_TX, "CS16", [a.tx_ch], {"tx_mode": "replay"})
+            txd.setFrequency(SOAPY_SDR_TX, a.tx_ch, dac_nco)
+            cs16 = np.ascontiguousarray(iq_a, dtype=np.int16).view(np.int32)
+            txd.writeStream(tx, [cs16], cs16.size, 0, 0)
+            txd.activateStream(tx)
         rxd.setSampleRate(SOAPY_SDR_RX, a.rx_ch, a.rate_mhz * 1e6)
         rxd.setFrequency(SOAPY_SDR_RX, a.rx_ch, adc_nco)
         fs = float(rxd.getSampleRate(SOAPY_SDR_RX, a.rx_ch))
