@@ -186,8 +186,12 @@ def main():
 
     # 3) matched filter against the ZC symbol at the decimated rate
     match = beacon_symbol(n_sym, 0.0, fs_d, a.n_sc)
-    match = match / np.sqrt(np.sum(np.abs(match) ** 2))
-    corr = np.abs(np.correlate(dec, match, mode="valid"))
+    match = match / (np.sqrt(np.sum(np.abs(match) ** 2)) + 1e-30)
+    # the R2C mixer may deliver the beacon conjugated (it lands at -f) -> try both
+    # senses and keep the stronger correlation.
+    c0 = np.abs(np.correlate(dec, match, mode="valid"))
+    c1 = np.abs(np.correlate(dec, np.conj(match), mode="valid"))
+    corr = c0 if c0.max() >= c1.max() else c1
     floor = float(np.median(corr))
     pk = int(np.argmax(corr))
     peak_snr = 20.0 * np.log10(corr[pk] / (floor + 1e-30))
