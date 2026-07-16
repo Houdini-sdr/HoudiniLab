@@ -138,6 +138,8 @@ def main():
     ap.add_argument("--rx-ch", type=int, default=3, help="ADC_D = RX ch3")
     ap.add_argument("--dac-nco", type=float, default=820.0)
     ap.add_argument("--adc-nco", type=float, default=388.8)
+    ap.add_argument("--matched", action="store_true",
+                    help="reference recipe: matched zone1_nco on TX+RX (not dual-NCO)")
     ap.add_argument("--beacon", choices=["tone", "chirp", "zc"], default="tone")
     ap.add_argument("--center-mhz", type=float, default=20.0, help="beacon baseband centre")
     ap.add_argument("--bw-mhz", type=float, default=30.0, help="chirp bandwidth")
@@ -183,8 +185,18 @@ def main():
     rx = sdr.setupStream(SOAPY_SDR_RX, native, [a.rx_ch], rx_stream_args(a.rx_ch))
     res = {}
     try:
-        sdr.setFrequency(SOAPY_SDR_TX, a.tx_ch, a.dac_nco * 1e6)
-        sdr.setFrequency(SOAPY_SDR_RX, a.rx_ch, a.adc_nco * 1e6)
+        if a.matched:                                  # reference recipe: one NCO
+            from houdini_setup import zone1_nco_hz      # on TX+RX (shared clock)
+            mnco = zone1_nco_hz(sdr, a.rx_ch, a.tx_ch)
+            sdr.setFrequency(SOAPY_SDR_TX, a.tx_ch, mnco)
+            sdr.setFrequency(SOAPY_SDR_RX, a.rx_ch, mnco)
+            f0_rx = a.center_mhz * 1e6                  # matched NCO -> tone at |f_bb|
+            print(f"  matched NCO {mnco/1e6:.3f} MHz (both), tone -> RF "
+                  f"{(mnco + a.center_mhz*1e6)/1e6:.1f} MHz")
+        else:
+            sdr.setFrequency(SOAPY_SDR_TX, a.tx_ch, a.dac_nco * 1e6)
+            sdr.setFrequency(SOAPY_SDR_RX, a.rx_ch, a.adc_nco * 1e6)
+            f0_rx = a.center_mhz * 1e6
         i16, label = build_beacon(a.beacon, dac_rate, n_load, a.center_mhz * 1e6,
                                   a.amp, a.bw_mhz * 1e6, a.n_sc)
         print(f"  replay payload: {label}, {n_load} samp, amp {a.amp}")
