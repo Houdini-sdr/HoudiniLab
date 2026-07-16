@@ -115,6 +115,8 @@ def main():
     ap.add_argument("--span-mhz", type=float, default=120.0, help="wide-sweep span")
     ap.add_argument("--rbw-khz", type=float, default=10.0)
     ap.add_argument("--ref-dbm", type=float, default=10.0)
+    ap.add_argument("--scan", action="store_true",
+                    help="wide sweep (TX on) to find WHERE the DAC emits, if anywhere")
     a = ap.parse_args()
 
     print(f"TX {a.board} ch{a.tx_ch} (DAC_B), NCO {a.nco_mhz} MHz + tone -> RF, "
@@ -145,6 +147,13 @@ def main():
 
         sa.connect()
         rbw = a.rbw_khz * 1e3
+        if a.scan:
+            print("\n  SCAN (TX on) -- strongest peak per 60-MHz window:")
+            for c in (20, 80, 160, 260, 360, 460, 500, 520, 600, 720, 850, 940):
+                pf, pa = sa.peak(c * 1e6, 60e6, rbw, a.ref_dbm)
+                hot = "  <== signal" if pa > -70 else ""
+                print(f"    ~{c:4d} MHz: peak {pf/1e6:8.3f} MHz @ {pa:7.2f} dBm{hot}")
+            return 0
         wf, wa = sa.peak(nco, a.span_mhz * 1e6, rbw, a.ref_dbm)
         print(f"\n  WIDE sweep @ {nco/1e6:.0f} MHz span {a.span_mhz:.0f} MHz: "
               f"peak {wf/1e6:.3f} MHz @ {wa:.2f} dBm")
