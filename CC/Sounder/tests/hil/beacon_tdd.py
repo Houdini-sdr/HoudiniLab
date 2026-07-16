@@ -201,17 +201,23 @@ def main():
         per_packet = rx_framing(sdr, verbose=False)["frame_words"] * (8 // bps)
         cap = (int(SYM * spt) // 2 // per_packet) * per_packet
 
-        def pump(sym_off):
+        def pump(sym_off, tag):
             ot = _next_window_tick(sdr, tick_rate, epoch, frame, sym_off)
             rc = sdr.activateStream(rx, SOAPY_SDR_HAS_TIME | SOAPY_SDR_END_BURST,
                                     _ns_of_tick(ot), cap)
             assert rc == 0, f"window arm rejected rc={rc}"
             out = run_burst(sdr, rx, per_packet, cap, dtype, buf_samples=256 * 1024)
             sdr.deactivateStream(rx)
+            fs_ns = next((p["time_ns"] for p in out["packets"]
+                          if (p["flags"] & SOAPY_SDR_HAS_TIME)
+                          and p["time_ns"] is not None), None)
+            dns = (fs_ns - _ns_of_tick(ot)) if fs_ns is not None else None
+            print(f"  {tag} win@sym{sym_off}: total={out['total']} "
+                  f"end_burst={out['end_burst']} first-stamp align={dns} ns")
             return iq_from_cs16(out["samples"]).astype(np.complex128)
 
-        res["beacon"] = pump(a.beacon_sym)
-        res["silence"] = pump(a.silence_sym)
+        res["beacon"] = pump(a.beacon_sym, "beacon")
+        res["silence"] = pump(a.silence_sym, "silence")
         for key in ("TDD_STAT", "TX_BANK_STATUS"):
             try:
                 print(f"  {key}: {sdr.readSetting(key)}")
@@ -232,6 +238,18 @@ def main():
     # --- analysis: the burst is narrowband (invisible in broadband RMS), so DDC to
     #     the beacon band first -> the burst shows as a power spike in the beacon
     #     window at ~offs_rx and NOT in the silence window ---
+    # diagnostic: where is the energy + is the burst region hotter than the rest?
+    for tag in ("beacon", "silence"):
+        iq = res[tag]
+        m = min(len(iq), 1 << 15)
+        P = np.abs(np.fft.fftshift(np.fft.fft(iq[:m] * np.hanning(m)))) ** 2
+        fr = np.fft.fftshift(np.fft.fftfreq(m, 1.0 / rx_rate))
+        pk = int(np.argmax(P * (np.abs(fr) > 1e6)))
+        breg = np.sqrt(np.mean(np.abs(iq[offs_rx:offs_rx + burst_rx]) ** 2))
+        rest = np.sqrt(np.mean(np.abs(iq[offs_rx + 4 * burst_rx:]) ** 2))
+        print(f"  [{tag}] FFT peak {fr[pk]/1e6:+.2f} MHz; burst-region RMS "
+              f"{breg:.2f} vs rest {rest:.2f}")
+
     f0 = a.center_mhz * 1e6          # dual-NCO: received tone ~ +centre MHz
     bw = a.bw_mhz * 1e6 if a.beacon == "chirp" else 2.0e6
 
