@@ -94,10 +94,10 @@ def main():
     ap.add_argument("--rx-search", type=float, default=20.0,
                     help="approx RX baseband centre to search (MHz)")
     ap.add_argument("--decim", type=int, default=8, help="RX decimation (122.88->15.36)")
-    ap.add_argument("--n-sc", type=int, default=8,
-                    help="occupied subcarriers (ZC length); @240kHz SCS 8 SC=1.92 MHz")
-    ap.add_argument("--overdrive", type=float, default=2.0,
-                    help="envelope clip factor to cut OFDM PAPR (raise avg power)")
+    ap.add_argument("--n-sc", type=int, default=63,
+                    help="occupied subcarriers (ZC length); longer = sharper timing peak")
+    ap.add_argument("--overdrive", type=float, default=1.0,
+                    help="envelope clip factor to cut OFDM PAPR (1.0=clean, no clip)")
     ap.add_argument("--fold-max", type=int, default=300,
                     help="max periods to fold (cap for inter-board clock drift; 0=all)")
     ap.add_argument("--amp", type=float, default=0.9)
