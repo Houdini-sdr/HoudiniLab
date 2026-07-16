@@ -272,7 +272,32 @@ def main():
     burst_db = 20 * np.log10(b_rms / max(s_rms, 1e-6))
     print(f"beacon/silence = {burst_db:.1f} dB")
 
+    # matched filter: DDC to the beacon band + correlate with the beacon waveform
+    # at the RX rate -> a sharp peak at the burst location even when the amp-0.25
+    # burst is buried in broadband RMS (chirp/zc only; a tone has no timing peak).
     fired = burst_db >= 8.0 and abs(b_at - offs_rx) <= 2 * burst_rx
+    if a.beacon in ("chirp", "zc"):
+        if a.beacon == "chirp":
+            mi16, _ = tx_lfm_chirp(a.bw_mhz * 1e6, rx_rate, burst_rx,
+                                   amp_frac=1.0, center_hz=0.0)
+        else:
+            mi16, _ = build_beacon("zc", rx_rate, burst_rx, 0.0, 1.0, 0.0, a.n_sc)
+        match = (mi16[0::2].astype(np.float64) + 1j * mi16[1::2]).astype(np.complex128)
+        match /= np.sqrt(np.sum(np.abs(match) ** 2)) + 1e-30
+
+        def mf(iq):
+            n = np.arange(len(iq))
+            d = iq * np.exp(-2j * np.pi * f0 * n / rx_rate)
+            c = np.abs(np.correlate(d, match, mode="valid"))
+            k = int(np.argmax(c))
+            return k, 20 * np.log10(c[k] / (np.median(c) + 1e-30))
+
+        bk, bsnr = mf(res["beacon"])
+        sk, ssnr = mf(res["silence"])
+        print(f"matched filter: beacon peak idx {bk} (expect ~{offs_rx}) "
+              f"{bsnr:.1f} dB; silence peak {ssnr:.1f} dB")
+        fired = bsnr >= 12.0 and abs(bk - offs_rx) <= 2 * burst_rx and bsnr - ssnr >= 6.0
+        b_at = bk
     print("\nRESULT:",
           f"BEACON FIRED in the TDD '6' slot @ samp {b_at} ({burst_db:.1f} dB over "
           f"the silence window) -- replay strobe + TDD framer OK"
