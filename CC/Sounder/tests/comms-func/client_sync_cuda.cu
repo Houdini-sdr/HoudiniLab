@@ -126,8 +126,10 @@ int main(int argc, char** argv) {
   SoapySDR::Device* txd = OpenByIp(tx_ip, port);
   SoapySDR::Device* rxd = OpenByIp(rx_ip, port);
   if (!txd || !rxd) { std::fprintf(stderr, "device open failed\n"); return 1; }
-  auto rates = txd->listSampleRates(SOAPY_SDR_TX, tx_ch);
-  if (!rates.empty()) txd->setSampleRate(SOAPY_SDR_TX, tx_ch, rates.back());
+  auto rates = txd->listSampleRates(SOAPY_SDR_TX, tx_ch);  // descending -> use max
+  if (!rates.empty())
+    txd->setSampleRate(SOAPY_SDR_TX, tx_ch,
+                       *std::max_element(rates.begin(), rates.end()));
   auto* txs = txd->setupStream(SOAPY_SDR_TX, "CS16", {static_cast<size_t>(tx_ch)},
                                {{"tx_mode", "replay"}});
   txd->setFrequency(SOAPY_SDR_TX, tx_ch, nco);
