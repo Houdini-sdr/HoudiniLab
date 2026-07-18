@@ -79,7 +79,6 @@ SoapySDR::Device* OpenByIp(const std::string& ip, const std::string& port) {
   a["remote"] = "tcp://" + ip + ":" + port;
   a["remote:driver"] = "houdinisdr-device";
   a["remote:type"] = "houdinisdr";
-  a["HOUDINI_MTU"] = "3512";        // small device frame -> zero-copy RX (SH-259)
   try {
     return SoapySDR::Device::make(a);
   } catch (const std::exception& e) {
