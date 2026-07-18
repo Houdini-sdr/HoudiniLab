@@ -306,6 +306,8 @@ void ClientRadioSet::init(ClientRadioContext* context) {
                              tx_stream_args);
   } catch (std::runtime_error& err) {
     has_runtime_error = true;
+    MLPD_WARN("ClientRadioSet radio %d (%s) setup failed: %s\n", i,
+              _cfg->cl_sdr_ids().at(i).c_str(), err.what());
 
     if (radios.at(i) != nullptr) {
       MLPD_TRACE("Radio not used due to exception\n");
