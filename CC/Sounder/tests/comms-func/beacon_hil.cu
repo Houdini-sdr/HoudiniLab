@@ -25,6 +25,7 @@
 #include <sys/types.h>
 
 #include <algorithm>
+#include <chrono>
 #include <complex>
 #include <cstdint>
 #include <cstdio>
@@ -112,9 +113,45 @@ int main(int argc, char** argv) {
     return any ? 0 : 1;
   }
 
+  if (std::strcmp(mode, "--stream") == 0 && argc > 2) {
+    // The receiver.cc clientSyncBeacon loop, driven by the Houdini radio: read one
+    // search window of raw cint16 from stdin, run syncSearch (find_beacon), repeat.
+    const size_t window = static_cast<size_t>(std::atol(argv[2]));
+    float scale = 1.0f;
+    for (int i = 3; i < argc - 1; ++i)
+      if (!std::strcmp(argv[i], "--scale")) scale = std::atof(argv[i + 1]);
+    std::vector<int16_t> raw(window * 2);
+    std::vector<std::complex<int16_t>> cap(window);
+    size_t it = 0, hits = 0;
+    while (std::fread(raw.data(), sizeof(int16_t), window * 2, stdin) ==
+           window * 2) {
+      for (size_t i = 0; i < window; ++i)
+        cap[i] = std::complex<int16_t>(raw[2 * i], raw[2 * i + 1]);
+      const auto t0 = std::chrono::steady_clock::now();
+      const ssize_t a =
+          CommsLib::find_beacon_avx(cap.data(), match, window, scale);
+      const double us = std::chrono::duration<double, std::micro>(
+                            std::chrono::steady_clock::now() - t0).count();
+      ++it;
+      if (a >= 0) ++hits;
+#ifdef USE_CUDA
+      const ssize_t g =
+          CommsLib::find_beacon_cuda(cap.data(), match, window, scale);
+      std::printf("iter %3zu  avx=%6zd  cuda=%6zd  avx %6.0f us  %s\n", it, a, g,
+                  us, a >= 0 ? "*** SYNC ***" : "searching");
+#else
+      std::printf("iter %3zu  avx=%6zd  avx %6.0f us  %s\n", it, a, us,
+                  a >= 0 ? "*** SYNC ***" : "searching");
+#endif
+      std::fflush(stdout);
+    }
+    std::fprintf(stderr, "stream: %zu windows, %zu with SYNC\n", it, hits);
+    return 0;
+  }
+
   std::fprintf(stderr,
                "usage: %s --dump-tx <file> | --detect <cap.bin> "
-               "[--window N] [--scale S]\n",
+               "[--window N] [--scale S] | --stream <window> [--scale S]\n",
                argv[0]);
   return 2;
 }
