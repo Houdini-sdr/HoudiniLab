@@ -1,0 +1,29 @@
+{
+	"_comment": "Houdini RFSoC single-UE client. Runs the unmodified receiver.cc client-sync path (clientSyncTxRx -> syncSearch -> find_beacon) on the Houdini radio via the ClientRadioSet houdini backend. Beacon is transmitted separately by beacon_tx_gold from the BS board. Matched-NCO Zone-1 loopback: TX ch1 -> RX ch1, NCO 500 MHz. slot=4096 samps -> detect window ~9544 > beacon.",
+	"serial_file" : "files/topology-houdini.json",
+	"radio_type" : "houdini",
+	"remote_port" : "55132",
+	"frequency" : 500e6,
+	"nco_frequency" : 500e6,
+	"sample_rate" : 122.88e6,
+	"channel" : "A",
+	"frame_schedule" : [
+		"BGGGGGGGGG"
+	],
+	"max_frame" : 20,
+	"ofdm_symbol_per_slot" : 48,
+	"fft_size" : 64,
+	"cp_size" : 16,
+	"ofdm_tx_zero_prefix" : 128,
+	"ofdm_tx_zero_postfix" : 128,
+	"beamsweep" : false,
+	"ue_channel" : "B",
+	"ue_rx_gain_a" : [65],
+	"ue_tx_gain_a" : [81],
+	"ue_rx_gain_b" : [65],
+	"ue_tx_gain_b" : [81],
+	"ue_frame_schedule" : [
+		"GGPPGGGGGG"
+	],
+	"tx_advance" : [135]
+}

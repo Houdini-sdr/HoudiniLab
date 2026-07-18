@@ -38,9 +38,13 @@ class Radio {
   void dev_init(Config* _cfg, int ch, double rxgain, double txgain);
 
  private:
+  int recvHoudini(void* const* buffs, int samples, long long& frameTime);
+
   SoapySDR::Device* dev_;
   SoapySDR::Stream* rxs_;
   SoapySDR::Stream* txs_;
+  bool houdini_ = false;
+  size_t num_rx_ch_ = 1;
 };
 
 #endif  // RADIO_H_

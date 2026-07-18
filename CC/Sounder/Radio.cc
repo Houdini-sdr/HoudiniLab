@@ -9,7 +9,9 @@
 */
 #include "include/Radio.h"
 
+#include <cstdint>
 #include <iostream>
+#include <vector>
 
 #include "SoapySDR/Errors.hpp"
 #include "include/logger.h"
@@ -146,10 +148,13 @@ Radio::Radio(const SoapySDR::Kwargs& args, const char soapyFmt[],
   rxs_ = dev_->setupStream(SOAPY_SDR_RX, soapyFmt, channels, rxStreamArgs);
   txs_ = dev_->setupStream(SOAPY_SDR_TX, soapyFmt, channels, txStreamArgs);
 
+  const std::string driver =
+      (args.count("driver") != 0u) ? args.at("driver") : std::string();
+  houdini_ = (driver == "houdinisdr");
+  num_rx_ch_ = channels.empty() ? 1 : channels.size();
+
   // RESET_DATA_LOGIC is an Iris-only setting; Houdini/UHD don't implement it.
-  const bool is_iris =
-      (args.count("driver") != 0u) && (args.at("driver") == "iris");
-  if (!kUseSoapyUHD && is_iris) {
+  if (!kUseSoapyUHD && driver == "iris") {
     reset_DATA_clk_domain();
   }
 }
@@ -165,7 +170,48 @@ Radio::~Radio(void) {
   dev_ = nullptr;
 }
 
+// SoapyHoudiniSDR delivers ~1 MTU (~1016 samples) per readStream and lets the
+// host socket buffer a backlog while the caller is busy (e.g. running
+// find_beacon between windows), so a single readStream can neither fill a
+// multi-thousand-sample sync window nor guarantee it is contiguous. Drain any
+// stale backlog non-blocking, then accumulate a fresh, contiguous window --
+// this is the in-radio equivalent of the client_sync_cuda drain-before-frame.
+int Radio::recvHoudini(void* const* buffs, int samples, long long& frameTime) {
+  constexpr size_t kBytesPerSamp = 4;  // CS16 = 2 x int16
+  static thread_local std::vector<uint8_t> junk;
+  const size_t drain_samps = 16384;
+  if (junk.size() < drain_samps * kBytesPerSamp * num_rx_ch_)
+    junk.resize(drain_samps * kBytesPerSamp * num_rx_ch_);
+  std::vector<void*> jb(num_rx_ch_);
+  for (size_t c = 0; c < num_rx_ch_; c++)
+    jb[c] = junk.data() + c * drain_samps * kBytesPerSamp;
+  int jf = 0;
+  long long jt = 0;
+  while (dev_->readStream(rxs_, jb.data(), drain_samps, jf, jt, 0) > 0) {
+  }
+
+  std::vector<void*> cur(num_rx_ch_);
+  for (size_t c = 0; c < num_rx_ch_; c++) cur[c] = buffs[c];
+  int got = 0;
+  while (got < samples) {
+    int flags = 0;
+    long long t = 0;
+    int r =
+        dev_->readStream(rxs_, cur.data(), samples - got, flags, t, 1000000);
+    if (r <= 0) {
+      if (got == 0) return r;
+      break;
+    }
+    if (got == 0) frameTime = t;
+    got += r;
+    for (size_t c = 0; c < num_rx_ch_; c++)
+      cur[c] = static_cast<uint8_t*>(cur[c]) + r * kBytesPerSamp;
+  }
+  return got;
+}
+
 int Radio::recv(void* const* buffs, int samples, long long& frameTime) {
+  if (houdini_) return recvHoudini(buffs, samples, frameTime);
   int flags(0);
   int r = dev_->readStream(rxs_, buffs, samples, flags, frameTime, 1000000);
   if (r < 0) {

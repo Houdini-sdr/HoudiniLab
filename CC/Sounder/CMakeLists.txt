@@ -220,7 +220,7 @@ target_link_libraries(sounder -lpthread --enable-threadsafe ${GFLAGS_LIBRARIES} 
     ${HDF5_LIBRARIES}
     ${MUFFT_LIBRARIES})
 
-add_library(sounder_module MODULE 
+add_library(sounder_module MODULE
     ${SOUNDER_SOURCES})
 
 target_link_libraries(sounder_module -lpthread --enable-threadsafe ${GFLAGS_LIBRARIES} ${UHD_LIBRARIES}
@@ -229,3 +229,15 @@ target_link_libraries(sounder_module -lpthread --enable-threadsafe ${GFLAGS_LIBR
     -Wl,--no-whole-archive
     ${HDF5_LIBRARIES}
     ${SoapySDR_LIBRARIES})
+
+# HIL helper: transmit the real Gold beacon from a Houdini board so a Houdini UE
+# running the unmodified receiver.cc client-sync path can acquire it.
+add_executable(beacon_tx_gold
+    tests/comms-func/beacon_tx_gold.cc
+    comms-lib.cc
+    comms-lib-avx.cc
+    comms-lib-portable.cc
+    utils.cc)
+target_link_libraries(beacon_tx_gold -lpthread
+    ${SoapySDR_LIBRARIES}
+    ${MUFFT_LIBRARIES})
