@@ -406,6 +406,16 @@ int ClientRadioSet::radioTx(size_t radio_id, const void* const* buffs,
     return radios.at(radio_id)->xmit(buffs, numSamps, flags, frameTime);
   } else {
     long long frameTimeNs = SoapySDR::ticksToTimeNs(frameTime, _cfg->rate());
+    if (_cfg->is_houdini()) {
+      // Houdini's timed streaming TX only arms a burst on a whole-millisecond
+      // boundary (off-ms / <=0 -> TIME_ERROR, no auto-snap, SH-...). The RENEW
+      // schedule places the pilot at a sample-accurate time; when the UE frame
+      // is a whole ms (samps_per_frame = k*rate/1000) the beacon anchor recurs
+      // at a fixed ms-phase, so quantizing to the ms grid applies a CONSTANT
+      // effective tx_advance -- the pilot lands at the same offset every frame.
+      constexpr long long kNsPerMs = 1000000LL;
+      frameTimeNs = ((frameTimeNs + kNsPerMs / 2) / kNsPerMs) * kNsPerMs;
+    }
     return radios.at(radio_id)->xmit(buffs, numSamps, flags, frameTimeNs);
   }
 }
