@@ -74,7 +74,10 @@ int main(int argc, char** argv) {
   const std::string port = opt(argc, argv, "--port", "55132");
   const int upf = std::stoi(opt(argc, argv, "--upsample", "8"));
   const float amp = std::stof(opt(argc, argv, "--amp", "0.6"));
-  const int period = std::stoi(opt(argc, argv, "--period", "2048"));  // rx samps
+  // The Houdini replay RAM is 4096 samples deep, so the loop (period x upf)
+  // must fit; period 512 x8 = 4096 packs the beacon back-to-back (rx period 512).
+  const int period = std::stoi(opt(argc, argv, "--period", "512"));  // rx samps
+  constexpr size_t kReplayDepth = 4096;
   const bool conj = std::stoi(opt(argc, argv, "--conj", "1")) != 0;
   std::signal(SIGINT, OnSig);
   std::signal(SIGTERM, OnSig);
@@ -98,7 +101,9 @@ int main(int argc, char** argv) {
   // received period so the beacon recurs inside every UE detection window.
   auto up = Upsample(beacon, upf);
   std::vector<cf32> loop = up;
-  loop.resize(static_cast<size_t>(period) * upf, cf32(0, 0));  // guard/pad
+  size_t loop_len = std::min<size_t>(static_cast<size_t>(period) * upf, kReplayDepth);
+  if (loop_len < up.size()) loop_len = up.size();  // never truncate the beacon
+  loop.resize(loop_len, cf32(0, 0));  // guard/pad
   float peak = 1e-30f;
   for (auto& c : loop) peak = std::max(peak, std::abs(c));
   const size_t n_load = loop.size();
