@@ -79,6 +79,7 @@ SoapySDR::Device* OpenByIp(const std::string& ip, const std::string& port) {
   a["remote"] = "tcp://" + ip + ":" + port;
   a["remote:driver"] = "houdinisdr-device";
   a["remote:type"] = "houdinisdr";
+  a["HOUDINI_MTU"] = "3512";        // small device frame -> zero-copy RX (SH-259)
   try {
     return SoapySDR::Device::make(a);
   } catch (const std::exception& e) {
@@ -164,15 +165,23 @@ int main(int argc, char** argv) {
       got += static_cast<size_t>(r);
     }
     if (got < frame) { std::printf("frame %3d: short read %zu\n", it, got); continue; }
+    double p = 0;
     for (size_t i = 0; i < frame; ++i)                   // conj: matched-NCO R2C
       cap[i] = ci16(raw[2 * i], static_cast<int16_t>(-raw[2 * i + 1]));
+    for (size_t i = 0; i < frame; ++i)
+      p += double(raw[2*i])*raw[2*i] + double(raw[2*i+1])*raw[2*i+1];
+    const double rms = std::sqrt(p / frame);
     const auto t0 = std::chrono::steady_clock::now();
-    const ssize_t idx = CommsLib::find_beacon_cuda(cap.data(), match, frame, 1.0f);
+    ssize_t idx = CommsLib::find_beacon_cuda(cap.data(), match, frame, 1.0f);
+    if (idx < 0) {                                       // try the other conj sense
+      for (size_t i = 0; i < frame; ++i) cap[i] = ci16(raw[2*i], raw[2*i+1]);
+      idx = CommsLib::find_beacon_cuda(cap.data(), match, frame, 1.0f);
+    }
     const double us = std::chrono::duration<double, std::micro>(
                           std::chrono::steady_clock::now() - t0).count();
     if (idx >= 0) ++hits;
-    std::printf("frame %3d: find_beacon_cuda -> %6zd  (%6.0f us)  %s\n", it, idx,
-                us, idx >= 0 ? "*** SYNC ***" : "searching");
+    std::printf("frame %3d: rms %6.0f  find_beacon_cuda -> %6zd  (%6.0f us)  %s\n",
+                it, rms, idx, us, idx >= 0 ? "*** SYNC ***" : "searching");
     std::fflush(stdout);
   }
   std::printf("\n%d/%d frames synced on the beacon (GPU, real time)\n", hits, iters);
