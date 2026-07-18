@@ -19,7 +19,9 @@ class Radio {
   inline SoapySDR::Device* RawDev() const { return dev_; };
 
   Radio(const SoapySDR::Kwargs& args, const char soapyFmt[],
-        const std::vector<size_t>& channels);
+        const std::vector<size_t>& channels,
+        const SoapySDR::Kwargs& rxStreamArgs = SoapySDR::Kwargs(),
+        const SoapySDR::Kwargs& txStreamArgs = SoapySDR::Kwargs());
   ~Radio(void);
   int recv(void* const* buffs, int samples, long long& frameTime);
   int activateRecv(const long long rxTime = 0, const size_t numSamps = 0,

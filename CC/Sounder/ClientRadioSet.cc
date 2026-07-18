@@ -81,6 +81,13 @@ ClientRadioSet::ClientRadioSet(Config* cfg) : _cfg(cfg) {
 
   for (size_t i = 0; i < radios.size(); i++) {
     auto* dev = radios.at(i)->RawDev();
+    if (_cfg->is_houdini()) {
+      // Houdini has no CBRS/UHF front end or LNA/PGA/TIA gain stages to report.
+      std::cout << _cfg->cl_sdr_ids().at(i) << ": Houdini RFSoC, RX rate "
+                << (dev->getSampleRate(SOAPY_SDR_RX, channels.at(0)) / 1e6)
+                << " MSPS" << std::endl;
+      continue;
+    }
     std::cout << _cfg->cl_sdr_ids().at(i) << ": Front end "
               << dev->getHardwareInfo()["frontend"] << std::endl;
     for (auto ch : channels) {
@@ -229,7 +236,12 @@ ClientRadioSet::ClientRadioSet(Config* cfg) : _cfg(cfg) {
           dev->writeSetting("CORR_START",
                             (_cfg->cl_channel() == "B") ? "B" : "A");
       } else {
-        if (!kUseSoapyUHD) {
+        if (_cfg->is_houdini()) {
+          // Houdini has no HW trigger/correlator block -- software beacon sync
+          // (find_beacon in receiver.cc) drives acquisition. Just start streams.
+          radios.at(i)->activateRecv();
+          radios.at(i)->activateXmit();
+        } else if (!kUseSoapyUHD) {
           dev->setHardwareTime(0, "TRIGGER");
           radios.at(i)->activateRecv();
           radios.at(i)->activateXmit();
@@ -267,8 +279,21 @@ void ClientRadioSet::init(ClientRadioContext* context) {
   MLPD_TRACE("ClientRadioSet setting up radio: %d : %zu\n", (i + 1),
              _cfg->num_cl_sdrs());
   SoapySDR::Kwargs args;
+  SoapySDR::Kwargs rx_stream_args;
+  SoapySDR::Kwargs tx_stream_args;
   args["timeout"] = "1000000";
-  if (kUseSoapyUHD == false) {
+  if (_cfg->is_houdini()) {
+    // SoapyHoudiniSDR remote device: cl_sdr_ids() holds the board IP. C++
+    // SoapyRemote auto-discovery is unreliable here, so address the remote
+    // node directly (matches SoapySDRUtil's enumerated kwargs).
+    args["driver"] = "houdinisdr";
+    args["remote"] =
+        "tcp://" + _cfg->cl_sdr_ids().at(i) + ":" + _cfg->remote_port();
+    args["remote:driver"] = "houdinisdr-device";
+    args["remote:type"] = "houdinisdr";
+    // RX host UDP port, one per radio; leave TX in default (streaming) mode.
+    rx_stream_args["local_port"] = std::to_string(10002 + i);
+  } else if (kUseSoapyUHD == false) {
     args["driver"] = "iris";
     args["serial"] = _cfg->cl_sdr_ids().at(i);
   } else {
@@ -277,7 +302,8 @@ void ClientRadioSet::init(ClientRadioContext* context) {
   }
   try {
     radios.at(i) = nullptr;
-    radios.at(i) = new Radio(args, SOAPY_SDR_CS16, channels);
+    radios.at(i) = new Radio(args, SOAPY_SDR_CS16, channels, rx_stream_args,
+                             tx_stream_args);
   } catch (std::runtime_error& err) {
     has_runtime_error = true;
 
@@ -306,8 +332,8 @@ void ClientRadioSet::init(ClientRadioContext* context) {
       radios.at(i)->dev_init(_cfg, ch, rxgain, txgain);
     }
 
-    // Init AGC only for Iris device
-    if (kUseSoapyUHD == false) {
+    // Init AGC only for Iris device (Houdini has no AGC_CONFIG setting)
+    if (kUseSoapyUHD == false && !_cfg->is_houdini()) {
       initAGC(dev, _cfg);
     }
   }

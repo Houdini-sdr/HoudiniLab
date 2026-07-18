@@ -49,6 +49,14 @@ class Config {
   inline size_t guard_mult(void) const { return this->guard_mult_; }
   inline bool bs_hw_framer(void) const { return this->bs_hw_framer_; }
   inline bool hw_framer(void) const { return this->hw_framer_; }
+  // Radio backend selector within the SoapySDR (non-UHD) path: "iris" (default)
+  // drives the Iris HW correlator/TDD; "houdini" drives the Houdini RFSoC over
+  // SoapyHoudiniSDR with software beacon sync (find_beacon). See ClientRadioSet.
+  inline const std::string& radio_type(void) const { return this->radio_type_; }
+  inline bool is_houdini(void) const { return this->radio_type_ == "houdini"; }
+  inline const std::string& remote_port(void) const {
+    return this->remote_port_;
+  }
   inline int prefix(void) const { return this->prefix_; }
   inline int postfix(void) const { return this->postfix_; }
   inline int beacon_size(void) const { return this->beacon_size_; }
@@ -357,6 +365,8 @@ class Config {
   std::string frame_mode_;
   bool bs_hw_framer_;
   bool hw_framer_;
+  std::string radio_type_;
+  std::string remote_port_;
   size_t max_frame_;
   size_t ul_data_frame_num_;
   size_t dl_data_frame_num_;

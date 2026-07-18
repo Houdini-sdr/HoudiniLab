@@ -185,6 +185,8 @@ Config::Config(const std::string& jsonfile, const std::string& directory,
   cl_power_ramp_hi_ = tddConf.value("ue_ramp_max_gain", 42);
   frame_mode_ = tddConf.value("frame_mode", "continuous_resync");
   hw_framer_ = tddConf.value("ue_hw_framer", false);
+  radio_type_ = tddConf.value("radio_type", "iris");
+  remote_port_ = tddConf.value("remote_port", "55132");
   auto tx_advance = tddConf.value("tx_advance", json::array());
   if (tx_advance.empty() == true) {
     tx_advance_.resize(num_cl_sdrs_, 250);
