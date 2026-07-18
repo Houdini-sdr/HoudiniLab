@@ -127,7 +127,8 @@ int main(int argc, char** argv) {
   {
     const void* buffs[1] = {beacon.data()};
     long long tns = 0;
-    txd->writeStream(txs, buffs, n_load, /*flags=*/0, tns, 1000000);  // load RAM
+    int txflags = 0;
+    txd->writeStream(txs, buffs, n_load, txflags, tns, 1000000);  // load RAM
   }
   txd->activateStream(txs);
   std::printf("BS TX %s ch%d beacon %zu samp @ NCO %.0f MHz\n", tx_ip.c_str(),
