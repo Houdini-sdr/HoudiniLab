@@ -71,15 +71,18 @@ std::vector<cf32> Upsample(const std::vector<cf32>& x, int f) {
   return xu;
 }
 
-SoapySDR::Device* OpenByIp(const std::string& ip) {
-  auto results = SoapySDR::Device::enumerate();   // full discovery (like SoapySDRUtil)
-  std::fprintf(stderr, "enumerate: %zu device(s), looking for %s\n",
-               results.size(), ip.c_str());
-  for (auto& r : results)
-    for (auto& kv : r)
-      if (kv.second.find(ip) != std::string::npos)
-        return SoapySDR::Device::make(r);
-  return nullptr;
+SoapySDR::Device* OpenByIp(const std::string& ip, const std::string& port) {
+  // C++ SoapyRemote discovery returns nothing here (vs SoapySDRUtil), so open the
+  // remote device directly by URI (both boards listen on :55132).
+  SoapySDR::Kwargs args;
+  args["driver"] = "remote";
+  args["remote"] = "tcp://" + ip + ":" + port;
+  try {
+    return SoapySDR::Device::make(args);
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "make(%s) failed: %s\n", args["remote"].c_str(), e.what());
+    return nullptr;
+  }
 }
 
 std::string opt(int argc, char** argv, const std::string& k, const std::string& d) {
@@ -97,6 +100,7 @@ int main(int argc, char** argv) {
   const double nco = std::stod(opt(argc, argv, "--nco-mhz", "500")) * 1e6;
   const size_t frame = std::stoul(opt(argc, argv, "--frame", "8192"));
   const int iters = std::stoi(opt(argc, argv, "--iters", "40"));
+  const std::string port = opt(argc, argv, "--port", "55132");
   const double rx_rate = 122.88e6;
 
   const auto match = MakeMatch(kSeqLen);          // == the find_beacon match
@@ -117,8 +121,8 @@ int main(int argc, char** argv) {
   }
 
   // --- BS: TX the beacon (replay) on tx_ip ch tx_ch ---
-  SoapySDR::Device* txd = OpenByIp(tx_ip);
-  SoapySDR::Device* rxd = OpenByIp(rx_ip);
+  SoapySDR::Device* txd = OpenByIp(tx_ip, port);
+  SoapySDR::Device* rxd = OpenByIp(rx_ip, port);
   if (!txd || !rxd) { std::fprintf(stderr, "device open failed\n"); return 1; }
   auto rates = txd->listSampleRates(SOAPY_SDR_TX, tx_ch);
   if (!rates.empty()) txd->setSampleRate(SOAPY_SDR_TX, tx_ch, rates.back());
