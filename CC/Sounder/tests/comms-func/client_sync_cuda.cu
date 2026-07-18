@@ -153,9 +153,14 @@ int main(int argc, char** argv) {
               rx_ip.c_str(), rx_ch, frame, iters);
 
   std::vector<int16_t> raw(frame * 2);
+  std::vector<int16_t> junk(16384 * 2);
   std::vector<ci16> cap(frame);
   int hits = 0;
   for (int it = 0; it < iters; ++it) {
+    // Drain the socket backlog (built up during the last find_beacon) so this
+    // frame starts fresh + contiguous -- the sync-loop analog of capture_rx's flush.
+    { void* jb[1] = {junk.data()}; int jf; long long jt;
+      while (rxd->readStream(rxs, jb, 16384, jf, jt, 0) > 0) {} }
     size_t got = 0;
     while (got < frame) {
       void* buffs[1] = {raw.data() + got * 2};
