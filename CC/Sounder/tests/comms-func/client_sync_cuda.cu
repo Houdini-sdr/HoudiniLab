@@ -72,8 +72,9 @@ std::vector<cf32> Upsample(const std::vector<cf32>& x, int f) {
 }
 
 SoapySDR::Device* OpenByIp(const std::string& ip) {
-  auto results = SoapySDR::Device::enumerate(
-      SoapySDR::Kwargs{{"driver", "houdinisdr"}});
+  auto results = SoapySDR::Device::enumerate();   // full discovery (like SoapySDRUtil)
+  std::fprintf(stderr, "enumerate: %zu device(s), looking for %s\n",
+               results.size(), ip.c_str());
   for (auto& r : results)
     for (auto& kv : r)
       if (kv.second.find(ip) != std::string::npos)
