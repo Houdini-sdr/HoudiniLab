@@ -238,6 +238,7 @@ add_executable(beacon_tx_gold
     comms-lib-avx.cc
     comms-lib-portable.cc
     utils.cc)
+target_include_directories(beacon_tx_gold PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(beacon_tx_gold -lpthread
     ${SoapySDR_LIBRARIES}
     ${MUFFT_LIBRARIES})
