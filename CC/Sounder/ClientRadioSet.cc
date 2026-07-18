@@ -291,8 +291,10 @@ void ClientRadioSet::init(ClientRadioContext* context) {
         "tcp://" + _cfg->cl_sdr_ids().at(i) + ":" + _cfg->remote_port();
     args["remote:driver"] = "houdinisdr-device";
     args["remote:type"] = "houdinisdr";
-    // RX host UDP port, one per radio; leave TX in default (streaming) mode.
+    // RX host UDP port, one per radio; the UE feeds pilots live from the host,
+    // so the TX stream is host-fed streaming (not device BRAM replay) (SH-183).
     rx_stream_args["local_port"] = std::to_string(10002 + i);
+    tx_stream_args["tx_mode"] = "stream";
   } else if (kUseSoapyUHD == false) {
     args["driver"] = "iris";
     args["serial"] = _cfg->cl_sdr_ids().at(i);
