@@ -72,15 +72,17 @@ std::vector<cf32> Upsample(const std::vector<cf32>& x, int f) {
 }
 
 SoapySDR::Device* OpenByIp(const std::string& ip, const std::string& port) {
-  // C++ SoapyRemote discovery returns nothing here (vs SoapySDRUtil), so open the
-  // remote device directly by URI (both boards listen on :55132).
-  SoapySDR::Kwargs args;
-  args["driver"] = "remote";
-  args["remote"] = "tcp://" + ip + ":" + port;
+  // C++ SoapyRemote discovery returns nothing here (vs SoapySDRUtil), so make the
+  // remote device directly with the full kwargs Python enumerate produces.
+  SoapySDR::Kwargs a;
+  a["driver"] = "houdinisdr";
+  a["remote"] = "tcp://" + ip + ":" + port;
+  a["remote:driver"] = "houdinisdr-device";
+  a["remote:type"] = "houdinisdr";
   try {
-    return SoapySDR::Device::make(args);
+    return SoapySDR::Device::make(a);
   } catch (const std::exception& e) {
-    std::fprintf(stderr, "make(%s) failed: %s\n", args["remote"].c_str(), e.what());
+    std::fprintf(stderr, "make(%s) failed: %s\n", a["remote"].c_str(), e.what());
     return nullptr;
   }
 }
