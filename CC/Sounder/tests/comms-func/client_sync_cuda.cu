@@ -170,6 +170,10 @@ int main(int argc, char** argv) {
     for (size_t i = 0; i < frame; ++i)
       p += double(raw[2*i])*raw[2*i] + double(raw[2*i+1])*raw[2*i+1];
     const double rms = std::sqrt(p / frame);
+    if (it == 0) {                                       // dump frame 0 for beacon_hil
+      FILE* f = std::fopen("/tmp/cs_frame.bin", "wb");
+      if (f) { std::fwrite(raw.data(), sizeof(int16_t), raw.size(), f); std::fclose(f); }
+    }
     const auto t0 = std::chrono::steady_clock::now();
     ssize_t idx = CommsLib::find_beacon_cuda(cap.data(), match, frame, 1.0f);
     if (idx < 0) {                                       // try the other conj sense
