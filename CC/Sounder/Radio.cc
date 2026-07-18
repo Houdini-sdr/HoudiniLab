@@ -21,15 +21,13 @@ void Radio::dev_init(Config* _cfg, int ch, double rxgain, double txgain) {
   SoapySDR::Kwargs info = dev_->getHardwareInfo();
 
   // Houdini RFSoC: the mixer NCO is the only tuning knob and there is no
-  // antenna/analog-bandwidth/gain/DC-offset stage to program -- just set the
-  // sample rate and the single-conversion frequency (the NCO) on both dirs.
+  // antenna/analog-bandwidth/gain/DC-offset stage to program. Rate + NCO were
+  // already applied in the ctor (before setupStream, since Houdini forbids a
+  // live rate change), so nothing to do here but report.
   if (_cfg->is_houdini()) {
-    dev_->setSampleRate(SOAPY_SDR_RX, ch, _cfg->rate());
-    dev_->setSampleRate(SOAPY_SDR_TX, ch, _cfg->rate());
-    dev_->setFrequency(SOAPY_SDR_RX, ch, _cfg->nco());
-    dev_->setFrequency(SOAPY_SDR_TX, ch, _cfg->nco());
     MLPD_INFO("Houdini channel %d: rate %.2f MSPS, NCO %.2f MHz\n", ch,
-              _cfg->rate() / 1e6, _cfg->nco() / 1e6);
+              dev_->getSampleRate(SOAPY_SDR_RX, ch) / 1e6,
+              dev_->getFrequency(SOAPY_SDR_RX, ch) / 1e6);
     (void)rxgain;
     (void)txgain;
     return;
@@ -132,7 +130,8 @@ void Radio::drain_buffers(std::vector<void*> buffs, int symSamp) {
 Radio::Radio(const SoapySDR::Kwargs& args, const char soapyFmt[],
              const std::vector<size_t>& channels,
              const SoapySDR::Kwargs& rxStreamArgs,
-             const SoapySDR::Kwargs& txStreamArgs) {
+             const SoapySDR::Kwargs& txStreamArgs, double preStreamRate,
+             double preStreamFreq) {
   dev_ = SoapySDR::Device::make(args);
   if (dev_ == nullptr) {
     throw std::invalid_argument("error making SoapySDR::Device\n");
@@ -143,6 +142,21 @@ Radio::Radio(const SoapySDR::Kwargs& args, const char soapyFmt[],
         dev_->setSampleRate(SOAPY_SDR_RX, ch, rate);
         dev_->setSampleRate(SOAPY_SDR_TX, ch, rate);
     }*/
+  // Backends that forbid live rate changes (Houdini) must have the rate and
+  // NCO set BEFORE the stream opens; the Iris path passes 0 and keeps setting
+  // these in dev_init (post-setupStream) as before.
+  if (preStreamRate > 0.0) {
+    for (auto ch : channels) {
+      dev_->setSampleRate(SOAPY_SDR_RX, ch, preStreamRate);
+      dev_->setSampleRate(SOAPY_SDR_TX, ch, preStreamRate);
+    }
+  }
+  if (preStreamFreq > 0.0) {
+    for (auto ch : channels) {
+      dev_->setFrequency(SOAPY_SDR_RX, ch, preStreamFreq);
+      dev_->setFrequency(SOAPY_SDR_TX, ch, preStreamFreq);
+    }
+  }
   // Houdini SoapyHoudiniSDR needs per-stream args (RX host port, TX replay/stream
   // mode); Iris/UHD ignore an empty Kwargs, so this is backend-agnostic.
   rxs_ = dev_->setupStream(SOAPY_SDR_RX, soapyFmt, channels, rxStreamArgs);

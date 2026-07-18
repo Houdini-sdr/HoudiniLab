@@ -18,10 +18,14 @@ class Radio {
  public:
   inline SoapySDR::Device* RawDev() const { return dev_; };
 
+  // preStreamRate/preStreamFreq (when > 0) are applied to RX+TX BEFORE the
+  // streams are opened -- required for backends (Houdini) that forbid a live
+  // sample-rate change once a stream is open. 0 leaves them to dev_init (Iris).
   Radio(const SoapySDR::Kwargs& args, const char soapyFmt[],
         const std::vector<size_t>& channels,
         const SoapySDR::Kwargs& rxStreamArgs = SoapySDR::Kwargs(),
-        const SoapySDR::Kwargs& txStreamArgs = SoapySDR::Kwargs());
+        const SoapySDR::Kwargs& txStreamArgs = SoapySDR::Kwargs(),
+        double preStreamRate = 0.0, double preStreamFreq = 0.0);
   ~Radio(void);
   int recv(void* const* buffs, int samples, long long& frameTime);
   int activateRecv(const long long rxTime = 0, const size_t numSamps = 0,
