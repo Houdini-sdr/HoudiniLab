@@ -242,3 +242,14 @@ target_include_directories(beacon_tx_gold PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(beacon_tx_gold -lpthread
     ${SoapySDR_LIBRARIES}
     ${MUFFT_LIBRARIES})
+
+# HIL harness: drive both ends with the real BaseRadioSet (BS beacon) +
+# ClientRadioSet (UE sync) -- proves the BaseRadioSet Houdini backend TXes the
+# beacon the UE acquires, without the un-runnable BS receive loop.
+add_executable(houdini_bs_ue_sync
+    tests/comms-func/houdini_bs_ue_sync.cc
+    ${SOUNDER_SOURCES})
+target_link_libraries(houdini_bs_ue_sync -lpthread --enable-threadsafe ${GFLAGS_LIBRARIES} ${UHD_LIBRARIES}
+    ${SoapySDR_LIBRARIES}
+    ${HDF5_LIBRARIES}
+    ${MUFFT_LIBRARIES})

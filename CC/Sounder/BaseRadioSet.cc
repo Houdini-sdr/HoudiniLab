@@ -9,6 +9,12 @@
   */
 #include "include/BaseRadioSet.h"
 
+#include <algorithm>
+#include <cmath>
+#include <complex>
+#include <cstdint>
+#include <vector>
+
 #include "SoapySDR/Errors.hpp"
 #include "SoapySDR/Formats.hpp"
 #include "SoapySDR/Time.hpp"
@@ -21,6 +27,34 @@
 
 using json = nlohmann::json;
 static constexpr int kMaxTOSyncRetry = 10;
+
+namespace {
+// Band-limited x f upsample via DFT zero-pad (startup only -> O(N^2) is fine).
+// Matches beacon_tx_gold so the replayed beacon lands at the UE sample rate.
+std::vector<std::complex<float>> upsampleBeacon(
+    const std::vector<std::complex<float>>& x, int f) {
+  using cf = std::complex<float>;
+  const int L = static_cast<int>(x.size()), Lu = L * f, h = L / 2;
+  std::vector<cf> X(L), Xu(Lu, cf(0, 0)), xu(Lu);
+  for (int k = 0; k < L; ++k) {
+    cf s(0, 0);
+    for (int n = 0; n < L; ++n)
+      s += x[n] * std::exp(cf(0, -2.0 * M_PI * k * n / L));
+    X[k] = s;
+  }
+  for (int k = 0; k < h; ++k) {
+    Xu[k] = X[k];
+    Xu[Lu - h + k] = X[h + k];
+  }
+  for (int n = 0; n < Lu; ++n) {
+    cf s(0, 0);
+    for (int k = 0; k < Lu; ++k)
+      if (Xu[k] != cf(0, 0)) s += Xu[k] * std::exp(cf(0, 2.0 * M_PI * k * n / Lu));
+    xu[n] = s;
+  }
+  return xu;
+}
+}  // namespace
 
 BaseRadioSet::BaseRadioSet(Config* cfg, const bool calibrate_proc) : _cfg(cfg) {
   std::vector<size_t> num_bs_antenntas(_cfg->num_cells());
@@ -134,6 +168,13 @@ BaseRadioSet::BaseRadioSet(Config* cfg, const bool calibrate_proc) : _cfg(cfg) {
 
     for (size_t i = 0; i < bsRadios.at(c).size(); i++) {
       auto* dev = bsRadios.at(c).at(i)->RawDev();
+      if (_cfg->is_houdini()) {
+        // Houdini has no CBRS/UHF front end or LNA/PGA/TIA gain stages.
+        std::cout << _cfg->bs_sdr_ids().at(c).at(i) << ": Houdini RFSoC BS, TX "
+                  << (dev->getSampleRate(SOAPY_SDR_TX, channels.at(0)) / 1e6)
+                  << " MSPS" << std::endl;
+        continue;
+      }
       std::cout << _cfg->bs_sdr_ids().at(c).at(i) << ": Front end "
                 << dev->getHardwareInfo()["frontend"] << std::endl;
       for (auto ch : channels) {
@@ -197,8 +238,8 @@ BaseRadioSet::BaseRadioSet(Config* cfg, const bool calibrate_proc) : _cfg(cfg) {
       }
       std::cout << std::endl;
     }
-    // Measure Sync Delays now!
-    if (kUseSoapyUHD == false) {
+    // Measure Sync Delays now! (Iris trigger-based; Houdini has no such block)
+    if (kUseSoapyUHD == false && _cfg->is_houdini() == false) {
       sync_delays(c);
     }
   }
@@ -210,6 +251,12 @@ BaseRadioSet::BaseRadioSet(Config* cfg, const bool calibrate_proc) : _cfg(cfg) {
     std::cout << "\033[1;31mERROR: the above base station serials were not "
                  "discovered in the network!\033[0m"
               << std::endl;
+  } else if (_cfg->is_houdini()) {
+    // Houdini BS: no HW framer / TDD / trigger / calibration. The beacon is a
+    // free-running device replay of the Gold sequence receiver.cc syncSearch
+    // matches -- fold in what beacon_tx_gold did, driven by the sounder itself.
+    armHoudiniBeacon();
+    MLPD_INFO("%s done (Houdini replay beacon)!\n", __func__);
   } else {
     if (calibrate_proc && _cfg->sample_cal_en() == true) {
       this->syncTimeOffset();
@@ -332,6 +379,59 @@ BaseRadioSet::BaseRadioSet(Config* cfg, const bool calibrate_proc) : _cfg(cfg) {
   }
 }
 
+void BaseRadioSet::armHoudiniBeacon(void) {
+  constexpr int kReplayDepth = 4096;  // Houdini TX replay RAM depth (samples)
+  constexpr int kUpsample = 8;        // DAC max (983.04) / app rate (122.88)
+
+  // Rebuild the STS+gold core of config's beacon (indices [prefix, prefix+
+  // beacon_size) skip the zero pre/postfix). Conjugate it: the matched-NCO R2C
+  // mixer delivers the beacon conjugated and receiver.cc::syncSearch feeds the
+  // raw RX to find_beacon, so pre-conjugating the TX cancels it.
+  const auto& bc = _cfg->beacon_ci16();
+  const int p = _cfg->prefix();
+  const int n = _cfg->beacon_size();
+  std::vector<std::complex<float>> core(n);
+  for (int k = 0; k < n; ++k) {
+    core[k] = std::conj(std::complex<float>(
+        static_cast<float>(bc.at(p + k).real()),
+        static_cast<float>(bc.at(p + k).imag())));
+  }
+
+  // x8 upsample so each rep lands at the app rate, then pad to the replay RAM
+  // so the beacon recurs at a fixed period (RAM/8 = 512 rx samples).
+  auto up = upsampleBeacon(core, kUpsample);
+  if (up.size() > static_cast<size_t>(kReplayDepth)) up.resize(kReplayDepth);
+  std::vector<std::complex<float>> loop(up.begin(), up.end());
+  loop.resize(kReplayDepth, std::complex<float>(0, 0));
+  float peak = 1e-30f;
+  for (const auto& v : loop) peak = std::max(peak, std::abs(v));
+  const size_t n_load = loop.size();
+  std::vector<int16_t> iq(n_load * 2);
+  for (size_t k = 0; k < n_load; ++k) {
+    iq[2 * k] =
+        static_cast<int16_t>(std::lround(loop[k].real() / peak * 0.6f * 32767));
+    iq[2 * k + 1] =
+        static_cast<int16_t>(std::lround(loop[k].imag() / peak * 0.6f * 32767));
+  }
+
+  // Load the replay RAM + arm free-running on the beacon radio's TX. The TX
+  // stream is bound to the BS channel (the wired DAC), so xmit targets it.
+  const void* buffs[1] = {iq.data()};
+  long long t0 = 0;
+  for (size_t c = 0; c < bsRadios.size(); ++c) {
+    for (size_t i = 0; i < bsRadios.at(c).size(); ++i) {
+      if (i != _cfg->beacon_radio()) continue;
+      Radio* r = bsRadios.at(c).at(i);
+      r->xmit(buffs, static_cast<int>(n_load), 0, t0);  // load replay RAM
+      r->activateXmit();                                // arm free-running loop
+      MLPD_INFO(
+          "Houdini BS beacon armed: %zu-sample replay loop (rx period %zu) on "
+          "cell %zu radio %zu\n",
+          n_load, n_load / kUpsample, c, i);
+    }
+  }
+}
+
 BaseRadioSet::~BaseRadioSet(void) {
   if (!_cfg->hub_ids().empty()) {
     for (unsigned int i = 0; i < hubs.size(); i++)
@@ -358,7 +458,21 @@ void BaseRadioSet::init(BaseRadioContext* context) {
 
   auto channels = Utils::strToChannels(_cfg->bs_channel());
   SoapySDR::Kwargs args;
-  if (kUseSoapyUHD == false) {
+  SoapySDR::Kwargs rx_stream_args;
+  SoapySDR::Kwargs tx_stream_args;
+  if (_cfg->is_houdini()) {
+    // SoapyHoudiniSDR BS node: bs_sdr_ids() holds the board IP. Address the
+    // remote node directly (C++ auto-discovery is unreliable). RX host port
+    // 10100+ keeps it clear of the UE stream (10002+); the beacon is device
+    // BRAM replay (tx_mode=replay), so the TX rate is the DAC max (see below).
+    args["driver"] = "houdinisdr";
+    args["remote"] =
+        "tcp://" + _cfg->bs_sdr_ids().at(c).at(i) + ":" + _cfg->remote_port();
+    args["remote:driver"] = "houdinisdr-device";
+    args["remote:type"] = "houdinisdr";
+    rx_stream_args["local_port"] = std::to_string(10100 + i);
+    tx_stream_args["tx_mode"] = "replay";
+  } else if (kUseSoapyUHD == false) {
     args["driver"] = "iris";
     args["serial"] = _cfg->bs_sdr_ids().at(c).at(i);
   } else {
@@ -369,7 +483,13 @@ void BaseRadioSet::init(BaseRadioContext* context) {
   args["timeout"] = "1000000";
   try {
     bsRadios.at(c).at(i) = nullptr;
-    bsRadios.at(c).at(i) = new Radio(args, SOAPY_SDR_CS16, channels);
+    // Houdini: RX at the app rate, TX at the DAC max (-1) for replay, tuned to
+    // the NCO -- all before setupStream (Houdini forbids a live rate change).
+    bsRadios.at(c).at(i) =
+        new Radio(args, SOAPY_SDR_CS16, channels, rx_stream_args, tx_stream_args,
+                  _cfg->is_houdini() ? _cfg->rate() : 0.0,
+                  _cfg->is_houdini() ? -1.0 : 0.0,
+                  _cfg->is_houdini() ? _cfg->nco() : 0.0);
   } catch (std::runtime_error& err) {
     if (kUseSoapyUHD == false) {
       std::cerr << "Ignoring iris " << _cfg->bs_sdr_ids().at(c).at(i)

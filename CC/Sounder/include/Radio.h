@@ -18,14 +18,19 @@ class Radio {
  public:
   inline SoapySDR::Device* RawDev() const { return dev_; };
 
-  // preStreamRate/preStreamFreq (when > 0) are applied to RX+TX BEFORE the
-  // streams are opened -- required for backends (Houdini) that forbid a live
-  // sample-rate change once a stream is open. 0 leaves them to dev_init (Iris).
+  // preStreamRxRate/preStreamTxRate/preStreamFreq (when non-zero) are applied
+  // BEFORE the streams are opened -- required for backends (Houdini) that forbid
+  // a live sample-rate change once a stream is open. RX and TX rates are set
+  // independently because the Houdini BS beacon replays at the DAC max rate
+  // while its RX runs at the sounder rate. preStreamTxRate < 0 means "use the
+  // device's maximum TX sample rate" (Houdini replay). 0 leaves a rate to
+  // dev_init (Iris path unchanged).
   Radio(const SoapySDR::Kwargs& args, const char soapyFmt[],
         const std::vector<size_t>& channels,
         const SoapySDR::Kwargs& rxStreamArgs = SoapySDR::Kwargs(),
         const SoapySDR::Kwargs& txStreamArgs = SoapySDR::Kwargs(),
-        double preStreamRate = 0.0, double preStreamFreq = 0.0);
+        double preStreamRxRate = 0.0, double preStreamTxRate = 0.0,
+        double preStreamFreq = 0.0);
   ~Radio(void);
   int recv(void* const* buffs, int samples, long long& frameTime);
   int activateRecv(const long long rxTime = 0, const size_t numSamps = 0,

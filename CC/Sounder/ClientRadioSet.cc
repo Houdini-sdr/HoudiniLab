@@ -305,9 +305,10 @@ void ClientRadioSet::init(ClientRadioContext* context) {
   try {
     radios.at(i) = nullptr;
     // Houdini needs rate+NCO set before the stream opens; Iris passes 0 and
-    // keeps configuring in dev_init.
+    // keeps configuring in dev_init. UE streams RX and TX at the app rate.
     radios.at(i) = new Radio(args, SOAPY_SDR_CS16, channels, rx_stream_args,
                              tx_stream_args,
+                             _cfg->is_houdini() ? _cfg->rate() : 0.0,
                              _cfg->is_houdini() ? _cfg->rate() : 0.0,
                              _cfg->is_houdini() ? _cfg->nco() : 0.0);
   } catch (std::runtime_error& err) {

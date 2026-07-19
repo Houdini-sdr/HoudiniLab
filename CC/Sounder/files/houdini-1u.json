@@ -6,7 +6,7 @@
 	"frequency" : 500e6,
 	"nco_frequency" : 500e6,
 	"sample_rate" : 122.88e6,
-	"channel" : "A",
+	"channel" : "B",
 	"frame_schedule" : [
 		"BGGGGGGGGGGGGGGGGGGGGGGGGGGGGG"
 	],
