@@ -249,6 +249,7 @@ target_link_libraries(beacon_tx_gold -lpthread
 add_executable(houdini_bs_ue_sync
     tests/comms-func/houdini_bs_ue_sync.cc
     ${SOUNDER_SOURCES})
+target_include_directories(houdini_bs_ue_sync PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(houdini_bs_ue_sync -lpthread --enable-threadsafe ${GFLAGS_LIBRARIES} ${UHD_LIBRARIES}
     ${SoapySDR_LIBRARIES}
     ${HDF5_LIBRARIES}
