@@ -415,16 +415,15 @@ void BaseRadioSet::armHoudiniBeacon(void) {
   }
 
   // Load the replay RAM + arm free-running on the beacon radio's TX. The TX
-  // stream is bound to the BS channel (the wired DAC), so xmit targets it.
-  // Every BS radio's RX is activated so the BS can receive the reverse link
-  // (UE pilots) once bidirectional wiring is present.
+  // stream is bound to the BS channel (the wired DAC), so xmit targets it. RX
+  // is NOT activated here: it would sit unread (overflowing) until the caller is
+  // ready to receive -- activateHoudiniRx() starts it on demand.
   const void* buffs[1] = {iq.data()};
   long long t0 = 0;
   for (size_t c = 0; c < bsRadios.size(); ++c) {
     for (size_t i = 0; i < bsRadios.at(c).size(); ++i) {
-      Radio* r = bsRadios.at(c).at(i);
-      r->activateRecv();
       if (i != _cfg->beacon_radio()) continue;
+      Radio* r = bsRadios.at(c).at(i);
       r->xmit(buffs, static_cast<int>(n_load), 0, t0);  // load replay RAM
       r->activateXmit();                                // arm free-running loop
       MLPD_INFO(
@@ -433,6 +432,15 @@ void BaseRadioSet::armHoudiniBeacon(void) {
           n_load, n_load / kUpsample, c, i);
     }
   }
+}
+
+void BaseRadioSet::activateHoudiniRx(void) {
+  // Start the BS RX streams on demand (the reverse link / UE pilots). Kept
+  // separate from beacon arming so the RX stream is not left overflowing while
+  // the caller is busy elsewhere (e.g. waiting for the UE to acquire).
+  for (size_t c = 0; c < bsRadios.size(); ++c)
+    for (size_t i = 0; i < bsRadios.at(c).size(); ++i)
+      bsRadios.at(c).at(i)->activateRecv();
 }
 
 BaseRadioSet::~BaseRadioSet(void) {

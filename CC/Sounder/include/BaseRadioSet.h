@@ -48,6 +48,12 @@ class BaseRadioSet {
   // Houdini BS: load the Gold beacon into the beacon radio's TX replay RAM and
   // arm it free-running (the software-framer/Iris trigger path is bypassed).
   void armHoudiniBeacon(void);
+
+ public:
+  // Houdini BS: start the RX streams on demand (reverse link / UE pilots).
+  void activateHoudiniRx(void);
+
+ private:
   void sync_delays(size_t cellIdx);
   SoapySDR::Device* baseRadio(size_t cellId);
   int syncTimeOffset();

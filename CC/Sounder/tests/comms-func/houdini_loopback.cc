@@ -87,6 +87,8 @@ int main(int argc, char** argv) {
   if (sidx < 0) { std::fprintf(stderr, "UE never synced\n"); return 1; }
 
   // --- Phase 2: UE transmits the pilot (reverse), BS receives it ---
+  // Start the BS RX only now (fresh), so it hasn't overflowed during the sync.
+  bs.activateHoudiniRx();
   const size_t bwin = static_cast<size_t>(2 * frame);  // >= 1 pilot period
   std::vector<ci16> bbuf(bwin);
   long long tx_base = ue_time + 10 * frame;  // ~10 ms ahead on the UE clock
