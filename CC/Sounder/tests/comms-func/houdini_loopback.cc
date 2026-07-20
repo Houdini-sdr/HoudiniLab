@@ -15,6 +15,7 @@
  */
 #include <sys/types.h>
 
+#include <atomic>
 #include <chrono>
 #include <complex>
 #include <cstdint>
@@ -22,6 +23,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "include/BaseRadioSet.h"
@@ -86,41 +88,52 @@ int main(int argc, char** argv) {
               ue_time);
   if (sidx < 0) { std::fprintf(stderr, "UE never synced\n"); return 1; }
 
-  // --- Phase 2: UE transmits the pilot (reverse), BS receives it ---
+  // --- Phase 2: UE transmits the pilot continuously (reverse), BS receives ---
+  // The two boards are not clock-synced, so absolute-time (scheduled-burst)
+  // coordination between the UE TX and the BS RX is impossible. Instead the UE
+  // streams the pilot continuously (flags=0 = immediate) from a background
+  // thread, so a pilot is always on the wire whenever the BS captures.
   // Start the BS RX only now (fresh), so it hasn't overflowed during the sync.
   bs.activateHoudiniRx();
-  const size_t bwin = static_cast<size_t>(2 * frame);  // >= 1 pilot period
+  const size_t bwin = static_cast<size_t>(2 * frame);
   std::vector<ci16> bbuf(bwin);
-  long long tx_base = ue_time + 10 * frame;  // ~10 ms ahead on the UE clock
-  std::printf("[rev] UE TX pilot (%d samp/slot) 1/frame; BS RX window %zu\n\n",
-              slot, bwin);
+  std::printf("[rev] UE streaming pilot continuously; BS RX window %zu\n\n",
+              bwin);
+
+  std::atomic<bool> tx_run{true};
+  std::atomic<long long> tx_calls{0};
+  std::thread txth([&] {
+    const void* tb[1] = {pilot.data()};
+    while (tx_run.load()) {
+      long long tt = 0;
+      ue.radioTx(0, tb, slot, 0, tt);  // flags=0 -> immediate streaming
+      tx_calls.fetch_add(1);
+    }
+  });
 
   int hits = 0;
   for (int it = 0; it < iters; ++it) {
-    const long long txT = tx_base + static_cast<long long>(it) * frame;
-    const void* tb[1] = {pilot.data()};
-    long long tt = txT;
-    const int r = ue.radioTx(0, tb, slot, kStreamEndBurst, tt);
-
     long long bt = 0;
     void* bb[1] = {bbuf.data()};
     const int rr = bs.radioRx(0, 0, bb, static_cast<int>(bwin), bt);
-
     ssize_t idx = -1;
     if (rr == static_cast<int>(bwin)) {
       idx = detect(bbuf.data(), gold, bwin, scale);
-      if (idx < 0) {  // try the other conj sense
+      if (idx < 0) {  // try the other conj sense (R2C)
         for (auto& c : bbuf) c = ci16(c.real(), static_cast<int16_t>(-c.imag()));
         idx = detect(bbuf.data(), gold, bwin, scale);
       }
     }
     if (idx >= 0) ++hits;
-    std::printf("it %2d: UE txTime=%lld tx=%d/%d | BS rx=%d find_beacon=%zd %s\n",
-                it, txT, r, slot, rr, idx,
+    std::printf("it %2d: BS rx=%d  find_beacon=%zd  %s\n", it, rr, idx,
                 idx >= 0 ? "*** UE PILOT @ BS ***" : "");
     std::fflush(stdout);
   }
-  std::printf("\n%d/%d BS captures detected the UE pilot -- reverse link %s\n",
-              hits, iters, hits > 0 ? "CLOSED" : "not detected");
+  tx_run.store(false);
+  txth.join();
+  std::printf(
+      "\n%d/%d BS captures detected the UE pilot (%lld UE tx calls) -- reverse "
+      "link %s\n",
+      hits, iters, tx_calls.load(), hits > 0 ? "CLOSED" : "not detected");
   return hits > 0 ? 0 : 1;
 }
