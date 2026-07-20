@@ -481,7 +481,10 @@ void BaseRadioSet::init(BaseRadioContext* context) {
         "tcp://" + _cfg->bs_sdr_ids().at(c).at(i) + ":" + _cfg->remote_port();
     args["remote:driver"] = "houdinisdr-device";
     args["remote:type"] = "houdinisdr";
-    rx_stream_args["local_port"] = std::to_string(10100 + i);
+    // The FPGA egresses RX to the fixed fpga_port (10002 for ch1); the host must
+    // bind that same port. The BS and UE are on different interface IPs, so both
+    // can bind 10002 without colliding.
+    rx_stream_args["local_port"] = "10002";
     tx_stream_args["tx_mode"] = "replay";
   } else if (kUseSoapyUHD == false) {
     args["driver"] = "iris";
