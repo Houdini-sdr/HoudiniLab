@@ -254,3 +254,14 @@ target_link_libraries(houdini_bs_ue_sync -lpthread --enable-threadsafe ${GFLAGS_
     ${SoapySDR_LIBRARIES}
     ${HDF5_LIBRARIES}
     ${MUFFT_LIBRARIES})
+
+# HIL closed-loop: BS beacon -> UE sync -> UE pilot -> BS receive, all through
+# the real BaseRadioSet + ClientRadioSet over the bidirectional Houdini link.
+add_executable(houdini_loopback
+    tests/comms-func/houdini_loopback.cc
+    ${SOUNDER_SOURCES})
+target_include_directories(houdini_loopback PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(houdini_loopback -lpthread --enable-threadsafe ${GFLAGS_LIBRARIES} ${UHD_LIBRARIES}
+    ${SoapySDR_LIBRARIES}
+    ${HDF5_LIBRARIES}
+    ${MUFFT_LIBRARIES})

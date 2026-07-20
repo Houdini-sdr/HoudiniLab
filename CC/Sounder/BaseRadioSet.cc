@@ -416,12 +416,15 @@ void BaseRadioSet::armHoudiniBeacon(void) {
 
   // Load the replay RAM + arm free-running on the beacon radio's TX. The TX
   // stream is bound to the BS channel (the wired DAC), so xmit targets it.
+  // Every BS radio's RX is activated so the BS can receive the reverse link
+  // (UE pilots) once bidirectional wiring is present.
   const void* buffs[1] = {iq.data()};
   long long t0 = 0;
   for (size_t c = 0; c < bsRadios.size(); ++c) {
     for (size_t i = 0; i < bsRadios.at(c).size(); ++i) {
-      if (i != _cfg->beacon_radio()) continue;
       Radio* r = bsRadios.at(c).at(i);
+      r->activateRecv();
+      if (i != _cfg->beacon_radio()) continue;
       r->xmit(buffs, static_cast<int>(n_load), 0, t0);  // load replay RAM
       r->activateXmit();                                // arm free-running loop
       MLPD_INFO(
