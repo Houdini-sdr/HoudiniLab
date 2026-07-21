@@ -600,7 +600,11 @@ void BaseRadioSet::adjustDelays() {
 }
 
 void BaseRadioSet::radioStart() {
-  if (!kUseSoapyUHD) {
+  if (_cfg->is_houdini()) {
+    // No Iris hardware trigger; start the BS RX streams (reverse link) here,
+    // right before loopRecv begins receiving, so they don't overflow while idle.
+    activateHoudiniRx();
+  } else if (!kUseSoapyUHD) {
     radioTrigger();
   }
 }
@@ -652,6 +656,14 @@ void BaseRadioSet::radioTx(const void* const* buffs) {
 int BaseRadioSet::radioTx(size_t radio_id, size_t cell_id,
                           const void* const* buffs, int flags,
                           long long& frameTime) {
+  if (_cfg->is_houdini()) {
+    // The Houdini BS beacon is a free-running device replay armed at init, so
+    // loopRecv's per-frame software beacon TX (baseTxBeacon) is a no-op here --
+    // writing to the replay-mode TX stream would corrupt the loaded beacon.
+    // Report the full slot as "sent" so baseTxBeacon doesn't log BAD Transmit.
+    (void)radio_id; (void)cell_id; (void)buffs; (void)flags; (void)frameTime;
+    return static_cast<int>(_cfg->samps_per_slot());
+  }
   int w;
   // for UHD device xmit from host using frameTimeNs
   if (!kUseSoapyUHD) {

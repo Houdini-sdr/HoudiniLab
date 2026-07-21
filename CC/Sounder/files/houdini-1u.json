@@ -3,6 +3,7 @@
 	"serial_file" : "files/topology-houdini.json",
 	"radio_type" : "houdini",
 	"remote_port" : "55132",
+	"bs_hw_framer" : false,
 	"frequency" : 500e6,
 	"nco_frequency" : 500e6,
 	"sample_rate" : 122.88e6,
