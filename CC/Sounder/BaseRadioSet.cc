@@ -704,17 +704,18 @@ int BaseRadioSet::radioRx(size_t radio_id, size_t cell_id, void* const* buffs,
   if (radio_id < bsRadios.at(cell_id).size()) {
     long long frameTimeNs = 0;
     ret = bsRadios.at(cell_id).at(radio_id)->recv(buffs, numSamps, frameTimeNs);
-    if (_cfg->is_houdini() && getenv("HOUDINI_RX_DEBUG") != nullptr) {
+    if (_cfg->is_houdini() && getenv("HOUDINI_RX_DEBUG") != nullptr &&
+        ret > 0 && buffs[0] != nullptr) {
       static std::atomic<int> cnt{0};
-      if ((cnt.fetch_add(1) % 300) == 0 && ret > 0 && buffs[0] != nullptr) {
+      if ((cnt.fetch_add(1) % 37) == 0) {
         const int16_t* p = static_cast<const int16_t*>(buffs[0]);
         double s = 0; int amax = 0;
         for (int i = 0; i < ret * 2; ++i) {
           s += double(p[i]) * p[i];
           amax = std::max(amax, std::abs((int)p[i]));
         }
-        MLPD_INFO("Houdini BS radioRx dbg: ret=%d rms=%.3f absmax=%d\n", ret,
-                  std::sqrt(s / (ret * 2)), amax);
+        MLPD_INFO("Houdini BS radioRx dbg: buf=%p ret=%d rms=%.3f absmax=%d\n",
+                  buffs[0], ret, std::sqrt(s / (ret * 2)), amax);
       }
     }
     // for UHD device recv using ticks
