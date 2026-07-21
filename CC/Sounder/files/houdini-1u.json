@@ -9,7 +9,7 @@
 	"sample_rate" : 122.88e6,
 	"channel" : "B",
 	"frame_schedule" : [
-		"BGGGGGGGGGGGGGGGGGGGGGGGGGGGGG"
+		"BGPGGGGGGGGGGGGGGGGGGGGGGGGGGG"
 	],
 	"max_frame" : 20,
 	"ofdm_symbol_per_slot" : 48,
