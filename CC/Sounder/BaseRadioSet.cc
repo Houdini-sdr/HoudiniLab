@@ -387,9 +387,10 @@ void BaseRadioSet::armHoudiniBeacon(void) {
     const auto& sched = _cfg->bs_array_frames().at(0).at(0);
     MLPD_INFO("Houdini BS sched dbg: bs_array_frames[0][0]=\"%s\"\n",
               sched.c_str());
-    for (int s = 0; s < 6 && s < static_cast<int>(sched.size()); ++s)
+    for (int s = 0; s < 6 && s < static_cast<int>(sched.size()); ++s) {
       MLPD_INFO("  slot %d char=%c isPilot=%d isUlData=%d\n", s, sched.at(s),
                 (int)_cfg->isPilot(0, 0, s), (int)_cfg->isUlData(0, 0, s));
+    }
   }
 
   // Rebuild the STS+gold core of config's beacon (indices [prefix, prefix+
