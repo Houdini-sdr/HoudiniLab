@@ -383,16 +383,6 @@ void BaseRadioSet::armHoudiniBeacon(void) {
   constexpr int kReplayDepth = 4096;  // Houdini TX replay RAM depth (samples)
   constexpr int kUpsample = 8;        // DAC max (983.04) / app rate (122.88)
 
-  if (getenv("HOUDINI_RX_DEBUG") != nullptr) {
-    const auto& sched = _cfg->bs_array_frames().at(0).at(0);
-    MLPD_INFO("Houdini BS sched dbg: bs_array_frames[0][0]=\"%s\"\n",
-              sched.c_str());
-    for (int s = 0; s < 6 && s < static_cast<int>(sched.size()); ++s) {
-      MLPD_INFO("  slot %d char=%c isPilot=%d isUlData=%d\n", s, sched.at(s),
-                (int)_cfg->isPilot(0, 0, s), (int)_cfg->isUlData(0, 0, s));
-    }
-  }
-
   // Rebuild the STS+gold core of config's beacon (indices [prefix, prefix+
   // beacon_size) skip the zero pre/postfix). Conjugate it: the matched-NCO R2C
   // mixer delivers the beacon conjugated and receiver.cc::syncSearch feeds the
@@ -714,20 +704,6 @@ int BaseRadioSet::radioRx(size_t radio_id, size_t cell_id, void* const* buffs,
   if (radio_id < bsRadios.at(cell_id).size()) {
     long long frameTimeNs = 0;
     ret = bsRadios.at(cell_id).at(radio_id)->recv(buffs, numSamps, frameTimeNs);
-    if (_cfg->is_houdini() && getenv("HOUDINI_RX_DEBUG") != nullptr &&
-        ret > 0 && buffs[0] != nullptr) {
-      static std::atomic<int> cnt{0};
-      if ((cnt.fetch_add(1) % 37) == 0) {
-        const int16_t* p = static_cast<const int16_t*>(buffs[0]);
-        double s = 0; int amax = 0;
-        for (int i = 0; i < ret * 2; ++i) {
-          s += double(p[i]) * p[i];
-          amax = std::max(amax, std::abs((int)p[i]));
-        }
-        MLPD_INFO("Houdini BS radioRx dbg: buf=%p ret=%d rms=%.3f absmax=%d\n",
-                  buffs[0], ret, std::sqrt(s / (ret * 2)), amax);
-      }
-    }
     // for UHD device recv using ticks
     if (kUseSoapyUHD == false)
       frameTime = frameTimeNs;
