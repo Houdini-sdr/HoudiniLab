@@ -13,6 +13,8 @@
 #include <cmath>
 #include <complex>
 #include <cstdint>
+#include <sstream>
+#include <string>
 #include <vector>
 
 #include "SoapySDR/Errors.hpp"
@@ -252,11 +254,17 @@ BaseRadioSet::BaseRadioSet(Config* cfg, const bool calibrate_proc) : _cfg(cfg) {
                  "discovered in the network!\033[0m"
               << std::endl;
   } else if (_cfg->is_houdini()) {
-    // Houdini BS: no HW framer / TDD / trigger / calibration. The beacon is a
-    // free-running device replay of the Gold sequence receiver.cc syncSearch
-    // matches -- fold in what beacon_tx_gold did, driven by the sounder itself.
-    armHoudiniBeacon();
-    MLPD_INFO("%s done (Houdini replay beacon)!\n", __func__);
+    // Houdini BS. bs_hw_framer=true -> native TDD framer (beacon replay strobe +
+    // rx_gate on the pilot slots; loopRecv's HW-framer true-path receives only
+    // those slots, tagged). bs_hw_framer=false -> free-running replay beacon +
+    // the software-framer read-every-slot path.
+    if (_cfg->bs_hw_framer()) {
+      armHoudiniTdd();
+      MLPD_INFO("%s done (Houdini native TDD framer)!\n", __func__);
+    } else {
+      armHoudiniBeacon();
+      MLPD_INFO("%s done (Houdini replay beacon)!\n", __func__);
+    }
   } else {
     if (calibrate_proc && _cfg->sample_cal_en() == true) {
       this->syncTimeOffset();
@@ -379,7 +387,7 @@ BaseRadioSet::BaseRadioSet(Config* cfg, const bool calibrate_proc) : _cfg(cfg) {
   }
 }
 
-void BaseRadioSet::armHoudiniBeacon(void) {
+void BaseRadioSet::buildHoudiniBeacon(std::vector<int16_t>& iq) {
   constexpr int kReplayDepth = 4096;  // Houdini TX replay RAM depth (samples)
   constexpr int kUpsample = 8;        // DAC max (983.04) / app rate (122.88)
 
@@ -406,13 +414,20 @@ void BaseRadioSet::armHoudiniBeacon(void) {
   float peak = 1e-30f;
   for (const auto& v : loop) peak = std::max(peak, std::abs(v));
   const size_t n_load = loop.size();
-  std::vector<int16_t> iq(n_load * 2);
+  iq.assign(n_load * 2, 0);
   for (size_t k = 0; k < n_load; ++k) {
     iq[2 * k] =
         static_cast<int16_t>(std::lround(loop[k].real() / peak * 0.6f * 32767));
     iq[2 * k + 1] =
         static_cast<int16_t>(std::lround(loop[k].imag() / peak * 0.6f * 32767));
   }
+}
+
+void BaseRadioSet::armHoudiniBeacon(void) {
+  constexpr int kUpsample = 8;
+  std::vector<int16_t> iq;
+  buildHoudiniBeacon(iq);
+  const size_t n_load = iq.size() / 2;
 
   // Load the replay RAM + arm free-running on the beacon radio's TX. The TX
   // stream is bound to the BS channel (the wired DAC), so xmit targets it. RX
@@ -441,6 +456,128 @@ void BaseRadioSet::activateHoudiniRx(void) {
   for (size_t c = 0; c < bsRadios.size(); ++c)
     for (size_t i = 0; i < bsRadios.at(c).size(); ++i)
       bsRadios.at(c).at(i)->activateRecv();
+}
+
+// ---- Houdini native-TDD framer (bs_hw_framer + radio_type=houdini) ----------
+namespace {
+constexpr long long kTddGridTicks = 384;    // 3.125 us grid
+constexpr long long kTddQuantumNs = 3125;
+constexpr long long kTddArmMargin = 36864000;  // ~300 ms of ticks
+inline long long tddNsOfTick(long long t) {
+  return (t / kTddGridTicks) * kTddQuantumNs;  // t must be grid-aligned
+}
+}  // namespace
+
+long long BaseRadioSet::houdiniArmTdd(SoapySDR::Device* dev,
+                                      long long symbol_ticks,
+                                      long long symbols_per_frame) {
+  const std::string arm = "symbol_ticks=" + std::to_string(symbol_ticks) +
+                          ",symbols_per_frame=" + std::to_string(symbols_per_frame) +
+                          ",margin=" + std::to_string(kTddArmMargin);
+  long long epoch = 0;
+  bool accepted = false;
+  for (int attempt = 0; attempt < 4 && !accepted; ++attempt) {
+    dev->writeSetting("TDD_ARM", arm);
+    std::stringstream ss(dev->readSetting("TDD_ARM"));
+    std::string tok;
+    while (ss >> tok) {
+      const auto eq = tok.find('=');
+      if (eq == std::string::npos) continue;
+      const std::string k = tok.substr(0, eq), v = tok.substr(eq + 1);
+      if (k == "epoch") epoch = std::stoll(v);
+      if (k == "accepted") accepted = (v == "1");
+    }
+    if (!accepted) dev->writeSetting("TDD_CMD", "abort");
+  }
+  if (!accepted) throw std::runtime_error("Houdini TDD_ARM rejected");
+  return epoch;
+}
+
+void BaseRadioSet::armHoudiniTdd(void) {
+  // TDD symbol == the sounder slot (samps_per_slot, chosen grid-aligned in the
+  // config), so rx_gate on a slot gates the ADC to exactly that slot.
+  htdd_symbol_ticks_ = static_cast<long long>(_cfg->samps_per_slot());
+  if (htdd_symbol_ticks_ % kTddGridTicks != 0) {
+    throw std::runtime_error(
+        "Houdini TDD needs samps_per_slot a multiple of 384 (grid); adjust "
+        "ofdm_tx_zero_prefix/postfix");
+  }
+  const size_t spf = _cfg->slot_per_frame();
+  htdd_frame_ticks_ = static_cast<long long>(spf) * htdd_symbol_ticks_;
+  htdd_tick_rate_ = _cfg->rate();
+
+  std::vector<int16_t> iq;
+  buildHoudiniBeacon(iq);
+  const size_t n_load = iq.size() / 2;
+  const void* buffs[1] = {iq.data()};
+
+  for (size_t c = 0; c < bsRadios.size(); ++c) {
+    for (size_t i = 0; i < bsRadios.at(c).size(); ++i) {
+      if (i != _cfg->beacon_radio()) continue;
+      Radio* r = bsRadios.at(c).at(i);
+      auto* dev = r->RawDev();
+      // Schedule from the BS frame: 'B' beacon -> replay strobe + rx_gate ('6');
+      // 'P'/'R'/'U'/'N' uplink -> rx_gate ('2'); everything else guard ('0').
+      const std::string& sched = _cfg->bs_array_frames().at(c).at(i);
+      std::string tdd(spf, '0');
+      htdd_rx_slots_.clear();
+      for (size_t s = 0; s < spf && s < sched.size(); ++s) {
+        const char ch = sched.at(s);
+        if (ch == 'B') {
+          tdd[s] = '6';
+        } else if (ch == 'P' || ch == 'R' || ch == 'U' || ch == 'N') {
+          tdd[s] = '2';
+          htdd_rx_slots_.push_back(s);
+        }
+      }
+      const size_t tx_ch = _cfg->beacon_channel();
+      long long t0 = 0;
+      r->xmit(buffs, static_cast<int>(n_load), 0, t0);  // load replay RAM
+      dev->writeSetting("TDD_SCHED", tdd);
+      dev->writeSetting("TDD_REPLAY_STROBE",
+                        "ch" + std::to_string(tx_ch) +
+                            ":len=" + std::to_string(n_load / 2) +
+                            ",offs=" + std::to_string(kTddGridTicks));
+      htdd_epoch_ = houdiniArmTdd(dev, htdd_symbol_ticks_,
+                                  static_cast<long long>(spf));
+      htdd_rx_cursor_ = 0;
+      htdd_last_win_tick_ = 0;
+      MLPD_INFO(
+          "Houdini BS TDD armed: sched=%s epoch=%lld frame=%lld ticks, "
+          "%zu rx slot(s), beacon replay %zu samp\n",
+          tdd.c_str(), htdd_epoch_, htdd_frame_ticks_, htdd_rx_slots_.size(),
+          n_load);
+    }
+  }
+}
+
+int BaseRadioSet::houdiniTddRx(size_t radio_id, void* const* buffs,
+                               long long& frameTime) {
+  if (htdd_rx_slots_.empty()) return 0;
+  Radio* r = bsRadios.at(0).at(radio_id);
+  auto* dev = r->RawDev();
+
+  // Next rx slot (round-robin across the frame's rx slots).
+  const size_t slot = htdd_rx_slots_.at(htdd_rx_cursor_);
+  htdd_rx_cursor_ = (htdd_rx_cursor_ + 1) % htdd_rx_slots_.size();
+
+  // Window tick = epoch + k*frame + slot*symbol_ticks, chosen a couple frames
+  // ahead of now and strictly after the last window (monotonic).
+  const long long now = static_cast<long long>(
+      std::llround(static_cast<double>(dev->getHardwareTime("")) *
+                   htdd_tick_rate_ / 1e9));
+  long long k = std::max((now - htdd_epoch_) / htdd_frame_ticks_ + 2, 1LL);
+  long long wt = htdd_epoch_ + k * htdd_frame_ticks_ +
+                 static_cast<long long>(slot) * htdd_symbol_ticks_;
+  while (wt <= htdd_last_win_tick_) wt += htdd_frame_ticks_;
+  htdd_last_win_tick_ = wt;
+
+  const int n = static_cast<int>(_cfg->samps_per_slot());
+  const int got = r->recvTddWindow(buffs, n, tddNsOfTick(wt));
+  const long long frame_id = (wt - htdd_epoch_) / htdd_frame_ticks_;
+  // Tag like the Iris HW framer so the unmodified loopRecv true-path decodes it.
+  frameTime = (frame_id << 32) | (static_cast<long long>(slot) << 16);
+  return got;
 }
 
 BaseRadioSet::~BaseRadioSet(void) {
@@ -601,9 +738,10 @@ void BaseRadioSet::adjustDelays() {
 
 void BaseRadioSet::radioStart() {
   if (_cfg->is_houdini()) {
-    // No Iris hardware trigger; start the BS RX streams (reverse link) here,
-    // right before loopRecv begins receiving, so they don't overflow while idle.
-    activateHoudiniRx();
+    // Native TDD (bs_hw_framer): the framer is armed and RX windows are armed
+    // per-recv (houdiniTddRx), so nothing to start here. Software-framer path:
+    // start the continuous BS RX streams (they'd overflow if started at ctor).
+    if (!_cfg->bs_hw_framer()) activateHoudiniRx();
   } else if (!kUseSoapyUHD) {
     radioTrigger();
   }
@@ -693,6 +831,12 @@ void BaseRadioSet::radioRx(void* const* buffs) {
 
 int BaseRadioSet::radioRx(size_t radio_id, size_t cell_id, void* const* buffs,
                           long long& frameTime) {
+  if (_cfg->is_houdini() && _cfg->bs_hw_framer()) {
+    // Native-TDD gated receive: arm a timed window at the next rx slot and tag
+    // frameTime = (frame<<32)|(slot<<16), which loopRecv's HW-framer true-path
+    // decodes to record the real pilot slot (fixing the software-path zeros).
+    return this->houdiniTddRx(radio_id, buffs, frameTime);
+  }
   return this->radioRx(radio_id, cell_id, buffs, _cfg->samps_per_slot(),
                        frameTime);
 }

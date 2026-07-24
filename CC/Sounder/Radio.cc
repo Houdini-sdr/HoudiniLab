@@ -238,6 +238,36 @@ int Radio::recvHoudini(void* const* buffs, int samples, long long& frameTime) {
   return got;
 }
 
+int Radio::recvTddWindow(void* const* buffs, int samples, long long start_ns) {
+  // The Houdini TDD framer gates the ADC to the scheduled rx_gate symbol; a
+  // HAS_TIME activate arms the capture at that symbol's tick, so this returns the
+  // pilot-slot samples and nothing else. activate -> drain-read -> deactivate.
+  constexpr size_t kBytesPerSamp = 4;  // CS16
+  const int flags = SOAPY_SDR_HAS_TIME | SOAPY_SDR_END_BURST;
+  int rc = dev_->activateStream(rxs_, flags, start_ns,
+                                static_cast<size_t>(samples));
+  if (rc != 0) {
+    MLPD_ERROR("recvTddWindow: activateStream rc=%d (%s)\n", rc,
+               SoapySDR::errToStr(rc));
+    dev_->deactivateStream(rxs_);
+    return rc;
+  }
+  std::vector<void*> cur(num_rx_ch_);
+  for (size_t c = 0; c < num_rx_ch_; c++) cur[c] = buffs[c];
+  int got = 0;
+  while (got < samples) {
+    int f = 0;
+    long long t = 0;
+    int r = dev_->readStream(rxs_, cur.data(), samples - got, f, t, 1000000);
+    if (r <= 0) break;
+    got += r;
+    for (size_t c = 0; c < num_rx_ch_; c++)
+      cur[c] = static_cast<uint8_t*>(cur[c]) + r * kBytesPerSamp;
+  }
+  dev_->deactivateStream(rxs_);
+  return got;
+}
+
 int Radio::recv(void* const* buffs, int samples, long long& frameTime) {
   if (houdini_) return recvHoudini(buffs, samples, frameTime);
   int flags(0);
