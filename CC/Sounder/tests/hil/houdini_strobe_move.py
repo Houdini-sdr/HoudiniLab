@@ -145,11 +145,11 @@ def main():
     match /= np.sqrt(np.sum(np.abs(match) ** 2)) + 1e-30
 
     REF = GRID_TICKS
-    tests = [(SYM // 4) // GRID_TICKS * GRID_TICKS,
-             (SYM // 2) // GRID_TICKS * GRID_TICKS,
-             (3 * SYM // 4) // GRID_TICKS * GRID_TICKS]
-    # bracketed sequence: ref, t1, ref, t2, ref, t3, ref
-    seq = [REF]
+    # small deltas (>> burst 256, << frame) so 1:1 is unambiguous, no wrap
+    tests = [REF + 3840, REF + 11520, REF + 23040]  # +31us, +94us, +188us
+    # First N ref captures measure the STABLE drift + REPRODUCIBILITY (same offset
+    # -> same position?), then bracket each small-delta test: ref, t, ref, t, ...
+    seq = [REF] * 5
     for t in tests:
         seq += [t, REF]
 
@@ -164,8 +164,12 @@ def main():
         tsd.writeSetting("TDD_REPLAY_STROBE", f"ch{a.tx_ch}:len={a.n_load//2},offs={REF}")
         r = _arm(tsd, symbol_ticks=SYM, symbols_per_frame=a.spf, margin=ARM_MARGIN)
         assert r.get("accepted") == 1, f"arm rejected: {r}"
+        print(f"  armed once: epoch={r['epoch']}  frame_rx={frame_rx:.0f} samp  ref_offs={REF}")
+        print("  settling 3 s + 2 warmup captures ...")
+        for _ in range(2):  # warmup: discard post-arm transient
+            cap_measure(rsd, a.rx_ch, rnative, rdtype, match, a.center_mhz * 1e6,
+                        rx_rate, frame_rx, a.secs, a.cap_mb)
         t_zero = time.monotonic()
-        print(f"  armed once: epoch={r['epoch']}  frame_rx={frame_rx:.0f} samp  ref_offs={REF}\n")
         print("   step  offset(tk)  wall(s)  phase(samp)  period(samp)  z")
         for off in seq:
             tsd.writeSetting("TDD_REPLAY_STROBE",
@@ -199,10 +203,15 @@ def main():
     rpu = rp.copy()
     for i in range(1, len(rpu)):
         rpu[i] = rpu[i - 1] + wrap(rp[i] - rpu[i - 1], P)
-    drift_slope = np.polyfit(rt, rpu, 1)[0]  # samples/sec
-    print(f"\n  measured frame period ~{np.nanmean([r[3] for r in rec if r[3]]):.1f} samp "
-          f"(ideal {P}); DRIFT ~{drift_slope:+.0f} samp/s "
-          f"({drift_slope/P*1e3:+.2f} frame-offset ppm-ish per s)")
+    coef = np.polyfit(rt, rpu, 1)
+    drift_slope = coef[0]  # samples/sec
+    resid = rpu - np.polyval(coef, rt)  # reproducibility: scatter about the drift line
+    print(f"\n  same-offset drift line: DRIFT ~{drift_slope:+.0f} samp/s "
+          f"({abs(drift_slope)/rx_rate*1e6:.1f} ppm); "
+          f"REPRODUCIBILITY residual = {resid.std():.0f} samp rms "
+          f"(burst {burst_rx}) over {len(refs)} ref captures")
+    print("    -> if residual << burst, the live rewrite is DETERMINISTIC (same offset "
+          "=> same place); if >> burst, it is non-deterministic (method 1 dead)")
 
     def ref_baseline(tw):  # unwrapped drift baseline interpolated to time tw
         return np.interp(tw, rt, rpu)
