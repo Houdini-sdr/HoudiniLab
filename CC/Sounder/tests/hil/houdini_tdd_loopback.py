@@ -118,7 +118,7 @@ def main():
     bs_tx = bsd.setupStream(SOAPY_SDR_TX, native, [a.tx_ch], {"tx_mode": "replay"})
     bs_rx = bsd.setupStream(SOAPY_SDR_RX, native, [a.rx_ch], rx_stream_args(a.rx_ch))
     ue_tx = ued.setupStream(SOAPY_SDR_TX, ue["native_fmt"], [a.tx_ch], {"tx_mode": "replay"})
-    ue_rx = ued.setupStream(SOAPY_SDR_RX, ue["native_fmt"], [a.rx_ch], rx_stream_args(a.rx_ch))
+    # UE RX (beacon detect) uses capture_rx, which opens/closes its own RX stream.
     per_packet = rx_framing(bsd, verbose=False)["frame_words"] * (8 // bps)
     cap = (int(SYM * spt) // 2 // per_packet) * per_packet
     step = max(GRID_TICKS, int(round(a.step_us * 1e-6 * tick_rate)) // GRID_TICKS * GRID_TICKS)
@@ -166,18 +166,16 @@ def main():
         epoch_bs = arm_bs()
         print(f"  BS armed: epoch={epoch_bs}  RX window {cap} samp @ pilot slot\n")
 
-        # --- beacon-phase cross-check: UE free-runs, detects the BS beacon ---
-        t0 = _hw_tick(ued, tick_rate)
+        # --- the UE can hear the BS beacon (the timing reference). The absolute
+        #     UE<->BS clock offset is unknown, so the exact pilot offset can't be
+        #     predicted in closed form -- the sweep finds it (== what a beacon-
+        #     referenced UE epoch would give). Here we just confirm the beacon. ---
         buf, _summ = hs.capture_rx(ued, a.rx_ch, ue["native_fmt"], dtype,
                                    duration_sec=0.05, capture_bytes=8 << 20)
         iqb = np.asarray(hs.iq_from_lanes(hs.cs16_lanes(buf), "interleaved"),
                          dtype=np.complex128)
-        db_b, pk_b = detect(iqb, match, a.center_mhz * 1e6, rx_rate)
-        beacon_tick = t0 + int(round(pk_b / rx_rate * tick_rate))
-        beacon_phase = (beacon_tick - epoch_bs) % frame       # note: BS epoch, UE tick (offset absorbed by sweep)
-        pred = (beacon_phase + a.pilot_sym * SYM) % frame
-        print(f"  UE beacon detect: {db_b:.1f} dB; beacon frame-phase ~{beacon_phase} ticks "
-              f"({beacon_phase/tick_rate*1e6:.1f} us); predicted pilot offset ~{pred} ticks\n")
+        db_b, _pk_b = detect(iqb, match, a.center_mhz * 1e6, rx_rate)
+        print(f"  UE hears BS beacon: {db_b:.1f} dB (the frame-timing reference)\n")
 
         # --- tx_advance sweep: walk the UE pilot's frame-offset over one frame ---
         print(f"  sweep: step {step} ticks ({step/tick_rate*1e6:.1f} us), "
@@ -201,7 +199,7 @@ def main():
                 sdr.writeSetting("TDD_REPLAY_STROBE", f"ch{a.tx_ch}:off")
             except Exception:  # noqa: BLE001
                 pass
-        for sdr, s in ((bsd, bs_rx), (bsd, bs_tx), (ued, ue_rx), (ued, ue_tx)):
+        for sdr, s in ((bsd, bs_rx), (bsd, bs_tx), (ued, ue_tx)):
             for fn in (sdr.deactivateStream, sdr.closeStream):
                 try:
                     fn(s)
