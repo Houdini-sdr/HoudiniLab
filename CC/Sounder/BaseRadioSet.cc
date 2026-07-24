@@ -462,6 +462,8 @@ void BaseRadioSet::activateHoudiniRx(void) {
 namespace {
 constexpr long long kTddGridTicks = 384;    // 3.125 us grid
 constexpr long long kTddQuantumNs = 3125;
+constexpr long long kTddSymTicks = 61440;   // 0.5 ms TDD symbol (comfortable
+                                            // window >> samps_per_slot capture)
 constexpr long long kTddArmMargin = 36864000;  // ~300 ms of ticks
 inline long long tddNsOfTick(long long t) {
   return (t / kTddGridTicks) * kTddQuantumNs;  // t must be grid-aligned
@@ -494,16 +496,13 @@ long long BaseRadioSet::houdiniArmTdd(SoapySDR::Device* dev,
 }
 
 void BaseRadioSet::armHoudiniTdd(void) {
-  // TDD symbol == the sounder slot (samps_per_slot, chosen grid-aligned in the
-  // config), so rx_gate on a slot gates the ADC to exactly that slot.
-  htdd_symbol_ticks_ = static_cast<long long>(_cfg->samps_per_slot());
-  if (htdd_symbol_ticks_ % kTddGridTicks != 0) {
-    throw std::runtime_error(
-        "Houdini TDD needs samps_per_slot a multiple of 384 (grid); adjust "
-        "ofdm_tx_zero_prefix/postfix");
-  }
-  const size_t spf = _cfg->slot_per_frame();
-  htdd_frame_ticks_ = static_cast<long long>(spf) * htdd_symbol_ticks_;
+  // Decouple the TDD symbol from the sounder slot: use a comfortable 0.5 ms
+  // symbol so the samps_per_slot (<= 4096) capture fits well inside one rx_gate
+  // window (the pre-open guard would clip a capture that filled the symbol).
+  // TDD layout: symbol 0 = beacon strobe; symbols 1..N = one rx_gate per sounder
+  // pilot slot. The capture is tagged with the SOUNDER slot index so the
+  // recorder places it, independent of the TDD symbol index.
+  htdd_symbol_ticks_ = kTddSymTicks;
   htdd_tick_rate_ = _cfg->rate();
 
   std::vector<int16_t> iq;
@@ -516,20 +515,23 @@ void BaseRadioSet::armHoudiniTdd(void) {
       if (i != _cfg->beacon_radio()) continue;
       Radio* r = bsRadios.at(c).at(i);
       auto* dev = r->RawDev();
-      // Schedule from the BS frame: 'B' beacon -> replay strobe + rx_gate ('6');
-      // 'P'/'R'/'U'/'N' uplink -> rx_gate ('2'); everything else guard ('0').
+      dev->writeSetting("TDD_CMD", "abort");  // tear down any armed framer (E6)
+
+      // The sounder pilot/uplink slots to receive (tag with these indices).
       const std::string& sched = _cfg->bs_array_frames().at(c).at(i);
-      std::string tdd(spf, '0');
       htdd_rx_slots_.clear();
-      for (size_t s = 0; s < spf && s < sched.size(); ++s) {
+      for (size_t s = 0; s < sched.size(); ++s) {
         const char ch = sched.at(s);
-        if (ch == 'B') {
-          tdd[s] = '6';
-        } else if (ch == 'P' || ch == 'R' || ch == 'U' || ch == 'N') {
-          tdd[s] = '2';
+        if (ch == 'P' || ch == 'R' || ch == 'U' || ch == 'N')
           htdd_rx_slots_.push_back(s);
-        }
       }
+      // TDD schedule: 1 beacon symbol + 1 rx_gate symbol per sounder pilot slot.
+      const size_t spf_tdd = 1 + htdd_rx_slots_.size();
+      std::string tdd(spf_tdd, '0');
+      tdd[0] = '6';  // beacon strobe (+rx_gate, harmless)
+      for (size_t k = 1; k < spf_tdd; ++k) tdd[k] = '2';  // rx_gate windows
+      htdd_frame_ticks_ = static_cast<long long>(spf_tdd) * htdd_symbol_ticks_;
+
       const size_t tx_ch = _cfg->beacon_channel();
       long long t0 = 0;
       r->xmit(buffs, static_cast<int>(n_load), 0, t0);  // load replay RAM
@@ -539,14 +541,14 @@ void BaseRadioSet::armHoudiniTdd(void) {
                             ":len=" + std::to_string(n_load / 2) +
                             ",offs=" + std::to_string(kTddGridTicks));
       htdd_epoch_ = houdiniArmTdd(dev, htdd_symbol_ticks_,
-                                  static_cast<long long>(spf));
+                                  static_cast<long long>(spf_tdd));
       htdd_rx_cursor_ = 0;
       htdd_last_win_tick_ = 0;
       MLPD_INFO(
           "Houdini BS TDD armed: sched=%s epoch=%lld frame=%lld ticks, "
-          "%zu rx slot(s), beacon replay %zu samp\n",
+          "%zu pilot slot(s) %s beacon replay %zu samp\n",
           tdd.c_str(), htdd_epoch_, htdd_frame_ticks_, htdd_rx_slots_.size(),
-          n_load);
+          htdd_rx_slots_.empty() ? "(none)" : "", n_load);
     }
   }
 }
@@ -557,18 +559,21 @@ int BaseRadioSet::houdiniTddRx(size_t radio_id, void* const* buffs,
   Radio* r = bsRadios.at(0).at(radio_id);
   auto* dev = r->RawDev();
 
-  // Next rx slot (round-robin across the frame's rx slots).
-  const size_t slot = htdd_rx_slots_.at(htdd_rx_cursor_);
+  // Round-robin over the pilot slots. TDD rx-gate symbol = 1 + cursor (symbol 0
+  // is the beacon); the tag uses the SOUNDER slot index for the recorder.
+  const size_t idx = htdd_rx_cursor_;
+  const size_t tdd_sym = 1 + idx;
+  const size_t sounder_slot = htdd_rx_slots_.at(idx);
   htdd_rx_cursor_ = (htdd_rx_cursor_ + 1) % htdd_rx_slots_.size();
 
-  // Window tick = epoch + k*frame + slot*symbol_ticks, chosen a couple frames
-  // ahead of now and strictly after the last window (monotonic).
+  // Window tick = epoch + k*frame + tdd_sym*symbol_ticks, a couple frames ahead
+  // of now and strictly monotonic.
   const long long now = static_cast<long long>(
       std::llround(static_cast<double>(dev->getHardwareTime("")) *
                    htdd_tick_rate_ / 1e9));
   long long k = std::max((now - htdd_epoch_) / htdd_frame_ticks_ + 2, 1LL);
   long long wt = htdd_epoch_ + k * htdd_frame_ticks_ +
-                 static_cast<long long>(slot) * htdd_symbol_ticks_;
+                 static_cast<long long>(tdd_sym) * htdd_symbol_ticks_;
   while (wt <= htdd_last_win_tick_) wt += htdd_frame_ticks_;
   htdd_last_win_tick_ = wt;
 
@@ -576,7 +581,7 @@ int BaseRadioSet::houdiniTddRx(size_t radio_id, void* const* buffs,
   const int got = r->recvTddWindow(buffs, n, tddNsOfTick(wt));
   const long long frame_id = (wt - htdd_epoch_) / htdd_frame_ticks_;
   // Tag like the Iris HW framer so the unmodified loopRecv true-path decodes it.
-  frameTime = (frame_id << 32) | (static_cast<long long>(slot) << 16);
+  frameTime = (frame_id << 32) | (static_cast<long long>(sounder_slot) << 16);
   return got;
 }
 
@@ -769,6 +774,19 @@ void BaseRadioSet::readSensors() {
 }
 
 void BaseRadioSet::radioStop(void) {
+  if (_cfg->is_houdini()) {
+    // Native TDD teardown so the next run can re-arm (an armed framer refuses
+    // TDD_SCHED fills, E6). No Iris TDD_CONFIG / RESET_DATA_LOGIC on Houdini.
+    for (size_t c = 0; c < bsRadios.size(); c++)
+      for (size_t i = 0; i < bsRadios.at(c).size(); i++)
+        if (bsRadios.at(c).at(i) != nullptr) {
+          try {
+            bsRadios.at(c).at(i)->RawDev()->writeSetting("TDD_CMD", "abort");
+          } catch (...) {
+          }
+        }
+    return;
+  }
   std::string tddConfStr = "{\"tdd_enabled\":false}";
   for (size_t c = 0; c < _cfg->num_cells(); c++) {
     for (size_t i = 0; i < bsRadios.at(c).size(); i++) {
