@@ -291,10 +291,13 @@ void ClientRadioSet::init(ClientRadioContext* context) {
         "tcp://" + _cfg->cl_sdr_ids().at(i) + ":" + _cfg->remote_port();
     args["remote:driver"] = "houdinisdr-device";
     args["remote:type"] = "houdinisdr";
-    // RX host UDP port, one per radio; the UE feeds pilots live from the host,
-    // so the TX stream is host-fed streaming (not device BRAM replay) (SH-183).
+    // RX host UDP port, one per radio; UE feeds pilots live -> host-fed streaming
+    // TX (SH-183). ue_tdd_pilot -> `tdd=1`: the TxTickAnchor accepts HAS_TIME
+    // starts on the 3.125 us TDD window grid (SH-248/SH-301) instead of whole-ms,
+    // so the pilot places finely with no ms drift-cliff.
     rx_stream_args["local_port"] = std::to_string(10002 + i);
     tx_stream_args["tx_mode"] = "stream";
+    if (_cfg->ue_tdd_pilot()) tx_stream_args["tdd"] = "1";
   } else if (kUseSoapyUHD == false) {
     args["driver"] = "iris";
     args["serial"] = _cfg->cl_sdr_ids().at(i);
@@ -406,16 +409,22 @@ int ClientRadioSet::radioTx(size_t radio_id, const void* const* buffs,
   if (_cfg->hw_framer()) {
     return radios.at(radio_id)->xmit(buffs, numSamps, flags, frameTime);
   } else {
-    long long frameTimeNs = SoapySDR::ticksToTimeNs(frameTime, _cfg->rate());
+    // Houdini streaming pilot. With the `tdd=1` TX stream arg (set in init when
+    // ue_tdd_pilot), the driver's TxTickAnchor accepts HAS_TIME starts on the
+    // 3.125 us TDD window grid (SH-248/SH-301), so we snap the beacon-referenced
+    // txTime to that grid -- fine enough to land in the BS rx_gate and, unlike
+    // the whole-ms fallback, with NO 1 ms drift-cliff. ue_tx_advance_ticks is a
+    // fine calibration (ticks) added before the snap. Non-TDD Houdini keeps the
+    // whole-ms fallback.
+    long long ft = frameTime;
+    if (_cfg->is_houdini() && _cfg->ue_tdd_pilot())
+      ft += _cfg->ue_tx_advance_ticks();
+    long long frameTimeNs = SoapySDR::ticksToTimeNs(ft, _cfg->rate());
     if (_cfg->is_houdini()) {
-      // Houdini's timed streaming TX only arms a burst on a whole-millisecond
-      // boundary (off-ms / <=0 -> TIME_ERROR, no auto-snap, SH-...). The RENEW
-      // schedule places the pilot at a sample-accurate time; when the UE frame
-      // is a whole ms (samps_per_frame = k*rate/1000) the beacon anchor recurs
-      // at a fixed ms-phase, so quantizing to the ms grid applies a CONSTANT
-      // effective tx_advance -- the pilot lands at the same offset every frame.
+      constexpr long long kTddGridNs = 3125;    // 384 ticks, the TDD window grid
       constexpr long long kNsPerMs = 1000000LL;
-      frameTimeNs = ((frameTimeNs + kNsPerMs / 2) / kNsPerMs) * kNsPerMs;
+      const long long q = _cfg->ue_tdd_pilot() ? kTddGridNs : kNsPerMs;
+      frameTimeNs = ((frameTimeNs + q / 2) / q) * q;  // snap to the accepted grid
     }
     return radios.at(radio_id)->xmit(buffs, numSamps, flags, frameTimeNs);
   }
