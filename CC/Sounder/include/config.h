@@ -57,6 +57,14 @@ class Config {
   inline const std::string& remote_port(void) const {
     return this->remote_port_;
   }
+  // Houdini closed loop: the UE fires its pilot via the native TDD replay strobe
+  // (3.125 us grid) so it lands in the BS native-TDD rx_gate window. The extra
+  // fine advance (ticks) is calibrated so the beacon-referenced pilot centers in
+  // the gate; the beacon carries the BS frame timing (no shared clock).
+  inline bool ue_tdd_pilot(void) const { return this->ue_tdd_pilot_; }
+  inline long long ue_tx_advance_ticks(void) const {
+    return this->ue_tx_advance_ticks_;
+  }
   inline int prefix(void) const { return this->prefix_; }
   inline int postfix(void) const { return this->postfix_; }
   inline int beacon_size(void) const { return this->beacon_size_; }
@@ -367,6 +375,8 @@ class Config {
   bool hw_framer_;
   std::string radio_type_;
   std::string remote_port_;
+  bool ue_tdd_pilot_ = false;
+  long long ue_tx_advance_ticks_ = 0;
   size_t max_frame_;
   size_t ul_data_frame_num_;
   size_t dl_data_frame_num_;

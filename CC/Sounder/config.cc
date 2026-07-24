@@ -187,6 +187,8 @@ Config::Config(const std::string& jsonfile, const std::string& directory,
   hw_framer_ = tddConf.value("ue_hw_framer", false);
   radio_type_ = tddConf.value("radio_type", "iris");
   remote_port_ = tddConf.value("remote_port", "55132");
+  ue_tdd_pilot_ = tddConf.value("ue_tdd_pilot", false);
+  ue_tx_advance_ticks_ = tddConf.value("ue_tx_advance_ticks", 0);
   auto tx_advance = tddConf.value("tx_advance", json::array());
   if (tx_advance.empty() == true) {
     tx_advance_.resize(num_cl_sdrs_, 250);
