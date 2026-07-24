@@ -9,12 +9,25 @@ timing contract is the software+fpga lanes' design.
 
 The RENEW Sounder closed loop needs the UE (client) to transmit its uplink pilot
 at a **beacon-referenced time** so it lands inside the BS's native-TDD `rx_gate`
-capture window. The BS receive side is done: the sounder's `BaseRadioSet`/`loopRecv`
-arms the FPGA TDD framer (beacon replay strobe + `rx_gate` per pilot slot) and
-records only the gated slot — verified non-zero (`Data/Pilot_Samples` absmax≈1220).
-The capture window is `samps_per_slot` = 4096 samples ≈ **33 µs**. To close the
-loop, the UE pilot must be placed with **sub-slot (≤ ~µs) timing precision**, and
-must **track slow inter-board drift** without a catastrophic jump.
+window. The BS receive side is done: the sounder's `BaseRadioSet`/`loopRecv` arms
+the FPGA TDD framer (beacon replay strobe + `rx_gate` per pilot slot) and records
+only the gated slot — verified non-zero (`Data/Pilot_Samples` absmax≈1220).
+
+**The placement tolerance.** Two figures, don't conflate them:
+- The `rx_gate` **symbol** (ADC receptive) is `SYM` = 61440 ticks = **0.5 ms**.
+- Of that, the BS **records** only `samps_per_slot` = 4096 samples = **33 µs**
+  (`4096 / 122.88 MSPS`; 4096 is pinned by the RENEW `genPilots` TX_RAM ≤ 4096
+  rule). This 33 µs read is placed inside the 0.5 ms symbol; today it sits at the
+  symbol start, but the BS window is deterministic and per-call placeable (v1), so
+  the read can be positioned anywhere in the 0.5 ms gate.
+
+So the UE-side timing tolerance is **≤ 0.5 ms** (place the pilot anywhere in the
+`rx_gate` symbol; the BS read is aligned to it), NOT ~33 µs. The fix therefore
+does **not** need microsecond resolution — it needs (a) sub-0.5-ms placement and,
+critically, (b) **no 1 ms discontinuity** as inter-board drift moves the
+beacon-referenced target across a boundary. The 3.125 µs TDD grid amply satisfies
+both, but a coarser sub-ms grid would too; the hard requirement is losing the 1 ms
+cliff, not the exact grid pitch.
 
 ## Evidence (what we observed, and where)
 
@@ -47,9 +60,10 @@ must **track slow inter-board drift** without a catastrophic jump.
 4. **Drift makes the whole-ms path a hard cliff, not just coarse.** The two RFSoC
    boards free-run (no shared clock); the beacon-referenced target time drifts.
    On a 1 ms grid, when it drifts across a ms boundary the quantization jumps a
-   full millisecond → the pilot leaves the 33 µs gate entirely. So whole-ms
-   streaming is not merely imprecise; it fails intermittently as drift crosses a
-   boundary.
+   full millisecond → the pilot leaves the `rx_gate` window (the jump, 1 ms, is
+   twice the whole 0.5 ms symbol). So whole-ms streaming is not merely imprecise;
+   it fails intermittently as drift crosses a boundary. This 1 ms discontinuity —
+   not the grid pitch — is the core problem.
 
 ## Options ruled OUT on the application side
 
@@ -69,11 +83,14 @@ must **track slow inter-board drift** without a catastrophic jump.
 ## What the application needs (capability, not mechanism)
 
 With a TDD schedule engaged, the UE needs **timed TX (streaming and/or replay) to
-accept a start time on the 3.125 µs TDD grid** — the same acceptance the RX path
-already has — so the pilot can be placed at sub-slot resolution and track drift by
-grid steps (no 1 ms cliff). Whether/how that scoping is done (stream arg, device
-TDD state, which of the streaming vs replay TX paths) is the software lane's
-design; RX @1538 is the working precedent to weigh against.
+accept a start time finer than whole-ms** — enough to place the pilot within the
+0.5 ms `rx_gate` and, above all, to move the beacon-referenced target **without a
+1 ms discontinuity**. The 3.125 µs TDD grid the RX path already accepts (@1538)
+does this and strictly generalizes the ms rule, so mirroring that acceptance onto
+TX is the natural candidate — but a coarser sub-ms grid would also clear the bar;
+the pitch is not the constraint, the cliff is. Whether/how the scoping is done
+(stream arg, device TDD state, which of the streaming vs replay TX paths) is the
+software lane's design; RX @1538 is the working precedent to weigh against.
 
 ## What would validate it (application-side test, ready to run)
 
