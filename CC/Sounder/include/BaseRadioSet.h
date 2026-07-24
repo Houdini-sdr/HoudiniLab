@@ -85,6 +85,7 @@ class BaseRadioSet {
   std::vector<size_t> htdd_rx_slots_;  // sounder slots with rx_gate (P/U/N)
   size_t htdd_rx_cursor_ = 0;
   long long htdd_last_win_tick_ = 0;
+  long long htdd_frame_counter_ = 0;  // 0,1,2,... like the Iris framer's frame_id
 };
 
 #endif  // BASE_RADIO_SET_H_

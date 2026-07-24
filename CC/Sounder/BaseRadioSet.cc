@@ -579,7 +579,12 @@ int BaseRadioSet::houdiniTddRx(size_t radio_id, void* const* buffs,
 
   const int n = static_cast<int>(_cfg->samps_per_slot());
   const int got = r->recvTddWindow(buffs, n, tddNsOfTick(wt));
-  const long long frame_id = (wt - htdd_epoch_) / htdd_frame_ticks_;
+  // frame_id must be a small monotonic counter (0,1,2,...) like the Iris HW
+  // framer -- the recorder EXTENDS its HDF5 dataset to frame_id, so an absolute
+  // tick-derived frame number would blow it up. Advance once per frame (after
+  // the last rx slot of the frame is served).
+  const long long frame_id = htdd_frame_counter_;
+  if (htdd_rx_cursor_ == 0) ++htdd_frame_counter_;
   // Tag like the Iris HW framer so the unmodified loopRecv true-path decodes it.
   frameTime = (frame_id << 32) | (static_cast<long long>(sounder_slot) << 16);
   return got;
