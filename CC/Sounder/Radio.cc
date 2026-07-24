@@ -240,8 +240,10 @@ int Radio::recvHoudini(void* const* buffs, int samples, long long& frameTime) {
 
 int Radio::recvTddWindow(void* const* buffs, int samples, long long start_ns) {
   // The Houdini TDD framer gates the ADC to the scheduled rx_gate symbol; a
-  // HAS_TIME activate arms the capture at that symbol's tick, so this returns the
-  // pilot-slot samples and nothing else. activate -> drain-read -> deactivate.
+  // HAS_TIME activate arms a finite burst of `samples` at that symbol's tick.
+  // Read one packet per call and STOP on END_BURST -- the burst may end a few
+  // samples short of the request, and waiting the full timeout for the missing
+  // tail would stall ~1 s per window (mirrors the working run_burst read loop).
   constexpr size_t kBytesPerSamp = 4;  // CS16
   const int flags = SOAPY_SDR_HAS_TIME | SOAPY_SDR_END_BURST;
   int rc = dev_->activateStream(rxs_, flags, start_ns,
@@ -255,14 +257,22 @@ int Radio::recvTddWindow(void* const* buffs, int samples, long long start_ns) {
   std::vector<void*> cur(num_rx_ch_);
   for (size_t c = 0; c < num_rx_ch_; c++) cur[c] = buffs[c];
   int got = 0;
+  int idle = 0;
   while (got < samples) {
     int f = 0;
     long long t = 0;
-    int r = dev_->readStream(rxs_, cur.data(), samples - got, f, t, 1000000);
-    if (r <= 0) break;
-    got += r;
-    for (size_t c = 0; c < num_rx_ch_; c++)
-      cur[c] = static_cast<uint8_t*>(cur[c]) + r * kBytesPerSamp;
+    int r = dev_->readStream(rxs_, cur.data(), samples - got, f, t, 200000);
+    if (r > 0) {
+      got += r;
+      for (size_t c = 0; c < num_rx_ch_; c++)
+        cur[c] = static_cast<uint8_t*>(cur[c]) + r * kBytesPerSamp;
+      if ((f & SOAPY_SDR_END_BURST) != 0) break;  // burst done
+      idle = 0;
+    } else if (r == SOAPY_SDR_TIMEOUT) {
+      if (++idle >= 3) break;  // no data for ~0.6 s -> give up on this window
+    } else {
+      break;  // hard error
+    }
   }
   dev_->deactivateStream(rxs_);
   return got;

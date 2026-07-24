@@ -556,6 +556,12 @@ void BaseRadioSet::armHoudiniTdd(void) {
 int BaseRadioSet::houdiniTddRx(size_t radio_id, void* const* buffs,
                                long long& frameTime) {
   if (htdd_rx_slots_.empty()) return 0;
+  // Bound the BS capture run: loopRecv (unlike the client loop) doesn't stop at
+  // max_frame, and an unbounded frame_id would grow the recorder's HDF5 dataset
+  // without limit (-> extend crash at close). Returning <0 makes loopRecv set
+  // running(false) and shut down cleanly.
+  if (_cfg->max_frame() > 0 && htdd_frame_counter_ >= _cfg->max_frame())
+    return -1;
   Radio* r = bsRadios.at(0).at(radio_id);
   auto* dev = r->RawDev();
 
