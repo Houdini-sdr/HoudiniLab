@@ -97,6 +97,9 @@ def main():
     ap.add_argument("--beacon-ram", default="/tmp/beacon_ram.bin")
     ap.add_argument("--gold", default="/tmp/gold.bin")
     ap.add_argument("--spf", type=int, default=2, help="framer symbols/frame for B")
+    ap.add_argument("--rx-gain", type=float, default=None,
+                    help="set RX gain to match the client (ue_rx_gain=65); "
+                         "default leaves the device default")
     ap.add_argument("--secs", type=float, default=0.25)
     ap.add_argument("--cap-mb", type=float, default=32.0)
     a = ap.parse_args()
@@ -122,6 +125,9 @@ def main():
     tsd.setFrequency(SOAPY_SDR_TX, a.tx_ch, a.nco * 1e6)
     rsd.setSampleRate(SOAPY_SDR_RX, a.rx_ch, 122.88e6)
     rsd.setFrequency(SOAPY_SDR_RX, a.rx_ch, a.nco * 1e6)
+    if a.rx_gain is not None:
+        rsd.setGain(SOAPY_SDR_RX, a.rx_ch, a.rx_gain)
+        print(f"RX gain set to {rsd.getGain(SOAPY_SDR_RX, a.rx_ch):.1f}")
     rx_rate = float(rsd.getSampleRate(SOAPY_SDR_RX, a.rx_ch))
     print(f"dac {dac_rate/1e6:.2f}  rx {rx_rate/1e6:.2f}  nco {a.nco}  "
           f"expected continuous period {n_load}/8 = {n_load//8} rx samp")
