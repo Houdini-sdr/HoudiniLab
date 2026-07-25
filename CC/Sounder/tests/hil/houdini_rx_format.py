@@ -115,7 +115,7 @@ def main():
         time.sleep(0.2)
 
         # (1) native format (what capture_rx / the working path uses)
-        nb = read_stream(rsd, RXC, rnative, rdtype, 30000)
+        nb = read_stream(rsd, RXC, rnative, rdtype, 180000)
         lanes = hs.cs16_lanes(nb) if rnative == "CS16" else None
         if rnative == "CS16":
             # int32 view -> low16=I, high16=Q
@@ -133,7 +133,7 @@ def main():
             print("   hs decode err:", e)
 
         # (2) FORCED CS16 (what the sounder client Radio uses)
-        cb = read_stream(rsd, RXC, "CS16", np.int32, 30000)
+        cb = read_stream(rsd, RXC, "CS16", np.int32, 180000)
         v = cb.view(np.int32) if cb.dtype != np.int32 else cb
         iq_cs = (v & 0xFFFF).astype(np.int16).astype(np.float64) + \
                 1j * (v >> 16).astype(np.int16).astype(np.float64)
