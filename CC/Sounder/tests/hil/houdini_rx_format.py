@@ -114,30 +114,33 @@ def main():
         print(f"arm accepted={r.get('accepted')}")
         time.sleep(0.2)
 
-        # (1) native format (what capture_rx / the working path uses)
-        nb = read_stream(rsd, RXC, rnative, rdtype, 180000)
-        lanes = hs.cs16_lanes(nb) if rnative == "CS16" else None
-        if rnative == "CS16":
-            # int32 view -> low16=I, high16=Q
-            v = nb.view(np.int32) if nb.dtype != np.int32 else nb
-            iq_nat = (v & 0xFFFF).astype(np.int16).astype(np.float64) + \
-                     1j * (v >> 16).astype(np.int16).astype(np.float64)
-        else:
-            iq_nat = nb.astype(np.complex128)
-        score(iq_nat, gold, f"native({rnative}) naive")
-        try:
-            iq_hs = np.asarray(hs.iq_from_lanes(hs.cs16_lanes(nb), "interleaved"),
-                               dtype=np.complex128)
-            score(iq_hs, gold, f"native({rnative}) hs-decode")
-        except Exception as e:  # noqa: BLE001
-            print("   hs decode err:", e)
-
-        # (2) FORCED CS16 (what the sounder client Radio uses)
-        cb = read_stream(rsd, RXC, "CS16", np.int32, 180000)
-        v = cb.view(np.int32) if cb.dtype != np.int32 else cb
-        iq_cs = (v & 0xFFFF).astype(np.int16).astype(np.float64) + \
+        def cs16_to_iq(b):
+            v = b.view(np.int32) if b.dtype != np.int32 else b
+            return (v & 0xFFFF).astype(np.int16).astype(np.float64) + \
                 1j * (v >> 16).astype(np.int16).astype(np.float64)
-        score(iq_cs, gold, "forced-CS16 naive")
+
+        # (A) capture_rx -- the WORKING free-run path (owns stream, drop-aware)
+        buf, summ = hs.capture_rx(rsd, RXC, rnative, rdtype, duration_sec=0.05,
+                                  capture_bytes=8 * 1024 * 1024, live_print=False)
+        score(cs16_to_iq(buf), gold, "A capture_rx(0.05s)")
+        print(f"     capture_rx drops={summ.get('drops')}")
+
+        # (B) recvHoudini-style: drain then CONCATENATE many readStream calls
+        cb = read_stream(rsd, RXC, "CS16", np.int32, 180000)
+        score(cs16_to_iq(cb), gold, "B drain+concat(recvHoudini)")
+
+        # (C) ONE contiguous readStream (no concatenation, no drain)
+        rx1 = rsd.setupStream(SOAPY_SDR_RX, "CS16", [RXC], rx_stream_args(RXC))
+        rsd.activateStream(rx1)
+        big = np.zeros(65536, dtype=np.int32)
+        got1 = 0
+        for _ in range(50):
+            sr = rsd.readStream(rx1, [big], 65536, timeoutUs=200000)
+            if sr.ret > 4096:  # one full contiguous chunk with real data
+                got1 = sr.ret
+                break
+        rsd.deactivateStream(rx1); rsd.closeStream(rx1)
+        score(cs16_to_iq(big[:got1]), gold, f"C single-read({got1})")
     finally:
         try:
             tsd.writeSetting("TDD_REPLAY_STROBE", f"ch{TXC}:off")
