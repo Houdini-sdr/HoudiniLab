@@ -536,10 +536,14 @@ void BaseRadioSet::armHoudiniTdd(void) {
       long long t0 = 0;
       r->xmit(buffs, static_cast<int>(n_load), 0, t0);  // load replay RAM
       dev->writeSetting("TDD_SCHED", tdd);
+      // loops=forever fills the whole beacon symbol with the replay (the TDD
+      // beacon path, HS-80 §11b) -- a DENSE beacon (like the free-running one)
+      // for half of every frame, so the client's single-window find_beacon
+      // catches it (a single once/frame burst was too sparse to detect).
       dev->writeSetting("TDD_REPLAY_STROBE",
                         "ch" + std::to_string(tx_ch) +
                             ":len=" + std::to_string(n_load / 2) +
-                            ",offs=" + std::to_string(kTddGridTicks));
+                            ",loops=forever,offs=" + std::to_string(kTddGridTicks));
       htdd_epoch_ = houdiniArmTdd(dev, htdd_symbol_ticks_,
                                   static_cast<long long>(spf_tdd));
       htdd_rx_cursor_ = 0;
