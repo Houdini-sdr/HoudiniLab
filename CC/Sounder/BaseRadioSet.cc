@@ -13,6 +13,8 @@
 #include <cmath>
 #include <complex>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -420,6 +422,15 @@ void BaseRadioSet::buildHoudiniBeacon(std::vector<int16_t>& iq) {
         static_cast<int16_t>(std::lround(loop[k].real() / peak * 0.6f * 32767));
     iq[2 * k + 1] =
         static_cast<int16_t>(std::lround(loop[k].imag() / peak * 0.6f * 32767));
+  }
+  if (std::getenv("HOUDINI_DUMP_BEACON")) {
+    FILE* f = std::fopen("/tmp/beacon_ram.bin", "wb");
+    if (f) {
+      std::fwrite(iq.data(), sizeof(int16_t), iq.size(), f);
+      std::fclose(f);
+      MLPD_INFO("HOUDINI_DUMP_BEACON: wrote %zu int16 to /tmp/beacon_ram.bin\n",
+                iq.size());
+    }
   }
 }
 
