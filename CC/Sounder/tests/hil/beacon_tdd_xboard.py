@@ -120,7 +120,8 @@ def main():
             tsd.writeSetting("TDD_SCHED", "".join(pattern))
             if not a.no_strobe:
                 tsd.writeSetting("TDD_REPLAY_STROBE",
-                                 f"ch{a.tx_ch}:len={a.n_load // 2},offs={GRID_TICKS}")
+                                 f"ch{a.tx_ch}:len={a.n_load // 2},"
+                                 f"loops=forever,offs={GRID_TICKS}")  # fill the beacon symbol
             r = _arm(tsd, symbol_ticks=SYM, symbols_per_frame=a.spf, margin=ARM_MARGIN)
             assert r.get("accepted") == 1, f"TDD arm rejected: {r}"
 
