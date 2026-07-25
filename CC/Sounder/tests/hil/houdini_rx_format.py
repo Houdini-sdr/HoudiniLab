@@ -119,28 +119,28 @@ def main():
             return (v & 0xFFFF).astype(np.int16).astype(np.float64) + \
                 1j * (v >> 16).astype(np.int16).astype(np.float64)
 
-        # (A) capture_rx -- the WORKING free-run path (owns stream, drop-aware)
-        buf, summ = hs.capture_rx(rsd, RXC, rnative, rdtype, duration_sec=0.05,
-                                  capture_bytes=8 * 1024 * 1024, live_print=False)
-        score(cs16_to_iq(buf), gold, "A capture_rx(0.05s)")
-        print(f"     capture_rx drops={summ.get('drops')}")
-
-        # (B) recvHoudini-style: drain then CONCATENATE many readStream calls
-        cb = read_stream(rsd, RXC, "CS16", np.int32, 180000)
-        score(cs16_to_iq(cb), gold, "B drain+concat(recvHoudini)")
-
-        # (C) ONE contiguous readStream (no concatenation, no drain)
-        rx1 = rsd.setupStream(SOAPY_SDR_RX, "CS16", [RXC], rx_stream_args(RXC))
-        rsd.activateStream(rx1)
-        big = np.zeros(65536, dtype=np.int32)
-        got1 = 0
-        for _ in range(50):
-            sr = rsd.readStream(rx1, [big], 65536, timeoutUs=200000)
-            if sr.ret > 4096:  # one full contiguous chunk with real data
-                got1 = sr.ret
-                break
-        rsd.deactivateStream(rx1); rsd.closeStream(rx1)
-        score(cs16_to_iq(big[:got1]), gold, f"C single-read({got1})")
+        # capture a LONG window WITH drop tracking, score full vs a client-sized slice
+        for trial in range(3):
+            buf, summ = hs.capture_rx(rsd, RXC, rnative, rdtype, duration_sec=0.15,
+                                      capture_bytes=32 * 1024 * 1024, live_print=False,
+                                      elem_rate_hz=2 * 122.88e6)
+            iq = cs16_to_iq(buf)
+            dr = summ.get("drops")
+            drfrac = dr.get("fraction") if isinstance(dr, dict) else None
+            print(f"  trial {trial}: len {len(iq)}  drops_frac="
+                  f"{drfrac if drfrac is not None else 'n/a'}")
+            score(iq, gold, "   full window")
+            # best gold SNR over any client-sized (9543) slice, and the WORST slice
+            W = 9543
+            snrs = []
+            for st in range(0, len(iq) - W, W):
+                sl = iq[st:st + W]
+                c = mf(sl, gold)
+                snrs.append(20 * np.log10(c.max() / (np.median(c) + 1e-30)))
+            if snrs:
+                print(f"      9543-slices: best {max(snrs):.1f} dB  worst "
+                      f"{min(snrs):.1f} dB  median {np.median(snrs):.1f} dB  "
+                      f"n={len(snrs)}")
     finally:
         try:
             tsd.writeSetting("TDD_REPLAY_STROBE", f"ch{TXC}:off")
