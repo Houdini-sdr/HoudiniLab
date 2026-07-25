@@ -10,7 +10,10 @@
 #include "include/Radio.h"
 
 #include <algorithm>
+#include <atomic>
+#include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <iostream>
 #include <vector>
 
@@ -234,6 +237,21 @@ int Radio::recvHoudini(void* const* buffs, int samples, long long& frameTime) {
     got += r;
     for (size_t c = 0; c < num_rx_ch_; c++)
       cur[c] = static_cast<uint8_t*>(cur[c]) + r * kBytesPerSamp;
+  }
+  if (getenv("HOUDINI_CL_RX_DEBUG") != nullptr && got > 0 &&
+      buffs[0] != nullptr) {
+    static std::atomic<int> cnt{0};
+    if ((cnt.fetch_add(1) % 40) == 0) {
+      const int16_t* p = static_cast<const int16_t*>(buffs[0]);
+      double s = 0;
+      int amax = 0;
+      for (int k = 0; k < got * 2; ++k) {
+        s += double(p[k]) * p[k];
+        amax = std::max(amax, std::abs((int)p[k]));
+      }
+      MLPD_INFO("Houdini client RX dbg: got=%d rms=%.2f absmax=%d\n", got,
+                std::sqrt(s / (got * 2)), amax);
+    }
   }
   return got;
 }
