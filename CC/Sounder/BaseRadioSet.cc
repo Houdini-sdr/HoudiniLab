@@ -587,6 +587,16 @@ int BaseRadioSet::houdiniTddRx(size_t radio_id, void* const* buffs,
   while (wt <= htdd_last_win_tick_) wt += htdd_frame_ticks_;
   htdd_last_win_tick_ = wt;
 
+  if (getenv("HOUDINI_RX_DEBUG") != nullptr) {
+    static std::atomic<int> bc{0};
+    if ((bc.fetch_add(1) % 40) == 0) {
+      try {
+        MLPD_INFO("Houdini BS TX bank: %s\n",
+                  dev->readSetting("TX_BANK_STATUS").c_str());
+      } catch (...) {
+      }
+    }
+  }
   const int n = static_cast<int>(_cfg->samps_per_slot());
   const int got = r->recvTddWindow(buffs, n, tddNsOfTick(wt));
   // frame_id must be a small monotonic counter (0,1,2,...) like the Iris HW
