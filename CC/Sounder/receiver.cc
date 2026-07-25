@@ -14,6 +14,7 @@
 #include <atomic>
 #include <chrono>
 #include <climits>
+#include <cstdlib>
 #include <random>
 
 #include "SoapySDR/Time.hpp"
@@ -811,13 +812,22 @@ ssize_t Receiver::syncSearch(const std::complex<int16_t>* check_data,
   ssize_t sync_index(-1);
   assert(search_window <= config_->samps_per_frame());
 #if defined(USE_CUDA)
+  const char* kPath = "cuda";
   sync_index = CommsLib::find_beacon_cuda(check_data, config_->gold_cf32(),
                                           search_window, corr_scale);
 #else
   // portable find_beacon_avx works on x86 and aarch64 (see comms-lib-portable.cc)
+  const char* kPath = "avx";
   sync_index = CommsLib::find_beacon_avx(check_data, config_->gold_cf32(),
                                          search_window, corr_scale);
 #endif
+  if (std::getenv("HOUDINI_SYNC_DEBUG") != nullptr) {
+    static std::atomic<int> c{0};
+    if ((c.fetch_add(1) % 20) == 0)
+      MLPD_INFO("syncSearch[%s]: window=%zu corr_scale=%.3f gold=%zu -> idx=%ld\n",
+                kPath, search_window, corr_scale, config_->gold_cf32().size(),
+                sync_index);
+  }
   return sync_index;
 }
 
