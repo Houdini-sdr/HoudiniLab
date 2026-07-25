@@ -67,6 +67,13 @@ def gold_snr(iq, center_mhz, rx_rate, gold):
     return snr, corr
 
 
+def spec_peak(iq, rx_rate):
+    m = min(len(iq), 1 << 15)
+    P = np.abs(np.fft.fftshift(np.fft.fft(iq[:m] * np.hanning(m)))) ** 2
+    fr = np.fft.fftshift(np.fft.fftfreq(m, 1.0 / rx_rate))
+    return fr[int(np.argmax(P))] / 1e6
+
+
 def period_hint(iq, center_mhz, rx_rate, gold, pmax=1200):
     """Autocorrelation of the gold-correlation envelope -> beacon repeat period."""
     _, corr = gold_snr(iq, center_mhz, rx_rate, gold)
@@ -151,6 +158,14 @@ def main():
         print(f"B arm: accepted={r.get('accepted')} sched={sched}")
         time.sleep(0.2)
         iqB = capture()
+        # save mode-B capture (int16 interleaved) so it can be correlated with the
+        # EXACT same code as the sounder client's /tmp/cl_win.bin
+        ab = np.empty(2 * len(iqB), dtype=np.int16)
+        ab[0::2] = np.round(np.real(iqB)).astype(np.int16)
+        ab[1::2] = np.round(np.imag(iqB)).astype(np.int16)
+        ab.tofile("/tmp/ab_modeB.bin")
+        print(f"A spec peak {spec_peak(iqA, rx_rate):+.2f} MHz   "
+              f"B spec peak {spec_peak(iqB, rx_rate):+.2f} MHz")
         try:
             bank = tsd.readSetting("TX_BANK_STATUS")
             ack = [c for c in bank.split(";") if c.startswith(f"ch{a.tx_ch}:")]
