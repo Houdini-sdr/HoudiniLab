@@ -149,6 +149,10 @@ def main():
         snrA, _ = gold_snr(iqA, a.center_mhz, rx_rate, gold)
         perA = period_hint(iqA, a.center_mhz, rx_rate, gold)
         out["A"] = (snrA, perA, float(np.sqrt(np.mean(np.abs(iqA) ** 2))))
+        aa = np.empty(2 * len(iqA), dtype=np.int16)
+        aa[0::2] = np.round(np.real(iqA)).astype(np.int16)
+        aa[1::2] = np.round(np.imag(iqA)).astype(np.int16)
+        aa.tofile("/tmp/ab_modeA.bin")  # CONTINUOUS replay capture for real find_beacon
         tsd.deactivateStream(txs)
         _teardown(tsd)
         time.sleep(0.3)
