@@ -56,14 +56,15 @@ def score(iq, gold, tag):
     return snr
 
 
-def read_stream(sdr, ch, fmt, dtype, nsamp):
+def read_stream(sdr, ch, fmt, dtype, nsamp, drain=True):
     rx = sdr.setupStream(SOAPY_SDR_RX, fmt, [ch], rx_stream_args(ch))
     sdr.activateStream(rx)
-    # drain startup
-    junk = np.zeros(2 * 65536, dtype=dtype)
-    for _ in range(30):
-        if sdr.readStream(rx, [junk], 65536, timeoutUs=20000).ret <= 0:
-            break
+    if drain:
+        # aggressive FIFO drain (recvHoudini does this: readStream timeout~0 until empty)
+        junk = np.zeros(2 * 65536, dtype=dtype)
+        for _ in range(30):
+            if sdr.readStream(rx, [junk], 65536, timeoutUs=0).ret <= 0:
+                break
     buf = np.zeros(nsamp, dtype=dtype)
     got = 0
     t0 = time.monotonic()
@@ -119,28 +120,18 @@ def main():
             return (v & 0xFFFF).astype(np.int16).astype(np.float64) + \
                 1j * (v >> 16).astype(np.int16).astype(np.float64)
 
-        # capture a LONG window WITH drop tracking, score full vs a client-sized slice
-        for trial in range(3):
-            buf, summ = hs.capture_rx(rsd, RXC, rnative, rdtype, duration_sec=0.15,
-                                      capture_bytes=32 * 1024 * 1024, live_print=False,
-                                      elem_rate_hz=2 * 122.88e6)
-            iq = cs16_to_iq(buf)
-            dr = summ.get("drops")
-            drfrac = dr.get("fraction") if isinstance(dr, dict) else None
-            print(f"  trial {trial}: len {len(iq)}  drops_frac="
-                  f"{drfrac if drfrac is not None else 'n/a'}")
-            score(iq, gold, "   full window")
-            # best gold SNR over any client-sized (9543) slice, and the WORST slice
-            W = 9543
-            snrs = []
-            for st in range(0, len(iq) - W, W):
-                sl = iq[st:st + W]
-                c = mf(sl, gold)
-                snrs.append(20 * np.log10(c.max() / (np.median(c) + 1e-30)))
-            if snrs:
-                print(f"      9543-slices: best {max(snrs):.1f} dB  worst "
-                      f"{min(snrs):.1f} dB  median {np.median(snrs):.1f} dB  "
-                      f"n={len(snrs)}")
+        W = 118784  # ~0.97 ms > the 0.5 ms silent rx_gate gap -> always spans a beacon
+        for trial in range(2):
+            # (A) capture_rx: the WORKING path (no aggressive drain)
+            buf, _ = hs.capture_rx(rsd, RXC, rnative, rdtype, duration_sec=0.05,
+                                   capture_bytes=4 * W, live_print=False)
+            score(cs16_to_iq(buf)[:W], gold, f"[{trial}] A capture_rx")
+            # (B) recvHoudini-style: aggressive drain + concat
+            score(cs16_to_iq(read_stream(rsd, RXC, "CS16", np.int32, W, drain=True)),
+                  gold, f"[{trial}] B drain+concat")
+            # (C) NO drain + concat
+            score(cs16_to_iq(read_stream(rsd, RXC, "CS16", np.int32, W, drain=False)),
+                  gold, f"[{trial}] C nodrain+concat")
     finally:
         try:
             tsd.writeSetting("TDD_REPLAY_STROBE", f"ch{TXC}:off")
