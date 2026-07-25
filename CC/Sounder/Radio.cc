@@ -13,6 +13,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <iostream>
 #include <vector>
@@ -238,19 +239,36 @@ int Radio::recvHoudini(void* const* buffs, int samples, long long& frameTime) {
     for (size_t c = 0; c < num_rx_ch_; c++)
       cur[c] = static_cast<uint8_t*>(cur[c]) + r * kBytesPerSamp;
   }
-  if (getenv("HOUDINI_CL_RX_DEBUG") != nullptr && got > 0 &&
-      buffs[0] != nullptr) {
-    static std::atomic<int> cnt{0};
-    if ((cnt.fetch_add(1) % 40) == 0) {
-      const int16_t* p = static_cast<const int16_t*>(buffs[0]);
-      double s = 0;
-      int amax = 0;
-      for (int k = 0; k < got * 2; ++k) {
-        s += double(p[k]) * p[k];
-        amax = std::max(amax, std::abs((int)p[k]));
+  if ((getenv("HOUDINI_CL_RX_DEBUG") != nullptr ||
+       getenv("HOUDINI_DUMP_WIN") != nullptr) &&
+      got > 0 && buffs[0] != nullptr) {
+    const int16_t* p = static_cast<const int16_t*>(buffs[0]);
+    double s = 0;
+    int amax = 0;
+    for (int k = 0; k < got * 2; ++k) {
+      s += double(p[k]) * p[k];
+      amax = std::max(amax, std::abs((int)p[k]));
+    }
+    const double rms = std::sqrt(s / (got * 2));
+    if (getenv("HOUDINI_CL_RX_DEBUG") != nullptr) {
+      static std::atomic<int> cnt{0};
+      if ((cnt.fetch_add(1) % 40) == 0)
+        MLPD_INFO("Houdini client RX dbg: got=%d rms=%.2f absmax=%d\n", got,
+                  rms, amax);
+    }
+    // Dump the first strong (beacon-present) window for offline correlation.
+    if (getenv("HOUDINI_DUMP_WIN") != nullptr && rms > 100.0) {
+      static std::atomic<bool> done{false};
+      bool expected = false;
+      if (done.compare_exchange_strong(expected, true)) {
+        FILE* f = std::fopen("/tmp/cl_win.bin", "wb");
+        if (f) {
+          std::fwrite(p, sizeof(int16_t), static_cast<size_t>(got) * 2, f);
+          std::fclose(f);
+          MLPD_INFO("Dumped client beacon window rms=%.1f got=%d -> /tmp/cl_win.bin\n",
+                    rms, got);
+        }
       }
-      MLPD_INFO("Houdini client RX dbg: got=%d rms=%.2f absmax=%d\n", got,
-                std::sqrt(s / (got * 2)), amax);
     }
   }
   return got;

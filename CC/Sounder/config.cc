@@ -732,6 +732,18 @@ void Config::genPilots() {
   for (size_t i = 0; i < seq_len; i++) {
     gold_cf32_.push_back(std::complex<float>(gold_ifft[0][i], gold_ifft[1][i]));
   }
+  if (getenv("HOUDINI_DUMP_GOLD") != nullptr) {  // the exact find_beacon match
+    FILE* f = std::fopen("/tmp/gold.bin", "wb");
+    if (f) {
+      for (const auto& c : gold_cf32_) {
+        float v[2] = {c.real(), c.imag()};
+        std::fwrite(v, sizeof(float), 2, f);
+      }
+      std::fclose(f);
+      std::printf("Dumped gold_cf32 (%zu samp) to /tmp/gold.bin\n",
+                  gold_cf32_.size());
+    }
+  }
 
   std::vector<std::vector<float>> sts_seq =
       CommsLib::getSequence(CommsLib::STS_SEQ);
