@@ -532,7 +532,17 @@ void BaseRadioSet::armHoudiniTdd(void) {
       for (size_t k = 1; k < spf_tdd; ++k) tdd[k] = '2';  // rx_gate windows
       htdd_frame_ticks_ = static_cast<long long>(spf_tdd) * htdd_symbol_ticks_;
 
-      const size_t tx_ch = _cfg->beacon_channel();
+      // PHYSICAL TX channel for the strobe (beacon_channel() is the logical index
+      // within bs_channel; TDD_REPLAY_STROBE and the loaded RAM are on the real
+      // DAC, e.g. bs_channel "B" -> ch1 = the cabled DAC_A). Using the logical 0
+      // fired the strobe on ch0 (DAC_B, not cabled) so the beacon never reached
+      // the UE.
+      const auto bs_chans = Utils::strToChannels(_cfg->bs_channel());
+      const size_t tx_ch =
+          bs_chans.empty()
+              ? 0
+              : bs_chans.at(std::min(static_cast<size_t>(_cfg->beacon_channel()),
+                                     bs_chans.size() - 1));
       long long t0 = 0;
       r->xmit(buffs, static_cast<int>(n_load), 0, t0);  // load replay RAM
       dev->writeSetting("TDD_SCHED", tdd);
