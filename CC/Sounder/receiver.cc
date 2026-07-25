@@ -937,21 +937,9 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   }
 
   //-------------------- New sync
-  // Houdini beacon rides the TDD framer's '6' strobe symbol: the frame is
-  // [beacon 0.5 ms][rx_gate 0.5 ms], so the beacon is only ~50% duty and a
-  // slot-sized (~78 us) detect window lands in the SILENT rx_gate symbol most of
-  // the time (median gold ~11 dB, undetectable; only ~42% of windows see the
-  // beacon). Widen the Houdini window past the 0.5 ms silent gap so it ALWAYS
-  // spans the beacon symbol (which holds ~230 dense beacon copies) -- find_beacon
-  // then locks even when random UDP drops gut some copies. One slot of headroom
-  // keeps alignment_samples (= samps_per_frame - window) > beacon_size+prefix so
-  // clientAdjustRx never goes negative. (houdini_beacon_ab / houdini_rx_format:
-  // full-frame window 40-53 dB vs slot-window median 11 dB.)
   const size_t beacon_detect_window =
-      config_->is_houdini()
-          ? config_->samps_per_frame() - config_->samps_per_slot()
-          : static_cast<size_t>(static_cast<float>(config_->samps_per_slot()) *
-                                kBeaconDetectWindowScaler);
+      static_cast<size_t>(static_cast<float>(config_->samps_per_slot()) *
+                          kBeaconDetectWindowScaler);
   size_t sync_count = 0;
   constexpr size_t kTargetSyncCount = 2;
   assert(config_->samps_per_frame() >= beacon_detect_window);
