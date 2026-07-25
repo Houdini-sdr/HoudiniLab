@@ -509,9 +509,17 @@ long long BaseRadioSet::houdiniArmTdd(SoapySDR::Device* dev,
 void BaseRadioSet::armHoudiniTdd(void) {
   // Comfortable 0.5 ms TDD symbol so the samps_per_slot (<= 4096) capture fits
   // well inside one rx_gate window (the pre-open guard would clip a capture that
-  // filled the symbol). Beacon = CONTINUOUS replay (decoupled from the framer);
-  // the framer provides rx_gate on symbols 1..N (one per sounder pilot slot). The
-  // capture is tagged with the SOUNDER slot index so the recorder places it.
+  // filled the symbol). Beacon rides the framer's '6' replay-strobe symbol;
+  // symbols 1..N are one rx_gate per sounder pilot slot. The capture is tagged
+  // with the SOUNDER slot index so the recorder places it.
+  //
+  // NB (houdini_beacon_ab.py, .21->.22): the SAME beacon RAM scored by the
+  // client's gold correlation gives 44.5 dB via the framer strobe vs only 10.2 dB
+  // via a continuous activateXmit replay -- the strobe is SHARPER, not distorted
+  // (an earlier "strobe distorted ~11 dB" note was the continuous mode mislabeled).
+  // And a continuous replay can't coexist with the framer anyway: arming the framer
+  // silences activateXmit (-33 dB) and any tx_gate schedule is arm-rejected without
+  // a strobe. So the strobe is the only way to get beacon + rx_gate on one board.
   htdd_symbol_ticks_ = kTddSymTicks;
   htdd_tick_rate_ = _cfg->rate();
 
@@ -535,32 +543,44 @@ void BaseRadioSet::armHoudiniTdd(void) {
         if (ch == 'P' || ch == 'R' || ch == 'U' || ch == 'N')
           htdd_rx_slots_.push_back(s);
       }
-      // DECOUPLED beacon: the beacon is a CONTINUOUS replay (activateXmit) --
-      // proven client-syncable in armHoudiniBeacon, and it drives the Radio's TX
-      // stream (physical channel, so no ch0/ch1 bug). The TDD REPLAY STROBE
-      // playback distorted the beacon (gold xcorr ~11 dB, ~64-samp repeat vs 512
-      // -> find_beacon failed), so we DON'T strobe. The TDD framer is armed for
-      // rx_gate ONLY (symbol 0 = guard, symbols 1..N = one rx_gate per pilot
-      // slot); .21 ADC_C hears only .22's DAC (reverse cable), never its own
-      // continuous beacon, so the gated RX still captures only the UE pilot.
+      // TDD schedule: 1 beacon symbol + 1 rx_gate symbol per sounder pilot slot.
       const size_t spf_tdd = 1 + htdd_rx_slots_.size();
       std::string tdd(spf_tdd, '0');
+      tdd[0] = '6';  // beacon strobe (+rx_gate, harmless)
       for (size_t k = 1; k < spf_tdd; ++k) tdd[k] = '2';  // rx_gate windows
       htdd_frame_ticks_ = static_cast<long long>(spf_tdd) * htdd_symbol_ticks_;
 
+      // PHYSICAL TX channel for the strobe (beacon_channel() is the logical index
+      // within bs_channel; TDD_REPLAY_STROBE and the loaded RAM are on the real
+      // DAC, e.g. bs_channel "B" -> ch1 = the cabled DAC_A). Using the logical 0
+      // fired the strobe on ch0 (DAC_B, not cabled) so the beacon never reached
+      // the UE.
+      const auto bs_chans = Utils::strToChannels(_cfg->bs_channel());
+      const size_t tx_ch =
+          bs_chans.empty()
+              ? 0
+              : bs_chans.at(std::min(static_cast<size_t>(_cfg->beacon_channel()),
+                                     bs_chans.size() - 1));
       long long t0 = 0;
       r->xmit(buffs, static_cast<int>(n_load), 0, t0);  // load replay RAM
-      r->activateXmit();                                // CONTINUOUS beacon replay
       dev->writeSetting("TDD_SCHED", tdd);
+      // loops=forever fills the whole beacon symbol with the replay (the TDD
+      // beacon path, HS-80 §11b) -- a DENSE beacon (like the free-running one)
+      // for half of every frame, so the client's single-window find_beacon
+      // catches it (a single once/frame burst was too sparse to detect).
+      dev->writeSetting("TDD_REPLAY_STROBE",
+                        "ch" + std::to_string(tx_ch) +
+                            ":len=" + std::to_string(n_load / 2) +
+                            ",loops=forever,offs=" + std::to_string(kTddGridTicks));
       htdd_epoch_ = houdiniArmTdd(dev, htdd_symbol_ticks_,
                                   static_cast<long long>(spf_tdd));
       htdd_rx_cursor_ = 0;
       htdd_last_win_tick_ = 0;
       MLPD_INFO(
-          "Houdini BS TDD armed (continuous beacon + rx_gate): sched=%s "
-          "epoch=%lld frame=%lld ticks, %zu pilot slot(s), beacon %zu samp\n",
+          "Houdini BS TDD armed: sched=%s epoch=%lld frame=%lld ticks, "
+          "%zu pilot slot(s) %s beacon strobe %zu samp\n",
           tdd.c_str(), htdd_epoch_, htdd_frame_ticks_, htdd_rx_slots_.size(),
-          n_load);
+          htdd_rx_slots_.empty() ? "(none)" : "", n_load);
     }
   }
 }
