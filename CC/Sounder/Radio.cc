@@ -149,8 +149,10 @@ Radio::Radio(const SoapySDR::Kwargs& args, const char soapyFmt[],
     }*/
   // Backends that forbid live rate changes (Houdini) must have the rate and
   // NCO set BEFORE the stream opens; the Iris path passes 0 and keeps setting
-  // these in dev_init (post-setupStream) as before. RX/TX rates are independent
-  // (BS beacon replay runs TX at the DAC max while RX stays at the app rate).
+  // these in dev_init (post-setupStream) as before. RX/TX rates are independent;
+  // a negative preStreamTxRate is a sentinel for "use the device max TX rate"
+  // (the replay RAM plays at that rate and the RFDC interpolates to the DAC) --
+  // but the BS beacon now passes the app rate, so no host upsampling is needed.
   if (preStreamRxRate > 0.0) {
     for (auto ch : channels) {
       dev_->setSampleRate(SOAPY_SDR_RX, ch, preStreamRxRate);

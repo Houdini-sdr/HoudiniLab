@@ -32,34 +32,6 @@
 using json = nlohmann::json;
 static constexpr int kMaxTOSyncRetry = 10;
 
-namespace {
-// Band-limited x f upsample via DFT zero-pad (startup only -> O(N^2) is fine).
-// Matches beacon_tx_gold so the replayed beacon lands at the UE sample rate.
-std::vector<std::complex<float>> upsampleBeacon(
-    const std::vector<std::complex<float>>& x, int f) {
-  using cf = std::complex<float>;
-  const int L = static_cast<int>(x.size()), Lu = L * f, h = L / 2;
-  std::vector<cf> X(L), Xu(Lu, cf(0, 0)), xu(Lu);
-  for (int k = 0; k < L; ++k) {
-    cf s(0, 0);
-    for (int n = 0; n < L; ++n)
-      s += x[n] * std::exp(cf(0, -2.0 * M_PI * k * n / L));
-    X[k] = s;
-  }
-  for (int k = 0; k < h; ++k) {
-    Xu[k] = X[k];
-    Xu[Lu - h + k] = X[h + k];
-  }
-  for (int n = 0; n < Lu; ++n) {
-    cf s(0, 0);
-    for (int k = 0; k < Lu; ++k)
-      if (Xu[k] != cf(0, 0)) s += Xu[k] * std::exp(cf(0, 2.0 * M_PI * k * n / Lu));
-    xu[n] = s;
-  }
-  return xu;
-}
-}  // namespace
-
 BaseRadioSet::BaseRadioSet(Config* cfg, const bool calibrate_proc) : _cfg(cfg) {
   std::vector<size_t> num_bs_antenntas(_cfg->num_cells());
   bsRadios.resize(_cfg->num_cells());
@@ -391,28 +363,30 @@ BaseRadioSet::BaseRadioSet(Config* cfg, const bool calibrate_proc) : _cfg(cfg) {
 
 void BaseRadioSet::buildHoudiniBeacon(std::vector<int16_t>& iq) {
   constexpr int kReplayDepth = 4096;  // Houdini TX replay RAM depth (samples)
-  constexpr int kUpsample = 8;        // DAC max (983.04) / app rate (122.88)
 
   // Rebuild the STS+gold core of config's beacon (indices [prefix, prefix+
   // beacon_size) skip the zero pre/postfix). Conjugate it: the matched-NCO R2C
   // mixer delivers the beacon conjugated and receiver.cc::syncSearch feeds the
   // raw RX to find_beacon, so pre-conjugating the TX cancels it.
+  //
+  // NO host upsampling: the beacon replays at the APP rate (BaseRadioSet opens
+  // the beacon Radio's TX at _cfg->rate(), not the DAC max), so the RFDC's own
+  // interpolation carries it to the DAC. Placing the beacon_size (~496) core at
+  // the head of the 4096-deep RAM and leaving the rest SILENT makes an ISOLATED
+  // beacon that recurs every 4096 samples (~33 us): it fits inside the client's
+  // detect window AND keeps find_beacon's trailing-energy threshold low, so the
+  // SHARP native-rate 2-rep gold peak clears it at corr_scale=1. (The old x8
+  // upsample + DAC-max replay recurred every 512 samples -- dense -- and smeared
+  // the gold, forcing corr_scale~100.)
   const auto& bc = _cfg->beacon_ci16();
   const int p = _cfg->prefix();
   const int n = _cfg->beacon_size();
-  std::vector<std::complex<float>> core(n);
-  for (int k = 0; k < n; ++k) {
-    core[k] = std::conj(std::complex<float>(
+  std::vector<std::complex<float>> loop(kReplayDepth, std::complex<float>(0, 0));
+  for (int k = 0; k < n && k < kReplayDepth; ++k) {
+    loop[k] = std::conj(std::complex<float>(
         static_cast<float>(bc.at(p + k).real()),
         static_cast<float>(bc.at(p + k).imag())));
   }
-
-  // x8 upsample so each rep lands at the app rate, then pad to the replay RAM
-  // so the beacon recurs at a fixed period (RAM/8 = 512 rx samples).
-  auto up = upsampleBeacon(core, kUpsample);
-  if (up.size() > static_cast<size_t>(kReplayDepth)) up.resize(kReplayDepth);
-  std::vector<std::complex<float>> loop(up.begin(), up.end());
-  loop.resize(kReplayDepth, std::complex<float>(0, 0));
   float peak = 1e-30f;
   for (const auto& v : loop) peak = std::max(peak, std::abs(v));
   const size_t n_load = loop.size();
@@ -435,7 +409,6 @@ void BaseRadioSet::buildHoudiniBeacon(std::vector<int16_t>& iq) {
 }
 
 void BaseRadioSet::armHoudiniBeacon(void) {
-  constexpr int kUpsample = 8;
   std::vector<int16_t> iq;
   buildHoudiniBeacon(iq);
   const size_t n_load = iq.size() / 2;
@@ -453,9 +426,9 @@ void BaseRadioSet::armHoudiniBeacon(void) {
       r->xmit(buffs, static_cast<int>(n_load), 0, t0);  // load replay RAM
       r->activateXmit();                                // arm free-running loop
       MLPD_INFO(
-          "Houdini BS beacon armed: %zu-sample replay loop (rx period %zu) on "
-          "cell %zu radio %zu\n",
-          n_load, n_load / kUpsample, c, i);
+          "Houdini BS beacon armed: %zu-sample app-rate replay loop (isolated "
+          "beacon, period %zu) on cell %zu radio %zu\n",
+          n_load, n_load, c, i);
     }
   }
 }
@@ -564,10 +537,12 @@ void BaseRadioSet::armHoudiniTdd(void) {
       long long t0 = 0;
       r->xmit(buffs, static_cast<int>(n_load), 0, t0);  // load replay RAM
       dev->writeSetting("TDD_SCHED", tdd);
-      // loops=forever fills the whole beacon symbol with the replay (the TDD
-      // beacon path, HS-80 §11b) -- a DENSE beacon (like the free-running one)
-      // for half of every frame, so the client's single-window find_beacon
-      // catches it (a single once/frame burst was too sparse to detect).
+      // loops=forever replays the full app-rate RAM back-to-back through the
+      // whole beacon symbol (the TDD beacon path, HS-80 §11b). The RAM is one
+      // ISOLATED beacon (beacon_size core + silence to 4096), so the symbol
+      // carries that beacon every 4096 samples (~33 us) -- frequent enough that
+      // the client's single-window find_beacon always catches one, sparse enough
+      // that the trailing-energy threshold stays low (sharp 2-rep peak).
       dev->writeSetting("TDD_REPLAY_STROBE",
                         "ch" + std::to_string(tx_ch) +
                             ":len=" + std::to_string(n_load / 2) +
@@ -692,12 +667,17 @@ void BaseRadioSet::init(BaseRadioContext* context) {
   args["timeout"] = "1000000";
   try {
     bsRadios.at(c).at(i) = nullptr;
-    // Houdini: RX at the app rate, TX at the DAC max (-1) for replay, tuned to
-    // the NCO -- all before setupStream (Houdini forbids a live rate change).
+    // Houdini: RX + TX both at the app rate, tuned to the NCO -- all before
+    // setupStream (Houdini forbids a live rate change). The beacon replay RAM
+    // plays out at THIS configured rate and the RFDC does its own interpolation
+    // up to the DAC (streaming.cpp: "the replay RAM plays out at this fabric
+    // rate"); there is NO need to clock replay at the DAC max and pre-upsample
+    // the beacon on the host (the old -1 sentinel did that and made the beacon
+    // recur every 512 samples -- dense -- which buried find_beacon's 2-rep peak).
     bsRadios.at(c).at(i) =
         new Radio(args, SOAPY_SDR_CS16, channels, rx_stream_args, tx_stream_args,
                   _cfg->is_houdini() ? _cfg->rate() : 0.0,
-                  _cfg->is_houdini() ? -1.0 : 0.0,
+                  _cfg->is_houdini() ? _cfg->rate() : 0.0,
                   _cfg->is_houdini() ? _cfg->nco() : 0.0);
   } catch (std::runtime_error& err) {
     if (kUseSoapyUHD == false) {
