@@ -14,6 +14,7 @@
 #include <chrono>
 #include <complex>
 #include <condition_variable>
+#include <cstdio>
 #include <cstdlib>
 #include <functional>
 #include <iostream>
@@ -270,6 +271,22 @@ int CommsLib::find_beacon_avx(
     if (corr_scale * peak_metric[i] > thresh[i]) {
       valid_peaks.push(static_cast<int>(i));
     }
+  }
+  if (std::getenv("FIND_BEACON_DEBUG") != nullptr) {
+    double best_ratio = 0.0;
+    size_t best_i = 0, best_pm_i = 0;
+    float best_pm = 0.0f;
+    for (size_t i = 0; i < peak_metric.size(); ++i) {
+      const double r = peak_metric[i] / (thresh[i] + 1e-30);
+      if (r > best_ratio) { best_ratio = r; best_i = i; }
+      if (peak_metric[i] > best_pm) { best_pm = peak_metric[i]; best_pm_i = i; }
+    }
+    std::fprintf(stderr,
+                 "[find_beacon] n=%zu corr_scale=%.1f  max(pm/thr)=%.4g at %zu  "
+                 "max_pm=%.4g at %zu (thr there=%.4g)  #valid=%zu -> %d\n",
+                 peak_metric.size(), corr_scale, best_ratio, best_i, best_pm,
+                 best_pm_i, thresh[best_pm_i], valid_peaks.size(),
+                 valid_peaks.empty() ? -1 : valid_peaks.front());
   }
 #ifdef TEST_BENCH
   const auto t4 = std::chrono::steady_clock::now();
