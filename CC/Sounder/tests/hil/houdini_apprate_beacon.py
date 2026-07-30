@@ -44,6 +44,10 @@ def to_c(buf):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--tx-rate", default="122.88", help="MHz, or 'max'")
+    ap.add_argument("--rx-nco", type=float, default=None,
+                    help="RX NCO in MHz (default = TX NCO 500); set 512/488 to "
+                         "hardware-compensate the +12 MHz app-rate beacon offset")
+    ap.add_argument("--tx-nco", type=float, default=NCO, help="TX NCO MHz")
     ap.add_argument("--secs", type=float, default=0.12)
     ap.add_argument("--cap-mb", type=float, default=16.0)
     a = ap.parse_args()
@@ -70,10 +74,12 @@ def main():
         tx_rate = float(a.tx_rate) * 1e6
     tsd.setSampleRate(SOAPY_SDR_TX, TXC, tx_rate)
     tx_rate = float(tsd.getSampleRate(SOAPY_SDR_TX, TXC))
-    tsd.setFrequency(SOAPY_SDR_TX, TXC, NCO * 1e6)
+    tsd.setFrequency(SOAPY_SDR_TX, TXC, a.tx_nco * 1e6)
+    rx_nco = a.rx_nco if a.rx_nco is not None else NCO
     rsd.setSampleRate(SOAPY_SDR_RX, RXC, 122.88e6)
-    rsd.setFrequency(SOAPY_SDR_RX, RXC, NCO * 1e6)
+    rsd.setFrequency(SOAPY_SDR_RX, RXC, rx_nco * 1e6)
     rx_rate = float(rsd.getSampleRate(SOAPY_SDR_RX, RXC))
+    print(f"TX NCO {a.tx_nco} MHz  RX NCO {rx_nco} MHz")
     ratio = tx_rate / rx_rate
     print(f"TX rate {tx_rate/1e6:.2f} MSPS  RX {rx_rate/1e6:.2f}  ratio {ratio:.2f} "
           f"=> expected on-air period {n_load/ratio:.0f} rx-samp, "
