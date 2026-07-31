@@ -606,7 +606,9 @@ int BaseRadioSet::houdiniTddRx(size_t radio_id, void* const* buffs,
   // located anywhere in the frame -> compute the advance that seats it in the
   // rx_gate. Scan a few frames further ahead than a normal window so the client
   // has synced and is transmitting its pilot. Returns -1 to stop after the dump.
-  if (getenv("HOUDINI_TDD_SCAN") != nullptr && htdd_frame_counter_ >= 100) {
+  if (getenv("HOUDINI_TDD_SCAN") != nullptr && (htdd_frame_counter_ % 10) == 0)
+    MLPD_INFO("houdiniTddRx: frame_counter=%lld\n", htdd_frame_counter_);
+  if (getenv("HOUDINI_TDD_SCAN") != nullptr && htdd_frame_counter_ >= 20) {
     static std::atomic<bool> scanned{false};
     bool expected = false;
     if (scanned.compare_exchange_strong(expected, true)) {
