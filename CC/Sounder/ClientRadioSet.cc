@@ -7,6 +7,8 @@
   * Initializes and Configures Client Radios 
   * ----------------------------------------------------------
   */
+#include <atomic>
+#include <cstdlib>
 #include "include/ClientRadioSet.h"
 
 #include "SoapySDR/Errors.hpp"
@@ -426,7 +428,22 @@ int ClientRadioSet::radioTx(size_t radio_id, const void* const* buffs,
       const long long q = _cfg->ue_tdd_pilot() ? kTddGridNs : kNsPerMs;
       frameTimeNs = ((frameTimeNs + q / 2) / q) * q;  // snap to the accepted grid
     }
-    return radios.at(radio_id)->xmit(buffs, numSamps, flags, frameTimeNs);
+    const int r = radios.at(radio_id)->xmit(buffs, numSamps, flags, frameTimeNs);
+    if (std::getenv("HOUDINI_UE_TX_DEBUG") != nullptr) {
+      static std::atomic<int> c{0};
+      if ((c.fetch_add(1) % 20) == 0) {
+        try {
+          const std::string b =
+              radios.at(radio_id)->RawDev()->readSetting("TX_BANK_STATUS");
+          const size_t p = b.find("ch1:");
+          MLPD_INFO("UE TX dbg: xmit r=%d/%d txNs=%lld bank[%s]\n", r, numSamps,
+                    frameTimeNs,
+                    (p == std::string::npos ? b : b.substr(p, 70)).c_str());
+        } catch (...) {
+        }
+      }
+    }
+    return r;
   }
 }
 
