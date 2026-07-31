@@ -600,6 +600,36 @@ int BaseRadioSet::houdiniTddRx(size_t radio_id, void* const* buffs,
       }
     }
   }
+  // Pilot-locate scan (HOUDINI_TDD_SCAN): once, capture a WHOLE frame starting at
+  // the frame origin (symbol 0; both '6' and '2' gate RX so the whole frame is
+  // receivable) and dump it, so a UE pilot TX'd at ue_tx_advance_ticks=0 can be
+  // located anywhere in the frame -> compute the advance that seats it in the
+  // rx_gate. Scan a few frames further ahead than a normal window so the client
+  // has synced and is transmitting its pilot. Returns -1 to stop after the dump.
+  if (getenv("HOUDINI_TDD_SCAN") != nullptr) {
+    static std::atomic<bool> scanned{false};
+    bool expected = false;
+    if (scanned.compare_exchange_strong(expected, true)) {
+      const int scan_n = static_cast<int>(htdd_frame_ticks_);  // one full frame
+      const long long lead =
+          std::max((now - htdd_epoch_) / htdd_frame_ticks_ + 80, 3LL);
+      const long long swt = htdd_epoch_ + lead * htdd_frame_ticks_;
+      std::vector<int16_t> scan(static_cast<size_t>(scan_n) * 2, 0);
+      void* sb[1] = {scan.data()};
+      const int sg = r->recvTddWindow(sb, scan_n, tddNsOfTick(swt));
+      FILE* f = std::fopen("/tmp/bs_scan.bin", "wb");
+      if (f) {
+        std::fwrite(scan.data(), sizeof(int16_t),
+                    static_cast<size_t>(std::max(sg, 0)) * 2, f);
+        std::fclose(f);
+      }
+      MLPD_INFO("HOUDINI_TDD_SCAN: dumped %d/%d samp BS-frame capture (win_tick "
+                "%lld, frame_ticks %lld, rx_gate at symbol tick %lld) to "
+                "/tmp/bs_scan.bin\n",
+                sg, scan_n, swt, htdd_frame_ticks_, htdd_symbol_ticks_);
+    }
+    return -1;
+  }
   const int n = static_cast<int>(_cfg->samps_per_slot());
   const int got = r->recvTddWindow(buffs, n, tddNsOfTick(wt));
   // frame_id must be a small monotonic counter (0,1,2,...) like the Iris HW
