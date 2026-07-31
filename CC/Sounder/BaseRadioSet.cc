@@ -606,13 +606,13 @@ int BaseRadioSet::houdiniTddRx(size_t radio_id, void* const* buffs,
   // located anywhere in the frame -> compute the advance that seats it in the
   // rx_gate. Scan a few frames further ahead than a normal window so the client
   // has synced and is transmitting its pilot. Returns -1 to stop after the dump.
-  if (getenv("HOUDINI_TDD_SCAN") != nullptr) {
+  if (getenv("HOUDINI_TDD_SCAN") != nullptr && htdd_frame_counter_ >= 100) {
     static std::atomic<bool> scanned{false};
     bool expected = false;
     if (scanned.compare_exchange_strong(expected, true)) {
       const int scan_n = static_cast<int>(htdd_frame_ticks_);  // one full frame
       const long long lead =
-          std::max((now - htdd_epoch_) / htdd_frame_ticks_ + 80, 3LL);
+          std::max((now - htdd_epoch_) / htdd_frame_ticks_ + 5, 3LL);
       const long long swt = htdd_epoch_ + lead * htdd_frame_ticks_;
       std::vector<int16_t> scan(static_cast<size_t>(scan_n) * 2, 0);
       void* sb[1] = {scan.data()};
