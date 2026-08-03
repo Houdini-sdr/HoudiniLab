@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -600,37 +601,68 @@ int BaseRadioSet::houdiniTddRx(size_t radio_id, void* const* buffs,
       }
     }
   }
-  // Pilot-locate scan (HOUDINI_TDD_SCAN): once, capture a WHOLE frame starting at
-  // the frame origin (symbol 0; both '6' and '2' gate RX so the whole frame is
-  // receivable) and dump it, so a UE pilot TX'd at ue_tx_advance_ticks=0 can be
-  // located anywhere in the frame -> compute the advance that seats it in the
-  // rx_gate. Scan a few frames further ahead than a normal window so the client
-  // has synced and is transmitting its pilot. Returns -1 to stop after the dump.
-  if (getenv("HOUDINI_TDD_SCAN") != nullptr && (htdd_frame_counter_ % 10) == 0)
-    MLPD_INFO("houdiniTddRx: frame_counter=%lld\n", htdd_frame_counter_);
-  if (getenv("HOUDINI_TDD_SCAN") != nullptr && htdd_frame_counter_ >= 20) {
-    static std::atomic<bool> scanned{false};
-    bool expected = false;
-    if (scanned.compare_exchange_strong(expected, true)) {
-      const int scan_n = static_cast<int>(htdd_frame_ticks_);  // one full frame
-      const long long lead =
-          std::max((now - htdd_epoch_) / htdd_frame_ticks_ + 5, 3LL);
-      const long long swt = htdd_epoch_ + lead * htdd_frame_ticks_;
-      std::vector<int16_t> scan(static_cast<size_t>(scan_n) * 2, 0);
-      void* sb[1] = {scan.data()};
-      const int sg = r->recvTddWindow(sb, scan_n, tddNsOfTick(swt));
-      FILE* f = std::fopen("/tmp/bs_scan.bin", "wb");
-      if (f) {
-        std::fwrite(scan.data(), sizeof(int16_t),
-                    static_cast<size_t>(std::max(sg, 0)) * 2, f);
-        std::fclose(f);
+  // Pilot-locate scan (HOUDINI_TDD_SCAN): capture a WHOLE frame from the frame
+  // origin (both '6' and '2' gate RX, so the whole frame is receivable) and, if a
+  // pilot burst is present, dump it + STOP -- so a UE pilot TX'd at
+  // ue_tx_advance_ticks=0 can be located anywhere in the frame and the advance
+  // that seats it in the rx_gate computed. We scan on EVERY call (not once) until
+  // a burst is caught, because the BS capture pace and the client's finite TX
+  // window (max_frame) don't line up -- a single fixed-time scan usually samples
+  // before the pilot starts or after it stops. On a miss we fall through to a
+  // normal capture (with a fresh window tick) so loopRecv keeps running.
+  static std::atomic<bool> htdd_scan_found{false};
+  if (getenv("HOUDINI_TDD_SCAN") != nullptr && !htdd_scan_found.load()) {
+    const int scan_n = static_cast<int>(htdd_frame_ticks_);  // one full frame
+    const long long snow = static_cast<long long>(
+        std::llround(static_cast<double>(dev->getHardwareTime("")) *
+                     htdd_tick_rate_ / 1e9));
+    const long long slead = std::max((snow - htdd_epoch_) / htdd_frame_ticks_ + 3, 3LL);
+    const long long swt = htdd_epoch_ + slead * htdd_frame_ticks_;  // frame origin
+    std::vector<int16_t> scan(static_cast<size_t>(scan_n) * 2, 0);
+    void* sb[1] = {scan.data()};
+    const int sg = r->recvTddWindow(sb, scan_n, tddNsOfTick(swt));
+    // peak sliding-4096 RMS vs the frame mean -> is a pilot burst present?
+    double best_e = 0.0;
+    int at = 0;
+    if (sg > 4096) {
+      std::vector<double> cs(static_cast<size_t>(sg) + 1, 0.0);
+      for (int i = 0; i < sg; ++i) {
+        const double re = scan[2 * i], im = scan[2 * i + 1];
+        cs[i + 1] = cs[i] + re * re + im * im;
       }
-      MLPD_INFO("HOUDINI_TDD_SCAN: dumped %d/%d samp BS-frame capture (win_tick "
-                "%lld, frame_ticks %lld, rx_gate at symbol tick %lld) to "
-                "/tmp/bs_scan.bin\n",
-                sg, scan_n, swt, htdd_frame_ticks_, htdd_symbol_ticks_);
+      for (int s = 0; s + 4096 <= sg; s += 256) {
+        const double e = (cs[s + 4096] - cs[s]) / 4096.0;
+        if (e > best_e) { best_e = e; at = s; }
+      }
+      const double peak_rms = std::sqrt(best_e);
+      const double mean_rms = std::sqrt(cs[sg] / sg);
+      MLPD_INFO("HOUDINI_TDD_SCAN: frame_counter=%lld got=%d peak-rms=%.0f@%d "
+                "mean-rms=%.0f\n",
+                htdd_frame_counter_, sg, peak_rms, at, mean_rms);
+      if (peak_rms > 120.0 && peak_rms > 4.0 * mean_rms) {
+        FILE* f = std::fopen("/tmp/bs_scan.bin", "wb");
+        if (f) {
+          std::fwrite(scan.data(), sizeof(int16_t),
+                      static_cast<size_t>(sg) * 2, f);
+          std::fclose(f);
+        }
+        htdd_scan_found.store(true);
+        MLPD_INFO("HOUDINI_TDD_SCAN: PILOT FOUND at frame-offset %d (peak-rms "
+                  "%.0f); rx_gate is at tick %lld => ue_tx_advance_ticks = %lld; "
+                  "dumped %d samp to /tmp/bs_scan.bin\n",
+                  at, peak_rms, htdd_symbol_ticks_,
+                  htdd_symbol_ticks_ - static_cast<long long>(at), sg);
+        return -1;
+      }
     }
-    return -1;
+    // Miss: don't run the (slow, timing-out) normal capture -- return the frame
+    // head as a dummy so loopRecv keeps running and we scan again next call fast.
+    const int n = static_cast<int>(_cfg->samps_per_slot());
+    std::memcpy(buffs[0], scan.data(), static_cast<size_t>(n) * 4);
+    const long long fid = htdd_frame_counter_;
+    if (htdd_rx_cursor_ == 0) ++htdd_frame_counter_;
+    frameTime = (fid << 32) | (static_cast<long long>(sounder_slot) << 16);
+    return n;
   }
   const int n = static_cast<int>(_cfg->samps_per_slot());
   const int got = r->recvTddWindow(buffs, n, tddNsOfTick(wt));
