@@ -640,19 +640,22 @@ int BaseRadioSet::houdiniTddRx(size_t radio_id, void* const* buffs,
                 "mean-rms=%.0f\n",
                 htdd_frame_counter_, sg, peak_rms, at, mean_rms);
       if (peak_rms > 120.0 && peak_rms > 4.0 * mean_rms) {
-        FILE* f = std::fopen("/tmp/bs_scan.bin", "wb");
-        if (f) {
-          std::fwrite(scan.data(), sizeof(int16_t),
-                      static_cast<size_t>(sg) * 2, f);
-          std::fclose(f);
+        static std::atomic<int> hits{0};
+        const int nh = hits.fetch_add(1);
+        MLPD_INFO("HOUDINI_TDD_SCAN: PILOT hit #%d at frame-offset %d (peak-rms "
+                  "%.0f); rx_gate tick %lld => advance %lld\n",
+                  nh, at, peak_rms, htdd_symbol_ticks_,
+                  htdd_symbol_ticks_ - static_cast<long long>(at));
+        if (nh >= 11) {  // collected enough to judge stability -> dump last + stop
+          FILE* f = std::fopen("/tmp/bs_scan.bin", "wb");
+          if (f) {
+            std::fwrite(scan.data(), sizeof(int16_t),
+                        static_cast<size_t>(sg) * 2, f);
+            std::fclose(f);
+          }
+          htdd_scan_found.store(true);
+          return -1;
         }
-        htdd_scan_found.store(true);
-        MLPD_INFO("HOUDINI_TDD_SCAN: PILOT FOUND at frame-offset %d (peak-rms "
-                  "%.0f); rx_gate is at tick %lld => ue_tx_advance_ticks = %lld; "
-                  "dumped %d samp to /tmp/bs_scan.bin\n",
-                  at, peak_rms, htdd_symbol_ticks_,
-                  htdd_symbol_ticks_ - static_cast<long long>(at), sg);
-        return -1;
       }
     }
     // Miss: don't run the (slow, timing-out) normal capture -- return the frame
