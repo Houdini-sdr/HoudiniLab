@@ -15,7 +15,7 @@
     "frame_schedule": [
         "BGPGGGGGGGGGGGGGGGGGGGGGGGGGGG"
     ],
-    "max_frame": 1500,
+    "max_frame": 600,
     "ofdm_symbol_per_slot": 48,
     "fft_size": 64,
     "cp_size": 16,
