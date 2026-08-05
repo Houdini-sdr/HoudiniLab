@@ -59,13 +59,33 @@ def start_tone(ip, ch, nco_hz, bb_hz, amp, n=4096):
     ctx = hs.open_device(node=ip, ch=ch, verbose=False)
     sdr, native = ctx["sdr"], ctx["native_fmt"]
     _teardown(sdr)
+    # A prior run may have left the replay strobe armed on this channel, which
+    # FREEZES the replay RAM (fill REFUSED) -> the board would TX stale samples.
+    # Explicitly disarm the strobe + abort the framer before loading the tone.
+    for setting, val in (("TDD_REPLAY_STROBE", f"ch{ch}:off"), ("TDD_CMD", "abort")):
+        try:
+            sdr.writeSetting(setting, val)
+        except Exception:  # noqa: BLE001
+            pass
     sdr.setSampleRate(SOAPY_SDR_TX, ch, 122.88e6)
     rate = float(sdr.getSampleRate(SOAPY_SDR_TX, ch))
     sdr.setFrequency(SOAPY_SDR_TX, ch, nco_hz)
     i16, act_bb = tx_iq_tone(bb_hz, rate, n, amp_frac=amp)
     cs16 = np.ascontiguousarray(i16, dtype=np.int16).view(np.int32)
     txs = sdr.setupStream(SOAPY_SDR_TX, native, [ch], {"tx_mode": "replay"})
-    sdr.writeStream(txs, [cs16], n, 0, 0)   # load the replay RAM
+    for tryi in range(3):
+        try:
+            sdr.writeStream(txs, [cs16], n, 0, 0)   # load the replay RAM
+            break
+        except Exception as e:  # noqa: BLE001
+            if tryi == 2:
+                raise
+            try:
+                sdr.writeSetting("TDD_REPLAY_STROBE", f"ch{ch}:off")
+                sdr.writeSetting("TDD_CMD", "abort")
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(0.3)
     sdr.activateStream(txs)                 # free-running continuous replay
     got_nco = float(sdr.getFrequency(SOAPY_SDR_TX, ch))
     print(f"  {ip}: DAC ch{ch}  RF = {(got_nco + act_bb)/1e6:.3f} MHz "
