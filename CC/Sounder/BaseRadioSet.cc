@@ -633,22 +633,10 @@ int BaseRadioSet::houdiniTddRx(size_t radio_id, void* const* buffs,
       }
       if (peak_rms > 120.0 && peak_rms > 4.0 * mean_rms) {
         loc = at;
-        pilot_offset.store(loc);
         MLPD_INFO("Houdini BS pilot LOCATED at frame-offset %lld (peak-rms %.0f, "
-                  "mean %.0f) -- arming rx_gate there\n",
+                  "mean %.0f)\n",
                   loc, peak_rms, mean_rms);
         if (getenv("HOUDINI_TDD_SCAN") != nullptr) {
-          // Leading edge of the pilot energy: first index where a sliding
-          // 256-sample RMS crosses 3x the frame mean (unambiguous, unlike the
-          // max-energy plateau). Then dump the whole scan for offline profiling.
-          const double thr = 9.0 * (cs[sg] / sg);  // 3x-rms in mean-square terms
-          int edge = -1;
-          for (int s = 0; s + 256 <= sg; s += 16) {
-            if ((cs[s + 256] - cs[s]) / 256.0 > thr) { edge = s; break; }
-          }
-          MLPD_INFO("Houdini BS pilot-scan: max-energy at=%d  leading-edge=%d  "
-                    "(slot=%zu, samps_per_slot=%zu)\n",
-                    at, edge, sounder_slot, _cfg->samps_per_slot());
           FILE* f = std::fopen("/tmp/bs_scan.bin", "wb");
           if (f) {
             std::fwrite(scan.data(), sizeof(int16_t),
@@ -656,6 +644,57 @@ int BaseRadioSet::houdiniTddRx(size_t radio_id, void* const* buffs,
             std::fclose(f);
           }
         }
+        // Self-calibrate the scan-vs-window pipeline offset. The whole-frame locate
+        // scan and a short gated rx window deliver samples with DIFFERENT fixed
+        // offsets (measured ~2k samples), so a window armed at the scan index lands
+        // the pilot ~2k samples late and truncates it. Do ONE trial capture at
+        // `at`, find where the pilot energy actually lands, and shift loc so the
+        // transmitted pilot slot ([prefix][symbols][postfix]) sits at the window
+        // front (energy leading edge -> offset = prefix).
+        const int n = static_cast<int>(_cfg->samps_per_slot());
+        const long long nowc = static_cast<long long>(
+            std::llround(static_cast<double>(dev->getHardwareTime("")) *
+                         htdd_tick_rate_ / 1e9));
+        const long long kc =
+            std::max((nowc - htdd_epoch_) / htdd_frame_ticks_ + 2, 1LL);
+        const long long wtc = htdd_epoch_ + kc * htdd_frame_ticks_ + at;
+        std::vector<int16_t> cal(static_cast<size_t>(n) * 2, 0);
+        void* cb[1] = {cal.data()};
+        const int cg = r->recvTddWindow(cb, n, tddNsOfTick(wtc));
+        int edge = -1;
+        if (cg > 256) {
+          // sliding-256 mean-square, peak-relative edge (the pilot dominates the
+          // window mean, so a mean-relative threshold would miss it).
+          std::vector<double> ms(static_cast<size_t>(cg), 0.0);
+          double win = 0.0, peak = 0.0;
+          for (int i = 0; i < cg; ++i) {
+            const double re = cal[2 * i], im = cal[2 * i + 1];
+            win += re * re + im * im;
+            if (i >= 256) {
+              const double r0 = cal[2 * (i - 256)], i0 = cal[2 * (i - 256) + 1];
+              win -= r0 * r0 + i0 * i0;
+            }
+            const double m = win / 256.0;
+            ms[i] = m;
+            if (i >= 255 && m > peak) peak = m;
+          }
+          const double thr = 0.15 * peak;  // 15% of the pilot's peak power
+          for (int i = 255; i < cg; ++i) {
+            if (ms[i] > thr) { edge = i - 255; break; }
+          }
+        }
+        if (edge >= 0) {
+          loc = at + (edge - static_cast<long long>(_cfg->prefix()));
+          if (loc < 0) loc += htdd_frame_ticks_;
+          MLPD_INFO("Houdini BS pilot CALIBRATED: trial energy-edge=%d, shift "
+                    "%lld, loc %d -> %lld (prefix=%d)\n",
+                    edge, loc - at, at, loc, _cfg->prefix());
+        } else {
+          MLPD_WARN("Houdini BS pilot calibrate: no edge in trial capture, "
+                    "using raw loc=%d (pilot may be truncated)\n",
+                    at);
+        }
+        pilot_offset.store(loc);
       }
     }
     if (loc < 0) {
