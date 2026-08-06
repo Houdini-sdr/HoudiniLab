@@ -679,9 +679,14 @@ int BaseRadioSet::houdiniTddRx(size_t radio_id, void* const* buffs,
       if (a > amx) amx = a;
       if (b > amx) amx = b;
     }
-    MLPD_INFO("HOUDINI_BS_RX: frame=%lld loc=%lld wt=%lld got=%d rms=%.0f absmax=%d\n",
+    const long long now3 = static_cast<long long>(
+        std::llround(static_cast<double>(dev->getHardwareTime("")) *
+                     htdd_tick_rate_ / 1e9));
+    MLPD_INFO("HOUDINI_BS_RX: frame=%lld loc=%lld wt=%lld got=%d rms=%.0f absmax=%d "
+              "recvTicks=%lld (=%.1fms) armLead=%lld\n",
               htdd_frame_counter_, loc, wt, got, std::sqrt(e / got),
-              static_cast<int>(amx));
+              static_cast<int>(amx), now3 - now2,
+              static_cast<double>(now3 - now2) / htdd_tick_rate_ * 1e3, wt - now2);
   }
   // frame_id must be a small monotonic counter (0,1,2,...) like the Iris HW
   // framer -- the recorder EXTENDS its HDF5 dataset to frame_id, so an absolute
