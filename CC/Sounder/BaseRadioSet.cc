@@ -658,6 +658,25 @@ int BaseRadioSet::houdiniTddRx(size_t radio_id, void* const* buffs,
 
   const int n = static_cast<int>(_cfg->samps_per_slot());
   const int got = r->recvTddWindow(buffs, n, tddNsOfTick(wt));
+  if (getenv("HOUDINI_BS_RX_DEBUG") != nullptr && got > 0) {
+    // Does the located rx_gate window actually LAND the pilot in the recorder
+    // buffer? RMS staying high => locked + seated; RMS decaying over the run =>
+    // pilot walks out of the 4096 window (clocks not frequency-locked).
+    const int16_t* s = reinterpret_cast<const int16_t*>(buffs[0]);
+    double e = 0.0;
+    int16_t amx = 0;
+    for (int i = 0; i < got; ++i) {
+      const int16_t re = s[2 * i], im = s[2 * i + 1];
+      e += static_cast<double>(re) * re + static_cast<double>(im) * im;
+      const int16_t a = static_cast<int16_t>(std::abs(re));
+      const int16_t b = static_cast<int16_t>(std::abs(im));
+      if (a > amx) amx = a;
+      if (b > amx) amx = b;
+    }
+    MLPD_INFO("HOUDINI_BS_RX: frame=%lld loc=%lld wt=%lld got=%d rms=%.0f absmax=%d\n",
+              htdd_frame_counter_, loc, wt, got, std::sqrt(e / got),
+              static_cast<int>(amx));
+  }
   // frame_id must be a small monotonic counter (0,1,2,...) like the Iris HW
   // framer -- the recorder EXTENDS its HDF5 dataset to frame_id, so an absolute
   // tick-derived frame number would blow it up. Advance once per frame (after
