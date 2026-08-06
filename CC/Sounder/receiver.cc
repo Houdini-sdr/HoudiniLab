@@ -1165,7 +1165,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
     // (valid because the boards are frequency-locked) so next frame's pilot lands
     // at the same BS-frame position instead of on the jittery read timestamp.
     if (config_->is_houdini() && houdini_pilot_ref_valid) {
-      houdini_pilot_ref += static_cast<long long>(frameTimeLen);
+      houdini_pilot_ref += static_cast<long long>(config_->samps_per_frame());
     }
     frame_id++;
   }  // end while
