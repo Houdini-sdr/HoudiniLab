@@ -994,6 +994,18 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   //Always decreases the requested rx samples
   size_t beacon_adjust = 0;
 
+  // Houdini: recvHoudini drains the FIFO then reads, so the per-frame RX read
+  // timestamp (rx_beacon_time) lands at an ARBITRARY frame phase -- it is not a
+  // stable frame reference, and the pilot TX time (rx_beacon_time + txTimeDelta)
+  // jitters across the whole frame, so it never seats in the BS rx_gate. With the
+  // boards frequency-locked (shared 10 MHz ref, CFO ~1 ppm) the frame period IS
+  // exactly samps_per_frame, so ANCHOR a beacon-locked reference on each successful
+  // (re)sync and ADVANCE it one frame period per frame; the periodic resync
+  // re-anchors it and absorbs the ~0.14 samp/frame residual drift. (Iris keeps the
+  // per-frame read timestamp -- its HW framer delivers frame-locked reads.)
+  long long houdini_pilot_ref = 0;
+  bool houdini_pilot_ref_valid = false;
+
   while (config_->running() == true) {
     if (config_->max_frame() > 0 && frame_id >= config_->max_frame()) {
       config_->running(false);
@@ -1030,6 +1042,12 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
             sync_index - (config_->beacon_size() + config_->prefix());
         //Adjust tx time
         rx_beacon_time += new_rx_offset;
+        // Anchor the Houdini pilot reference to this beacon-locked frame start
+        // (read_ts + sync_index - beacon_size - prefix); advanced per frame below.
+        if (config_->is_houdini()) {
+          houdini_pilot_ref = rx_beacon_time;
+          houdini_pilot_ref_valid = true;
+        }
         resync = false;
         resync_retry_cnt = 0;
         resync_success++;
@@ -1077,7 +1095,13 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
       }
     } else {
       if (config_->cl_pilot_slots().at(tid).size() > 0) {
-        this->clientTxPilots(tid, rx_beacon_time + txTimeDelta_);
+        // Houdini: use the anchored+advanced beacon reference (stable frame
+        // position); Iris: the frame-locked per-frame read timestamp.
+        const long long pilot_base =
+            (config_->is_houdini() && houdini_pilot_ref_valid)
+                ? houdini_pilot_ref
+                : rx_beacon_time;
+        this->clientTxPilots(tid, pilot_base + txTimeDelta_);
       }
     }  // end if config_->ul_data_slot_present()
 
@@ -1137,6 +1161,12 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
                   rx_data_status, samples_per_slot, rx_data_time, frame_id);
       }
     }  // end for
+    // Houdini: advance the anchored beacon reference by exactly one frame period
+    // (valid because the boards are frequency-locked) so next frame's pilot lands
+    // at the same BS-frame position instead of on the jittery read timestamp.
+    if (config_->is_houdini() && houdini_pilot_ref_valid) {
+      houdini_pilot_ref += static_cast<long long>(frameTimeLen);
+    }
     frame_id++;
   }  // end while
 }
