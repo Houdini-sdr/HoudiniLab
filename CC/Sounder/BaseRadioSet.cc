@@ -651,7 +651,13 @@ int BaseRadioSet::houdiniTddRx(size_t radio_id, void* const* buffs,
     }
   }
   // Arm the rx_gate at the located pilot offset, a couple frames ahead + monotonic.
-  long long k = std::max((now - htdd_epoch_) / htdd_frame_ticks_ + 2, 1LL);
+  // Re-read the clock: the whole-frame locate scan (when it runs) consumes >1 frame
+  // of wall time, so the top-of-function `now` is stale by then -- using it here
+  // arms the window in the past (activateStream TIME_ERROR).
+  const long long now2 = static_cast<long long>(
+      std::llround(static_cast<double>(dev->getHardwareTime("")) *
+                   htdd_tick_rate_ / 1e9));
+  long long k = std::max((now2 - htdd_epoch_) / htdd_frame_ticks_ + 2, 1LL);
   long long wt = htdd_epoch_ + k * htdd_frame_ticks_ + loc;
   while (wt <= htdd_last_win_tick_) wt += htdd_frame_ticks_;
   htdd_last_win_tick_ = wt;

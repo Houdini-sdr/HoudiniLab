@@ -14,6 +14,7 @@
 #include <atomic>
 #include <chrono>
 #include <climits>
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <random>
@@ -738,6 +739,38 @@ void Receiver::clientTxPilots(size_t user_id, long long base_time) {
   long long txTime = base_time +
                      config_->cl_pilot_slots().at(user_id).at(0) * num_samps -
                      config_->tx_advance(user_id);
+  // Houdini pilot-only closed loop: the BS and UE loops are async and slower than
+  // real-time (recvHoudini drains before it reads), so a single once-per-loop timed
+  // pilot rarely lands in the frame the BS happens to arm its rx_gate on. With the
+  // boards frequency-locked (CFO ~0, no drift) the pilot offset is stable, so emit
+  // it on EVERY frame across a horizon ahead of real time -- then whichever frame
+  // the BS listens on, a pilot is there. A per-thread cursor keeps the schedule
+  // continuous and non-overlapping (each client tid runs this on one thread).
+  const char* he = std::getenv("HOUDINI_PILOT_HORIZON");
+  if (he != nullptr && config_->is_houdini() && config_->cl_sdr_ch() == 1) {
+    const long long frame = static_cast<long long>(config_->samps_per_frame());
+    const int horizon = std::max(1, std::atoi(he));
+    thread_local long long pilot_cursor = 0;  // last-scheduled txTime (samples)
+    const long long end = txTime + static_cast<long long>(horizon) * frame;
+    long long cur = std::max(pilot_cursor + frame, txTime);
+    int nsched = 0;
+    for (; cur <= end; cur += frame) {
+      long long tt = cur;  // radioTx adds advance + grid-snaps a copy
+      const int rr = client_radio_set_->radioTx(user_id, pilotbuffA_.data(),
+                                                 num_samps, flags, tt);
+      if (rr < num_samps) {
+        MLPD_WARN("BAD Write (burst @%lld): %d/%d\n", cur, rr, num_samps);
+        break;
+      }
+      pilot_cursor = cur;
+      ++nsched;
+    }
+    if (std::getenv("HOUDINI_UE_TX_DEBUG") != nullptr && nsched > 0) {
+      MLPD_INFO("UE pilot burst: scheduled %d frames up to %lld\n", nsched,
+                pilot_cursor);
+    }
+    return;
+  }
   int r;
   r = client_radio_set_->radioTx(user_id, pilotbuffA_.data(), num_samps, flags,
                                  txTime);

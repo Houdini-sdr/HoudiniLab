@@ -11,7 +11,18 @@ canonical id lives there from then on.
 
 ## AP-2 — Frequency-lock the two RFSoC4x2 boards (external CLK IN mux select) `[→ propose SH ticket]`
 
-**Status:** OPEN — handoff drafted.
+**Status:** RESOLVED — both boards locked to a common external 10 MHz on `CLK IN`.
+Verified app-side (`.21` beacon → `.22`, coherent per-4096-period phase over a 20 ms
+capture): **CFO = +0.1 Hz (0.0002 ppm at the 500 MHz NCO), drift ~0.0000 samp/frame**
+(was +447 kHz / 894 ppm / ~110 samp-frame free-running). The gold-corr DDC offset moved
++447 kHz → +0.0 MHz and the beacon folds ISOLATED at period 4096. Sample clocks are now
+identical (shared ref), so the beacon-synced UE pilot no longer walks the BS frame. The
+firmware `CLK_SEL0/1` external-mux path (per the doc) landed via the os/firmware lane.
+Residual `SYNC IN`/SYSREF phase determinism (power-cycle-repeatable epochs, coherent/MIMO)
+is a separate later step, not needed for the sounder loop.
+
+<details><summary>original OPEN handoff (kept for history)</summary>
+
 **Receiver:** software (SoapyHoudiniSDR device firmware `clock_driver.cpp`), deployed by
 the os lane (`deploy-fw`).
 **Doc:** [`docs/TWO_BOARD_CLOCK_LOCK.md`](TWO_BOARD_CLOCK_LOCK.md)
@@ -26,6 +37,7 @@ so a common 10 MHz on the external `CLK IN` is ignored. Fix = drive `CLK_SEL0/1`
 **external** mux value (open item: which value — RFSoC4x2 schematic / empirical). Verify
 via `ClockVerifyLocks()` PLL lock + the app tone-test beat stopping + CFO→~0. `SYNC IN`/
 SYSREF phase alignment is a separate, later step. See the doc for full evidence + options.
+</details>
 
 ---
 
