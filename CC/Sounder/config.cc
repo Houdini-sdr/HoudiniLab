@@ -189,6 +189,7 @@ Config::Config(const std::string& jsonfile, const std::string& directory,
   remote_port_ = tddConf.value("remote_port", "55132");
   ue_tdd_pilot_ = tddConf.value("ue_tdd_pilot", false);
   ue_tx_advance_ticks_ = tddConf.value("ue_tx_advance_ticks", 0);
+  ue_pilot_horizon_ = tddConf.value("ue_pilot_horizon", 0);
   auto tx_advance = tddConf.value("tx_advance", json::array());
   if (tx_advance.empty() == true) {
     tx_advance_.resize(num_cl_sdrs_, 250);

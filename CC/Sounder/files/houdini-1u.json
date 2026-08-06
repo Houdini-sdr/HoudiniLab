@@ -43,5 +43,6 @@
     ],
     "corr_scale": [
         100
-    ]
+    ],
+    "ue_pilot_horizon": 96
 }

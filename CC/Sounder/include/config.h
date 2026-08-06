@@ -65,6 +65,13 @@ class Config {
   inline long long ue_tx_advance_ticks(void) const {
     return this->ue_tx_advance_ticks_;
   }
+  // Houdini pilot-only closed loop: emit the UE pilot on every frame across this
+  // many frames ahead of real time. The BS/UE loops are async and slower than
+  // real time, so a single once-per-loop pilot rarely lands in the frame the BS
+  // arms its rx_gate on; a continuous per-frame pilot (boards frequency-locked =>
+  // stable offset) is caught on every BS window. Must exceed the UE loop period
+  // in frames or coverage gaps appear (0 = off = legacy single pilot).
+  inline int ue_pilot_horizon(void) const { return this->ue_pilot_horizon_; }
   inline int prefix(void) const { return this->prefix_; }
   inline int postfix(void) const { return this->postfix_; }
   inline int beacon_size(void) const { return this->beacon_size_; }
@@ -377,6 +384,7 @@ class Config {
   std::string remote_port_;
   bool ue_tdd_pilot_ = false;
   long long ue_tx_advance_ticks_ = 0;
+  int ue_pilot_horizon_ = 0;
   size_t max_frame_;
   size_t ul_data_frame_num_;
   size_t dl_data_frame_num_;

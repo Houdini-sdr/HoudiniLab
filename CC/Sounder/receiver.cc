@@ -747,9 +747,9 @@ void Receiver::clientTxPilots(size_t user_id, long long base_time) {
   // the BS listens on, a pilot is there. A per-thread cursor keeps the schedule
   // continuous and non-overlapping (each client tid runs this on one thread).
   const char* he = std::getenv("HOUDINI_PILOT_HORIZON");
-  if (he != nullptr && config_->is_houdini() && config_->cl_sdr_ch() == 1) {
+  const int horizon = he != nullptr ? std::atoi(he) : config_->ue_pilot_horizon();
+  if (horizon > 0 && config_->is_houdini() && config_->cl_sdr_ch() == 1) {
     const long long frame = static_cast<long long>(config_->samps_per_frame());
-    const int horizon = std::max(1, std::atoi(he));
     thread_local long long pilot_cursor = 0;  // last-scheduled txTime (samples)
     const long long end = txTime + static_cast<long long>(horizon) * frame;
     long long cur = std::max(pilot_cursor + frame, txTime);
