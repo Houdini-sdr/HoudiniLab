@@ -703,13 +703,21 @@ int BaseRadioSet::houdiniTddRx(size_t radio_id, void* const* buffs,
       if (m > peak) peak = m;
     }
     const double thr = 0.15 * peak;
+    // Center the pilot by its energy CENTROID (unbiased; a leading-edge threshold
+    // lands partway up the ramp and biases the alignment). Extract so the centroid
+    // sits at the slot center -> the transmitted [prefix][3840 energy][postfix]
+    // structure, ~128-sample margins each side.
+    long long mcnt = 0;
+    double misum = 0.0;
     for (int i = 64; i + 64 <= cg; ++i) {
-      if (cse[i + 64] - cse[i - 64] > thr) { edge = i - 64; break; }
+      if (cse[i + 64] - cse[i - 64] > thr) {
+        if (edge < 0) edge = i - 64;  // keep leading edge for the debug log
+        ++mcnt;
+        misum += i;
+      }
     }
-    // Align so the pilot's energy leading edge lands at offset `prefix` (== the
-    // transmitted [prefix zeros][symbols][postfix zeros] structure). Clamp so the
-    // copied slot stays inside the captured samples.
-    long long start = (edge >= 0) ? edge - _cfg->prefix() : 0;
+    const long long centroid = mcnt > 0 ? std::llround(misum / mcnt) : (cg / 2);
+    long long start = centroid - n / 2;
     if (start < 0) start = 0;
     if (start + n > cg) start = cg - n;
     std::memcpy(buffs[0], s + start * 2, static_cast<size_t>(n) * 4);
