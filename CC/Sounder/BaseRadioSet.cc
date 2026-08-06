@@ -646,54 +646,57 @@ int BaseRadioSet::houdiniTddRx(size_t radio_id, void* const* buffs,
         }
         // Self-calibrate the scan-vs-window pipeline offset. The whole-frame locate
         // scan and a short gated rx window deliver samples with DIFFERENT fixed
-        // offsets (measured ~2k samples), so a window armed at the scan index lands
-        // the pilot ~2k samples late and truncates it. Do ONE trial capture at
-        // `at`, find where the pilot energy actually lands, and shift loc so the
-        // transmitted pilot slot ([prefix][symbols][postfix]) sits at the window
-        // front (energy leading edge -> offset = prefix).
+        // offsets (~2k samples), so a window armed at the scan index lands the pilot
+        // late and truncates it. Iterate REAL-size (4096) trial captures, each time
+        // centering the pilot energy centroid at the window center (== the
+        // transmitted [prefix][3840 energy][postfix] structure, ~128-samp margins).
+        // Centroid is unbiased (no edge threshold bias) and converges through
+        // truncation; same-size captures each round keep it consistent with the run.
         const int n = static_cast<int>(_cfg->samps_per_slot());
-        const long long nowc = static_cast<long long>(
-            std::llround(static_cast<double>(dev->getHardwareTime("")) *
-                         htdd_tick_rate_ / 1e9));
-        const long long kc =
-            std::max((nowc - htdd_epoch_) / htdd_frame_ticks_ + 2, 1LL);
-        const long long wtc = htdd_epoch_ + kc * htdd_frame_ticks_ + at;
-        std::vector<int16_t> cal(static_cast<size_t>(n) * 2, 0);
-        void* cb[1] = {cal.data()};
-        const int cg = r->recvTddWindow(cb, n, tddNsOfTick(wtc));
-        int edge = -1;
-        if (cg > 256) {
-          // sliding-256 mean-square, peak-relative edge (the pilot dominates the
-          // window mean, so a mean-relative threshold would miss it).
-          std::vector<double> ms(static_cast<size_t>(cg), 0.0);
-          double win = 0.0, peak = 0.0;
+        const long long center = n / 2;
+        for (int it = 0; it < 5; ++it) {
+          const long long nowc = static_cast<long long>(
+              std::llround(static_cast<double>(dev->getHardwareTime("")) *
+                           htdd_tick_rate_ / 1e9));
+          const long long kc =
+              std::max((nowc - htdd_epoch_) / htdd_frame_ticks_ + 2, 1LL);
+          const long long wtc = htdd_epoch_ + kc * htdd_frame_ticks_ + loc;
+          std::vector<int16_t> cal(static_cast<size_t>(n) * 2, 0);
+          void* cb[1] = {cal.data()};
+          const int cg = r->recvTddWindow(cb, n, tddNsOfTick(wtc));
+          if (cg <= 256) break;
+          // per-sample energy prefix sum -> CENTERED 256-sample power (unbiased,
+          // unlike a right-aligned window). Peak, then the geometric centroid of
+          // the hot region (>15% of peak) -- flat-topped pilot => sharp mask =>
+          // centroid == the pilot's true center, robust to the noise floor.
+          std::vector<double> cse(static_cast<size_t>(cg) + 1, 0.0);
           for (int i = 0; i < cg; ++i) {
             const double re = cal[2 * i], im = cal[2 * i + 1];
-            win += re * re + im * im;
-            if (i >= 256) {
-              const double r0 = cal[2 * (i - 256)], i0 = cal[2 * (i - 256) + 1];
-              win -= r0 * r0 + i0 * i0;
-            }
-            const double m = win / 256.0;
-            ms[i] = m;
-            if (i >= 255 && m > peak) peak = m;
+            cse[i + 1] = cse[i] + re * re + im * im;
           }
-          const double thr = 0.15 * peak;  // 15% of the pilot's peak power
-          for (int i = 255; i < cg; ++i) {
-            if (ms[i] > thr) { edge = i - 255; break; }
+          double peak = 0.0;
+          for (int i = 128; i + 128 <= cg; ++i) {
+            const double m = (cse[i + 128] - cse[i - 128]) / 256.0;
+            if (m > peak) peak = m;
           }
-        }
-        if (edge >= 0) {
-          loc = at + (edge - static_cast<long long>(_cfg->prefix()));
+          const double thr = 0.15 * peak;
+          long long cnt = 0;
+          double isum = 0.0;
+          for (int i = 128; i + 128 <= cg; ++i) {
+            const double m = (cse[i + 128] - cse[i - 128]) / 256.0;
+            if (m > thr) { ++cnt; isum += i; }
+          }
+          if (cnt == 0) break;
+          const long long centroid = std::llround(isum / static_cast<double>(cnt));
+          const long long adj = centroid - center;
+          if (getenv("HOUDINI_TDD_SCAN") != nullptr)
+            MLPD_INFO("Houdini BS pilot calib it=%d loc=%lld centroid=%lld adj=%lld\n",
+                      it, loc, centroid, adj);
+          loc += adj;
           if (loc < 0) loc += htdd_frame_ticks_;
-          MLPD_INFO("Houdini BS pilot CALIBRATED: trial energy-edge=%d, shift "
-                    "%lld, loc %d -> %lld (prefix=%d)\n",
-                    edge, loc - at, at, loc, _cfg->prefix());
-        } else {
-          MLPD_WARN("Houdini BS pilot calibrate: no edge in trial capture, "
-                    "using raw loc=%d (pilot may be truncated)\n",
-                    at);
+          if (std::llabs(adj) <= 24) break;  // centered
         }
+        MLPD_INFO("Houdini BS pilot CALIBRATED: loc=%lld (from at=%d)\n", loc, at);
         pilot_offset.store(loc);
       }
     }
