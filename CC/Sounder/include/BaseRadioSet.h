@@ -86,7 +86,10 @@ class BaseRadioSet {
   size_t htdd_rx_cursor_ = 0;
   long long htdd_last_win_tick_ = 0;
   long long htdd_frame_counter_ = 0;  // 0,1,2,... like the Iris framer's frame_id
-  std::vector<int16_t> htdd_cap_buf_;  // reused generous rx capture (extract 1 slot)
+  std::vector<int16_t> htdd_cap_buf_;  // reused multi-frame rx capture
+  std::vector<int16_t> htdd_cache_;    // extracted pilot slots from the last batch
+  int htdd_cache_count_ = 0;           // valid pilots in the cache
+  int htdd_cache_idx_ = 0;             // next cache slot to serve
 };
 
 #endif  // BASE_RADIO_SET_H_

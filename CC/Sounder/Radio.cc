@@ -326,12 +326,10 @@ int Radio::recvTddWindow(void* const* buffs, int samples, long long start_ns) {
     }
   }
   const auto t_read = clk::now();
-  // deactivateStream costs ~50 ms on Houdini (the dominant per-window cost). The
-  // HAS_TIME finite burst self-terminates on END_BURST, so re-arming with the next
-  // activateStream works without tearing down -- skip the teardown on the normal
-  // path to lift the BS capture rate ~25x. HOUDINI_TDD_DEACT forces the old behavior.
-  static const bool always_deact = std::getenv("HOUDINI_TDD_DEACT") != nullptr;
-  if (always_deact || got < samples) dev_->deactivateStream(rxs_);
+  // deactivateStream costs ~50 ms on Houdini and is REQUIRED between HAS_TIME
+  // bursts (skipping it makes the next arm return 0). The caller amortizes it by
+  // capturing many frames per window (houdiniTddRx batching).
+  dev_->deactivateStream(rxs_);
   const auto t_deact = clk::now();
   if (dbg) {
     MLPD_INFO("recvTddWindow timing: activate=%lldus firstRead=%lldus "
