@@ -1043,9 +1043,14 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
             sync_index - (config_->beacon_size() + config_->prefix());
         //Adjust tx time
         rx_beacon_time += new_rx_offset;
-        // Anchor the Houdini pilot reference to this beacon-locked frame start
-        // (read_ts + sync_index - beacon_size - prefix); advanced per frame below.
-        if (config_->is_houdini()) {
+        // Anchor the Houdini pilot reference ONCE, to the first beacon-locked frame
+        // start (read_ts + sync_index - beacon_size - prefix). The dense beacon fills
+        // the whole beacon symbol (slots 0..14), so a later resync can lock to a
+        // DIFFERENT beacon copy (4096 apart) -- re-anchoring would jump the pilot by
+        // whole slots. Anchor once and keep it: with frequency-locked boards the
+        // residual drift is ~0.14 samp/frame (< a slot over a run), and the per-frame
+        // grid-snap below tracks real time.
+        if (config_->is_houdini() && !houdini_pilot_ref_valid) {
           houdini_pilot_ref = rx_beacon_time;
           houdini_pilot_ref_valid = true;
         }
