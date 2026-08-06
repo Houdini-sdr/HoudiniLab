@@ -637,6 +637,25 @@ int BaseRadioSet::houdiniTddRx(size_t radio_id, void* const* buffs,
         MLPD_INFO("Houdini BS pilot LOCATED at frame-offset %lld (peak-rms %.0f, "
                   "mean %.0f) -- arming rx_gate there\n",
                   loc, peak_rms, mean_rms);
+        if (getenv("HOUDINI_TDD_SCAN") != nullptr) {
+          // Leading edge of the pilot energy: first index where a sliding
+          // 256-sample RMS crosses 3x the frame mean (unambiguous, unlike the
+          // max-energy plateau). Then dump the whole scan for offline profiling.
+          const double thr = 9.0 * (cs[sg] / sg);  // 3x-rms in mean-square terms
+          int edge = -1;
+          for (int s = 0; s + 256 <= sg; s += 16) {
+            if ((cs[s + 256] - cs[s]) / 256.0 > thr) { edge = s; break; }
+          }
+          MLPD_INFO("Houdini BS pilot-scan: max-energy at=%d  leading-edge=%d  "
+                    "(slot=%zu, samps_per_slot=%zu)\n",
+                    at, edge, sounder_slot, _cfg->samps_per_slot());
+          FILE* f = std::fopen("/tmp/bs_scan.bin", "wb");
+          if (f) {
+            std::fwrite(scan.data(), sizeof(int16_t),
+                        static_cast<size_t>(sg) * 2, f);
+            std::fclose(f);
+          }
+        }
       }
     }
     if (loc < 0) {
