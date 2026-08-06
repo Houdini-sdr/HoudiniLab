@@ -6,7 +6,7 @@
     "bs_hw_framer": true,
     "ue_tdd_pilot": true,
     "_ue_tdd_pilot_note": "UE streams its pilot with the tdd=1 TX stream arg -> the driver TxTickAnchor accepts the beacon-referenced start on the 3.125us TDD window grid (SH-248/SH-301), not whole-ms, so no 1ms drift-cliff. ue_tx_advance_ticks (ticks) is the fine calibration that seats the pilot in the BS rx_gate; sweep it.",
-    "ue_tx_advance_ticks": 1792,
+    "ue_tx_advance_ticks": 18432,
     "_bs_hw_framer_note": "true selects the BS native-Houdini-TDD framer path: beacon replay strobe + one rx_gate window per sounder pilot slot; loopRecv's HW-framer true-path receives only those, tagged with the sounder slot. The TDD symbol is a fixed 0.5ms (decoupled from the slot) so the capture fits inside the rx_gate window; samps_per_slot just needs to be <= 4096 (FPGA TX_RAM, else genPilots' size_t remain_size underflows). 48*80 + 128+128 = 4096.",
     "frequency": 500000000.0,
     "nco_frequency": 500000000.0,
