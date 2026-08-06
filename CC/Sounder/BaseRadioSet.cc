@@ -720,6 +720,12 @@ int BaseRadioSet::houdiniTddRx(size_t radio_id, void* const* buffs,
   if (htdd_cache_idx_ >= htdd_cache_count_) {
     int batch = 16;
     if (const char* be = getenv("HOUDINI_BS_BATCH")) batch = std::max(1, atoi(be));
+    // A single HAS_TIME burst is capped at 131070 native elements by the framer's
+    // 16-bit ctrl_num_samps field, so at most 1 frame fits per gated burst.
+    const long long kMaxBurstElems = 131070;
+    const int max_batch =
+        static_cast<int>(std::max(1LL, kMaxBurstElems / htdd_frame_ticks_));
+    if (batch > max_batch) batch = max_batch;
     if (_cfg->max_frame() > 0) {  // don't over-capture past the run bound
       const long long rem = _cfg->max_frame() - htdd_frame_counter_;
       if (rem < batch) batch = static_cast<int>(std::max(1LL, rem));
