@@ -995,13 +995,13 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   size_t beacon_adjust = 0;
 
   // Houdini: recvHoudini drains the FIFO then reads, so the per-frame RX read
-  // timestamp (rx_beacon_time) lands at an ARBITRARY frame phase -- it is not a
-  // stable frame reference, and the pilot TX time (rx_beacon_time + txTimeDelta)
-  // jitters across the whole frame, so it never seats in the BS rx_gate. With the
-  // boards frequency-locked (shared 10 MHz ref, CFO ~1 ppm) the frame period IS
-  // exactly samps_per_frame, so ANCHOR a beacon-locked reference on each successful
-  // (re)sync and ADVANCE it one frame period per frame; the periodic resync
-  // re-anchors it and absorbs the ~0.14 samp/frame residual drift. (Iris keeps the
+  // timestamp (rx_beacon_time) is real-time accurate but at an ARBITRARY frame
+  // phase -- the pilot TX time (rx_beacon_time + txTimeDelta) then jitters across
+  // the whole frame and never seats in the BS rx_gate. With the boards
+  // frequency-locked (shared 10 MHz ref, CFO ~1 ppm) the frame period IS exactly
+  // samps_per_frame, so we ANCHOR a beacon-locked frame start on each successful
+  // (re)sync and, at pilot TX, SNAP the current read timestamp to that grid
+  // (anchor + k*frame) -- see the clientTxPilots call below. (Iris keeps the raw
   // per-frame read timestamp -- its HW framer delivers frame-locked reads.)
   long long houdini_pilot_ref = 0;
   bool houdini_pilot_ref_valid = false;
@@ -1095,12 +1095,20 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
       }
     } else {
       if (config_->cl_pilot_slots().at(tid).size() > 0) {
-        // Houdini: use the anchored+advanced beacon reference (stable frame
-        // position); Iris: the frame-locked per-frame read timestamp.
-        const long long pilot_base =
-            (config_->is_houdini() && houdini_pilot_ref_valid)
-                ? houdini_pilot_ref
-                : rx_beacon_time;
+        // Houdini: the per-frame read timestamp (rx_beacon_time) is real-time
+        // accurate but at an ARBITRARY frame phase (recvHoudini drains then reads),
+        // so SNAP it to the beacon-locked frame grid (anchor + k*frame) -- keeps
+        // real-time tracking (the loop rate != real-time because of the drain) AND
+        // a constant frame phase, so the pilot lands at the same BS-frame position.
+        long long pilot_base = rx_beacon_time;
+        if (config_->is_houdini() && houdini_pilot_ref_valid) {
+          const long long frame =
+              static_cast<long long>(config_->samps_per_frame());
+          const long long k = std::llround(
+              static_cast<double>(rx_beacon_time - houdini_pilot_ref) /
+              static_cast<double>(frame));
+          pilot_base = houdini_pilot_ref + k * frame;
+        }
         this->clientTxPilots(tid, pilot_base + txTimeDelta_);
       }
     }  // end if config_->ul_data_slot_present()
@@ -1161,12 +1169,6 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
                   rx_data_status, samples_per_slot, rx_data_time, frame_id);
       }
     }  // end for
-    // Houdini: advance the anchored beacon reference by exactly one frame period
-    // (valid because the boards are frequency-locked) so next frame's pilot lands
-    // at the same BS-frame position instead of on the jittery read timestamp.
-    if (config_->is_houdini() && houdini_pilot_ref_valid) {
-      houdini_pilot_ref += static_cast<long long>(config_->samps_per_frame());
-    }
     frame_id++;
   }  // end while
 }
