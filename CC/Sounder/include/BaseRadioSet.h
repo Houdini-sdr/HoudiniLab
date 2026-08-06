@@ -86,6 +86,7 @@ class BaseRadioSet {
   size_t htdd_rx_cursor_ = 0;
   long long htdd_last_win_tick_ = 0;
   long long htdd_frame_counter_ = 0;  // 0,1,2,... like the Iris framer's frame_id
+  std::vector<int16_t> htdd_cap_buf_;  // reused generous rx capture (extract 1 slot)
 };
 
 #endif  // BASE_RADIO_SET_H_
