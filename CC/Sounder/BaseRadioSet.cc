@@ -644,59 +644,10 @@ int BaseRadioSet::houdiniTddRx(size_t radio_id, void* const* buffs,
             std::fclose(f);
           }
         }
-        // Self-calibrate the scan-vs-window pipeline offset. The whole-frame locate
-        // scan and a short gated rx window deliver samples with DIFFERENT fixed
-        // offsets (~2k samples), so a window armed at the scan index lands the pilot
-        // late and truncates it. Iterate REAL-size (4096) trial captures, each time
-        // centering the pilot energy centroid at the window center (== the
-        // transmitted [prefix][3840 energy][postfix] structure, ~128-samp margins).
-        // Centroid is unbiased (no edge threshold bias) and converges through
-        // truncation; same-size captures each round keep it consistent with the run.
-        const int n = static_cast<int>(_cfg->samps_per_slot());
-        const long long center = n / 2;
-        for (int it = 0; it < 5; ++it) {
-          const long long nowc = static_cast<long long>(
-              std::llround(static_cast<double>(dev->getHardwareTime("")) *
-                           htdd_tick_rate_ / 1e9));
-          const long long kc =
-              std::max((nowc - htdd_epoch_) / htdd_frame_ticks_ + 2, 1LL);
-          const long long wtc = htdd_epoch_ + kc * htdd_frame_ticks_ + loc;
-          std::vector<int16_t> cal(static_cast<size_t>(n) * 2, 0);
-          void* cb[1] = {cal.data()};
-          const int cg = r->recvTddWindow(cb, n, tddNsOfTick(wtc));
-          if (cg <= 256) break;
-          // per-sample energy prefix sum -> CENTERED 256-sample power (unbiased,
-          // unlike a right-aligned window). Peak, then the geometric centroid of
-          // the hot region (>15% of peak) -- flat-topped pilot => sharp mask =>
-          // centroid == the pilot's true center, robust to the noise floor.
-          std::vector<double> cse(static_cast<size_t>(cg) + 1, 0.0);
-          for (int i = 0; i < cg; ++i) {
-            const double re = cal[2 * i], im = cal[2 * i + 1];
-            cse[i + 1] = cse[i] + re * re + im * im;
-          }
-          double peak = 0.0;
-          for (int i = 128; i + 128 <= cg; ++i) {
-            const double m = (cse[i + 128] - cse[i - 128]) / 256.0;
-            if (m > peak) peak = m;
-          }
-          const double thr = 0.15 * peak;
-          long long cnt = 0;
-          double isum = 0.0;
-          for (int i = 128; i + 128 <= cg; ++i) {
-            const double m = (cse[i + 128] - cse[i - 128]) / 256.0;
-            if (m > thr) { ++cnt; isum += i; }
-          }
-          if (cnt == 0) break;
-          const long long centroid = std::llround(isum / static_cast<double>(cnt));
-          const long long adj = centroid - center;
-          if (getenv("HOUDINI_TDD_SCAN") != nullptr)
-            MLPD_INFO("Houdini BS pilot calib it=%d loc=%lld centroid=%lld adj=%lld\n",
-                      it, loc, centroid, adj);
-          loc += adj;
-          if (loc < 0) loc += htdd_frame_ticks_;
-          if (std::llabs(adj) <= 24) break;  // centered
-        }
-        MLPD_INFO("Houdini BS pilot CALIBRATED: loc=%lld (from at=%d)\n", loc, at);
+        // The framer floors the arm tick to a coarse grid, so loc only selects
+        // WHICH slot the window grabs -- the pilot's sub-slot position is set by the
+        // UE transmit timing and is centered with ue_tx_advance_ticks (UE side), not
+        // loc. Keep the coarse locate here.
         pilot_offset.store(loc);
       }
     }
@@ -732,22 +683,37 @@ int BaseRadioSet::houdiniTddRx(size_t radio_id, void* const* buffs,
     const int16_t* s = reinterpret_cast<const int16_t*>(buffs[0]);
     double e = 0.0;
     int16_t amx = 0;
+    double epk = 0.0;  // peak per-sample energy (for centroid threshold)
     for (int i = 0; i < got; ++i) {
       const int16_t re = s[2 * i], im = s[2 * i + 1];
-      e += static_cast<double>(re) * re + static_cast<double>(im) * im;
+      const double se = static_cast<double>(re) * re + static_cast<double>(im) * im;
+      e += se;
+      if (se > epk) epk = se;
       const int16_t a = static_cast<int16_t>(std::abs(re));
       const int16_t b = static_cast<int16_t>(std::abs(im));
       if (a > amx) amx = a;
       if (b > amx) amx = b;
     }
+    // Pilot energy centroid: where the pilot sits in the recorded slot. Target =
+    // slot center (n/2); the offset drives ue_tx_advance_ticks calibration.
+    long long cnt = 0;
+    double isum = 0.0;
+    const double cthr = 0.15 * epk;
+    for (int i = 0; i < got; ++i) {
+      const int16_t re = s[2 * i], im = s[2 * i + 1];
+      if (static_cast<double>(re) * re + static_cast<double>(im) * im > cthr) {
+        ++cnt;
+        isum += i;
+      }
+    }
+    const long long centroid = cnt > 0 ? std::llround(isum / cnt) : -1;
     const long long now3 = static_cast<long long>(
         std::llround(static_cast<double>(dev->getHardwareTime("")) *
                      htdd_tick_rate_ / 1e9));
-    MLPD_INFO("HOUDINI_BS_RX: frame=%lld loc=%lld wt=%lld got=%d rms=%.0f absmax=%d "
-              "recvTicks=%lld (=%.1fms) armLead=%lld\n",
-              htdd_frame_counter_, loc, wt, got, std::sqrt(e / got),
-              static_cast<int>(amx), now3 - now2,
-              static_cast<double>(now3 - now2) / htdd_tick_rate_ * 1e3, wt - now2);
+    MLPD_INFO("HOUDINI_BS_RX: frame=%lld loc=%lld got=%d rms=%.0f absmax=%d "
+              "centroid=%lld (target %d) recvTicks=%lld (=%.1fms)\n",
+              htdd_frame_counter_, loc, got, std::sqrt(e / got),
+              static_cast<int>(amx), centroid, n / 2, now3 - now2);
   }
   // frame_id must be a small monotonic counter (0,1,2,...) like the Iris HW
   // framer -- the recorder EXTENDS its HDF5 dataset to frame_id, so an absolute
