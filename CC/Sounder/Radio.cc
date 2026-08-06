@@ -11,7 +11,6 @@
 
 #include <algorithm>
 #include <atomic>
-#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -285,15 +284,8 @@ int Radio::recvTddWindow(void* const* buffs, int samples, long long start_ns) {
   // tail would stall ~1 s per window (mirrors the working run_burst read loop).
   constexpr size_t kBytesPerSamp = 4;  // CS16
   const int flags = SOAPY_SDR_HAS_TIME | SOAPY_SDR_END_BURST;
-  const bool dbg = std::getenv("HOUDINI_TDD_TIMING") != nullptr;
-  using clk = std::chrono::steady_clock;
-  auto us = [](clk::duration d) {
-    return std::chrono::duration_cast<std::chrono::microseconds>(d).count();
-  };
-  const auto t0 = clk::now();
   int rc = dev_->activateStream(rxs_, flags, start_ns,
                                 static_cast<size_t>(samples));
-  const auto t_act = clk::now();
   if (rc != 0) {
     MLPD_ERROR("recvTddWindow: activateStream rc=%d (%s)\n", rc,
                SoapySDR::errToStr(rc));
@@ -304,15 +296,10 @@ int Radio::recvTddWindow(void* const* buffs, int samples, long long start_ns) {
   for (size_t c = 0; c < num_rx_ch_; c++) cur[c] = buffs[c];
   int got = 0;
   int idle = 0;
-  int nreads = 0;
-  long long first_read_us = -1;
   while (got < samples) {
     int f = 0;
     long long t = 0;
-    const auto tr = clk::now();
     int r = dev_->readStream(rxs_, cur.data(), samples - got, f, t, 200000);
-    ++nreads;
-    if (first_read_us < 0) first_read_us = us(clk::now() - tr);
     if (r > 0) {
       got += r;
       for (size_t c = 0; c < num_rx_ch_; c++)
@@ -325,18 +312,7 @@ int Radio::recvTddWindow(void* const* buffs, int samples, long long start_ns) {
       break;  // hard error
     }
   }
-  const auto t_read = clk::now();
-  // deactivateStream costs ~50 ms on Houdini and is REQUIRED between HAS_TIME
-  // bursts (skipping it makes the next arm return 0). The caller amortizes it by
-  // capturing many frames per window (houdiniTddRx batching).
   dev_->deactivateStream(rxs_);
-  const auto t_deact = clk::now();
-  if (dbg) {
-    MLPD_INFO("recvTddWindow timing: activate=%lldus firstRead=%lldus "
-              "readLoop=%lldus deactivate=%lldus total=%lldus got=%d/%d nreads=%d\n",
-              us(t_act - t0), first_read_us, us(t_read - t_act),
-              us(t_deact - t_read), us(t_deact - t0), got, samples, nreads);
-  }
   return got;
 }
 

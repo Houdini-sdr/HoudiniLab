@@ -561,53 +561,6 @@ void BaseRadioSet::armHoudiniTdd(void) {
   }
 }
 
-// Find the pilot inside a captured region (which may also contain the BS's own
-// beacon in symbol 0) and copy the aligned n-sample slot to dst. Coarse: the
-// max-energy n-window (the pilot's 48 contiguous LTS symbols are far denser than
-// the sparse beacon). Fine: center the pilot's energy centroid within a 3n window
-// around that peak (excludes the beacon) so the slot matches the transmitted
-// [prefix][energy][postfix] structure. Returns true if a pilot was extracted.
-static bool extractHoudiniPilot(const int16_t* reg, int rlen, int n, int prefix,
-                                int16_t* dst) {
-  (void)prefix;
-  if (rlen < n) return false;
-  std::vector<double> cse(static_cast<size_t>(rlen) + 1, 0.0);
-  for (int i = 0; i < rlen; ++i) {
-    const double re = reg[2 * i], im = reg[2 * i + 1];
-    cse[i + 1] = cse[i] + re * re + im * im;
-  }
-  // coarse: densest n-window
-  double best = 0.0;
-  int at = 0;
-  for (int s = 0; s + n <= rlen; s += 128) {
-    const double e = cse[s + n] - cse[s];
-    if (e > best) { best = e; at = s; }
-  }
-  if (best <= 0.0) return false;
-  // fine window [w0, w1) around the peak (excludes a beacon elsewhere in the frame)
-  int w0 = at - n / 2;
-  if (w0 < 0) w0 = 0;
-  int w1 = w0 + 3 * n;
-  if (w1 > rlen) w1 = rlen;
-  double peak = 0.0;
-  for (int i = w0 + 64; i + 64 <= w1; ++i) {
-    const double m = cse[i + 64] - cse[i - 64];
-    if (m > peak) peak = m;
-  }
-  const double thr = 0.15 * peak;
-  long long cnt = 0;
-  double isum = 0.0;
-  for (int i = w0 + 64; i + 64 <= w1; ++i) {
-    if (cse[i + 64] - cse[i - 64] > thr) { ++cnt; isum += i; }
-  }
-  const long long centroid = cnt > 0 ? std::llround(isum / cnt) : (at + n / 2);
-  long long start = centroid - n / 2;
-  if (start < 0) start = 0;
-  if (start + n > rlen) start = rlen - n;
-  std::memcpy(dst, reg + start * 2, static_cast<size_t>(n) * 4);
-  return true;
-}
-
 int BaseRadioSet::houdiniTddRx(size_t radio_id, void* const* buffs,
                                long long& frameTime) {
   if (htdd_rx_slots_.empty()) return 0;
@@ -627,7 +580,10 @@ int BaseRadioSet::houdiniTddRx(size_t radio_id, void* const* buffs,
   const size_t sounder_slot = htdd_rx_slots_.at(idx);
   htdd_rx_cursor_ = (htdd_rx_cursor_ + 1) % htdd_rx_slots_.size();
 
-  (void)tdd_sym;  // rx_gate spans the whole frame; the pilot is found by search
+  const long long now = static_cast<long long>(
+      std::llround(static_cast<double>(dev->getHardwareTime("")) *
+                   htdd_tick_rate_ / 1e9));
+  (void)tdd_sym;  // rx_gate is armed at the LOCATED pilot offset, not a fixed symbol
 
   if (getenv("HOUDINI_RX_DEBUG") != nullptr) {
     static std::atomic<int> bc{0};
@@ -650,9 +606,6 @@ int BaseRadioSet::houdiniTddRx(size_t radio_id, void* const* buffs,
   static std::atomic<long long> pilot_offset{-1};
   long long loc = pilot_offset.load();
   if (loc < 0) {
-    const long long now = static_cast<long long>(
-        std::llround(static_cast<double>(dev->getHardwareTime("")) *
-                     htdd_tick_rate_ / 1e9));
     const int scan_n = static_cast<int>(htdd_frame_ticks_);  // one full frame
     const long long slead =
         std::max((now - htdd_epoch_) / htdd_frame_ticks_ + 3, 3LL);
@@ -691,102 +644,128 @@ int BaseRadioSet::houdiniTddRx(size_t radio_id, void* const* buffs,
             std::fclose(f);
           }
         }
-        // loc only GATES that a pilot is on-air (peak-rms threshold) before we
-        // start batched captures -- the actual per-frame position is found by
-        // extractHoudiniPilot, so the framer's coarse arm grid / pipeline lag /
-        // run-dependent sub-slot phase don't matter.
+        // The framer floors the arm tick to a coarse grid, so loc only selects
+        // WHICH slot the window grabs -- the pilot's sub-slot position is set by the
+        // UE transmit timing and is centered with ue_tx_advance_ticks (UE side), not
+        // loc. Keep the coarse locate here.
         pilot_offset.store(loc);
       }
     }
     if (loc < 0) {
       // Not located yet: return the frame head as a dummy so loopRecv keeps
-      // running and we scan again next call. Do NOT advance frame_counter -- these
-      // are pre-pilot noise frames; the first real pilot should land at frame 0.
+      // running and we scan again next call (fast -- no timing-out capture).
       const int n = static_cast<int>(_cfg->samps_per_slot());
       std::memcpy(buffs[0], scan.data(), static_cast<size_t>(n) * 4);
-      frameTime = (htdd_frame_counter_ << 32) |
-                  (static_cast<long long>(sounder_slot) << 16);
+      const long long fid = htdd_frame_counter_;
+      if (htdd_rx_cursor_ == 0) ++htdd_frame_counter_;
+      frameTime = (fid << 32) | (static_cast<long long>(sounder_slot) << 16);
       return n;
     }
   }
+  // Arm the rx_gate at the located pilot offset, a couple frames ahead + monotonic.
+  // Re-read the clock: the whole-frame locate scan (when it runs) consumes >1 frame
+  // of wall time, so the top-of-function `now` is stale by then -- using it here
+  // arms the window in the past (activateStream TIME_ERROR).
+  const long long now2 = static_cast<long long>(
+      std::llround(static_cast<double>(dev->getHardwareTime("")) *
+                   htdd_tick_rate_ / 1e9));
+  long long k = std::max((now2 - htdd_epoch_) / htdd_frame_ticks_ + 2, 1LL);
+  long long wt = htdd_epoch_ + k * htdd_frame_ticks_ + loc;
+  while (wt <= htdd_last_win_tick_) wt += htdd_frame_ticks_;
+  htdd_last_win_tick_ = wt;
+
   const int n = static_cast<int>(_cfg->samps_per_slot());
-  // BATCHED capture. recvTddWindow's cost is dominated by a fixed ~50 ms
-  // deactivateStream (required between HAS_TIME bursts), so a per-frame window caps
-  // the BS at ~19 pilots/s and only a fraction of the recorder frames get filled.
-  // Both TDD symbols gate RX and the schedule loops forever, so N contiguous frames
-  // come back in ONE window -- extract all N pilots and serve them from a cache,
-  // amortizing the deactivate ~N-fold. The pilot repeats once per frame; each frame
-  // region is searched independently (robust to the beacon in symbol 0 and jitter).
-  if (htdd_cache_idx_ >= htdd_cache_count_) {
-    int batch = 16;
-    if (const char* be = getenv("HOUDINI_BS_BATCH")) batch = std::max(1, atoi(be));
-    // A single HAS_TIME burst is capped at 131070 native elements by the framer's
-    // 16-bit ctrl_num_samps field, so at most 1 frame fits per gated burst.
-    const long long kMaxBurstElems = 131070;
-    const int max_batch =
-        static_cast<int>(std::max(1LL, kMaxBurstElems / htdd_frame_ticks_));
-    if (batch > max_batch) batch = max_batch;
-    if (_cfg->max_frame() > 0) {  // don't over-capture past the run bound
-      const long long rem = _cfg->max_frame() - htdd_frame_counter_;
-      if (rem < batch) batch = static_cast<int>(std::max(1LL, rem));
+  // Capture a GENEROUS window (bigger than one slot) and extract the aligned pilot
+  // slot from it. The framer floors the arm tick to a coarse grid and the client's
+  // anchor gives the pilot a RUN-DEPENDENT sub-slot phase, so a fixed 1-slot window
+  // lands the pilot at an arbitrary (run-varying) offset and truncates it. By
+  // searching for the pilot within the larger capture and copying out the aligned
+  // 4096, the recorded slot is consistent regardless of grid/pipeline/phase -- and
+  // it costs the same ~52 ms (recvTddWindow overhead is per-CALL, not per-sample).
+  const int cap = 3 * n;  // room for the pilot at any sub-slot phase + pipeline lag
+  htdd_cap_buf_.resize(static_cast<size_t>(cap) * 2);
+  void* tb[1] = {htdd_cap_buf_.data()};
+  const int cg = r->recvTddWindow(tb, cap, tddNsOfTick(wt));
+  int got = 0;
+  long long edge = -1;
+  if (cg >= n) {
+    // per-sample energy prefix sum -> centered 128-window power; peak; leading edge
+    // = first index rising above 15% of peak (the pilot is a flat-topped burst).
+    const int16_t* s = htdd_cap_buf_.data();
+    std::vector<double> cse(static_cast<size_t>(cg) + 1, 0.0);
+    for (int i = 0; i < cg; ++i) {
+      const double re = s[2 * i], im = s[2 * i + 1];
+      cse[i + 1] = cse[i] + re * re + im * im;
     }
-    const long long now2 = static_cast<long long>(
-        std::llround(static_cast<double>(dev->getHardwareTime("")) *
-                     htdd_tick_rate_ / 1e9));
-    const long long k = std::max((now2 - htdd_epoch_) / htdd_frame_ticks_ + 2, 1LL);
-    long long wt = htdd_epoch_ + k * htdd_frame_ticks_;  // frame origin
-    while (wt <= htdd_last_win_tick_) wt += htdd_frame_ticks_;
-    const long long cap = static_cast<long long>(batch) * htdd_frame_ticks_;
-    htdd_last_win_tick_ = wt + cap;
-    htdd_cap_buf_.resize(static_cast<size_t>(cap) * 2);
-    void* tb[1] = {htdd_cap_buf_.data()};
-    const int cg = r->recvTddWindow(tb, static_cast<int>(cap), tddNsOfTick(wt));
-    if (cg < n) return (cg < 0) ? cg : 0;  // error -> propagate; short -> skip
-    const int frames = cg / static_cast<int>(htdd_frame_ticks_);
-    htdd_cache_.resize(static_cast<size_t>(batch) * n * 2);
-    htdd_cache_count_ = 0;
-    for (int f = 0; f < frames && htdd_cache_count_ < batch; ++f) {
-      const int16_t* reg = htdd_cap_buf_.data() +
-                           static_cast<size_t>(f) * htdd_frame_ticks_ * 2;
-      int16_t* dst = htdd_cache_.data() +
-                     static_cast<size_t>(htdd_cache_count_) * n * 2;
-      if (extractHoudiniPilot(reg, static_cast<int>(htdd_frame_ticks_), n,
-                              _cfg->prefix(), dst))
-        ++htdd_cache_count_;
+    double peak = 0.0;
+    for (int i = 64; i + 64 <= cg; ++i) {
+      const double m = cse[i + 64] - cse[i - 64];
+      if (m > peak) peak = m;
     }
-    htdd_cache_idx_ = 0;
-    if (htdd_cache_count_ == 0) return 0;  // no pilot this batch -> skip
-    if (getenv("HOUDINI_BS_RX_DEBUG") != nullptr) {
-      const int16_t* s = htdd_cache_.data();
-      double e = 0.0, epk = 0.0;
-      for (int i = 0; i < n; ++i) {
-        const double se = static_cast<double>(s[2 * i]) * s[2 * i] +
-                          static_cast<double>(s[2 * i + 1]) * s[2 * i + 1];
-        e += se;
-        if (se > epk) epk = se;
+    const double thr = 0.15 * peak;
+    // Center the pilot by its energy CENTROID (unbiased; a leading-edge threshold
+    // lands partway up the ramp and biases the alignment). Extract so the centroid
+    // sits at the slot center -> the transmitted [prefix][3840 energy][postfix]
+    // structure, ~128-sample margins each side.
+    long long mcnt = 0;
+    double misum = 0.0;
+    for (int i = 64; i + 64 <= cg; ++i) {
+      if (cse[i + 64] - cse[i - 64] > thr) {
+        if (edge < 0) edge = i - 64;  // keep leading edge for the debug log
+        ++mcnt;
+        misum += i;
       }
-      long long cnt = 0;
-      double isum = 0.0;
-      for (int i = 0; i < n; ++i) {
-        const double se = static_cast<double>(s[2 * i]) * s[2 * i] +
-                          static_cast<double>(s[2 * i + 1]) * s[2 * i + 1];
-        if (se > 0.15 * epk) { ++cnt; isum += i; }
-      }
-      MLPD_INFO("HOUDINI_BS_RX: batch=%d frames=%d pilots=%d rms=%.0f "
-                "centroid=%lld (target %d)\n",
-                batch, frames, htdd_cache_count_, std::sqrt(e / n),
-                cnt > 0 ? std::llround(isum / cnt) : -1, n / 2);
     }
+    const long long centroid = mcnt > 0 ? std::llround(misum / mcnt) : (cg / 2);
+    long long start = centroid - n / 2;
+    if (start < 0) start = 0;
+    if (start + n > cg) start = cg - n;
+    std::memcpy(buffs[0], s + start * 2, static_cast<size_t>(n) * 4);
+    got = n;
+  } else if (cg > 0) {
+    std::memcpy(buffs[0], htdd_cap_buf_.data(),
+                static_cast<size_t>(std::min(cg, n)) * 4);
+    got = cg;
+  } else {
+    got = cg;  // error/timeout -> propagate
   }
-  // Serve the next cached pilot. frame_id is a small monotonic counter (0,1,2,...)
-  // like the Iris HW framer -- the recorder EXTENDS its dataset to frame_id.
-  std::memcpy(buffs[0], htdd_cache_.data() + static_cast<size_t>(htdd_cache_idx_) * n * 2,
-              static_cast<size_t>(n) * 4);
-  ++htdd_cache_idx_;
+  if (getenv("HOUDINI_BS_RX_DEBUG") != nullptr && got > 0) {
+    const int16_t* s = reinterpret_cast<const int16_t*>(buffs[0]);
+    double e = 0.0, epk = 0.0;
+    int16_t amx = 0;
+    for (int i = 0; i < got; ++i) {
+      const int16_t re = s[2 * i], im = s[2 * i + 1];
+      const double se = static_cast<double>(re) * re + static_cast<double>(im) * im;
+      e += se;
+      if (se > epk) epk = se;
+      const int16_t a = static_cast<int16_t>(std::abs(re));
+      const int16_t b = static_cast<int16_t>(std::abs(im));
+      if (a > amx) amx = a;
+      if (b > amx) amx = b;
+    }
+    long long cnt = 0;
+    double isum = 0.0;
+    for (int i = 0; i < got; ++i) {
+      const int16_t re = s[2 * i], im = s[2 * i + 1];
+      if (static_cast<double>(re) * re + static_cast<double>(im) * im > 0.15 * epk) {
+        ++cnt;
+        isum += i;
+      }
+    }
+    MLPD_INFO("HOUDINI_BS_RX: frame=%lld cg=%d edge=%lld rms=%.0f absmax=%d "
+              "centroid=%lld (target %d)\n",
+              htdd_frame_counter_, cg, edge, std::sqrt(e / got),
+              static_cast<int>(amx), cnt > 0 ? std::llround(isum / cnt) : -1, n / 2);
+  }
+  // frame_id must be a small monotonic counter (0,1,2,...) like the Iris HW
+  // framer -- the recorder EXTENDS its HDF5 dataset to frame_id, so an absolute
+  // tick-derived frame number would blow it up. Advance once per frame (after
+  // the last rx slot of the frame is served).
   const long long frame_id = htdd_frame_counter_;
-  ++htdd_frame_counter_;
+  if (htdd_rx_cursor_ == 0) ++htdd_frame_counter_;
+  // Tag like the Iris HW framer so the unmodified loopRecv true-path decodes it.
   frameTime = (frame_id << 32) | (static_cast<long long>(sounder_slot) << 16);
-  return n;
+  return got;
 }
 
 BaseRadioSet::~BaseRadioSet(void) {
