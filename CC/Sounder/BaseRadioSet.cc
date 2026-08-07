@@ -645,9 +645,12 @@ int BaseRadioSet::houdiniTddRx(size_t radio_id, void* const* buffs,
     else if (selfsim(at + gap) >= 0.4) p_at = at + gap;
   }
   // Centroid-align the pilot slot -> transmitted [prefix][energy][postfix] layout.
-  int w0 = p_at - n / 2;
+  // Keep the window to ~1.25 slots around the pilot: a wider window reaches into
+  // the adjacent uplink-data slot (only 1-2 slots away) and its energy drags the
+  // centroid, misaligning BOTH the pilot and the data extraction.
+  int w0 = p_at - n / 8;
   if (w0 < 0) w0 = 0;
-  int w1 = w0 + 3 * n;
+  int w1 = w0 + 5 * n / 4;
   if (w1 > cg) w1 = cg;
   double peak = 0.0;
   for (int i = w0 + 64; i + 64 <= w1; ++i) {
