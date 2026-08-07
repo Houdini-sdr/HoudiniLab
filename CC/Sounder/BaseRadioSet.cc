@@ -446,13 +446,9 @@ void BaseRadioSet::activateHoudiniRx(void) {
 // ---- Houdini native-TDD framer (bs_hw_framer + radio_type=houdini) ----------
 namespace {
 constexpr long long kTddGridTicks = 384;    // 3.125 us grid
-constexpr long long kTddQuantumNs = 3125;
 constexpr long long kTddSymTicks = 61440;   // 0.5 ms TDD symbol (comfortable
                                             // window >> samps_per_slot capture)
 constexpr long long kTddArmMargin = 36864000;  // ~300 ms of ticks
-inline long long tddNsOfTick(long long t) {
-  return (t / kTddGridTicks) * kTddQuantumNs;  // t must be grid-aligned
-}
 }  // namespace
 
 long long BaseRadioSet::houdiniArmTdd(SoapySDR::Device* dev,
@@ -571,201 +567,84 @@ int BaseRadioSet::houdiniTddRx(size_t radio_id, void* const* buffs,
   if (_cfg->max_frame() > 0 && htdd_frame_counter_ >= _cfg->max_frame())
     return -1;
   Radio* r = bsRadios.at(0).at(radio_id);
-  auto* dev = r->RawDev();
-
-  // Round-robin over the pilot slots. TDD rx-gate symbol = 1 + cursor (symbol 0
-  // is the beacon); the tag uses the SOUNDER slot index for the recorder.
-  const size_t idx = htdd_rx_cursor_;
-  const size_t tdd_sym = 1 + idx;
-  const size_t sounder_slot = htdd_rx_slots_.at(idx);
-  htdd_rx_cursor_ = (htdd_rx_cursor_ + 1) % htdd_rx_slots_.size();
-
-  const long long now = static_cast<long long>(
-      std::llround(static_cast<double>(dev->getHardwareTime("")) *
-                   htdd_tick_rate_ / 1e9));
-  (void)tdd_sym;  // rx_gate is armed at the LOCATED pilot offset, not a fixed symbol
-
-  if (getenv("HOUDINI_RX_DEBUG") != nullptr) {
-    static std::atomic<int> bc{0};
-    if ((bc.fetch_add(1) % 40) == 0) {
-      try {
-        MLPD_INFO("Houdini BS TX bank: %s\n",
-                  dev->readSetting("TX_BANK_STATUS").c_str());
-      } catch (...) {
-      }
-    }
-  }
-  // BS pilot AUTO-LOCATE. The UE pilot is within-run STABLE (frequency-locked
-  // clocks + anchored client timing), but its absolute frame position varies
-  // run-to-run -- the client's first sync locks to one of the dense beacon's many
-  // copies (the beacon fills slots 0..14), so a fixed rx_gate at symbol 1 can't
-  // catch it. Instead LOCATE the pilot once (scan a whole frame -- both '6' and '2'
-  // gate RX so the frame is fully receivable) and then arm the rx_gate at the
-  // pilot's ACTUAL offset for the rest of the run. The BS tracks the UE, immune to
-  // the run-to-run anchor; HOUDINI_TDD_SCAN just adds verbose logging.
-  static std::atomic<long long> pilot_offset{-1};
-  long long loc = pilot_offset.load();
-  if (loc < 0) {
-    const int scan_n = static_cast<int>(htdd_frame_ticks_);  // one full frame
-    const long long slead =
-        std::max((now - htdd_epoch_) / htdd_frame_ticks_ + 3, 3LL);
-    const long long swt = htdd_epoch_ + slead * htdd_frame_ticks_;  // frame origin
-    std::vector<int16_t> scan(static_cast<size_t>(scan_n) * 2, 0);
-    void* sb[1] = {scan.data()};
-    const int sg = r->recvTddWindow(sb, scan_n, tddNsOfTick(swt));
-    double best_e = 0.0;
-    int at = 0;
-    if (sg > 4096) {
-      std::vector<double> cs(static_cast<size_t>(sg) + 1, 0.0);
-      for (int i = 0; i < sg; ++i) {
-        const double re = scan[2 * i], im = scan[2 * i + 1];
-        cs[i + 1] = cs[i] + re * re + im * im;
-      }
-      for (int s = 0; s + 4096 <= sg; s += 128) {
-        const double e = (cs[s + 4096] - cs[s]) / 4096.0;
-        if (e > best_e) { best_e = e; at = s; }
-      }
-      const double peak_rms = std::sqrt(best_e);
-      const double mean_rms = std::sqrt(cs[sg] / sg);
-      if (getenv("HOUDINI_TDD_SCAN") != nullptr) {
-        MLPD_INFO("Houdini BS pilot-scan: got=%d peak-rms=%.0f@%d mean-rms=%.0f\n",
-                  sg, peak_rms, at, mean_rms);
-      }
-      if (peak_rms > 120.0 && peak_rms > 4.0 * mean_rms) {
-        loc = at;
-        MLPD_INFO("Houdini BS pilot LOCATED at frame-offset %lld (peak-rms %.0f, "
-                  "mean %.0f)\n",
-                  loc, peak_rms, mean_rms);
-        if (getenv("HOUDINI_TDD_SCAN") != nullptr) {
-          FILE* f = std::fopen("/tmp/bs_scan.bin", "wb");
-          if (f) {
-            std::fwrite(scan.data(), sizeof(int16_t),
-                        static_cast<size_t>(sg) * 2, f);
-            std::fclose(f);
-          }
-        }
-        // The framer floors the arm tick to a coarse grid, so loc only selects
-        // WHICH slot the window grabs -- the pilot's sub-slot position is set by the
-        // UE transmit timing and is centered with ue_tx_advance_ticks (UE side), not
-        // loc. Keep the coarse locate here.
-        pilot_offset.store(loc);
-      }
-    }
-    if (loc < 0) {
-      // Not located yet: return the frame head as a dummy so loopRecv keeps
-      // running and we scan again next call (fast -- no timing-out capture).
-      const int n = static_cast<int>(_cfg->samps_per_slot());
-      std::memcpy(buffs[0], scan.data(), static_cast<size_t>(n) * 4);
-      const long long fid = htdd_frame_counter_;
-      if (htdd_rx_cursor_ == 0) ++htdd_frame_counter_;
-      frameTime = (fid << 32) | (static_cast<long long>(sounder_slot) << 16);
-      return n;
-    }
-  }
-  // Arm the rx_gate at the located pilot offset, a couple frames ahead + monotonic.
-  // Re-read the clock: the whole-frame locate scan (when it runs) consumes >1 frame
-  // of wall time, so the top-of-function `now` is stale by then -- using it here
-  // arms the window in the past (activateStream TIME_ERROR).
-  const long long now2 = static_cast<long long>(
-      std::llround(static_cast<double>(dev->getHardwareTime("")) *
-                   htdd_tick_rate_ / 1e9));
-  long long k = std::max((now2 - htdd_epoch_) / htdd_frame_ticks_ + 2, 1LL);
-  long long wt = htdd_epoch_ + k * htdd_frame_ticks_ + loc;
-  while (wt <= htdd_last_win_tick_) wt += htdd_frame_ticks_;
-  htdd_last_win_tick_ = wt;
-
+  const size_t sounder_slot = htdd_rx_slots_.at(0);  // recorder tag (single pilot)
   const int n = static_cast<int>(_cfg->samps_per_slot());
-  // Capture a GENEROUS window (bigger than one slot) and extract the aligned pilot
-  // slot from it. The framer floors the arm tick to a coarse grid and the client's
-  // anchor gives the pilot a RUN-DEPENDENT sub-slot phase, so a fixed 1-slot window
-  // lands the pilot at an arbitrary (run-varying) offset and truncates it. By
-  // searching for the pilot within the larger capture and copying out the aligned
-  // 4096, the recorded slot is consistent regardless of grid/pipeline/phase -- and
-  // it costs the same ~52 ms (recvTddWindow overhead is per-CALL, not per-sample).
-  const int cap = 3 * n;  // room for the pilot at any sub-slot phase + pipeline lag
-  htdd_cap_buf_.resize(static_cast<size_t>(cap) * 2);
-  void* tb[1] = {htdd_cap_buf_.data()};
-  const int cg = r->recvTddWindow(tb, cap, tddNsOfTick(wt));
-  int got = 0;
-  long long edge = -1;
-  if (cg >= n) {
-    // per-sample energy prefix sum -> centered 128-window power; peak; leading edge
-    // = first index rising above 15% of peak (the pilot is a flat-topped burst).
-    const int16_t* s = htdd_cap_buf_.data();
-    std::vector<double> cse(static_cast<size_t>(cg) + 1, 0.0);
-    for (int i = 0; i < cg; ++i) {
-      const double re = s[2 * i], im = s[2 * i + 1];
-      cse[i + 1] = cse[i] + re * re + im * im;
-    }
-    double peak = 0.0;
-    for (int i = 64; i + 64 <= cg; ++i) {
-      const double m = cse[i + 64] - cse[i - 64];
-      if (m > peak) peak = m;
-    }
-    const double thr = 0.15 * peak;
-    // Center the pilot by its energy CENTROID (unbiased; a leading-edge threshold
-    // lands partway up the ramp and biases the alignment). Extract so the centroid
-    // sits at the slot center -> the transmitted [prefix][3840 energy][postfix]
-    // structure, ~128-sample margins each side.
-    long long mcnt = 0;
-    double misum = 0.0;
-    for (int i = 64; i + 64 <= cg; ++i) {
-      if (cse[i + 64] - cse[i - 64] > thr) {
-        if (edge < 0) edge = i - 64;  // keep leading edge for the debug log
-        ++mcnt;
-        misum += i;
-      }
-    }
-    const long long centroid = mcnt > 0 ? std::llround(misum / mcnt) : (cg / 2);
-    long long start = centroid - n / 2;
-    if (start < 0) start = 0;
-    if (start + n > cg) start = cg - n;
-    std::memcpy(buffs[0], s + start * 2, static_cast<size_t>(n) * 4);
-    got = n;
-  } else if (cg > 0) {
-    std::memcpy(buffs[0], htdd_cap_buf_.data(),
-                static_cast<size_t>(std::min(cg, n)) * 4);
-    got = cg;
-  } else {
-    got = cg;  // error/timeout -> propagate
+  const int fn = static_cast<int>(htdd_frame_ticks_);  // one frame period
+
+  // CONTINUOUS framer receive (the Iris model). The TDD framer is armed ONCE and
+  // gates the ADC every frame; the RX stream is activated ONCE (radioStart). So we
+  // just read a fresh frame-period window from the running stream -- NO per-window
+  // activateStream/deactivateStream (whose ~50 ms teardown capped the BS at
+  // ~19 pilots/s). One frame period holds exactly one UE pilot; recv() drains stale
+  // backlog then reads a contiguous window (Radio::recvHoudini). loc/rx_gate arming
+  // and the whole-frame locate scan are gone -- the pilot is found by search below.
+  htdd_cap_buf_.resize(static_cast<size_t>(fn) * 2);
+  void* cb[1] = {htdd_cap_buf_.data()};
+  long long ft = 0;
+  const int cg = r->recv(cb, fn, ft);
+  if (cg < n) return (cg < 0) ? cg : 0;
+
+  // Densest n-window = the pilot (its 48 contiguous LTS symbols dominate the sparse
+  // beacon in symbol 0). Energy prefix sum -> coarse peak.
+  const int16_t* s = htdd_cap_buf_.data();
+  std::vector<double> cse(static_cast<size_t>(cg) + 1, 0.0);
+  for (int i = 0; i < cg; ++i) {
+    const double re = s[2 * i], im = s[2 * i + 1];
+    cse[i + 1] = cse[i] + re * re + im * im;
   }
-  if (getenv("HOUDINI_BS_RX_DEBUG") != nullptr && got > 0) {
-    const int16_t* s = reinterpret_cast<const int16_t*>(buffs[0]);
-    double e = 0.0, epk = 0.0;
-    int16_t amx = 0;
-    for (int i = 0; i < got; ++i) {
-      const int16_t re = s[2 * i], im = s[2 * i + 1];
-      const double se = static_cast<double>(re) * re + static_cast<double>(im) * im;
-      e += se;
-      if (se > epk) epk = se;
-      const int16_t a = static_cast<int16_t>(std::abs(re));
-      const int16_t b = static_cast<int16_t>(std::abs(im));
-      if (a > amx) amx = a;
-      if (b > amx) amx = b;
-    }
-    long long cnt = 0;
-    double isum = 0.0;
-    for (int i = 0; i < got; ++i) {
-      const int16_t re = s[2 * i], im = s[2 * i + 1];
-      if (static_cast<double>(re) * re + static_cast<double>(im) * im > 0.15 * epk) {
-        ++cnt;
-        isum += i;
-      }
-    }
-    MLPD_INFO("HOUDINI_BS_RX: frame=%lld cg=%d edge=%lld rms=%.0f absmax=%d "
-              "centroid=%lld (target %d)\n",
-              htdd_frame_counter_, cg, edge, std::sqrt(e / got),
-              static_cast<int>(amx), cnt > 0 ? std::llround(isum / cnt) : -1, n / 2);
+  double best = 0.0;
+  int at = 0;
+  for (int t = 0; t + n <= cg; t += 128) {
+    const double e = cse[t + n] - cse[t];
+    if (e > best) { best = e; at = t; }
   }
-  // frame_id must be a small monotonic counter (0,1,2,...) like the Iris HW
-  // framer -- the recorder EXTENDS its HDF5 dataset to frame_id, so an absolute
-  // tick-derived frame number would blow it up. Advance once per frame (after
-  // the last rx slot of the frame is served).
+  const double pilot_rms = std::sqrt(best / n);
+  const double mean_rms = std::sqrt(cse[cg] / cg);
+  // Presence gate (the old locate criterion): skip frames where the UE pilot isn't
+  // on-air yet (densest window is then the weak beacon/noise). Don't advance
+  // frame_counter for those, so the first real pilot lands at recorder frame 0.
+  if (pilot_rms < 120.0 || pilot_rms < 4.0 * mean_rms) {
+    std::memcpy(buffs[0], s, static_cast<size_t>(n) * 4);
+    frameTime = (htdd_frame_counter_ << 32) |
+                (static_cast<long long>(sounder_slot) << 16);
+    return n;
+  }
+  // Center the pilot by its energy centroid within a 3n window around the peak
+  // (excludes the beacon) -> the transmitted [prefix][3840 energy][postfix]
+  // structure, ~128-sample margins each side.
+  int w0 = at - n / 2;
+  if (w0 < 0) w0 = 0;
+  int w1 = w0 + 3 * n;
+  if (w1 > cg) w1 = cg;
+  double peak = 0.0;
+  for (int i = w0 + 64; i + 64 <= w1; ++i) {
+    const double m = cse[i + 64] - cse[i - 64];
+    if (m > peak) peak = m;
+  }
+  const double thr = 0.15 * peak;
+  long long mcnt = 0;
+  double misum = 0.0;
+  for (int i = w0 + 64; i + 64 <= w1; ++i) {
+    if (cse[i + 64] - cse[i - 64] > thr) { ++mcnt; misum += i; }
+  }
+  const long long centroid = mcnt > 0 ? std::llround(misum / mcnt) : (at + n / 2);
+  long long start = centroid - n / 2;
+  if (start < 0) start = 0;
+  if (start + n > cg) start = cg - n;
+  std::memcpy(buffs[0], s + start * 2, static_cast<size_t>(n) * 4);
+  if (getenv("HOUDINI_BS_RX_DEBUG") != nullptr) {
+    static std::atomic<int> dc{0};
+    if ((dc.fetch_add(1) % 20) == 0)
+      MLPD_INFO("HOUDINI_BS_RX: frame=%lld cg=%d pilot-rms=%.0f mean-rms=%.0f "
+                "centroid=%lld start=%lld\n",
+                htdd_frame_counter_, cg, pilot_rms, mean_rms, centroid, start);
+  }
+  // frame_id: a small monotonic counter (0,1,2,...) like the Iris HW framer -- the
+  // recorder EXTENDS its HDF5 dataset to frame_id. One pilot served per call.
   const long long frame_id = htdd_frame_counter_;
-  if (htdd_rx_cursor_ == 0) ++htdd_frame_counter_;
-  // Tag like the Iris HW framer so the unmodified loopRecv true-path decodes it.
+  ++htdd_frame_counter_;
   frameTime = (frame_id << 32) | (static_cast<long long>(sounder_slot) << 16);
-  return got;
+  return n;
 }
 
 BaseRadioSet::~BaseRadioSet(void) {
@@ -931,10 +810,11 @@ void BaseRadioSet::adjustDelays() {
 
 void BaseRadioSet::radioStart() {
   if (_cfg->is_houdini()) {
-    // Native TDD (bs_hw_framer): the framer is armed and RX windows are armed
-    // per-recv (houdiniTddRx), so nothing to start here. Software-framer path:
-    // start the continuous BS RX streams (they'd overflow if started at ctor).
-    if (!_cfg->bs_hw_framer()) activateHoudiniRx();
+    // Both paths start the continuous BS RX stream here (they'd overflow if started
+    // at ctor). Native TDD (bs_hw_framer): the armed framer GATES this continuous
+    // stream every frame (the Iris model) -- houdiniTddRx reads it frame-by-frame,
+    // no per-window arm/teardown. Software framer: plain continuous RX.
+    activateHoudiniRx();
   } else if (!kUseSoapyUHD) {
     radioTrigger();
   }
