@@ -199,6 +199,7 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
   std::nth_element(tmp.begin(), tmp.begin() + tmp.size() / 2, tmp.end());
   const float hmed = tmp.empty() ? 0.0f : tmp[tmp.size() / 2];
   const float hmin = 0.4f * hmed;
+  const int mod = cfg_->ue_data_mod_order();
   const size_t kMaxPts = 600;
   std::vector<std::complex<float>> pts;
   pts.reserve(kMaxPts);
@@ -209,13 +210,33 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
     const int base = prefix + sym * (cp + N) + cp;
     if (base + N > slot) break;
     auto Y = symbolFft(d, base);
-    for (size_t j = 0; j < data_ind.size() && pts.size() < kMaxPts; ++j) {
+    // Equalize this symbol's data subcarriers.
+    std::vector<std::complex<float>> sx;
+    sx.reserve(data_ind.size());
+    std::complex<double> acc4(0.0, 0.0);  // 4th-power sum for blind QPSK CPE
+    for (size_t j = 0; j < data_ind.size(); ++j) {
       const size_t k = data_ind[j];
       const std::complex<float> h = H[k];
       if (std::abs(h) < hmin || std::norm(h) < 1e-9f) continue;  // deep fade
       const std::complex<float> x = Y[k] / h;  // zero-forcing equalizer
-      psum += std::norm(x);
-      pts.push_back(x);
+      sx.push_back(x);
+      const std::complex<double> xd(x.real(), x.imag());
+      acc4 += xd * xd * xd * xd;
+    }
+    // Per-symbol common-phase correction. Residual phase/CFO rotates each OFDM
+    // symbol; the pilot CSI (averaged over the slot) can't track it, so estimate
+    // it blind per symbol via the QPSK 4th-power (data cancels: ideal X^4 -> angle
+    // pi) and de-rotate. Only for QPSK; higher-order QAM needs pilot subcarriers.
+    std::complex<float> derot(1.0f, 0.0f);
+    if (mod == 2 && std::abs(acc4) > 0.0) {
+      const double cpe = (std::arg(acc4) - M_PI) / 4.0;
+      derot = std::complex<float>(std::cos(cpe), -std::sin(cpe));
+    }
+    for (auto& x : sx) {
+      if (pts.size() >= kMaxPts) break;
+      const std::complex<float> xr = x * derot;
+      psum += std::norm(xr);
+      pts.push_back(xr);
     }
   }
   if (pts.empty()) return;
