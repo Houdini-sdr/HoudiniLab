@@ -212,22 +212,33 @@ def main():
     srv = ThreadingHTTPServer((args.http_host, args.http_port), Handler)
     srv.fps = args.fps
     srv.daemon_threads = True
+    # Serve in a daemon thread so the main thread can wait for Ctrl+C. (Calling
+    # srv.shutdown() from a signal handler on the serve_forever thread deadlocks.)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
     url = "http://localhost:%d/" % args.http_port
     print("[csi] dashboard at %s  (SSH: -L %d:localhost:%d)"
           % (url, args.http_port, args.http_port), flush=True)
 
-    def _shutdown(*_):
-        print("\n[csi] shutting down", flush=True)
-        if child is not None:
+    def _cleanup():
+        if child is not None:  # kill the whole sounder process group
             try:
                 os.killpg(os.getpgid(child.pid), signal.SIGTERM)
             except ProcessLookupError:
                 pass
-        srv.shutdown()
-        sys.exit(0)
-    signal.signal(signal.SIGINT, _shutdown)
-    signal.signal(signal.SIGTERM, _shutdown)
-    srv.serve_forever()
+
+    def _sigterm(*_):
+        print("\n[csi] shutting down (SIGTERM)", flush=True)
+        _cleanup()
+        os._exit(0)
+    signal.signal(signal.SIGTERM, _sigterm)
+
+    try:
+        while True:
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        print("\n[csi] shutting down (Ctrl+C)", flush=True)
+        _cleanup()
+        os._exit(0)  # hard exit: avoids any serve_forever/shutdown deadlock
 
 
 PAGE = r"""<!doctype html>
