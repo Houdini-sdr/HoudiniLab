@@ -46,11 +46,6 @@ class Radio {
   void reset_DATA_clk_domain(void);
   void dev_init(Config* _cfg, int ch, double rxgain, double txgain);
 
-  // Houdini native-TDD gated receive: arm a timed RX window at start_ns (a whole
-  // grid tick) and capture `samples` contiguous samples of the gated slot. Used
-  // by the BaseRadioSet TDD framer path; returns the sample count (<0 on error).
-  int recvTddWindow(void* const* buffs, int samples, long long start_ns);
-
  private:
   int recvHoudini(void* const* buffs, int samples, long long& frameTime);
 
