@@ -880,9 +880,6 @@ void Config::genPilots() {
                                                    : 2;  // QPSK
   const size_t n_data = data_ind_.size();
   std::mt19937 rng(0xC0FFEE);  // fixed seed -> reproducible constellation
-  const float dnorm = 1.0f / (4.0f * (tx_scale_ > 0.0f ? 1.0f : 1.0f));
-  (void)dnorm;
-  std::vector<std::complex<int16_t>> prefix_zpad(prefix_, 0), postfix_zpad(postfix_, 0);
   ue_data_ci16_.clear();
   ue_data_ci16_.insert(ue_data_ci16_.end(), prefix_zpad.begin(), prefix_zpad.end());
   // DISTINCT random symbol per OFDM symbol (not one repeated) so the BS can tell
