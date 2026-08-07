@@ -59,6 +59,7 @@ class RecorderWorker {
   std::unordered_map<uint32_t, std::vector<std::complex<float>>> csi_h_;
   void initCsi(void);
   void streamCsi(Packet* pkt, NodeType node_type);   // routes pilot vs uplink data
+  int slotEnergyStart(const short* d, int slot) const;
   std::vector<std::complex<float>> symbolFft(const short* d, int base) const;
   void sendCsi(Packet* pkt);                          // pilot -> CSI + cache H
   void sendConstellation(Packet* pkt);                // uplink data -> equalize

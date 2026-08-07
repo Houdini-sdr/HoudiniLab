@@ -79,6 +79,26 @@ void RecorderWorker::initCsi(void) {
             host.c_str(), port, N, fps);
 }
 
+// Energy leading edge of a slot (first index where the sliding-64 power crosses
+// 15% of the slot peak). Equals `prefix` when the slot is perfectly aligned, but
+// tolerates a small residual misalignment so the OFDM symbol windows land on the
+// real symbol boundaries (a whole-symbol offset otherwise causes inter-symbol
+// interference -> spread constellation / bad CSI).
+int RecorderWorker::slotEnergyStart(const short* d, int slot) const {
+  std::vector<double> cs(static_cast<size_t>(slot) + 1, 0.0);
+  for (int i = 0; i < slot; ++i) {
+    const double re = d[2 * i], im = d[2 * i + 1];
+    cs[i + 1] = cs[i] + re * re + im * im;
+  }
+  double peak = 0.0;
+  for (int i = 0; i + 64 <= slot; ++i)
+    peak = std::max(peak, cs[i + 64] - cs[i]);
+  const double thr = 0.15 * peak;
+  for (int i = 0; i + 64 <= slot; ++i)
+    if (cs[i + 64] - cs[i] > thr) return i;
+  return this->cfg_->prefix();
+}
+
 // DC-centered FFT of the fft-size symbol body starting at sample `base` in `d`.
 std::vector<std::complex<float>> RecorderWorker::symbolFft(const short* d,
                                                           int base) const {
@@ -116,16 +136,16 @@ void RecorderWorker::streamCsi(Packet* pkt, NodeType node_type) {
 void RecorderWorker::sendCsi(Packet* pkt) {
   const int N = static_cast<int>(cfg_->fft_size());
   const int cp = static_cast<int>(cfg_->cp_size());
-  const int prefix = cfg_->prefix();
   const int nsym = static_cast<int>(cfg_->symbol_per_slot());
   const int slot = static_cast<int>(cfg_->samps_per_slot());
   const short* d = pkt->data;
+  const int es = slotEnergyStart(d, slot);  // actual symbol-0 start (robust align)
   int s0 = nsym / 8, s1 = nsym - nsym / 8;
   if (s1 <= s0) { s0 = 0; s1 = nsym; }
   std::vector<std::complex<float>> hacc(N, {0.0f, 0.0f});
   int used = 0;
   for (int sym = s0; sym < s1; ++sym) {
-    const int base = prefix + sym * (cp + N) + cp;
+    const int base = es + sym * (cp + N) + cp;
     if (base + N > slot) break;
     auto F = symbolFft(d, base);
     for (int k = 0; k < N; ++k) hacc[k] += F[k] * std::conj(pilot_ref_[k]);
@@ -183,10 +203,10 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
   const std::vector<std::complex<float>>& H = hit->second;
   const int N = static_cast<int>(cfg_->fft_size());
   const int cp = static_cast<int>(cfg_->cp_size());
-  const int prefix = cfg_->prefix();
   const int nsym = static_cast<int>(cfg_->symbol_per_slot());
   const int slot = static_cast<int>(cfg_->samps_per_slot());
   const short* d = pkt->data;
+  const int es = slotEnergyStart(d, slot);  // actual symbol-0 start (robust align)
   const auto& data_ind = cfg_->data_ind();
   // One-shot raw dump for offline analysis: [N cp prefix nsym ndata i32]
   // [H re,im f32]*N [data_ind i32]*ndata [U slot re,im i16]*slot.
@@ -196,7 +216,7 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
     if (dumped.compare_exchange_strong(exp, true)) {
       FILE* f = std::fopen("/tmp/cns_dump.bin", "wb");
       if (f) {
-        const int32_t hdr[5] = {N, cp, prefix, nsym,
+        const int32_t hdr[5] = {N, cp, es, nsym,
                                 static_cast<int32_t>(data_ind.size())};
         std::fwrite(hdr, sizeof(int32_t), 5, f);
         for (int k = 0; k < N; ++k) {
@@ -233,7 +253,7 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
   if (s1 <= s0) { s0 = 0; s1 = nsym; }
   double psum = 0.0;
   for (int sym = s0; sym < s1 && pts.size() < kMaxPts; ++sym) {
-    const int base = prefix + sym * (cp + N) + cp;
+    const int base = es + sym * (cp + N) + cp;
     if (base + N > slot) break;
     auto Y = symbolFft(d, base);
     // Equalize this symbol's data subcarriers.
