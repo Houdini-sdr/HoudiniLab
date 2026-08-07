@@ -188,6 +188,32 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
   const int slot = static_cast<int>(cfg_->samps_per_slot());
   const short* d = pkt->data;
   const auto& data_ind = cfg_->data_ind();
+  // One-shot raw dump for offline analysis: [N cp prefix nsym ndata i32]
+  // [H re,im f32]*N [data_ind i32]*ndata [U slot re,im i16]*slot.
+  if (std::getenv("HOUDINI_CSI_DUMP") != nullptr) {
+    static std::atomic<bool> dumped{false};
+    bool exp = false;
+    if (dumped.compare_exchange_strong(exp, true)) {
+      FILE* f = std::fopen("/tmp/cns_dump.bin", "wb");
+      if (f) {
+        const int32_t hdr[5] = {N, cp, prefix, nsym,
+                                static_cast<int32_t>(data_ind.size())};
+        std::fwrite(hdr, sizeof(int32_t), 5, f);
+        for (int k = 0; k < N; ++k) {
+          const float re = H[k].real(), im = H[k].imag();
+          std::fwrite(&re, 4, 1, f);
+          std::fwrite(&im, 4, 1, f);
+        }
+        for (size_t j = 0; j < data_ind.size(); ++j) {
+          const int32_t di = static_cast<int32_t>(data_ind[j]);
+          std::fwrite(&di, 4, 1, f);
+        }
+        std::fwrite(d, sizeof(short), static_cast<size_t>(slot) * 2, f);
+        std::fclose(f);
+        MLPD_INFO("CSI dump written to /tmp/cns_dump.bin\n");
+      }
+    }
+  }
   // Skip deep-fade data subcarriers: zero-forcing (X=Y/H) amplifies noise where
   // |H| is small, which blows up the constellation. Keep only subcarriers with
   // |H| >= 0.4 x median|H| (over the data subcarriers).
