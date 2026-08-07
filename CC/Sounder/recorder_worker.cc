@@ -14,6 +14,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -187,6 +188,17 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
   const int slot = static_cast<int>(cfg_->samps_per_slot());
   const short* d = pkt->data;
   const auto& data_ind = cfg_->data_ind();
+  // Skip deep-fade data subcarriers: zero-forcing (X=Y/H) amplifies noise where
+  // |H| is small, which blows up the constellation. Keep only subcarriers with
+  // |H| >= 0.4 x median|H| (over the data subcarriers).
+  std::vector<float> habs;
+  habs.reserve(data_ind.size());
+  for (size_t j = 0; j < data_ind.size(); ++j)
+    habs.push_back(std::abs(H[data_ind[j]]));
+  std::vector<float> tmp = habs;
+  std::nth_element(tmp.begin(), tmp.begin() + tmp.size() / 2, tmp.end());
+  const float hmed = tmp.empty() ? 0.0f : tmp[tmp.size() / 2];
+  const float hmin = 0.4f * hmed;
   const size_t kMaxPts = 600;
   std::vector<std::complex<float>> pts;
   pts.reserve(kMaxPts);
@@ -200,7 +212,7 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
     for (size_t j = 0; j < data_ind.size() && pts.size() < kMaxPts; ++j) {
       const size_t k = data_ind[j];
       const std::complex<float> h = H[k];
-      if (std::norm(h) < 1e-9f) continue;
+      if (std::abs(h) < hmin || std::norm(h) < 1e-9f) continue;  // deep fade
       const std::complex<float> x = Y[k] / h;  // zero-forcing equalizer
       psum += std::norm(x);
       pts.push_back(x);
