@@ -199,7 +199,7 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
   std::nth_element(tmp.begin(), tmp.begin() + tmp.size() / 2, tmp.end());
   const float hmed = tmp.empty() ? 0.0f : tmp[tmp.size() / 2];
   const float hmin = 0.4f * hmed;
-  const int mod = cfg_->ue_data_mod_order();
+  const int mod_ord = cfg_->ue_data_mod_order();
   const size_t kMaxPts = 600;
   std::vector<std::complex<float>> pts;
   pts.reserve(kMaxPts);
@@ -228,7 +228,7 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
     // it blind per symbol via the QPSK 4th-power (data cancels: ideal X^4 -> angle
     // pi) and de-rotate. Only for QPSK; higher-order QAM needs pilot subcarriers.
     std::complex<float> derot(1.0f, 0.0f);
-    if (mod == 2 && std::abs(acc4) > 0.0) {
+    if (mod_ord == 2 && std::abs(acc4) > 0.0) {
       const double cpe = (std::arg(acc4) - M_PI) / 4.0;
       derot = std::complex<float>(std::cos(cpe), -std::sin(cpe));
     }
