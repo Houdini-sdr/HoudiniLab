@@ -569,15 +569,19 @@ int BaseRadioSet::houdiniTddRx(size_t radio_id, void* const* buffs,
   Radio* r = bsRadios.at(0).at(radio_id);
   const size_t sounder_slot = htdd_rx_slots_.at(0);  // recorder tag (single pilot)
   const int n = static_cast<int>(_cfg->samps_per_slot());
-  const int fn = static_cast<int>(htdd_frame_ticks_);  // one frame period
+  // Read slightly MORE than one frame period so a full pilot is always contained
+  // regardless of the (unaligned) read phase -- a frame-period read would clip the
+  // pilot whenever it straddled the read boundary. The densest 4096 is then always a
+  // fully-contained pilot (a clipped one carries less energy), so it centers cleanly.
+  const int fn = static_cast<int>(htdd_frame_ticks_) + 2 * n;
 
   // CONTINUOUS framer receive (the Iris model). The TDD framer is armed ONCE and
   // gates the ADC every frame; the RX stream is activated ONCE (radioStart). So we
-  // just read a fresh frame-period window from the running stream -- NO per-window
+  // just read a fresh window from the running stream -- NO per-window
   // activateStream/deactivateStream (whose ~50 ms teardown capped the BS at
-  // ~19 pilots/s). One frame period holds exactly one UE pilot; recv() drains stale
-  // backlog then reads a contiguous window (Radio::recvHoudini). loc/rx_gate arming
-  // and the whole-frame locate scan are gone -- the pilot is found by search below.
+  // ~19 pilots/s). recv() drains stale backlog then reads a contiguous window
+  // (Radio::recvHoudini). loc/rx_gate arming and the whole-frame locate scan are
+  // gone -- the pilot is found by search below.
   htdd_cap_buf_.resize(static_cast<size_t>(fn) * 2);
   void* cb[1] = {htdd_cap_buf_.data()};
   long long ft = 0;
