@@ -11,6 +11,7 @@
 
 #include <gflags/gflags.h>
 
+#include <cstdlib>
 #include <iostream>
 
 #include "include/data_generator.h"
@@ -27,13 +28,22 @@ DEFINE_string(storepath, "logs", "Dataset store path");
 DEFINE_bool(bs_only, false, "Run BS only");
 DEFINE_bool(client_only, false, "Run client only");
 DEFINE_bool(calibrate, false, "Run radio set calibration");
+DEFINE_bool(view, false,
+            "Viewing mode: compute live CSI per antenna and stream it to the GUI "
+            "over UDP (dest from HOUDINI_CSI_UDP, default 127.0.0.1:9999) instead "
+            "of recording to HDF5");
 
 int main(int argc, char* argv[]) {
   gflags::SetVersionString(GetSounderProjectVersion());
   gflags::SetUsageMessage(
       "sounder Options: -bs_only -client_only -conf "
-      "-gen_data_bits -storepath");
+      "-gen_data_bits -storepath -view");
   gflags::ParseCommandLineFlags(&argc, &argv, true);
+  // Viewing mode is switched on inside the recorder by the presence of
+  // HOUDINI_CSI_UDP; --view just sets a sensible default destination.
+  if (FLAGS_view && std::getenv("HOUDINI_CSI_UDP") == nullptr) {
+    setenv("HOUDINI_CSI_UDP", "127.0.0.1:9999", 1);
+  }
   auto config =
       std::make_unique<Config>(FLAGS_conf_file, FLAGS_storepath, FLAGS_bs_only,
                                FLAGS_client_only, FLAGS_calibrate);

@@ -9,11 +9,141 @@
 
 #include "include/recorder_worker.h"
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+#include <chrono>
+#include <cmath>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+
 #include "include/logger.h"
 #include "include/macros.h"
 #include "include/utils.h"
 
 namespace Sounder {
+
+// Parse HOUDINI_CSI_UDP ("host:port"), open a connected UDP socket, precompute the
+// DC-centered freq-domain pilot reference + a DC-centered DFT matrix, and set the
+// per-antenna send throttle. Enables view mode when the env is present.
+void RecorderWorker::initCsi(void) {
+  const char* dst = std::getenv("HOUDINI_CSI_UDP");
+  if (dst == nullptr) return;
+  std::string s(dst);
+  const auto colon = s.find(':');
+  const std::string host = (colon == std::string::npos) ? "127.0.0.1"
+                                                        : s.substr(0, colon);
+  const int port =
+      (colon == std::string::npos) ? 9999 : std::atoi(s.substr(colon + 1).c_str());
+  csi_sock_ = ::socket(AF_INET, SOCK_DGRAM, 0);
+  if (csi_sock_ < 0) {
+    MLPD_ERROR("CSI view: socket() failed, view mode disabled\n");
+    return;
+  }
+  sockaddr_in addr{};
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(static_cast<uint16_t>(port));
+  if (::inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1 ||
+      ::connect(csi_sock_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+    MLPD_ERROR("CSI view: bad dest %s:%d, view mode disabled\n", host.c_str(),
+               port);
+    ::close(csi_sock_);
+    csi_sock_ = -1;
+    return;
+  }
+  const int N = static_cast<int>(cfg_->fft_size());
+  auto& pf = cfg_->pilot_sym_f();
+  pilot_ref_.resize(N);
+  for (int k = 0; k < N; ++k)
+    pilot_ref_[k] = {pf.at(0).at(k), pf.at(1).at(k)};  // DC-centered
+  // Xs[k] = sum_n x[n] * dft_[k*N+n] gives the DC-centered spectrum directly
+  // (natural bin (k+N/2)%N), matching the DC-centered pilot reference.
+  dft_.resize(static_cast<size_t>(N) * N);
+  for (int k = 0; k < N; ++k) {
+    const int m = (k + N / 2) % N;
+    for (int n = 0; n < N; ++n) {
+      const double ph = -2.0 * M_PI * m * n / N;
+      dft_[static_cast<size_t>(k) * N + n] = {static_cast<float>(std::cos(ph)),
+                                              static_cast<float>(std::sin(ph))};
+    }
+  }
+  double fps = 30.0;
+  if (const char* f = std::getenv("HOUDINI_CSI_FPS")) fps = std::max(0.5, atof(f));
+  csi_throttle_ns_ = 1e9 / fps;
+  view_mode_ = true;
+  MLPD_INFO("CSI view mode: streaming to %s:%d (%d subcarriers, ~%.0f fps/ant)\n",
+            host.c_str(), port, N, fps);
+}
+
+// Compute CSI from one received pilot slot and stream it (throttled per antenna).
+void RecorderWorker::streamCsi(Packet* pkt, NodeType node_type) {
+  const size_t num_channels = cfg_->bs_channel().size();
+  const size_t radio_id = pkt->ant_id / num_channels;
+  const bool is_pilot =
+      cfg_->internal_measurement()
+          ? (node_type == kBS)
+          : cfg_->isPilot(pkt->cell_id, radio_id, pkt->slot_id);
+  if (!is_pilot) return;
+  const long long now =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count();
+  auto it = csi_last_ns_.find(pkt->ant_id);
+  if (it != csi_last_ns_.end() &&
+      (now - it->second) < static_cast<long long>(csi_throttle_ns_))
+    return;
+  csi_last_ns_[pkt->ant_id] = now;
+
+  const int N = static_cast<int>(cfg_->fft_size());
+  const int cp = static_cast<int>(cfg_->cp_size());
+  const int prefix = cfg_->prefix();
+  const int nsym = static_cast<int>(cfg_->symbol_per_slot());
+  const int slot = static_cast<int>(cfg_->samps_per_slot());
+  const short* d = pkt->data;
+  // Average CSI over the middle symbols (skip the slot edges for settling/jitter).
+  int s0 = nsym / 8, s1 = nsym - nsym / 8;
+  if (s1 <= s0) { s0 = 0; s1 = nsym; }
+  std::vector<std::complex<float>> hacc(N, {0.0f, 0.0f});
+  int used = 0;
+  for (int sym = s0; sym < s1; ++sym) {
+    const int base = prefix + sym * (cp + N) + cp;  // skip CP -> FFT body
+    if (base + N > slot) break;
+    for (int k = 0; k < N; ++k) {
+      const std::complex<float>* row = &dft_[static_cast<size_t>(k) * N];
+      std::complex<float> acc(0.0f, 0.0f);
+      for (int n = 0; n < N; ++n) {
+        const std::complex<float> x(static_cast<float>(d[2 * (base + n)]),
+                                    static_cast<float>(d[2 * (base + n) + 1]));
+        acc += x * row[n];
+      }
+      hacc[k] += acc * std::conj(pilot_ref_[k]);  // zero-forcing numerator
+    }
+    ++used;
+  }
+  // Datagram: [magic u32][frame u32][ant u32][num_sc u32][rate f32][H re,im f32]*N
+  std::vector<uint8_t> buf(20 + static_cast<size_t>(8) * N);
+  const uint32_t magic = 0x43534931u;  // "CSI1"
+  const uint32_t fr = pkt->frame_id, an = pkt->ant_id, nsc = static_cast<uint32_t>(N);
+  const float rate = static_cast<float>(cfg_->rate());
+  std::memcpy(&buf[0], &magic, 4);
+  std::memcpy(&buf[4], &fr, 4);
+  std::memcpy(&buf[8], &an, 4);
+  std::memcpy(&buf[12], &nsc, 4);
+  std::memcpy(&buf[16], &rate, 4);
+  for (int k = 0; k < N; ++k) {
+    const float pw = std::norm(pilot_ref_[k]);  // |ref|^2 (0 on unused subcarriers)
+    const std::complex<float> h =
+        (pw > 1e-6f && used > 0) ? hacc[k] / (static_cast<float>(used) * pw)
+                                 : std::complex<float>(0.0f, 0.0f);
+    const float re = h.real(), im = h.imag();
+    std::memcpy(&buf[20 + 8 * k], &re, 4);
+    std::memcpy(&buf[24 + 8 * k], &im, 4);
+  }
+  (void)::send(csi_sock_, buf.data(), buf.size(), 0);
+}
 
 RecorderWorker::RecorderWorker(Config* in_cfg, size_t antenna_offset,
                                size_t num_antennas)
@@ -32,6 +162,8 @@ RecorderWorker::RecorderWorker(Config* in_cfg, size_t antenna_offset,
 RecorderWorker::~RecorderWorker() { this->finalize(); }
 
 void RecorderWorker::init(void) {
+  this->initCsi();
+  if (this->view_mode_) return;  // viewing mode streams CSI, writes no HDF5
   this->hdf5_ = new Hdf5Lib(this->hdf5_name_, "Data");
   // Write Atrributes
   // ******* COMMON ******** //
@@ -282,12 +414,22 @@ void RecorderWorker::init(void) {
 }
 
 void RecorderWorker::finalize(void) {
-  this->hdf5_->closeDataset();
-  this->hdf5_->closeFile();
+  if (this->csi_sock_ >= 0) {
+    ::close(this->csi_sock_);
+    this->csi_sock_ = -1;
+  }
+  if (this->hdf5_ != nullptr) {
+    this->hdf5_->closeDataset();
+    this->hdf5_->closeFile();
+  }
 }
 
 void RecorderWorker::record(int tid, Packet* pkt, NodeType node_type) {
   (void)tid;
+  if (this->view_mode_) {  // viewing mode: compute + stream CSI, no HDF5
+    this->streamCsi(pkt, node_type);
+    return;
+  }
   /* TODO: remove TEMP check */
   size_t end_antenna = (this->antenna_offset_ + this->num_antennas_) - 1;
   size_t num_channels = this->cfg_->bs_channel().size();

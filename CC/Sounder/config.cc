@@ -9,6 +9,8 @@
 
 #include "include/config.h"
 
+#include <cstdlib>
+
 #include "include/comms-lib.h"
 #include "include/constants.h"
 #include "include/logger.h"
@@ -123,6 +125,11 @@ Config::Config(const std::string& jsonfile, const std::string& directory,
   beacon_radio_ = beacon_ant_ / bs_sdr_ch_;
   beacon_ch_ = beacon_ant_ % bs_sdr_ch_;
   max_frame_ = tddConf.value("max_frame", 0);
+  // Env override (used by the live-CSI GUI to run the sounder ~indefinitely in
+  // viewing mode, where max_frame would otherwise stop the BS loop).
+  if (const char* mf = std::getenv("HOUDINI_MAX_FRAME")) {
+    max_frame_ = static_cast<size_t>(std::strtoull(mf, nullptr, 10));
+  }
   bs_hw_framer_ = tddConf.value("bs_hw_framer", true);
 
   // Load/Build BS and Client SDRs' Schedules
