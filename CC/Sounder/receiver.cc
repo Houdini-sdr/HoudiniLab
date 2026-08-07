@@ -1076,8 +1076,9 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
       config_->running(false);
       break;
     }
-    if (config_->ul_data_slot_present() == true) {
-      // Notify new frame
+    if (config_->ul_data_slot_present() == true && !config_->is_houdini()) {
+      // Notify new frame (file-based UL data path; Houdini uses the self-contained
+      // continuous P+U burst in clientTxPilots instead).
       this->notifyPacket(kClient, frame_id + this->txFrameDelta_, 0, tid,
                          tx_buffer_size);
     }
@@ -1148,7 +1149,10 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
     }
     // schedule all TX slot
     // config_->tx_advance() needs calibration based on SDR model and sampling rate
-    if (config_->ul_data_slot_present() == true) {
+    // Houdini always uses the continuous P(+U) burst below (clientTxPilots now
+    // transmits the uplink-data slot too); the file-based clientTxData path is for
+    // Iris/UHD.
+    if (config_->ul_data_slot_present() == true && !config_->is_houdini()) {
       int tx_return = 0;
       while (tx_return >= 0) {
         tx_return = this->clientTxData(tid, frame_id, rx_beacon_time);
