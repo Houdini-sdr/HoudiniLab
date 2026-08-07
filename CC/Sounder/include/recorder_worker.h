@@ -52,9 +52,16 @@ class RecorderWorker {
   std::vector<std::complex<float>> pilot_ref_;  // DC-centered freq-domain pilot
   std::vector<std::complex<float>> dft_;        // NxN DC-centered DFT coefficients
   double csi_throttle_ns_ = 0.0;                // per-antenna min send interval
-  std::unordered_map<uint32_t, long long> csi_last_ns_;
+  std::unordered_map<uint32_t, long long> csi_last_ns_;   // CSI (pilot) send timer
+  std::unordered_map<uint32_t, long long> cns_last_ns_;   // constellation send timer
+  // Latest channel estimate H[k] per antenna (DC-centered), cached from the pilot
+  // slot and used to equalize that antenna's uplink-data (U) slot.
+  std::unordered_map<uint32_t, std::vector<std::complex<float>>> csi_h_;
   void initCsi(void);
-  void streamCsi(Packet* pkt, NodeType node_type);
+  void streamCsi(Packet* pkt, NodeType node_type);   // routes pilot vs uplink data
+  std::vector<std::complex<float>> symbolFft(const short* d, int base) const;
+  void sendCsi(Packet* pkt);                          // pilot -> CSI + cache H
+  void sendConstellation(Packet* pkt);                // uplink data -> equalize
 };
 }; /* End namespace Sounder */
 

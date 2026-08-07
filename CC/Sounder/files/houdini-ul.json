@@ -1,0 +1,49 @@
+{
+    "_comment": "Houdini RFSoC single-UE client. Runs the unmodified receiver.cc client-sync path (clientSyncTxRx -> syncSearch -> find_beacon) on the Houdini radio via the ClientRadioSet houdini backend. Beacon is transmitted separately by beacon_tx_gold from the BS board. Matched-NCO Zone-1 loopback: TX ch1 -> RX ch1, NCO 500 MHz. slot=4096 samps -> detect window ~9544 > beacon. 30 slots x 4096 = 122880 samps = EXACTLY 1 ms per frame so the UE pilot TX time quantizes onto Houdini's whole-ms TX grid at a constant advance.",
+    "serial_file": "files/topology-houdini.json",
+    "radio_type": "houdini",
+    "remote_port": "55132",
+    "bs_hw_framer": true,
+    "ue_tdd_pilot": true,
+    "_ue_tdd_pilot_note": "UE streams its pilot with the tdd=1 TX stream arg -> the driver TxTickAnchor accepts the beacon-referenced start on the 3.125us TDD window grid (SH-248/SH-301), not whole-ms, so no 1ms drift-cliff. ue_tx_advance_ticks (ticks) is the fine calibration that seats the pilot in the BS rx_gate; sweep it.",
+    "ue_tx_advance_ticks": 0,
+    "_bs_hw_framer_note": "true selects the BS native-Houdini-TDD framer path: beacon replay strobe + one rx_gate window per sounder pilot slot; loopRecv's HW-framer true-path receives only those, tagged with the sounder slot. The TDD symbol is a fixed 0.5ms (decoupled from the slot) so the capture fits inside the rx_gate window; samps_per_slot just needs to be <= 4096 (FPGA TX_RAM, else genPilots' size_t remain_size underflows). 48*80 + 128+128 = 4096.",
+    "frequency": 500000000.0,
+    "nco_frequency": 500000000.0,
+    "sample_rate": 122880000.0,
+    "channel": "B",
+    "frame_schedule": [
+        "BGPGUGGGGGGGGGGGGGGGGGGGGGGGGG"
+    ],
+    "max_frame": 600,
+    "ofdm_symbol_per_slot": 48,
+    "fft_size": 64,
+    "cp_size": 16,
+    "ofdm_tx_zero_prefix": 128,
+    "ofdm_tx_zero_postfix": 128,
+    "beamsweep": false,
+    "ue_channel": "B",
+    "ue_rx_gain_a": [
+        65
+    ],
+    "ue_tx_gain_a": [
+        81
+    ],
+    "ue_rx_gain_b": [
+        65
+    ],
+    "ue_tx_gain_b": [
+        81
+    ],
+    "ue_frame_schedule": [
+        "GGPGUGGGGGGGGGGGGGGGGGGGGGGGGG"
+    ],
+    "tx_advance": [
+        135
+    ],
+    "corr_scale": [
+        100
+    ],
+    "ue_pilot_horizon": 96,
+    "ue_modulation": "QPSK"
+}

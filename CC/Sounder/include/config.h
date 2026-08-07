@@ -166,6 +166,14 @@ class Config {
   inline std::vector<std::complex<int16_t>>& pilot_ci16(void) {
     return this->pilot_ci16_;
   }
+  // Self-contained UE uplink-data slot for viewing mode (random modulated symbols
+  // on the data subcarriers, one OFDM symbol repeated across the slot) + its
+  // modulation order (2/4/6 = QPSK/16/64-QAM). Transmitted continuously in the U
+  // slot; the BS equalizes it with the pilot CSI to show the constellation.
+  inline std::vector<std::complex<int16_t>>& ue_data_ci16(void) {
+    return this->ue_data_ci16_;
+  }
+  inline int ue_data_mod_order(void) const { return this->ue_data_mod_order_; }
   inline std::vector<size_t>& n_bs_sdrs(void) { return this->n_bs_sdrs_; }
 
   inline const std::vector<std::string>& cl_frames(void) const {
@@ -424,6 +432,8 @@ class Config {
   std::vector<size_t> data_ind_;
   std::vector<uint32_t> coeffs_;
   std::vector<std::complex<int16_t>> pilot_ci16_;
+  std::vector<std::complex<int16_t>> ue_data_ci16_;  // viewing-mode UE UL data slot
+  int ue_data_mod_order_ = 2;                        // QPSK by default
   std::vector<uint32_t> pilot_;
   std::vector<std::complex<float>> pilot_sc_;
   std::vector<size_t> pilot_sc_ind_;

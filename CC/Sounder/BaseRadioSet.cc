@@ -512,6 +512,7 @@ void BaseRadioSet::armHoudiniTdd(void) {
         const char ch = sched.at(s);
         if (ch == 'P' || ch == 'R' || ch == 'U' || ch == 'N')
           htdd_rx_slots_.push_back(s);
+        if (ch == 'P') htdd_pilot_slot_ = s;  // CSI reference slot
       }
       // TDD schedule: 1 beacon symbol + 1 rx_gate symbol per sounder pilot slot.
       const size_t spf_tdd = 1 + htdd_rx_slots_.size();
@@ -567,29 +568,36 @@ int BaseRadioSet::houdiniTddRx(size_t radio_id, void* const* buffs,
   if (_cfg->max_frame() > 0 && htdd_frame_counter_ >= _cfg->max_frame())
     return -1;
   Radio* r = bsRadios.at(0).at(radio_id);
-  const size_t sounder_slot = htdd_rx_slots_.at(0);  // recorder tag (single pilot)
   const int n = static_cast<int>(_cfg->samps_per_slot());
-  // Read slightly MORE than one frame period so a full pilot is always contained
-  // regardless of the (unaligned) read phase -- a frame-period read would clip the
-  // pilot whenever it straddled the read boundary. The densest 4096 is then always a
-  // fully-contained pilot (a clipped one carries less energy), so it centers cleanly.
-  const int fn = static_cast<int>(htdd_frame_ticks_) + 2 * n;
+  const size_t K = htdd_rx_slots_.size();  // rx slots/frame (pilot P + uplink U...)
+  const size_t cur = htdd_rx_cursor_;
 
-  // CONTINUOUS framer receive (the Iris model). The TDD framer is armed ONCE and
-  // gates the ADC every frame; the RX stream is activated ONCE (radioStart). So we
-  // just read a fresh window from the running stream -- NO per-window
-  // activateStream/deactivateStream (whose ~50 ms teardown capped the BS at
-  // ~19 pilots/s). recv() drains stale backlog then reads a contiguous window
-  // (Radio::recvHoudini). loc/rx_gate arming and the whole-frame locate scan are
-  // gone -- the pilot is found by search below.
+  // Non-first rx slot: serve it from the per-frame cache filled on cursor 0 (one
+  // continuous read yields every rx slot of the frame). Shares the frame_id so the
+  // recorder places P and U in the same frame.
+  if (cur != 0) {
+    std::memcpy(buffs[0], htdd_slot_cache_.data() + cur * static_cast<size_t>(n) * 2,
+                static_cast<size_t>(n) * 4);
+    const size_t slot = htdd_rx_slots_.at(cur);
+    htdd_rx_cursor_ = (cur + 1) % K;
+    frameTime = (htdd_cache_frame_ << 32) | (static_cast<long long>(slot) << 16);
+    return n;
+  }
+
+  // cursor 0: CONTINUOUS framer receive (the Iris model -- framer armed once, RX
+  // activated once in radioStart, no per-window arm/teardown). Read a bit more than
+  // one frame + the pilot->last-slot span so every rx slot is fully contained
+  // regardless of the (unaligned) read phase.
+  const int span = (K > 1)
+                       ? static_cast<int>(htdd_rx_slots_.back() -
+                                          htdd_rx_slots_.front())
+                       : 0;
+  const int fn = static_cast<int>(htdd_frame_ticks_) + (span + 3) * n;
   htdd_cap_buf_.resize(static_cast<size_t>(fn) * 2);
   void* cb[1] = {htdd_cap_buf_.data()};
   long long ft = 0;
   const int cg = r->recv(cb, fn, ft);
   if (cg < n) return (cg < 0) ? cg : 0;
-
-  // Densest n-window = the pilot (its 48 contiguous LTS symbols dominate the sparse
-  // beacon in symbol 0). Energy prefix sum -> coarse peak.
   const int16_t* s = htdd_cap_buf_.data();
   std::vector<double> cse(static_cast<size_t>(cg) + 1, 0.0);
   for (int i = 0; i < cg; ++i) {
@@ -604,19 +612,40 @@ int BaseRadioSet::houdiniTddRx(size_t radio_id, void* const* buffs,
   }
   const double pilot_rms = std::sqrt(best / n);
   const double mean_rms = std::sqrt(cse[cg] / cg);
-  // Presence gate (the old locate criterion): skip frames where the UE pilot isn't
-  // on-air yet (densest window is then the weak beacon/noise). Don't advance
-  // frame_counter for those, so the first real pilot lands at recorder frame 0.
+  // Presence gate: skip frames where no UE signal is on-air yet (don't advance the
+  // frame counter -> the first real frame lands at recorder frame 0).
   if (pilot_rms < 120.0 || pilot_rms < 4.0 * mean_rms) {
     std::memcpy(buffs[0], s, static_cast<size_t>(n) * 4);
     frameTime = (htdd_frame_counter_ << 32) |
-                (static_cast<long long>(sounder_slot) << 16);
+                (static_cast<long long>(htdd_rx_slots_.at(0)) << 16);
     return n;
   }
-  // Center the pilot by its energy centroid within a 3n window around the peak
-  // (excludes the beacon) -> the transmitted [prefix][3840 energy][postfix]
-  // structure, ~128-sample margins each side.
-  int w0 = at - n / 2;
+  // The densest slot `at` is a UE slot -- pilot OR data. Identify it: the pilot is
+  // identical repeated LTS symbols (high self-similarity at lag cp+fft); data is
+  // distinct symbols (low). This keeps P/U tagged correctly so CSI comes from the
+  // pilot and equalization from the data.
+  auto selfsim = [&](int off) -> double {
+    const int lag = static_cast<int>(_cfg->cp_size() + _cfg->fft_size());
+    if (off < 0 || off + n > cg) return 0.0;
+    double sr = 0, si = 0, sp = 0;
+    for (int m = 0; m + lag < n; ++m) {
+      const double a = s[2 * (off + m)], b = s[2 * (off + m) + 1];
+      const double c = s[2 * (off + m + lag)], d = s[2 * (off + m + lag) + 1];
+      sr += a * c + b * d;
+      si += b * c - a * d;
+      sp += a * a + b * b;
+    }
+    return sp > 0 ? std::sqrt(sr * sr + si * si) / sp : 0.0;
+  };
+  const int gap =
+      static_cast<int>(htdd_rx_slots_.back() - htdd_pilot_slot_) * n;
+  int p_at = at;
+  if (selfsim(at) < 0.5) {  // `at` is a data slot -> the pilot is `gap` earlier
+    if (selfsim(at - gap) >= 0.4) p_at = at - gap;
+    else if (selfsim(at + gap) >= 0.4) p_at = at + gap;
+  }
+  // Centroid-align the pilot slot -> transmitted [prefix][energy][postfix] layout.
+  int w0 = p_at - n / 2;
   if (w0 < 0) w0 = 0;
   int w1 = w0 + 3 * n;
   if (w1 > cg) w1 = cg;
@@ -628,26 +657,33 @@ int BaseRadioSet::houdiniTddRx(size_t radio_id, void* const* buffs,
   const double thr = 0.15 * peak;
   long long mcnt = 0;
   double misum = 0.0;
-  for (int i = w0 + 64; i + 64 <= w1; ++i) {
+  for (int i = w0 + 64; i + 64 <= w1; ++i)
     if (cse[i + 64] - cse[i - 64] > thr) { ++mcnt; misum += i; }
+  const long long centroid = mcnt > 0 ? std::llround(misum / mcnt) : (p_at + n / 2);
+  const long long p_start = centroid - n / 2;  // aligned pilot slot start
+  // Fill the per-frame cache: each rx slot at its schedule offset from the pilot.
+  htdd_slot_cache_.resize(K * static_cast<size_t>(n) * 2);
+  for (size_t k = 0; k < K; ++k) {
+    long long st = p_start + (static_cast<long long>(htdd_rx_slots_.at(k)) -
+                              static_cast<long long>(htdd_pilot_slot_)) * n;
+    if (st < 0) st = 0;
+    if (st + n > cg) st = cg - n;
+    std::memcpy(htdd_slot_cache_.data() + k * static_cast<size_t>(n) * 2,
+                s + st * 2, static_cast<size_t>(n) * 4);
   }
-  const long long centroid = mcnt > 0 ? std::llround(misum / mcnt) : (at + n / 2);
-  long long start = centroid - n / 2;
-  if (start < 0) start = 0;
-  if (start + n > cg) start = cg - n;
-  std::memcpy(buffs[0], s + start * 2, static_cast<size_t>(n) * 4);
   if (getenv("HOUDINI_BS_RX_DEBUG") != nullptr) {
     static std::atomic<int> dc{0};
     if ((dc.fetch_add(1) % 20) == 0)
-      MLPD_INFO("HOUDINI_BS_RX: frame=%lld cg=%d pilot-rms=%.0f mean-rms=%.0f "
-                "centroid=%lld start=%lld\n",
-                htdd_frame_counter_, cg, pilot_rms, mean_rms, centroid, start);
+      MLPD_INFO("HOUDINI_BS_RX: frame=%lld cg=%d pilot-rms=%.0f selfsim=%.2f "
+                "p_start=%lld rx_slots=%zu\n",
+                htdd_frame_counter_, cg, pilot_rms, selfsim(at), p_start, K);
   }
-  // frame_id: a small monotonic counter (0,1,2,...) like the Iris HW framer -- the
-  // recorder EXTENDS its HDF5 dataset to frame_id. One pilot served per call.
-  const long long frame_id = htdd_frame_counter_;
+  std::memcpy(buffs[0], htdd_slot_cache_.data(), static_cast<size_t>(n) * 4);
+  htdd_cache_frame_ = htdd_frame_counter_;
   ++htdd_frame_counter_;
-  frameTime = (frame_id << 32) | (static_cast<long long>(sounder_slot) << 16);
+  htdd_rx_cursor_ = (K > 1) ? 1 : 0;
+  frameTime = (htdd_cache_frame_ << 32) |
+              (static_cast<long long>(htdd_rx_slots_.at(0)) << 16);
   return n;
 }
 

@@ -136,6 +136,12 @@ void Receiver::initBuffers() {
     pilotbuffB_.at(1) = config_->pilot_ci16().data();
     pilotbuffB_.at(0) = zeros_.at(1);
   }
+  // Viewing-mode UE uplink-data slot buffer (ch A). Transmitted continuously in
+  // the U slot alongside the pilot so the BS can equalize it and show the
+  // constellation. Empty (0-length data()) when the config has no data slot.
+  ue_databuffA_.resize(2);
+  ue_databuffA_.at(0) = config_->ue_data_ci16().data();
+  ue_databuffA_.at(1) = zeros_.at(0);
 }
 
 std::vector<pthread_t> Receiver::startClientThreads(SampleBuffer* rx_buffer,
@@ -746,6 +752,16 @@ void Receiver::clientTxPilots(size_t user_id, long long base_time) {
   // it on EVERY frame across a horizon ahead of real time -- then whichever frame
   // the BS listens on, a pilot is there. A per-thread cursor keeps the schedule
   // continuous and non-overlapping (each client tid runs this on one thread).
+  // Viewing mode also sends an uplink DATA slot (U) each frame so the BS can
+  // equalize it and render the constellation. It rides the same continuous burst,
+  // offset from the pilot by (U_slot - P_slot) slots.
+  const bool ul_present = !config_->cl_ul_slots().at(user_id).empty() &&
+                          config_->ue_data_ci16().size() >= (size_t)num_samps;
+  const long long ul_off =
+      ul_present ? (static_cast<long long>(config_->cl_ul_slots().at(user_id).at(0)) -
+                    static_cast<long long>(config_->cl_pilot_slots().at(user_id).at(0))) *
+                       num_samps
+                 : 0;
   const char* he = std::getenv("HOUDINI_PILOT_HORIZON");
   const int horizon = he != nullptr ? std::atoi(he) : config_->ue_pilot_horizon();
   if (horizon > 0 && config_->is_houdini() && config_->cl_sdr_ch() == 1) {
@@ -761,6 +777,11 @@ void Receiver::clientTxPilots(size_t user_id, long long base_time) {
       if (rr < num_samps) {
         MLPD_WARN("BAD Write (burst @%lld): %d/%d\n", cur, rr, num_samps);
         break;
+      }
+      if (ul_present) {  // uplink data slot in the same frame
+        long long ut = cur + ul_off;
+        client_radio_set_->radioTx(user_id, ue_databuffA_.data(), num_samps, flags,
+                                   ut);
       }
       pilot_cursor = cur;
       ++nsched;

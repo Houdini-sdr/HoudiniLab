@@ -10,6 +10,7 @@
 #include "include/config.h"
 
 #include <cstdlib>
+#include <random>
 
 #include "include/comms-lib.h"
 #include "include/constants.h"
@@ -869,6 +870,41 @@ void Config::genPilots() {
   pilot_sc_ = CommsLib::getPilotScValue(fft_size_, symbol_data_subcarrier_num_);
   pilot_sc_ind_ =
       CommsLib::getPilotScIndex(fft_size_, symbol_data_subcarrier_num_);
+
+  // Viewing-mode UE uplink-data slot: random modulated symbols on the data
+  // subcarriers (same DC-centered layout as the pilot/lts_seq), one OFDM symbol
+  // (CP + FFT) repeated across the slot with the pilot's prefix/postfix guards.
+  // The BS equalizes this against the pilot CSI to render the live constellation.
+  ue_data_mod_order_ = (cl_data_mod_ == "QAM64")   ? 6
+                       : (cl_data_mod_ == "QAM16") ? 4
+                                                   : 2;  // QPSK
+  const size_t n_data = data_ind_.size();
+  std::mt19937 rng(0xC0FFEE);  // fixed seed -> reproducible constellation
+  const float dnorm = 1.0f / (4.0f * (tx_scale_ > 0.0f ? 1.0f : 1.0f));
+  (void)dnorm;
+  std::vector<std::complex<int16_t>> prefix_zpad(prefix_, 0), postfix_zpad(postfix_, 0);
+  ue_data_ci16_.clear();
+  ue_data_ci16_.insert(ue_data_ci16_.end(), prefix_zpad.begin(), prefix_zpad.end());
+  // DISTINCT random symbol per OFDM symbol (not one repeated) so the BS can tell
+  // this data slot (low lag-(cp+fft) self-similarity) from the pilot (identical
+  // repeated LTS -> high self-similarity) when both are on-air in the same frame.
+  for (size_t sym = 0; sym < symbol_per_slot_; ++sym) {
+    std::vector<uint8_t> bits(n_data * ue_data_mod_order_);
+    for (auto& b : bits) b = static_cast<uint8_t>(rng() & 1u);
+    auto syms = CommsLib::modulate(bits, ue_data_mod_order_);
+    std::vector<std::complex<float>> data_f(fft_size_, {0.0f, 0.0f});  // DC-centered
+    for (size_t j = 0; j < n_data && j < syms.size(); ++j)
+      data_f[data_ind_.at(j)] = syms[j];
+    auto data_t = CommsLib::IFFT(data_f, fft_size_, 1.0f / fft_size_, false, true);
+    float dmax = 1e-9f;
+    for (auto& v : data_t) dmax = std::max(dmax, std::abs(v));
+    const float dscale = (tx_scale_ > 0.0f) ? tx_scale_ : (1.0f / (4.0f * dmax));
+    for (auto& v : data_t) v *= dscale;
+    auto data_iq = Utils::cfloat_to_cint16(data_t);
+    data_iq.insert(data_iq.begin(), data_iq.end() - cp_size_, data_iq.end());  // CP
+    ue_data_ci16_.insert(ue_data_ci16_.end(), data_iq.begin(), data_iq.end());
+  }
+  ue_data_ci16_.insert(ue_data_ci16_.end(), postfix_zpad.begin(), postfix_zpad.end());
 }
 
 void Config::loadULData() {

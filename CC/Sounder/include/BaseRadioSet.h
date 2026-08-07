@@ -83,7 +83,10 @@ class BaseRadioSet {
   long long htdd_frame_ticks_ = 0;  // symbols_per_frame * symbol_ticks
   long long htdd_symbol_ticks_ = 0;   // == samps_per_slot (grid-aligned)
   std::vector<size_t> htdd_rx_slots_;  // sounder slots with rx_gate (P/U/N)
+  size_t htdd_pilot_slot_ = 0;         // the 'P' sounder slot (CSI reference)
   size_t htdd_rx_cursor_ = 0;
+  std::vector<int16_t> htdd_slot_cache_;  // extracted rx slots for the current frame
+  long long htdd_cache_frame_ = 0;        // frame_id tag shared by a frame's slots
   long long htdd_last_win_tick_ = 0;
   long long htdd_frame_counter_ = 0;  // 0,1,2,... like the Iris framer's frame_id
   std::vector<int16_t> htdd_cap_buf_;  // reused generous rx capture (extract 1 slot)

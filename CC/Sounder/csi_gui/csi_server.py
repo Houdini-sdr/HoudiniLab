@@ -33,24 +33,22 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-MAGIC = 0x43534931  # "CSI1"
-HDR = struct.Struct("<IIIIf")  # magic, frame, ant, num_sc, rate
+MAGIC_CSI = 0x43534931  # "CSI1" -- pilot channel estimate
+MAGIC_CNS = 0x434E5331  # "CNS1" -- equalized uplink-data constellation
+CSI_HDR = struct.Struct("<IIIIf")  # magic, frame, ant, num_sc, rate
+CNS_HDR = struct.Struct("<IIIII")  # magic, frame, ant, num_pts, mod_order
 
-# ---- shared state: latest CSI per antenna ----------------------------------
+# ---- shared state: latest CSI + constellation per antenna ------------------
 _lock = threading.Lock()
-_latest = {}   # ant_id -> dict(frame, sc, rate, mag_db=[...|None], phase=[...|None])
+_latest = {}   # ant_id -> {"csi": {...}, "cns": {...}}
 _seq = 0       # bumps on every new datagram so the SSE loop knows there's fresh data
 _stats = {"pkts": 0, "t0": time.time()}
 
 
-def _to_csi(payload):
-    """Parse one datagram body into per-subcarrier magnitude(dB) and phase(rad)."""
-    magic, frame, ant, nsc, rate = HDR.unpack_from(payload, 0)
-    if magic != MAGIC:
-        return None
-    off = HDR.size
-    need = off + 8 * nsc
-    if len(payload) < need:
+def _parse_csi(payload):
+    magic, frame, ant, nsc, rate = CSI_HDR.unpack_from(payload, 0)
+    off = CSI_HDR.size
+    if len(payload) < off + 8 * nsc:
         return None
     vals = struct.unpack_from("<%df" % (2 * nsc), payload, off)
     mag_db, phase, mags = [], [], []
@@ -65,9 +63,19 @@ def _to_csi(payload):
             mag_db.append(20.0 * math.log10(m))
             phase.append(math.atan2(im, re))
     peak = max((m for m in mags if m > 0), default=0.0)
-    return {"frame": int(frame), "ant": int(ant), "sc": int(nsc),
-            "rate": float(rate), "mag_db": mag_db, "phase": phase,
-            "peak_db": (20.0 * math.log10(peak) if peak > 0 else 0.0)}
+    return int(ant), {"frame": int(frame), "sc": int(nsc), "rate": float(rate),
+                      "mag_db": mag_db, "phase": phase,
+                      "peak_db": (20.0 * math.log10(peak) if peak > 0 else 0.0)}
+
+
+def _parse_cns(payload):
+    magic, frame, ant, npt, mod = CNS_HDR.unpack_from(payload, 0)
+    off = CNS_HDR.size
+    if len(payload) < off + 8 * npt:
+        return None
+    vals = struct.unpack_from("<%df" % (2 * npt), payload, off)
+    pts = [[vals[2 * i], vals[2 * i + 1]] for i in range(npt)]
+    return int(ant), {"frame": int(frame), "mod": int(mod), "pts": pts}
 
 
 def _udp_loop(bind_host, bind_port):
@@ -76,17 +84,25 @@ def _udp_loop(bind_host, bind_port):
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 << 20)
     sock.bind((bind_host, bind_port))
-    print("[csi] listening for CSI on %s:%d" % (bind_host, bind_port), flush=True)
+    print("[csi] listening on %s:%d" % (bind_host, bind_port), flush=True)
     while True:
         try:
             data, _ = sock.recvfrom(65535)
         except OSError:
             break
-        csi = _to_csi(data)
-        if csi is None:
+        if len(data) < 4:
             continue
+        magic = struct.unpack_from("<I", data, 0)[0]
+        parsed, kind = (None, None)
+        if magic == MAGIC_CSI:
+            parsed, kind = _parse_csi(data), "csi"
+        elif magic == MAGIC_CNS:
+            parsed, kind = _parse_cns(data), "cns"
+        if parsed is None:
+            continue
+        ant, rec = parsed
         with _lock:
-            _latest[csi["ant"]] = csi
+            _latest.setdefault(ant, {})[kind] = rec
             _seq += 1
             _stats["pkts"] += 1
 
@@ -289,14 +305,17 @@ function makeCard(ant){
     <div class="row" style="margin-top:8px">
       <div class="plot"><span class="lbl">waterfall |H| (time ↓)</span>
         <canvas width="${WFW}" height="${WFH}"></canvas></div>
-      <div class="status" style="flex:1"></div>
-    </div>`;
+      <div class="plot"><span class="lbl">constellation (equalized U)</span>
+        <canvas width="${WFH}" height="${WFH}"></canvas></div>
+    </div>
+    <div class="status"></div>`;
   document.getElementById('ants').appendChild(wrap);
   const cvs=wrap.querySelectorAll('canvas');
   const wf=cvs[2].getContext('2d');
-  const img=wf.createImageData(WFW,1);
   cards[ant]={mag:cvs[0].getContext('2d'),phase:cvs[1].getContext('2d'),
-              wf:wf,wfimg:img,status:wrap.querySelector('.status'),frame:0};
+              wf:wf,wfimg:wf.createImageData(WFW,1),
+              cons:cvs[3].getContext('2d'),
+              status:wrap.querySelector('.status'),frame:0};
 }
 
 function axes(ctx,ymin,ymax,label){
@@ -318,8 +337,7 @@ function line(ctx,vals,ymin,ymax,color){
   ctx.stroke();
 }
 
-function draw(ant,c){
-  const card=cards[ant]; if(!card) return;
+function drawCsi(card,c){
   card.frame=c.frame;
   // magnitude, auto-ranged to [peak-40, peak+3] dB
   const top=c.peak_db+3, bot=c.peak_db-40;
@@ -342,12 +360,35 @@ function draw(ant,c){
      +(c.rate/1e6).toFixed(2)+' MS/s · peak '+c.peak_db.toFixed(1)+' dB';
 }
 
-let lastFrames={},pktCount=0,t0=Date.now();
+// ideal alphabet (unit average power), mod = bits/symbol (2=QPSK,4=16QAM,6=64QAM)
+function idealPts(mod){
+  const L=Math.round(Math.sqrt(Math.pow(2,mod)));  // levels per dimension
+  const lv=[]; for(let i=0;i<L;i++) lv.push(-(L-1)+2*i);
+  let p=0; for(const a of lv)for(const b of lv) p+=a*a+b*b;
+  const nrm=Math.sqrt(p/(L*L)), out=[];
+  for(const a of lv)for(const b of lv) out.push([a/nrm,b/nrm]);
+  return out;
+}
+function drawCons(card,cn){
+  const ctx=card.cons, S=WFH, R=S/2/1.7;  // unit power -> R px
+  ctx.clearRect(0,0,S,S);
+  ctx.strokeStyle='#21262d'; ctx.lineWidth=1; ctx.beginPath();
+  ctx.moveTo(S/2,0);ctx.lineTo(S/2,S);ctx.moveTo(0,S/2);ctx.lineTo(S,S/2);ctx.stroke();
+  ctx.fillStyle='rgba(88,166,255,0.55)';   // received points
+  for(const p of cn.pts){const x=S/2+p[0]*R,y=S/2-p[1]*R;ctx.fillRect(x,y,1.6,1.6);}
+  ctx.fillStyle='#f85149';                 // ideal alphabet
+  for(const p of idealPts(cn.mod)){const x=S/2+p[0]*R,y=S/2-p[1]*R;ctx.fillRect(x-2,y-2,4,4);}
+}
+
+let pktCount=0,t0=Date.now();
 function onData(obj){
   const ant=obj.ant;
   for(const a in ant){
     if(!cards[a]) makeCard(a);
-    draw(a,ant[a]); pktCount++;
+    const rec=ant[a];
+    if(rec.csi) drawCsi(cards[a],rec.csi);
+    if(rec.cns) drawCons(cards[a],rec.cns);
+    pktCount++;
   }
   const dt=(Date.now()-t0)/1000;
   document.getElementById('meta').textContent=

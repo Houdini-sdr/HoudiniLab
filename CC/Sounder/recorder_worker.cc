@@ -78,7 +78,25 @@ void RecorderWorker::initCsi(void) {
             host.c_str(), port, N, fps);
 }
 
-// Compute CSI from one received pilot slot and stream it (throttled per antenna).
+// DC-centered FFT of the fft-size symbol body starting at sample `base` in `d`.
+std::vector<std::complex<float>> RecorderWorker::symbolFft(const short* d,
+                                                          int base) const {
+  const int N = static_cast<int>(cfg_->fft_size());
+  std::vector<std::complex<float>> out(N);
+  for (int k = 0; k < N; ++k) {
+    const std::complex<float>* row = &dft_[static_cast<size_t>(k) * N];
+    std::complex<float> acc(0.0f, 0.0f);
+    for (int n = 0; n < N; ++n) {
+      const std::complex<float> x(static_cast<float>(d[2 * (base + n)]),
+                                  static_cast<float>(d[2 * (base + n) + 1]));
+      acc += x * row[n];
+    }
+    out[k] = acc;
+  }
+  return out;
+}
+
+// Route a received slot: pilot -> CSI (+ cache H); uplink data -> constellation.
 void RecorderWorker::streamCsi(Packet* pkt, NodeType node_type) {
   const size_t num_channels = cfg_->bs_channel().size();
   const size_t radio_id = pkt->ant_id / num_channels;
@@ -86,7 +104,40 @@ void RecorderWorker::streamCsi(Packet* pkt, NodeType node_type) {
       cfg_->internal_measurement()
           ? (node_type == kBS)
           : cfg_->isPilot(pkt->cell_id, radio_id, pkt->slot_id);
-  if (!is_pilot) return;
+  if (is_pilot) {
+    sendCsi(pkt);
+  } else if (cfg_->isUlData(pkt->cell_id, radio_id, pkt->slot_id)) {
+    sendConstellation(pkt);
+  }
+}
+
+// Pilot slot -> channel estimate H[k] (DC-centered), cached per antenna + streamed.
+void RecorderWorker::sendCsi(Packet* pkt) {
+  const int N = static_cast<int>(cfg_->fft_size());
+  const int cp = static_cast<int>(cfg_->cp_size());
+  const int prefix = cfg_->prefix();
+  const int nsym = static_cast<int>(cfg_->symbol_per_slot());
+  const int slot = static_cast<int>(cfg_->samps_per_slot());
+  const short* d = pkt->data;
+  int s0 = nsym / 8, s1 = nsym - nsym / 8;
+  if (s1 <= s0) { s0 = 0; s1 = nsym; }
+  std::vector<std::complex<float>> hacc(N, {0.0f, 0.0f});
+  int used = 0;
+  for (int sym = s0; sym < s1; ++sym) {
+    const int base = prefix + sym * (cp + N) + cp;
+    if (base + N > slot) break;
+    auto F = symbolFft(d, base);
+    for (int k = 0; k < N; ++k) hacc[k] += F[k] * std::conj(pilot_ref_[k]);
+    ++used;
+  }
+  // Cache H per antenna (always -- keeps it fresh for equalizing this ant's data).
+  auto& H = csi_h_[pkt->ant_id];
+  H.assign(N, {0.0f, 0.0f});
+  for (int k = 0; k < N; ++k) {
+    const float pw = std::norm(pilot_ref_[k]);
+    if (pw > 1e-6f && used > 0) H[k] = hacc[k] / (static_cast<float>(used) * pw);
+  }
+  // Throttle the CSI datagram (H is cached above regardless).
   const long long now =
       std::chrono::duration_cast<std::chrono::nanoseconds>(
           std::chrono::steady_clock::now().time_since_epoch())
@@ -96,37 +147,10 @@ void RecorderWorker::streamCsi(Packet* pkt, NodeType node_type) {
       (now - it->second) < static_cast<long long>(csi_throttle_ns_))
     return;
   csi_last_ns_[pkt->ant_id] = now;
-
-  const int N = static_cast<int>(cfg_->fft_size());
-  const int cp = static_cast<int>(cfg_->cp_size());
-  const int prefix = cfg_->prefix();
-  const int nsym = static_cast<int>(cfg_->symbol_per_slot());
-  const int slot = static_cast<int>(cfg_->samps_per_slot());
-  const short* d = pkt->data;
-  // Average CSI over the middle symbols (skip the slot edges for settling/jitter).
-  int s0 = nsym / 8, s1 = nsym - nsym / 8;
-  if (s1 <= s0) { s0 = 0; s1 = nsym; }
-  std::vector<std::complex<float>> hacc(N, {0.0f, 0.0f});
-  int used = 0;
-  for (int sym = s0; sym < s1; ++sym) {
-    const int base = prefix + sym * (cp + N) + cp;  // skip CP -> FFT body
-    if (base + N > slot) break;
-    for (int k = 0; k < N; ++k) {
-      const std::complex<float>* row = &dft_[static_cast<size_t>(k) * N];
-      std::complex<float> acc(0.0f, 0.0f);
-      for (int n = 0; n < N; ++n) {
-        const std::complex<float> x(static_cast<float>(d[2 * (base + n)]),
-                                    static_cast<float>(d[2 * (base + n) + 1]));
-        acc += x * row[n];
-      }
-      hacc[k] += acc * std::conj(pilot_ref_[k]);  // zero-forcing numerator
-    }
-    ++used;
-  }
-  // Datagram: [magic u32][frame u32][ant u32][num_sc u32][rate f32][H re,im f32]*N
+  // [magic 'CSI1'][frame][ant][num_sc][rate][H re,im]*N
   std::vector<uint8_t> buf(20 + static_cast<size_t>(8) * N);
-  const uint32_t magic = 0x43534931u;  // "CSI1"
-  const uint32_t fr = pkt->frame_id, an = pkt->ant_id, nsc = static_cast<uint32_t>(N);
+  const uint32_t magic = 0x43534931u, fr = pkt->frame_id, an = pkt->ant_id,
+                 nsc = static_cast<uint32_t>(N);
   const float rate = static_cast<float>(cfg_->rate());
   std::memcpy(&buf[0], &magic, 4);
   std::memcpy(&buf[4], &fr, 4);
@@ -134,13 +158,71 @@ void RecorderWorker::streamCsi(Packet* pkt, NodeType node_type) {
   std::memcpy(&buf[12], &nsc, 4);
   std::memcpy(&buf[16], &rate, 4);
   for (int k = 0; k < N; ++k) {
-    const float pw = std::norm(pilot_ref_[k]);  // |ref|^2 (0 on unused subcarriers)
-    const std::complex<float> h =
-        (pw > 1e-6f && used > 0) ? hacc[k] / (static_cast<float>(used) * pw)
-                                 : std::complex<float>(0.0f, 0.0f);
-    const float re = h.real(), im = h.imag();
+    const float re = H[k].real(), im = H[k].imag();
     std::memcpy(&buf[20 + 8 * k], &re, 4);
     std::memcpy(&buf[24 + 8 * k], &im, 4);
+  }
+  (void)::send(csi_sock_, buf.data(), buf.size(), 0);
+}
+
+// Uplink-data slot -> equalize with the cached H and stream the constellation.
+void RecorderWorker::sendConstellation(Packet* pkt) {
+  auto hit = csi_h_.find(pkt->ant_id);
+  if (hit == csi_h_.end() || hit->second.empty()) return;  // no CSI yet
+  const long long now =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count();
+  auto it = cns_last_ns_.find(pkt->ant_id);
+  if (it != cns_last_ns_.end() &&
+      (now - it->second) < static_cast<long long>(csi_throttle_ns_))
+    return;
+  cns_last_ns_[pkt->ant_id] = now;
+
+  const std::vector<std::complex<float>>& H = hit->second;
+  const int N = static_cast<int>(cfg_->fft_size());
+  const int cp = static_cast<int>(cfg_->cp_size());
+  const int prefix = cfg_->prefix();
+  const int nsym = static_cast<int>(cfg_->symbol_per_slot());
+  const int slot = static_cast<int>(cfg_->samps_per_slot());
+  const short* d = pkt->data;
+  const auto& data_ind = cfg_->data_ind();
+  const size_t kMaxPts = 600;
+  std::vector<std::complex<float>> pts;
+  pts.reserve(kMaxPts);
+  int s0 = nsym / 8, s1 = nsym - nsym / 8;
+  if (s1 <= s0) { s0 = 0; s1 = nsym; }
+  double psum = 0.0;
+  for (int sym = s0; sym < s1 && pts.size() < kMaxPts; ++sym) {
+    const int base = prefix + sym * (cp + N) + cp;
+    if (base + N > slot) break;
+    auto Y = symbolFft(d, base);
+    for (size_t j = 0; j < data_ind.size() && pts.size() < kMaxPts; ++j) {
+      const size_t k = data_ind[j];
+      const std::complex<float> h = H[k];
+      if (std::norm(h) < 1e-9f) continue;
+      const std::complex<float> x = Y[k] / h;  // zero-forcing equalizer
+      psum += std::norm(x);
+      pts.push_back(x);
+    }
+  }
+  if (pts.empty()) return;
+  // Normalize to unit average power so the ideal alphabet is fixed in the GUI.
+  const float scale = static_cast<float>(1.0 / std::sqrt(psum / pts.size() + 1e-12));
+  // [magic 'CNS1'][frame][ant][num_pts][mod_order][X re,im]*num_pts
+  std::vector<uint8_t> buf(20 + 8 * pts.size());
+  const uint32_t magic = 0x434E5331u, fr = pkt->frame_id, an = pkt->ant_id,
+                 npt = static_cast<uint32_t>(pts.size()),
+                 mod = static_cast<uint32_t>(cfg_->ue_data_mod_order());
+  std::memcpy(&buf[0], &magic, 4);
+  std::memcpy(&buf[4], &fr, 4);
+  std::memcpy(&buf[8], &an, 4);
+  std::memcpy(&buf[12], &npt, 4);
+  std::memcpy(&buf[16], &mod, 4);
+  for (size_t j = 0; j < pts.size(); ++j) {
+    const float re = pts[j].real() * scale, im = pts[j].imag() * scale;
+    std::memcpy(&buf[20 + 8 * j], &re, 4);
+    std::memcpy(&buf[24 + 8 * j], &im, 4);
   }
   (void)::send(csi_sock_, buf.data(), buf.size(), 0);
 }
