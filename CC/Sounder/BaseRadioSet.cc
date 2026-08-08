@@ -658,33 +658,42 @@ int BaseRadioSet::houdiniTddRx(size_t radio_id, void* const* buffs,
     if (selfsim(at - gap) >= 0.4) p_at = at - gap;
     else if (selfsim(at + gap) >= 0.4) p_at = at + gap;
   }
-  // Centroid-align the pilot slot -> transmitted [prefix][energy][postfix] layout.
-  // Keep the window to ~1.25 slots around the pilot: a wider window reaches into
-  // the adjacent uplink-data slot (only 1-2 slots away) and its energy drags the
-  // centroid, misaligning BOTH the pilot and the data extraction.
-  int w0 = p_at - n / 8;
-  if (w0 < 0) w0 = 0;
-  int w1 = w0 + 5 * n / 4;
-  if (w1 > cg) w1 = cg;
-  double peak = 0.0;
-  for (int i = w0 + 64; i + 64 <= w1; ++i) {
-    const double m = cse[i + 64] - cse[i - 64];
-    if (m > peak) peak = m;
-  }
-  const double thr = 0.15 * peak;
-  long long mcnt = 0;
-  double misum = 0.0;
-  for (int i = w0 + 64; i + 64 <= w1; ++i)
-    if (cse[i + 64] - cse[i - 64] > thr) { ++mcnt; misum += i; }
-  const long long centroid = mcnt > 0 ? std::llround(misum / mcnt) : (p_at + n / 2);
-  const long long p_start = centroid - n / 2;  // aligned pilot slot start
-  // Fill the per-frame cache: each rx slot at its schedule offset from the pilot.
-  htdd_slot_cache_.resize(K * static_cast<size_t>(n) * 2);
-  for (size_t k = 0; k < K; ++k) {
-    long long st = p_start + (static_cast<long long>(htdd_rx_slots_.at(k)) -
-                              static_cast<long long>(htdd_pilot_slot_)) * n;
+  // Centroid-align a slot's energy near `guess` -> transmitted [prefix][energy]
+  // [postfix] layout (energy edge at ~prefix). Window ~1.25 slots so it can't
+  // reach into an adjacent slot and drag the centroid.
+  auto align_slot = [&](long long guess) -> long long {
+    long long w0 = guess - n / 8;
+    if (w0 < 0) w0 = 0;
+    long long w1 = w0 + 5 * n / 4;
+    if (w1 > cg) w1 = cg;
+    double peak = 0.0;
+    for (long long i = w0 + 64; i + 64 <= w1; ++i) {
+      const double m = cse[i + 64] - cse[i - 64];
+      if (m > peak) peak = m;
+    }
+    const double thr = 0.15 * peak;
+    long long cnt = 0;
+    double isum = 0.0;
+    for (long long i = w0 + 64; i + 64 <= w1; ++i)
+      if (cse[i + 64] - cse[i - 64] > thr) { ++cnt; isum += static_cast<double>(i); }
+    long long st = (cnt > 0 ? std::llround(isum / cnt) : (guess + n / 2)) - n / 2;
     if (st < 0) st = 0;
     if (st + n > cg) st = cg - n;
+    return st;
+  };
+  const long long p_start = align_slot(p_at);  // aligned pilot slot start
+  // Fill the per-frame cache. Centroid-align EACH rx slot to its OWN energy near
+  // its expected offset from the pilot -- the UE snaps each slot's tx time to the
+  // 384-tick TDD grid independently, so the pilot->data spacing isn't exactly an
+  // integer number of slots; extracting the data at pilot+gap would leave it
+  // ~260 samples off. Aligning each slot lands every slot at [prefix..] so the
+  // recorded data lines up with the pilot for offline equalization.
+  htdd_slot_cache_.resize(K * static_cast<size_t>(n) * 2);
+  for (size_t k = 0; k < K; ++k) {
+    const long long guess = p_start +
+        (static_cast<long long>(htdd_rx_slots_.at(k)) -
+         static_cast<long long>(htdd_pilot_slot_)) * n;
+    const long long st = align_slot(guess);
     std::memcpy(htdd_slot_cache_.data() + k * static_cast<size_t>(n) * 2,
                 s + st * 2, static_cast<size_t>(n) * 4);
   }
