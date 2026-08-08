@@ -251,41 +251,36 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
   pts.reserve(kMaxPts);
   int s0 = nsym / 8, s1 = nsym - nsym / 8;
   if (s1 <= s0) { s0 = 0; s1 = nsym; }
-  double psum = 0.0;
   for (int sym = s0; sym < s1 && pts.size() < kMaxPts; ++sym) {
     const int base = es + sym * (cp + N) + cp;
     if (base + N > slot) break;
     auto Y = symbolFft(d, base);
-    // Equalize this symbol's data subcarriers.
-    std::vector<std::complex<float>> sx;
-    sx.reserve(data_ind.size());
-    std::complex<double> acc4(0.0, 0.0);  // 4th-power sum for blind QPSK CPE
-    for (size_t j = 0; j < data_ind.size(); ++j) {
+    for (size_t j = 0; j < data_ind.size() && pts.size() < kMaxPts; ++j) {
       const size_t k = data_ind[j];
       const std::complex<float> h = H[k];
       if (std::abs(h) < hmin || std::norm(h) < 1e-9f) continue;  // deep fade
-      const std::complex<float> x = Y[k] / h;  // zero-forcing equalizer
-      sx.push_back(x);
-      const std::complex<double> xd(x.real(), x.imag());
-      acc4 += xd * xd * xd * xd;
-    }
-    // Per-symbol common-phase correction. Residual phase/CFO rotates each OFDM
-    // symbol; the pilot CSI (averaged over the slot) can't track it, so estimate
-    // it blind per symbol via the QPSK 4th-power (data cancels: ideal X^4 -> angle
-    // pi) and de-rotate. Only for QPSK; higher-order QAM needs pilot subcarriers.
-    std::complex<float> derot(1.0f, 0.0f);
-    if (mod_ord == 2 && std::abs(acc4) > 0.0) {
-      const double cpe = (std::arg(acc4) - M_PI) / 4.0;
-      derot = std::complex<float>(std::cos(cpe), -std::sin(cpe));
-    }
-    for (auto& x : sx) {
-      if (pts.size() >= kMaxPts) break;
-      const std::complex<float> xr = x * derot;
-      psum += std::norm(xr);
-      pts.push_back(xr);
+      pts.push_back(Y[k] / h);  // zero-forcing equalizer
     }
   }
   if (pts.empty()) return;
+  // Global common-phase de-rotation. A fixed phase offset between the pilot CSI and
+  // the data slot leaves the whole constellation rotated off the axes. Estimate it
+  // blind over ALL points via the QPSK 4th-power (data cancels: ideal X^4 -> angle
+  // pi) -- robust, unlike a per-symbol estimate (~48 points is too few to lock).
+  if (mod_ord == 2) {
+    std::complex<double> acc4(0.0, 0.0);
+    for (const auto& x : pts) {
+      const std::complex<double> xd(x.real(), x.imag());
+      acc4 += xd * xd * xd * xd;
+    }
+    if (std::abs(acc4) > 0.0) {
+      const double th = (std::arg(acc4) - M_PI) / 4.0;
+      const std::complex<float> derot(std::cos(th), -std::sin(th));
+      for (auto& x : pts) x *= derot;
+    }
+  }
+  double psum = 0.0;
+  for (const auto& x : pts) psum += std::norm(x);
   // Normalize to unit average power so the ideal alphabet is fixed in the GUI.
   const float scale = static_cast<float>(1.0 / std::sqrt(psum / pts.size() + 1e-12));
   // [magic 'CNS1'][frame][ant][num_pts][mod_order][X re,im]*num_pts

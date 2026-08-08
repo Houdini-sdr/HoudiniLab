@@ -514,11 +514,17 @@ void BaseRadioSet::armHoudiniTdd(void) {
           htdd_rx_slots_.push_back(s);
         if (ch == 'P') htdd_pilot_slot_ = s;  // CSI reference slot
       }
-      // TDD schedule: 1 beacon symbol + 1 rx_gate symbol per sounder pilot slot.
-      const size_t spf_tdd = 1 + htdd_rx_slots_.size();
-      std::string tdd(spf_tdd, '0');
-      tdd[0] = '6';  // beacon strobe (+rx_gate, harmless)
-      for (size_t k = 1; k < spf_tdd; ++k) tdd[k] = '2';  // rx_gate windows
+      // TDD frame must EQUAL the sounder frame: the beacon fires once per TDD
+      // frame, so a longer TDD frame makes the beacon period differ from the UE's
+      // (sounder) frame and the pilot/data walk relative to the beacon -> noisy CSI.
+      // All symbols gate RX (continuous receive), so use just enough symbols to
+      // span the frame (beacon on symbol 0), NOT one per rx slot -- the rx slots
+      // (pilot P, uplink U, ...) are extracted from the continuous read, not mapped
+      // to separate TDD symbols.
+      const size_t spf_tdd = std::max<size_t>(
+          2, static_cast<size_t>(_cfg->samps_per_frame() / htdd_symbol_ticks_));
+      std::string tdd(spf_tdd, '2');  // every symbol rx-gates
+      tdd[0] = '6';                   // + beacon strobe on symbol 0
       htdd_frame_ticks_ = static_cast<long long>(spf_tdd) * htdd_symbol_ticks_;
 
       // PHYSICAL TX channel for the strobe (beacon_channel() is the logical index
