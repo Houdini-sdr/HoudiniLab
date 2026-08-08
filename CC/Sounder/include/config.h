@@ -433,6 +433,7 @@ class Config {
   std::vector<uint32_t> coeffs_;
   std::vector<std::complex<int16_t>> pilot_ci16_;
   std::vector<std::complex<int16_t>> ue_data_ci16_;  // viewing-mode UE UL data slot
+  std::vector<std::complex<float>> ue_data_f_;  // its freq-domain ref (ul_data_f_*.bin)
   int ue_data_mod_order_ = 2;                        // QPSK by default
   std::vector<uint32_t> pilot_;
   std::vector<std::complex<float>> pilot_sc_;

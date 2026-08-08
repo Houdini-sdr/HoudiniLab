@@ -9,6 +9,7 @@
 
 #include "include/config.h"
 
+#include <cstdio>
 #include <cstdlib>
 #include <random>
 
@@ -871,31 +872,34 @@ void Config::genPilots() {
   pilot_sc_ind_ =
       CommsLib::getPilotScIndex(fft_size_, symbol_data_subcarrier_num_);
 
-  // Viewing-mode UE uplink-data slot: random modulated symbols on the data
-  // subcarriers (same DC-centered layout as the pilot/lts_seq), one OFDM symbol
-  // (CP + FFT) repeated across the slot with the pilot's prefix/postfix guards.
-  // The BS equalizes this against the pilot CSI to render the live constellation.
+  // UE uplink-data slot (symbol U): a DISTINCT random modulated OFDM symbol per
+  // symbol slot (so the BS tells it from the identical-LTS pilot by self-similarity),
+  // built exactly like Config::DataGenerator so plot_hdf5.py can demodulate it:
+  //   data subcarriers  <- modulated symbols (modulate() takes SYMBOL INDICES 0..M-1,
+  //                        NOT bits), and
+  //   pilot subcarriers <- the known OFDM pilot values (for per-symbol phase tracking).
+  // ue_data_f_ keeps the freq-domain reference to write ul_data_f_*.bin.
   ue_data_mod_order_ = (cl_data_mod_ == "QAM64")   ? 6
                        : (cl_data_mod_ == "QAM16") ? 4
-                                                   : 2;  // QPSK
+                                                   : 2;  // bits/symbol (QPSK)
+  const int mod_alph = 1 << ue_data_mod_order_;  // 4 / 16 / 64
   const size_t n_data = data_ind_.size();
   std::mt19937 rng(0xC0FFEE);  // fixed seed -> reproducible constellation
   ue_data_ci16_.clear();
+  ue_data_f_.clear();
   ue_data_ci16_.insert(ue_data_ci16_.end(), prefix_zpad.begin(), prefix_zpad.end());
-  // DISTINCT random symbol per OFDM symbol (not one repeated) so the BS can tell
-  // this data slot (low lag-(cp+fft) self-similarity) from the pilot (identical
-  // repeated LTS -> high self-similarity) when both are on-air in the same frame.
   for (size_t sym = 0; sym < symbol_per_slot_; ++sym) {
-    std::vector<uint8_t> bits(n_data * ue_data_mod_order_);
-    for (auto& b : bits) b = static_cast<uint8_t>(rng() & 1u);
-    auto syms = CommsLib::modulate(bits, ue_data_mod_order_);
-    std::vector<std::complex<float>> data_f(fft_size_, {0.0f, 0.0f});  // DC-centered
-    for (size_t j = 0; j < n_data && j < syms.size(); ++j)
-      data_f[data_ind_.at(j)] = syms[j];
-    auto data_t = CommsLib::IFFT(data_f, fft_size_, 1.0f / fft_size_, false, true);
-    float dmax = 1e-9f;
-    for (auto& v : data_t) dmax = std::max(dmax, std::abs(v));
-    const float dscale = (tx_scale_ > 0.0f) ? tx_scale_ : (1.0f / (4.0f * dmax));
+    std::vector<uint8_t> syms_in(n_data);
+    for (auto& v : syms_in) v = static_cast<uint8_t>(rng() % mod_alph);
+    auto mod_data = CommsLib::modulate(syms_in, ue_data_mod_order_);
+    std::vector<std::complex<float>> ofdm_sym(fft_size_, {0.0f, 0.0f});  // DC-centered
+    for (size_t j = 0; j < n_data && j < mod_data.size(); ++j)
+      ofdm_sym[data_ind_.at(j)] = mod_data[j];
+    for (size_t c = 0; c < pilot_sc_.size(); ++c)  // OFDM pilot subcarriers
+      ofdm_sym[pilot_sc_ind_.at(c)] = pilot_sc_.at(c);
+    ue_data_f_.insert(ue_data_f_.end(), ofdm_sym.begin(), ofdm_sym.end());
+    auto data_t = CommsLib::IFFT(ofdm_sym, fft_size_, 1.0f / fft_size_, false, true);
+    const float dscale = (tx_scale_ > 0.0f) ? tx_scale_ : 0.5f;
     for (auto& v : data_t) v *= dscale;
     auto data_iq = Utils::cfloat_to_cint16(data_t);
     data_iq.insert(data_iq.begin(), data_iq.end() - cp_size_, data_iq.end());  // CP
@@ -925,6 +929,28 @@ void Config::loadULData() {
       std::string filename_ul_data_t =
           directory_ + "/ul_data_t_" + filename_tag;
       ul_tx_td_data_files_.push_back(filename_ul_data_t);
+
+      // Houdini transmits the in-process UE data slot (ue_data_f_), so write its
+      // freq-domain reference to the ul_data_f_*.bin that TX_FD_DATA_FILENAMES points
+      // to -- plot_hdf5.py needs it to demodulate (the file-based DataGenerator path
+      // is bypassed on Houdini). Layout matches the reader: [frame][slot][ch][sym]
+      // [fft] interleaved f32 I/Q; ue_data_f_ is one frame/slot/ch (sym x fft).
+      if (is_houdini() && !ue_data_f_.empty()) {
+        FILE* fp = std::fopen(filename_ul_data_f.c_str(), "wb");
+        if (fp != nullptr) {
+          for (const auto& v : ue_data_f_) {
+            const float re = v.real(), im = v.imag();
+            std::fwrite(&re, sizeof(float), 1, fp);
+            std::fwrite(&im, sizeof(float), 1, fp);
+          }
+          std::fclose(fp);
+          MLPD_INFO("Wrote UE UL freq-domain reference (%zu complex) to %s\n",
+                    ue_data_f_.size(), filename_ul_data_f.c_str());
+        } else {
+          MLPD_WARN("Could not write UL reference %s (plot_hdf5 demod unavailable)\n",
+                    filename_ul_data_f.c_str());
+        }
+      }
     }
   }
 }
