@@ -13,7 +13,7 @@
     "sample_rate": 122880000.0,
     "channel": "B",
     "frame_schedule": [
-        "BGPGUGGGGGGGGGGGGGGGGGGGGGGGGG"
+        "BGGGGGGGGGGGGGGGPGUGGGGGGGGGGG"
     ],
     "max_frame": 600,
     "ofdm_symbol_per_slot": 48,
@@ -36,7 +36,7 @@
         81
     ],
     "ue_frame_schedule": [
-        "GGPGUGGGGGGGGGGGGGGGGGGGGGGGGG"
+        "GGGGGGGGGGGGGGGGPGUGGGGGGGGGGG"
     ],
     "tx_advance": [
         135
