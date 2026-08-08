@@ -539,6 +539,14 @@ void BaseRadioSet::armHoudiniTdd(void) {
               : bs_chans.at(std::min(static_cast<size_t>(_cfg->beacon_channel()),
                                      bs_chans.size() - 1));
       long long t0 = 0;
+      // Explicitly disarm any strobe left armed by a previous (e.g. killed) run --
+      // TDD_CMD abort alone doesn't release it, and the replay RAM can't be filled
+      // while strobe mode is enabled ("Disarm first"). Safe when nothing is armed.
+      try {
+        dev->writeSetting("TDD_REPLAY_STROBE",
+                          "ch" + std::to_string(tx_ch) + ":off");
+      } catch (...) {
+      }
       r->xmit(buffs, static_cast<int>(n_load), 0, t0);  // load replay RAM
       dev->writeSetting("TDD_SCHED", tdd);
       // loops=forever replays the full app-rate RAM back-to-back through the
