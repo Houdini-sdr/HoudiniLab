@@ -599,6 +599,10 @@ def main():
     parser.add_option("--corr-thresh", type="float", dest="corr_thresh",
                       help="Correlation threshold to exclude bad nodes",
                       default=0.00)
+    parser.add_option("--conj", action="store_true", dest="conj",
+                      help="Conjugate RX samples (undo the RFSoC/Houdini R2C mixer's "
+                           "spectral inversion) before processing. Use for Houdini "
+                           "recordings; omit for Iris.", default=False)
     (options, args) = parser.parse_args()
 
     show_metadata = options.show_metadata
@@ -626,6 +630,7 @@ def main():
     bs_nodes_str = options.bs_nodes
     exclude_bs_nodes_str = options.exclude_bs_nodes
     tx_files = options.tx_files
+    conj = options.conj
 
     filename = sys.argv[1]
     scrpt_strt = time.time()
@@ -649,6 +654,19 @@ def main():
         compute_legacy(hdf5)
     else:
         hdf5 = hdf5_lib(filename, tx_files, n_frames, fr_strt, sub_sample)
+        if conj:
+            # RFSoC/Houdini R2C RX mixer returns baseband CONJUGATED (a +f tone comes
+            # back at -f); undo it so CSI/constellation aren't mirrored onto (N-k).
+            # Samples are interleaved [I0,Q0,I1,Q1,...] on the last axis -> negate Q
+            # (odd elements). This is the offline counterpart of the sounder view mode's
+            # rx_conj (recorder_worker.cc). Iris recordings: omit --conj.
+            for _a in ('pilot_samples', 'uplink_samples', 'downlink_samples'):
+                _s = getattr(hdf5, _a, None)
+                if _s is not None and len(_s) > 0:
+                    _s = np.array(_s)
+                    _s[..., 1::2] = -_s[..., 1::2]
+                    setattr(hdf5, _a, _s)
+            print("RX conjugation applied (--conj): undoing R2C spectral inversion")
         pilot_samples = hdf5.pilot_samples
         uplink_samples = hdf5.uplink_samples
         noise_samples = hdf5.noise_samples
