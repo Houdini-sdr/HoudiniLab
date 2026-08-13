@@ -74,9 +74,17 @@ void RecorderWorker::initCsi(void) {
   double fps = 30.0;
   if (const char* f = std::getenv("HOUDINI_CSI_FPS")) fps = std::max(0.5, atof(f));
   csi_throttle_ns_ = 1e9 / fps;
+  rx_conj_ = cfg_->is_houdini();  // undo the R2C mixer's spectral inversion (RFSoC only)
+  if (std::getenv("HOUDINI_RX_NOCONJ")) rx_conj_ = false;  // A/B override (before/after)
+  // Symbol-0 start: fixed at the nominal prefix by default (manually tunable); the
+  // energy-edge auto-detector is opt-in only (HOUDINI_CSI_SYM_START=auto).
+  csi_sym_start_ = static_cast<int>(cfg_->prefix());
+  if (const char* s = std::getenv("HOUDINI_CSI_SYM_START"))
+    csi_sym_start_ = (std::string(s) == "auto") ? -1 : std::atoi(s);
   view_mode_ = true;
-  MLPD_INFO("CSI view mode: streaming to %s:%d (%d subcarriers, ~%.0f fps/ant)\n",
-            host.c_str(), port, N, fps);
+  MLPD_INFO("CSI view mode: streaming to %s:%d (%d subcarriers, ~%.0f fps/ant, rx_conj=%d, "
+            "sym_start=%s)\n", host.c_str(), port, N, fps, rx_conj_ ? 1 : 0,
+            csi_sym_start_ >= 0 ? std::to_string(csi_sym_start_).c_str() : "auto");
 }
 
 // Energy leading edge of a slot (first index where the sliding-64 power crosses
@@ -99,17 +107,24 @@ int RecorderWorker::slotEnergyStart(const short* d, int slot) const {
   return this->cfg_->prefix();
 }
 
+// Symbol-0 start for a received slot: the fixed csi_sym_start_ (manual, the default)
+// when >= 0, else the opt-in energy-edge auto-detector.
+int RecorderWorker::symStart(const short* d, int slot) const {
+  return csi_sym_start_ >= 0 ? csi_sym_start_ : slotEnergyStart(d, slot);
+}
+
 // DC-centered FFT of the fft-size symbol body starting at sample `base` in `d`.
 std::vector<std::complex<float>> RecorderWorker::symbolFft(const short* d,
                                                           int base) const {
   const int N = static_cast<int>(cfg_->fft_size());
+  const float qs = rx_conj_ ? -1.0f : 1.0f;  // conjugate RX (undo R2C spectral inversion)
   std::vector<std::complex<float>> out(N);
   for (int k = 0; k < N; ++k) {
     const std::complex<float>* row = &dft_[static_cast<size_t>(k) * N];
     std::complex<float> acc(0.0f, 0.0f);
     for (int n = 0; n < N; ++n) {
       const std::complex<float> x(static_cast<float>(d[2 * (base + n)]),
-                                  static_cast<float>(d[2 * (base + n) + 1]));
+                                  qs * static_cast<float>(d[2 * (base + n) + 1]));
       acc += x * row[n];
     }
     out[k] = acc;
@@ -139,7 +154,7 @@ void RecorderWorker::sendCsi(Packet* pkt) {
   const int nsym = static_cast<int>(cfg_->symbol_per_slot());
   const int slot = static_cast<int>(cfg_->samps_per_slot());
   const short* d = pkt->data;
-  const int es = slotEnergyStart(d, slot);  // actual symbol-0 start (robust align)
+  const int es = symStart(d, slot);  // symbol-0 start (fixed prefix by default; sym_start knob)
   int s0 = nsym / 8, s1 = nsym - nsym / 8;
   if (s1 <= s0) { s0 = 0; s1 = nsym; }
   std::vector<std::complex<float>> hacc(N, {0.0f, 0.0f});
@@ -206,7 +221,7 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
   const int nsym = static_cast<int>(cfg_->symbol_per_slot());
   const int slot = static_cast<int>(cfg_->samps_per_slot());
   const short* d = pkt->data;
-  const int es = slotEnergyStart(d, slot);  // actual symbol-0 start (robust align)
+  const int es = symStart(d, slot);  // symbol-0 start (fixed prefix by default; sym_start knob)
   const auto& data_ind = cfg_->data_ind();
   // One-shot raw dump for offline analysis: [N cp prefix nsym ndata i32]
   // [H re,im f32]*N [data_ind i32]*ndata [U slot re,im i16]*slot.

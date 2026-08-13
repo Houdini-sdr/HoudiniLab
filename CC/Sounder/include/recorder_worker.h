@@ -48,10 +48,20 @@ class RecorderWorker {
   // of writing HDF5. One datagram per (frame, antenna); the GUI scales to whatever
   // antennas appear. ---
   bool view_mode_ = false;
+  // Houdini RFSoC only: the matched-NCO R2C RX mixer delivers baseband CONJUGATED
+  // (a +f tone returns at -f -- same inversion buildHoudiniBeacon pre-conjugates the
+  // TX beacon to cancel). Sync uses raw samples, but CSI/constellation must undo it,
+  // else H[k] lands on the mirror subcarrier (N-k) and the constellation scrambles.
+  bool rx_conj_ = false;
   int csi_sock_ = -1;
   std::vector<std::complex<float>> pilot_ref_;  // DC-centered freq-domain pilot
   std::vector<std::complex<float>> dft_;        // NxN DC-centered DFT coefficients
   double csi_throttle_ns_ = 0.0;                // per-antenna min send interval
+  // OFDM symbol-0 start within a received slot. Default = the nominal prefix (a fixed,
+  // manually-tunable offset via HOUDINI_CSI_SYM_START); the energy-edge auto-detector
+  // slotEnergyStart() is opt-in only (HOUDINI_CSI_SYM_START=auto) because its 15%
+  // threshold can mis-trigger on pre-symbol leakage and mis-align the FFT windows.
+  int csi_sym_start_ = -1;
   std::unordered_map<uint32_t, long long> csi_last_ns_;   // CSI (pilot) send timer
   std::unordered_map<uint32_t, long long> cns_last_ns_;   // constellation send timer
   // Latest channel estimate H[k] per antenna (DC-centered), cached from the pilot
@@ -59,7 +69,8 @@ class RecorderWorker {
   std::unordered_map<uint32_t, std::vector<std::complex<float>>> csi_h_;
   void initCsi(void);
   void streamCsi(Packet* pkt, NodeType node_type);   // routes pilot vs uplink data
-  int slotEnergyStart(const short* d, int slot) const;
+  int slotEnergyStart(const short* d, int slot) const;   // opt-in energy-edge auto-detect
+  int symStart(const short* d, int slot) const;          // fixed csi_sym_start_ (or auto)
   std::vector<std::complex<float>> symbolFft(const short* d, int base) const;
   void sendCsi(Packet* pkt);                          // pilot -> CSI + cache H
   void sendConstellation(Packet* pkt);                // uplink data -> equalize
