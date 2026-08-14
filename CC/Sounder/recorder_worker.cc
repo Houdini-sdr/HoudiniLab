@@ -81,10 +81,14 @@ void RecorderWorker::initCsi(void) {
   csi_sym_start_ = static_cast<int>(cfg_->prefix());
   if (const char* s = std::getenv("HOUDINI_CSI_SYM_START"))
     csi_sym_start_ = (std::string(s) == "auto") ? -1 : std::atoi(s);
+  // Per-frame pilot-vs-data timing re-align (Houdini framer jitter). Default on for Houdini.
+  csi_timing_fix_ = cfg_->is_houdini();
+  if (std::getenv("HOUDINI_CSI_NO_TIMING_FIX")) csi_timing_fix_ = false;
   view_mode_ = true;
   MLPD_INFO("CSI view mode: streaming to %s:%d (%d subcarriers, ~%.0f fps/ant, rx_conj=%d, "
-            "sym_start=%s)\n", host.c_str(), port, N, fps, rx_conj_ ? 1 : 0,
-            csi_sym_start_ >= 0 ? std::to_string(csi_sym_start_).c_str() : "auto");
+            "sym_start=%s, timing_fix=%d)\n", host.c_str(), port, N, fps, rx_conj_ ? 1 : 0,
+            csi_sym_start_ >= 0 ? std::to_string(csi_sym_start_).c_str() : "auto",
+            csi_timing_fix_ ? 1 : 0);
 }
 
 // Energy leading edge of a slot (first index where the sliding-64 power crosses
@@ -262,17 +266,57 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
   const float hmin = 0.4f * hmed;
   const int mod_ord = cfg_->ue_data_mod_order();
   const size_t kMaxPts = 600;
-  std::vector<std::complex<float>> pts;
-  pts.reserve(kMaxPts);
   int s0 = nsym / 8, s1 = nsym - nsym / 8;
   if (s1 <= s0) { s0 = 0; s1 = nsym; }
-  for (int sym = s0; sym < s1 && pts.size() < kMaxPts; ++sym) {
+  // Pre-FFT the middle data symbols once (reused by the timing search + the constellation).
+  std::vector<std::vector<std::complex<float>>> Ys;
+  for (int sym = s0; sym < s1; ++sym) {
     const int base = es + sym * (cp + N) + cp;
     if (base + N > slot) break;
-    auto Y = symbolFft(d, base);
+    Ys.push_back(symbolFft(d, base));
+  }
+  // Pilot-vs-data timing re-align (Houdini): an unstable beacon re-lock leaves the pilot
+  // ~1 sample off the data, which ramps H and rings the otherwise-fine data. A pilot
+  // re-align of r samples == a linear phase ramp exp(j 2pi (k-N/2) r / N) on H. Pick the
+  // integer r whose equalized QPSK constellation is tightest (blind 4th-power). |H|
+  // (the deep-fade gate) is phase-invariant, so hmin is unchanged.
+  std::vector<std::complex<float>> Hc(H.begin(), H.end());
+  if (csi_timing_fix_ && mod_ord == 2 && !Ys.empty()) {
+    double best_score = -1.0;
+    int best_r = 0;
+    for (int r = -2; r <= 2; ++r) {
+      std::complex<double> s4(0.0, 0.0);
+      double pwr = 0.0;
+      for (const auto& Y : Ys)
+        for (size_t j = 0; j < data_ind.size(); ++j) {
+          const size_t k = data_ind[j];
+          if (std::abs(H[k]) < hmin) continue;
+          const double ang = 2.0 * M_PI * (static_cast<double>(k) - N / 2.0) * r / N;
+          const std::complex<double> hr =
+              std::complex<double>(H[k]) *
+              std::complex<double>(std::cos(ang), std::sin(ang));
+          const std::complex<double> x = std::complex<double>(Y[k]) / hr;
+          const std::complex<double> x2 = x * x;
+          s4 += x2 * x2;
+          pwr += std::norm(x);
+        }
+      const double score = (pwr > 0.0) ? std::abs(s4) / (pwr * pwr) : -1.0;
+      if (score > best_score) { best_score = score; best_r = r; }
+    }
+    if (best_r != 0)
+      for (int k = 0; k < N; ++k) {
+        const double ang = 2.0 * M_PI * (static_cast<double>(k) - N / 2.0) * best_r / N;
+        Hc[k] *= std::complex<float>(static_cast<float>(std::cos(ang)),
+                                     static_cast<float>(std::sin(ang)));
+      }
+  }
+  std::vector<std::complex<float>> pts;
+  pts.reserve(kMaxPts);
+  for (size_t si = 0; si < Ys.size() && pts.size() < kMaxPts; ++si) {
+    const auto& Y = Ys[si];
     for (size_t j = 0; j < data_ind.size() && pts.size() < kMaxPts; ++j) {
       const size_t k = data_ind[j];
-      const std::complex<float> h = H[k];
+      const std::complex<float> h = Hc[k];
       if (std::abs(h) < hmin || std::norm(h) < 1e-9f) continue;  // deep fade
       pts.push_back(Y[k] / h);  // zero-forcing equalizer
     }
