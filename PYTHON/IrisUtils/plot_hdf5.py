@@ -568,6 +568,75 @@ def compute_legacy(hdf5):
     print("Total time: %f" % (endtime - starttime))
 
 
+def fix_pilot_timing(hdf5, srch=(-2, -1, 0, 1, 2)):
+    """Per-frame/antenna, correct the ~1-sample pilot-vs-data timing jitter (unstable RFSoC/Houdini
+    beacon re-locks leave the pilot slot 1 sample off the data ~40% of frames, which ramps H and
+    rings the constellation while the data itself is fine). Detects the integer pilot symbol-start
+    offset that best aligns the equalized uplink data (blind QPSK 4th-power concentration, no TX
+    reference needed) and rolls the pilot samples so the default (offset=prefix) FFT lands on-symbol.
+    Call after any --conj; operates on hdf5.pilot_samples in place."""
+    md = hdf5.metadata
+    P = getattr(hdf5, 'pilot_samples', None)
+    U = getattr(hdf5, 'uplink_samples', None)
+    if P is None or U is None or len(P) == 0 or len(U) == 0:
+        print("fix-timing: needs both pilot and uplink data, skipping"); return
+    if 'OFDM_PILOT_F' not in md or 'OFDM_DATA_SC' not in md:
+        print("fix-timing: needs OFDM_PILOT_F + OFDM_DATA_SC in metadata, skipping"); return
+    def _i(x):
+        return int(np.asarray(x).flat[0])          # scalar from a scalar-or-1elem attr
+    N = _i(md['FFT_SIZE']); cp = _i(md['CP_LEN']); pre = _i(md['PREFIX_LEN'])
+    post = _i(md['POSTFIX_LEN']); slot = _i(md['SLOT_SAMP_LEN'])
+    nsym = (slot - pre - post) // (cp + N)
+    pfr = np.asarray(md['OFDM_PILOT_F'])           # hdf5_lib pre-converts this to complex;
+    pref = pfr if np.iscomplexobj(pfr) else (pfr[0::2] + 1j * pfr[1::2])   # else raw [I,Q] floats
+    dsc = np.asarray(md['OFDM_DATA_SC']).astype(int).ravel()
+    pw = np.abs(pref) ** 2; pmsk = pw > 1e-9
+    s0, s1 = nsym // 8, nsym - nsym // 8
+    if s1 <= s0:
+        s0, s1 = 0, nsym
+
+    def hat(xp, off):
+        acc = np.zeros(N, dtype=complex); u = 0
+        for s in range(s0, s1):
+            b = pre + off + s * (cp + N) + cp
+            if b + N > len(xp):
+                break
+            acc += np.fft.fftshift(np.fft.fft(xp[b:b + N])) * np.conj(pref); u += 1
+        H = np.zeros(N, dtype=complex)
+        if u:
+            H[pmsk] = acc[pmsk] / (u * pw[pmsk])
+        return H
+
+    def conc(xu, H):
+        hm = 0.4 * np.median(np.abs(H[dsc])); pts = []
+        for s in range(s0, s1):
+            b = pre + s * (cp + N) + cp
+            if b + N > len(xu):
+                break
+            X = np.fft.fftshift(np.fft.fft(xu[b:b + N]))
+            g = np.abs(H[dsc]) > hm
+            pts.extend((X[dsc][g] / H[dsc][g]).tolist())
+        if not pts:
+            return 0.0
+        pn = np.array(pts); pn /= (np.sqrt(np.mean(np.abs(pn) ** 2)) + 1e-12)
+        return float(np.abs(np.mean(pn ** 4)))    # QPSK 4th-power: high = tight, low = ring
+
+    P = np.array(P); U = np.array(U)
+    n_fr, n_ant = P.shape[0], P.shape[3]
+    fixed = 0
+    for fr in range(n_fr):
+        for a in range(n_ant):
+            pi = P[fr, 0, 0, a]; ui = U[fr, 0, 0, a]
+            xp = pi.astype(float); xp = xp[0::2] + 1j * xp[1::2]
+            xu = ui.astype(float); xu = xu[0::2] + 1j * xu[1::2]
+            best = max(srch, key=lambda d: conc(xu, hat(xp, d)))
+            if best != 0:
+                P[fr, 0, 0, a] = np.roll(pi, -2 * best)    # int16 [I,Q]: 2 per complex sample
+                fixed += 1
+    hdf5.pilot_samples = P
+    print("fix-timing: re-aligned pilot on %d / %d (frame,ant) slots" % (fixed, n_fr * n_ant))
+
+
 def main():
     # Tested with inputs: ./data_in/Argos-2019-3-11-11-45-17_1x8x2.hdf5 300  (for two users)
     #                     ./data_in/Argos-2019-3-30-12-20-50_1x8x1.hdf5 300  (for one user) 
@@ -603,6 +672,11 @@ def main():
                       help="Conjugate RX samples (undo the RFSoC/Houdini R2C mixer's "
                            "spectral inversion) before processing. Use for Houdini "
                            "recordings; omit for Iris.", default=False)
+    parser.add_option("--fix-timing", action="store_true", dest="fix_timing",
+                      help="Per-frame, correct the ~1-sample pilot-vs-data timing jitter (from "
+                           "unstable Houdini beacon re-locks) by re-aligning the pilot to the "
+                           "uplink data (blind QPSK 4th-power). Needs uplink data + OFDM_PILOT_F.",
+                      default=False)
     (options, args) = parser.parse_args()
 
     show_metadata = options.show_metadata
@@ -631,6 +705,7 @@ def main():
     exclude_bs_nodes_str = options.exclude_bs_nodes
     tx_files = options.tx_files
     conj = options.conj
+    fix_timing = options.fix_timing
 
     filename = sys.argv[1]
     scrpt_strt = time.time()
@@ -667,6 +742,8 @@ def main():
                     _s[..., 1::2] = -_s[..., 1::2]
                     setattr(hdf5, _a, _s)
             print("RX conjugation applied (--conj): undoing R2C spectral inversion")
+        if fix_timing:
+            fix_pilot_timing(hdf5)
         pilot_samples = hdf5.pilot_samples
         uplink_samples = hdf5.uplink_samples
         noise_samples = hdf5.noise_samples
