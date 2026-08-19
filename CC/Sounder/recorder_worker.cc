@@ -278,10 +278,11 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
   // Pilot-vs-data timing re-align (Houdini): an unstable beacon re-lock leaves the pilot
   // ~1 sample off the data, which ramps H and rings the otherwise-fine data. A pilot
   // re-align of r samples == a linear phase ramp exp(j 2pi (k-N/2) r / N) on H. Pick the
-  // integer r whose equalized QPSK constellation is tightest (blind 4th-power). |H|
-  // (the deep-fade gate) is phase-invariant, so hmin is unchanged.
+  // integer r whose equalized constellation is tightest (blind 4th-power). |H|
+  // (the deep-fade gate) is phase-invariant, so hmin is unchanged. The 4th-power is valid
+  // for any square QAM (QPSK/16/64-QAM: E[X^4] real -> arg pi), so gate on mod_ord 2/4/6.
   std::vector<std::complex<float>> Hc(H.begin(), H.end());
-  if (csi_timing_fix_ && mod_ord == 2 && !Ys.empty()) {
+  if (csi_timing_fix_ && (mod_ord == 2 || mod_ord == 4 || mod_ord == 6) && !Ys.empty()) {
     double best_score = -1.0;
     int best_r = 0;
     for (int r = -2; r <= 2; ++r) {
@@ -324,9 +325,10 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
   if (pts.empty()) return;
   // Global common-phase de-rotation. A fixed phase offset between the pilot CSI and
   // the data slot leaves the whole constellation rotated off the axes. Estimate it
-  // blind over ALL points via the QPSK 4th-power (data cancels: ideal X^4 -> angle
-  // pi) -- robust, unlike a per-symbol estimate (~48 points is too few to lock).
-  if (mod_ord == 2) {
+  // blind over ALL points via the 4th-power (data cancels: ideal X^4 -> angle pi) --
+  // robust, unlike a per-symbol estimate (~48 points is too few to lock). Valid for any
+  // square QAM (QPSK/16/64-QAM all have E[X^4] real-negative), so gate on mod_ord 2/4/6.
+  if (mod_ord == 2 || mod_ord == 4 || mod_ord == 6) {
     std::complex<double> acc4(0.0, 0.0);
     for (const auto& x : pts) {
       const std::complex<double> xd(x.real(), x.imag());
