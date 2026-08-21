@@ -10,6 +10,8 @@
 #include <cstdlib>
 #include <vector>
 
+#include <cstdint>
+
 #include "SoapySDR/Device.hpp"
 #include "SoapySDR/Types.hpp"
 #include "config.h"
@@ -54,6 +56,12 @@ class Radio {
   SoapySDR::Stream* txs_;
   bool houdini_ = false;
   size_t num_rx_ch_ = 1;
+  // Sample-gap awareness (Houdini UDP RX). recvHoudini() detects a dropped-packet gap
+  // spliced mid-window (see grid tracker) and zero-pads it so post-gap samples keep
+  // their offset; the extent is pushed to the process-wide RxGapSink (rx_gap_sink.h)
+  // for the recorder's /Data/Gaps table.
+  double rx_rate_ = 0.0;        // cached RX sample rate for the grid tracker
+  int64_t rx_sample_pos_ = 0;  // absolute samples emitted across recvHoudini calls
 };
 
 #endif  // RADIO_H_

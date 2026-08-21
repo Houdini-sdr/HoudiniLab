@@ -23,6 +23,7 @@
 
 #include "include/logger.h"
 #include "include/macros.h"
+#include "include/rx_gap_sink.h"  // RxGapSink -> /Data/Gaps at finalize
 #include "include/utils.h"
 
 namespace Sounder {
@@ -636,6 +637,39 @@ void RecorderWorker::finalize(void) {
     this->csi_sock_ = -1;
   }
   if (this->hdf5_ != nullptr) {
+    // Emit /Data/Gaps: the UDP sample gaps the RX path detected + zero-padded this
+    // capture (Houdini only). The sink is process-wide, so drain it once here, before
+    // the file closes. start_time_ns is relative to the RX stream start (0-anchored);
+    // the parser tools (gap_forensics.py) key off the gap sizes + spacing, not an
+    // absolute wall-clock. Single receiving stream assumed (see rx_gap_sink.h).
+    if (this->cfg_->is_houdini()) {
+      const std::vector<Sounder::GapExtent> gaps =
+          Sounder::RxGapSink::instance().drain();
+      if (gaps.empty() == false) {
+        const double rate = this->cfg_->rate();
+        std::vector<int64_t> table;
+        table.reserve(gaps.size() * 4);
+        int64_t untrusted = 0;
+        for (const auto& g : gaps) {
+          table.push_back(g.start_sample);
+          table.push_back(g.n_samples);
+          table.push_back(
+              static_cast<int64_t>(Sounder::sampleToNs(g.start_sample, rate)));
+          table.push_back(g.cause);
+          if (g.n_samples > 0) untrusted += g.n_samples;
+        }
+        this->hdf5_->writeTableInt64("Gaps", 4, table);
+        this->hdf5_->write_attribute(
+            "GAP_COLUMNS",
+            std::string("start_sample,n_samples,start_time_ns,"
+                        "cause(0=time_jump,1=host_ring,2=write_error,"
+                        "3=backward,4=resync)"));
+        this->hdf5_->write_attribute("TOTAL_UNTRUSTED_SAMPLES",
+                                     static_cast<double>(untrusted));
+        MLPD_INFO("Recorder: /Data/Gaps -- %zu gap(s), %lld untrusted samples\n",
+                  gaps.size(), static_cast<long long>(untrusted));
+      }
+    }
     this->hdf5_->closeDataset();
     this->hdf5_->closeFile();
   }

@@ -13,8 +13,10 @@ Copyright (c) 2018-2022
 #include <algorithm>
 #include <array>
 #include <complex>
+#include <cstdint>
 #include <map>
 #include <memory>
+#include <vector>
 
 #include "H5Cpp.h"
 #include "macros.h"
@@ -35,6 +37,9 @@ class Hdf5Lib {
   herr_t writeDataset(std::string dataset_name,
                       std::array<hsize_t, kDsDimsNum> target_id,
                       std::array<hsize_t, kDsDimsNum> wrt_dim, short* wrt_data);
+  // One-shot 2-D int64 table (row-major, num_cols per row). For /Data/Gaps.
+  void writeTableInt64(const std::string& dataset_name, size_t num_cols,
+                       const std::vector<int64_t>& row_major_data);
   std::vector<short> readDataset(std::string dataset_name,
                                  std::array<hsize_t, kDsDimsNum> target_id,
                                  std::array<hsize_t, kDsDimsNum> read_dim);

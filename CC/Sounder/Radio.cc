@@ -8,6 +8,8 @@
   * ----------------------------------------------------------
 */
 #include "include/Radio.h"
+#include "include/rx_gap_sink.h"       // RxGapSink (UDP gap -> /Data/Gaps bridge)
+#include "include/rx_recorder_grid.h"  // TimeGridTracker
 
 #include <algorithm>
 #include <atomic>
@@ -15,6 +17,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <vector>
 
@@ -224,10 +227,21 @@ int Radio::recvHoudini(void* const* buffs, int samples, long long& frameTime) {
   while (dev_->readStream(rxs_, jb.data(), drain_samps, jf, jt, 0) > 0) {
   }
 
+  // A dropped UDP packet splices a gap between two reads of THIS window. Detect it
+  // from each read's own timestamp (the window used to keep only the first read's
+  // time and concatenate the rest as if contiguous -- silently mis-aligning every
+  // post-gap sample, which corrupts the correlation window / CSI). A per-window
+  // TimeGridTracker compares where each read's samples land vs. where its stamp says
+  // they belong; a gap is zero-padded so post-gap samples stay on their true offset,
+  // and the extent is logged (absolute RX sample position) for the /Data/Gaps table.
+  if (rx_rate_ == 0.0) rx_rate_ = dev_->getSampleRate(SOAPY_SDR_RX, 0);
+  Sounder::TimeGridTracker grid(rx_rate_);
   std::vector<void*> cur(num_rx_ch_);
-  for (size_t c = 0; c < num_rx_ch_; c++) cur[c] = buffs[c];
   int got = 0;
   while (got < samples) {
+    for (size_t c = 0; c < num_rx_ch_; c++)
+      cur[c] = static_cast<uint8_t*>(buffs[c]) +
+               static_cast<size_t>(got) * kBytesPerSamp;
     int flags = 0;
     long long t = 0;
     int r =
@@ -236,11 +250,32 @@ int Radio::recvHoudini(void* const* buffs, int samples, long long& frameTime) {
       if (got == 0) return r;
       break;
     }
-    if (got == 0) frameTime = t;
-    got += r;
-    for (size_t c = 0; c < num_rx_ch_; c++)
-      cur[c] = static_cast<uint8_t*>(cur[c]) + r * kBytesPerSamp;
+    if (got == 0) frameTime = t;  // first (grid-anchoring) read stamps the window
+    size_t pad = 0;
+    if (rx_rate_ > 0.0 && (flags & SOAPY_SDR_HAS_TIME) != 0) {
+      const Sounder::GridCheck gc = grid.onStamp(t, got);
+      pad = std::min(gc.pad_samples, static_cast<size_t>(samples - got));
+    }
+    if (pad > 0) {
+      // The r samples just read belong at got+pad: shift them forward and zero-fill
+      // the gap so the window stays sample-exact (one gap can't time-shift the rest).
+      const size_t keep = std::min(static_cast<size_t>(r),
+                                   static_cast<size_t>(samples - got) - pad);
+      for (size_t c = 0; c < num_rx_ch_; c++) {
+        uint8_t* d = static_cast<uint8_t*>(buffs[c]) +
+                     static_cast<size_t>(got) * kBytesPerSamp;
+        std::memmove(d + pad * kBytesPerSamp, d, keep * kBytesPerSamp);
+        std::memset(d, 0, pad * kBytesPerSamp);
+      }
+      Sounder::RxGapSink::instance().push({rx_sample_pos_ + got,
+                                           static_cast<int64_t>(pad),
+                                           Sounder::kGapTimeJump});
+      got += static_cast<int>(pad + keep);
+    } else {
+      got += r;
+    }
   }
+  rx_sample_pos_ += got;
   if ((getenv("HOUDINI_CL_RX_DEBUG") != nullptr ||
        getenv("HOUDINI_DUMP_WIN") != nullptr) &&
       got > 0 && buffs[0] != nullptr) {
