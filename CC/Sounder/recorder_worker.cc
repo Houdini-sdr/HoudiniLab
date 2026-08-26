@@ -77,9 +77,16 @@ void RecorderWorker::initCsi(void) {
   csi_throttle_ns_ = 1e9 / fps;
   rx_conj_ = cfg_->is_houdini();  // undo the R2C mixer's spectral inversion (RFSoC only)
   if (std::getenv("HOUDINI_RX_NOCONJ")) rx_conj_ = false;  // A/B override (before/after)
-  // Symbol-0 start: fixed at the nominal prefix by default (manually tunable); the
-  // energy-edge auto-detector is opt-in only (HOUDINI_CSI_SYM_START=auto).
-  csi_sym_start_ = static_cast<int>(cfg_->prefix());
+  // Symbol-0 start: default the FFT window HALF A CP earlier than the nominal prefix.
+  // The cyclic-prefix guard is one-sided -- a window placed early (within the CP) is a
+  // valid circular shift (pure phase, recoverable), but one placed even 1 sample LATE
+  // pulls the next symbol into the FFT = ISI (unrecoverable). The nominal prefix sits
+  // right at that cliff edge, so beacon-relock jitter routinely tips runs into ISI
+  // (measured: es=prefix 19.8% EVM -> es=prefix-CP/2 3.2% on a window-ISI run). Backing
+  // off CP/2 centers the window in the guard for two-sided jitter margin. Still fully
+  // manual: HOUDINI_CSI_SYM_START overrides (an int, or "auto" for the energy-edge detector).
+  csi_sym_start_ = static_cast<int>(cfg_->prefix()) -
+                   static_cast<int>(cfg_->cp_size()) / 2;
   if (const char* s = std::getenv("HOUDINI_CSI_SYM_START"))
     csi_sym_start_ = (std::string(s) == "auto") ? -1 : std::atoi(s);
   // Per-frame pilot-vs-data timing re-align (Houdini framer jitter). Default on for Houdini.
