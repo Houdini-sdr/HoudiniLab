@@ -7,6 +7,8 @@
   * Initializes and Configures Client Radios 
   * ----------------------------------------------------------
   */
+#include <atomic>
+#include <cstdlib>
 #include "include/ClientRadioSet.h"
 
 #include "SoapySDR/Errors.hpp"
@@ -81,6 +83,13 @@ ClientRadioSet::ClientRadioSet(Config* cfg) : _cfg(cfg) {
 
   for (size_t i = 0; i < radios.size(); i++) {
     auto* dev = radios.at(i)->RawDev();
+    if (_cfg->is_houdini()) {
+      // Houdini has no CBRS/UHF front end or LNA/PGA/TIA gain stages to report.
+      std::cout << _cfg->cl_sdr_ids().at(i) << ": Houdini RFSoC, RX rate "
+                << (dev->getSampleRate(SOAPY_SDR_RX, channels.at(0)) / 1e6)
+                << " MSPS" << std::endl;
+      continue;
+    }
     std::cout << _cfg->cl_sdr_ids().at(i) << ": Front end "
               << dev->getHardwareInfo()["frontend"] << std::endl;
     for (auto ch : channels) {
@@ -229,7 +238,12 @@ ClientRadioSet::ClientRadioSet(Config* cfg) : _cfg(cfg) {
           dev->writeSetting("CORR_START",
                             (_cfg->cl_channel() == "B") ? "B" : "A");
       } else {
-        if (!kUseSoapyUHD) {
+        if (_cfg->is_houdini()) {
+          // Houdini has no HW trigger/correlator block -- software beacon sync
+          // (find_beacon in receiver.cc) drives acquisition. Just start streams.
+          radios.at(i)->activateRecv();
+          radios.at(i)->activateXmit();
+        } else if (!kUseSoapyUHD) {
           dev->setHardwareTime(0, "TRIGGER");
           radios.at(i)->activateRecv();
           radios.at(i)->activateXmit();
@@ -267,8 +281,26 @@ void ClientRadioSet::init(ClientRadioContext* context) {
   MLPD_TRACE("ClientRadioSet setting up radio: %d : %zu\n", (i + 1),
              _cfg->num_cl_sdrs());
   SoapySDR::Kwargs args;
+  SoapySDR::Kwargs rx_stream_args;
+  SoapySDR::Kwargs tx_stream_args;
   args["timeout"] = "1000000";
-  if (kUseSoapyUHD == false) {
+  if (_cfg->is_houdini()) {
+    // SoapyHoudiniSDR remote device: cl_sdr_ids() holds the board IP. C++
+    // SoapyRemote auto-discovery is unreliable here, so address the remote
+    // node directly (matches SoapySDRUtil's enumerated kwargs).
+    args["driver"] = "houdinisdr";
+    args["remote"] =
+        "tcp://" + _cfg->cl_sdr_ids().at(i) + ":" + _cfg->remote_port();
+    args["remote:driver"] = "houdinisdr-device";
+    args["remote:type"] = "houdinisdr";
+    // RX host UDP port, one per radio; UE feeds pilots live -> host-fed streaming
+    // TX (SH-183). ue_tdd_pilot -> `tdd=1`: the TxTickAnchor accepts HAS_TIME
+    // starts on the 3.125 us TDD window grid (SH-248/SH-301) instead of whole-ms,
+    // so the pilot places finely with no ms drift-cliff.
+    rx_stream_args["local_port"] = std::to_string(10002 + i);
+    tx_stream_args["tx_mode"] = "stream";
+    if (_cfg->ue_tdd_pilot()) tx_stream_args["tdd"] = "1";
+  } else if (kUseSoapyUHD == false) {
     args["driver"] = "iris";
     args["serial"] = _cfg->cl_sdr_ids().at(i);
   } else {
@@ -277,9 +309,17 @@ void ClientRadioSet::init(ClientRadioContext* context) {
   }
   try {
     radios.at(i) = nullptr;
-    radios.at(i) = new Radio(args, SOAPY_SDR_CS16, channels);
+    // Houdini needs rate+NCO set before the stream opens; Iris passes 0 and
+    // keeps configuring in dev_init. UE streams RX and TX at the app rate.
+    radios.at(i) = new Radio(args, SOAPY_SDR_CS16, channels, rx_stream_args,
+                             tx_stream_args,
+                             _cfg->is_houdini() ? _cfg->rate() : 0.0,
+                             _cfg->is_houdini() ? _cfg->rate() : 0.0,
+                             _cfg->is_houdini() ? _cfg->nco() : 0.0);
   } catch (std::runtime_error& err) {
     has_runtime_error = true;
+    MLPD_WARN("ClientRadioSet radio %d (%s) setup failed: %s\n", i,
+              _cfg->cl_sdr_ids().at(i).c_str(), err.what());
 
     if (radios.at(i) != nullptr) {
       MLPD_TRACE("Radio not used due to exception\n");
@@ -306,8 +346,8 @@ void ClientRadioSet::init(ClientRadioContext* context) {
       radios.at(i)->dev_init(_cfg, ch, rxgain, txgain);
     }
 
-    // Init AGC only for Iris device
-    if (kUseSoapyUHD == false) {
+    // Init AGC only for Iris device (Houdini has no AGC_CONFIG setting)
+    if (kUseSoapyUHD == false && !_cfg->is_houdini()) {
       initAGC(dev, _cfg);
     }
   }
@@ -371,8 +411,39 @@ int ClientRadioSet::radioTx(size_t radio_id, const void* const* buffs,
   if (_cfg->hw_framer()) {
     return radios.at(radio_id)->xmit(buffs, numSamps, flags, frameTime);
   } else {
-    long long frameTimeNs = SoapySDR::ticksToTimeNs(frameTime, _cfg->rate());
-    return radios.at(radio_id)->xmit(buffs, numSamps, flags, frameTimeNs);
+    // Houdini streaming pilot. With the `tdd=1` TX stream arg (set in init when
+    // ue_tdd_pilot), the driver's TxTickAnchor accepts HAS_TIME starts on the
+    // 3.125 us TDD window grid (SH-248/SH-301), so we snap the beacon-referenced
+    // txTime to that grid -- fine enough to land in the BS rx_gate and, unlike
+    // the whole-ms fallback, with NO 1 ms drift-cliff. ue_tx_advance_ticks is a
+    // fine calibration (ticks) added before the snap. Non-TDD Houdini keeps the
+    // whole-ms fallback.
+    long long ft = frameTime;
+    if (_cfg->is_houdini() && _cfg->ue_tdd_pilot())
+      ft += _cfg->ue_tx_advance_ticks();
+    long long frameTimeNs = SoapySDR::ticksToTimeNs(ft, _cfg->rate());
+    if (_cfg->is_houdini()) {
+      constexpr long long kTddGridNs = 3125;    // 384 ticks, the TDD window grid
+      constexpr long long kNsPerMs = 1000000LL;
+      const long long q = _cfg->ue_tdd_pilot() ? kTddGridNs : kNsPerMs;
+      frameTimeNs = ((frameTimeNs + q / 2) / q) * q;  // snap to the accepted grid
+    }
+    const int r = radios.at(radio_id)->xmit(buffs, numSamps, flags, frameTimeNs);
+    if (std::getenv("HOUDINI_UE_TX_DEBUG") != nullptr) {
+      static std::atomic<int> c{0};
+      if ((c.fetch_add(1) % 20) == 0) {
+        try {
+          const std::string b =
+              radios.at(radio_id)->RawDev()->readSetting("TX_BANK_STATUS");
+          const size_t p = b.find("ch1:");
+          MLPD_INFO("UE TX dbg: xmit r=%d/%d txNs=%lld bank[%s]\n", r, numSamps,
+                    frameTimeNs,
+                    (p == std::string::npos ? b : b.substr(p, 70)).c_str());
+        } catch (...) {
+        }
+      }
+    }
+    return r;
   }
 }
 

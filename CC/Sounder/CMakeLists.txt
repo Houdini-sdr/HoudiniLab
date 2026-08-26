@@ -43,7 +43,12 @@ if(${CMAKE_C_COMPILER_ID} STREQUAL "GNU")
   message(STATUS "Using GNU compiler, compiler ID ${CMAKE_C_COMPILER_ID}")
   #For Ubuntu 1804 need to keep the c11 std for thread check
   set(CMAKE_C_FLAGS "-std=c11 -Wall")
-  set(CMAKE_CXX_FLAGS "-std=c++17 -Wall -Wextra -march=native")
+  if (CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm")
+    set(ARCH_FLAGS "-mcpu=native")   # ARM (e.g. DGX Spark / Grace): NEON/SVE
+  else()
+    set(ARCH_FLAGS "-march=native")
+  endif()
+  set(CMAKE_CXX_FLAGS "-std=c++17 -Wall -Wextra ${ARCH_FLAGS}")
   set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -O0")
 else()
   message(FATAL_ERROR "Unsupported version of compiler")
@@ -176,14 +181,30 @@ set(SOUNDER_SOURCES ${PURE_UHD_SOURCES}
     BaseRadioSet-calibrate-analog.cc
     comms-lib.cc
     comms-lib-avx.cc
+    comms-lib-portable.cc
     utils.cc
     signalHandler.cpp)
 
-add_executable(sounder 
+# Optional GPU beacon correlator (DGX Spark / GB10). find_beacon_cuda.cu runs
+# the detection pipeline on the GPU over unified memory; the portable CPU
+# find_beacon_avx stays the default and the numeric reference.
+option(HOUDINI_USE_CUDA "Build the GPU beacon correlator (DGX Spark)" OFF)
+if (HOUDINI_USE_CUDA)
+  enable_language(CUDA)
+  set(CMAKE_CUDA_STANDARD 17)
+  if (NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+    set(CMAKE_CUDA_ARCHITECTURES native)
+  endif()
+  add_definitions(-DUSE_CUDA)
+  list(APPEND SOUNDER_SOURCES find_beacon_cuda.cu)
+  message(STATUS "GPU beacon correlator: ENABLED (CUDA arch ${CMAKE_CUDA_ARCHITECTURES})")
+endif()
+
+add_executable(sounder
     main.cc
     ${SOUNDER_SOURCES})
 
-if (${CMAKE_SYSTEM_PROCESSOR} MATCHES "arm") 
+if (${CMAKE_SYSTEM_PROCESSOR} MATCHES "aarch64|arm") 
     set(MUFFT_LIBRARIES
         ${CMAKE_SOURCE_DIR}/mufft/libmuFFT.a)
 else()
@@ -199,7 +220,7 @@ target_link_libraries(sounder -lpthread --enable-threadsafe ${GFLAGS_LIBRARIES} 
     ${HDF5_LIBRARIES}
     ${MUFFT_LIBRARIES})
 
-add_library(sounder_module MODULE 
+add_library(sounder_module MODULE
     ${SOUNDER_SOURCES})
 
 target_link_libraries(sounder_module -lpthread --enable-threadsafe ${GFLAGS_LIBRARIES} ${UHD_LIBRARIES}
@@ -208,3 +229,39 @@ target_link_libraries(sounder_module -lpthread --enable-threadsafe ${GFLAGS_LIBR
     -Wl,--no-whole-archive
     ${HDF5_LIBRARIES}
     ${SoapySDR_LIBRARIES})
+
+# HIL helper: transmit the real Gold beacon from a Houdini board so a Houdini UE
+# running the unmodified receiver.cc client-sync path can acquire it.
+add_executable(beacon_tx_gold
+    tests/comms-func/beacon_tx_gold.cc
+    comms-lib.cc
+    comms-lib-avx.cc
+    comms-lib-portable.cc
+    utils.cc)
+target_include_directories(beacon_tx_gold PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(beacon_tx_gold -lpthread
+    ${SoapySDR_LIBRARIES}
+    ${MUFFT_LIBRARIES})
+
+# HIL harness: drive both ends with the real BaseRadioSet (BS beacon) +
+# ClientRadioSet (UE sync) -- proves the BaseRadioSet Houdini backend TXes the
+# beacon the UE acquires, without the un-runnable BS receive loop.
+add_executable(houdini_bs_ue_sync
+    tests/comms-func/houdini_bs_ue_sync.cc
+    ${SOUNDER_SOURCES})
+target_include_directories(houdini_bs_ue_sync PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(houdini_bs_ue_sync -lpthread --enable-threadsafe ${GFLAGS_LIBRARIES} ${UHD_LIBRARIES}
+    ${SoapySDR_LIBRARIES}
+    ${HDF5_LIBRARIES}
+    ${MUFFT_LIBRARIES})
+
+# HIL closed-loop: BS beacon -> UE sync -> UE pilot -> BS receive, all through
+# the real BaseRadioSet + ClientRadioSet over the bidirectional Houdini link.
+add_executable(houdini_loopback
+    tests/comms-func/houdini_loopback.cc
+    ${SOUNDER_SOURCES})
+target_include_directories(houdini_loopback PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(houdini_loopback -lpthread --enable-threadsafe ${GFLAGS_LIBRARIES} ${UHD_LIBRARIES}
+    ${SoapySDR_LIBRARIES}
+    ${HDF5_LIBRARIES}
+    ${MUFFT_LIBRARIES})

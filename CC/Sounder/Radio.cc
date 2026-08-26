@@ -8,8 +8,18 @@
   * ----------------------------------------------------------
 */
 #include "include/Radio.h"
+#include "include/rx_gap_sink.h"       // RxGapSink (UDP gap -> /Data/Gaps bridge)
+#include "include/rx_recorder_grid.h"  // TimeGridTracker
 
+#include <algorithm>
+#include <atomic>
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <iostream>
+#include <vector>
 
 #include "SoapySDR/Errors.hpp"
 #include "include/logger.h"
@@ -17,6 +27,19 @@
 
 void Radio::dev_init(Config* _cfg, int ch, double rxgain, double txgain) {
   SoapySDR::Kwargs info = dev_->getHardwareInfo();
+
+  // Houdini RFSoC: the mixer NCO is the only tuning knob and there is no
+  // antenna/analog-bandwidth/gain/DC-offset stage to program. Rate + NCO were
+  // already applied in the ctor (before setupStream, since Houdini forbids a
+  // live rate change), so nothing to do here but report.
+  if (_cfg->is_houdini()) {
+    MLPD_INFO("Houdini channel %d: rate %.2f MSPS, NCO %.2f MHz\n", ch,
+              dev_->getSampleRate(SOAPY_SDR_RX, ch) / 1e6,
+              dev_->getFrequency(SOAPY_SDR_RX, ch) / 1e6);
+    (void)rxgain;
+    (void)txgain;
+    return;
+  }
 
   dev_->setSampleRate(SOAPY_SDR_RX, ch, _cfg->rate());
   dev_->setSampleRate(SOAPY_SDR_TX, ch, _cfg->rate());
@@ -113,7 +136,10 @@ void Radio::drain_buffers(std::vector<void*> buffs, int symSamp) {
 }
 
 Radio::Radio(const SoapySDR::Kwargs& args, const char soapyFmt[],
-             const std::vector<size_t>& channels) {
+             const std::vector<size_t>& channels,
+             const SoapySDR::Kwargs& rxStreamArgs,
+             const SoapySDR::Kwargs& txStreamArgs, double preStreamRxRate,
+             double preStreamTxRate, double preStreamFreq) {
   dev_ = SoapySDR::Device::make(args);
   if (dev_ == nullptr) {
     throw std::invalid_argument("error making SoapySDR::Device\n");
@@ -124,10 +150,48 @@ Radio::Radio(const SoapySDR::Kwargs& args, const char soapyFmt[],
         dev_->setSampleRate(SOAPY_SDR_RX, ch, rate);
         dev_->setSampleRate(SOAPY_SDR_TX, ch, rate);
     }*/
-  rxs_ = dev_->setupStream(SOAPY_SDR_RX, soapyFmt, channels);
-  txs_ = dev_->setupStream(SOAPY_SDR_TX, soapyFmt, channels);
+  // Backends that forbid live rate changes (Houdini) must have the rate and
+  // NCO set BEFORE the stream opens; the Iris path passes 0 and keeps setting
+  // these in dev_init (post-setupStream) as before. RX/TX rates are independent;
+  // a negative preStreamTxRate is a sentinel for "use the device max TX rate"
+  // (the replay RAM plays at that rate and the RFDC interpolates to the DAC) --
+  // but the BS beacon now passes the app rate, so no host upsampling is needed.
+  if (preStreamRxRate > 0.0) {
+    for (auto ch : channels) {
+      dev_->setSampleRate(SOAPY_SDR_RX, ch, preStreamRxRate);
+    }
+  }
+  if (preStreamTxRate != 0.0) {
+    double tx_rate = preStreamTxRate;
+    if (tx_rate < 0.0) {  // sentinel: use the device max TX rate (replay)
+      const auto tr = dev_->listSampleRates(
+          SOAPY_SDR_TX, channels.empty() ? 0 : channels.front());
+      tx_rate = tr.empty() ? 0.0 : *std::max_element(tr.begin(), tr.end());
+    }
+    if (tx_rate > 0.0) {
+      for (auto ch : channels) {
+        dev_->setSampleRate(SOAPY_SDR_TX, ch, tx_rate);
+      }
+    }
+  }
+  if (preStreamFreq > 0.0) {
+    for (auto ch : channels) {
+      dev_->setFrequency(SOAPY_SDR_RX, ch, preStreamFreq);
+      dev_->setFrequency(SOAPY_SDR_TX, ch, preStreamFreq);
+    }
+  }
+  // Houdini SoapyHoudiniSDR needs per-stream args (RX host port, TX replay/stream
+  // mode); Iris/UHD ignore an empty Kwargs, so this is backend-agnostic.
+  rxs_ = dev_->setupStream(SOAPY_SDR_RX, soapyFmt, channels, rxStreamArgs);
+  txs_ = dev_->setupStream(SOAPY_SDR_TX, soapyFmt, channels, txStreamArgs);
 
-  if (!kUseSoapyUHD) {
+  const std::string driver =
+      (args.count("driver") != 0u) ? args.at("driver") : std::string();
+  houdini_ = (driver == "houdinisdr");
+  num_rx_ch_ = channels.empty() ? 1 : channels.size();
+
+  // RESET_DATA_LOGIC is an Iris-only setting; Houdini/UHD don't implement it.
+  if (!kUseSoapyUHD && driver == "iris") {
     reset_DATA_clk_domain();
   }
 }
@@ -143,7 +207,112 @@ Radio::~Radio(void) {
   dev_ = nullptr;
 }
 
+// SoapyHoudiniSDR delivers ~1 MTU (~1016 samples) per readStream and lets the
+// host socket buffer a backlog while the caller is busy (e.g. running
+// find_beacon between windows), so a single readStream can neither fill a
+// multi-thousand-sample sync window nor guarantee it is contiguous. Drain any
+// stale backlog non-blocking, then accumulate a fresh, contiguous window --
+// this is the in-radio equivalent of the client_sync_cuda drain-before-frame.
+int Radio::recvHoudini(void* const* buffs, int samples, long long& frameTime) {
+  constexpr size_t kBytesPerSamp = 4;  // CS16 = 2 x int16
+  static thread_local std::vector<uint8_t> junk;
+  const size_t drain_samps = 16384;
+  if (junk.size() < drain_samps * kBytesPerSamp * num_rx_ch_)
+    junk.resize(drain_samps * kBytesPerSamp * num_rx_ch_);
+  std::vector<void*> jb(num_rx_ch_);
+  for (size_t c = 0; c < num_rx_ch_; c++)
+    jb[c] = junk.data() + c * drain_samps * kBytesPerSamp;
+  int jf = 0;
+  long long jt = 0;
+  while (dev_->readStream(rxs_, jb.data(), drain_samps, jf, jt, 0) > 0) {
+  }
+
+  // A dropped UDP packet splices a gap between two reads of THIS window. Detect it
+  // from each read's own timestamp (the window used to keep only the first read's
+  // time and concatenate the rest as if contiguous -- silently mis-aligning every
+  // post-gap sample, which corrupts the correlation window / CSI). A per-window
+  // TimeGridTracker compares where each read's samples land vs. where its stamp says
+  // they belong; a gap is zero-padded so post-gap samples stay on their true offset,
+  // and the extent is logged (absolute RX sample position) for the /Data/Gaps table.
+  if (rx_rate_ == 0.0) rx_rate_ = dev_->getSampleRate(SOAPY_SDR_RX, 0);
+  Sounder::TimeGridTracker grid(rx_rate_);
+  std::vector<void*> cur(num_rx_ch_);
+  int got = 0;
+  while (got < samples) {
+    for (size_t c = 0; c < num_rx_ch_; c++)
+      cur[c] = static_cast<uint8_t*>(buffs[c]) +
+               static_cast<size_t>(got) * kBytesPerSamp;
+    int flags = 0;
+    long long t = 0;
+    int r =
+        dev_->readStream(rxs_, cur.data(), samples - got, flags, t, 1000000);
+    if (r <= 0) {
+      if (got == 0) return r;
+      break;
+    }
+    if (got == 0) frameTime = t;  // first (grid-anchoring) read stamps the window
+    size_t pad = 0;
+    if (rx_rate_ > 0.0 && (flags & SOAPY_SDR_HAS_TIME) != 0) {
+      const Sounder::GridCheck gc = grid.onStamp(t, got);
+      pad = std::min(gc.pad_samples, static_cast<size_t>(samples - got));
+    }
+    if (pad > 0) {
+      // The r samples just read belong at got+pad: shift them forward and zero-fill
+      // the gap so the window stays sample-exact (one gap can't time-shift the rest).
+      const size_t keep = std::min(static_cast<size_t>(r),
+                                   static_cast<size_t>(samples - got) - pad);
+      for (size_t c = 0; c < num_rx_ch_; c++) {
+        uint8_t* d = static_cast<uint8_t*>(buffs[c]) +
+                     static_cast<size_t>(got) * kBytesPerSamp;
+        std::memmove(d + pad * kBytesPerSamp, d, keep * kBytesPerSamp);
+        std::memset(d, 0, pad * kBytesPerSamp);
+      }
+      Sounder::RxGapSink::instance().push({rx_sample_pos_ + got,
+                                           static_cast<int64_t>(pad),
+                                           Sounder::kGapTimeJump});
+      got += static_cast<int>(pad + keep);
+    } else {
+      got += r;
+    }
+  }
+  rx_sample_pos_ += got;
+  if ((getenv("HOUDINI_CL_RX_DEBUG") != nullptr ||
+       getenv("HOUDINI_DUMP_WIN") != nullptr) &&
+      got > 0 && buffs[0] != nullptr) {
+    const int16_t* p = static_cast<const int16_t*>(buffs[0]);
+    double s = 0;
+    int amax = 0;
+    for (int k = 0; k < got * 2; ++k) {
+      s += double(p[k]) * p[k];
+      amax = std::max(amax, std::abs((int)p[k]));
+    }
+    const double rms = std::sqrt(s / (got * 2));
+    if (getenv("HOUDINI_CL_RX_DEBUG") != nullptr) {
+      static std::atomic<int> cnt{0};
+      if ((cnt.fetch_add(1) % 40) == 0)
+        MLPD_INFO("Houdini client RX dbg: got=%d rms=%.2f absmax=%d\n", got,
+                  rms, amax);
+    }
+    // Dump the first strong (beacon-present) window for offline correlation.
+    if (getenv("HOUDINI_DUMP_WIN") != nullptr && rms > 100.0) {
+      static std::atomic<bool> done{false};
+      bool expected = false;
+      if (done.compare_exchange_strong(expected, true)) {
+        FILE* f = std::fopen("/tmp/cl_win.bin", "wb");
+        if (f) {
+          std::fwrite(p, sizeof(int16_t), static_cast<size_t>(got) * 2, f);
+          std::fclose(f);
+          MLPD_INFO("Dumped client beacon window rms=%.1f got=%d -> /tmp/cl_win.bin\n",
+                    rms, got);
+        }
+      }
+    }
+  }
+  return got;
+}
+
 int Radio::recv(void* const* buffs, int samples, long long& frameTime) {
+  if (houdini_) return recvHoudini(buffs, samples, frameTime);
   int flags(0);
   int r = dev_->readStream(rxs_, buffs, samples, flags, frameTime, 1000000);
   if (r < 0) {

@@ -1,0 +1,234 @@
+#!/usr/bin/env python3
+"""
+beacon_pss.py -- PSS/SSS-style narrowband beacon over the .21 DAC_A -> .22 ADC_C
+comb tooth, detected 5G-UE style (DDC -> decimate -> ZC matched filter).
+
+The cross-board channel couples only in a ~2-3 MHz standing-wave tooth at RF
+~840 MHz, so a full-band beacon is hopeless.  Instead -- exactly like a 5G SSB --
+we put a length-127 Zadoff-Chu sequence on 127 contiguous centre subcarriers
+(15 kHz SCS -> 1.9 MHz occupied), size it to sit inside the tooth, and detect it
+by downconverting the wideband 122.88 MSPS capture to the beacon band, decimating
+to 3.84 MHz, and matched-filtering against the 127-tap ZC.  Correlating at 3.84
+instead of 122.88 is ~32x less work -- the same reason a UE searches PSS at a low
+rate.
+
+Placement: TX at 30.72 MSPS, N=2048 IFFT (15 kHz SCS), ZC on subcarriers centred
+at baseband +10 MHz; DAC NCO 830 -> RF 840 (on the tooth).  RX at 122.88 MSPS,
+ADC NCO 388.8 -> the beacon lands near +20 MHz; the script measures the exact
+centre (kills inter-board CFO) before the DDC.
+
+Run on the DGX (after: source houdini_test/bin/activate):
+    python3 beacon_pss.py
+    python3 beacon_pss.py --no-tx      # control: no beacon -> should NOT detect
+"""
+import argparse
+import os
+import sys
+
+import numpy as np
+
+_EX = os.environ.get(
+    "HOUDINI_EXAMPLES",
+    os.path.expanduser("~/repos/SoapyHoudiniSDR/host/examples"))
+if _EX not in sys.path:
+    sys.path.insert(0, _EX)
+
+import SoapySDR  # noqa: E402
+from SoapySDR import SOAPY_SDR_RX, SOAPY_SDR_TX  # noqa: E402
+import houdini_setup as hs  # noqa: E402
+
+ZC_U = 25          # Zadoff-Chu root (gcd(25,63)=1 -> CAZAC; 5G PSS uses 25/29/34)
+N_SC = 63          # occupied subcarriers: the 4096-sample TX replay BRAM caps N at
+                   # 4096, so @122.88 SCS=30 kHz and 127 SC would be 3.8 MHz (too
+                   # wide for the ~2 MHz tooth); 63 SC = 1.89 MHz fits.
+SCS_HZ = 30e3      # subcarrier spacing (= 122.88 MSPS / 4096)
+
+
+def zc(u, n):
+    """Length-n Zadoff-Chu (n odd)."""
+    k = np.arange(n)
+    return np.exp(-1j * np.pi * u * k * (k + 1) / n)
+
+
+def beacon_symbol(n_fft, center_hz, rate_hz, n_sc, u=ZC_U):
+    """n_sc-length ZC on the centre subcarriers of an n_fft IFFT, centred at
+    center_hz. Returns the n_fft-sample complex time-domain symbol."""
+    seq = zc(u, n_sc)
+    X = np.zeros(n_fft, dtype=complex)
+    c = int(round(center_hz / (rate_hz / n_fft)))          # centre bin
+    idx = (np.arange(n_sc) - (n_sc // 2) + c) % n_fft       # wrapped SC indices
+    X[idx] = seq
+    x = np.fft.ifft(X) * n_fft
+    return x
+
+
+def lowpass(ntaps, fc):
+    """Windowed-sinc LPF; fc = cutoff as a fraction of Nyquist (fs/2)."""
+    n = np.arange(ntaps) - (ntaps - 1) / 2.0
+    h = fc * np.sinc(fc * n) * np.hamming(ntaps)
+    return (h / h.sum()).astype(np.float64)
+
+
+def to_complex(lanes):
+    try:
+        return np.asarray(hs.iq_from_lanes(lanes, "interleaved"), dtype=np.complex64)
+    except Exception:  # noqa: BLE001
+        L = lanes.astype(np.float32)
+        q = L[:, 1] if lanes.shape[1] < 3 else L[:, 2]
+        return (L[:, 0] + 1j * q).astype(np.complex64)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--tx-ip", default="168.6.244.21")
+    ap.add_argument("--rx-ip", default="168.6.244.22")
+    ap.add_argument("--tx-ch", type=int, default=1, help="DAC_A = TX ch1 (RFSoC4x2 reversed)")
+    ap.add_argument("--rx-ch", type=int, default=1, help="cable lands on .22 RX ch1")
+    ap.add_argument("--dac-nco", type=float, default=500.0, help="matched fine NCO (MHz, Zone 1)")
+    ap.add_argument("--adc-nco", type=float, default=500.0, help="matched fine NCO (MHz, Zone 1)")
+    ap.add_argument("--tx-rate", type=float, default=122.88, help="TX MSPS (=RX; TX min is 122.88)")
+    ap.add_argument("--rx-rate", type=float, default=122.88, help="RX MSPS")
+    ap.add_argument("--n-fft", type=int, default=4096, help="TX IFFT size (=TX replay BRAM depth)")
+    ap.add_argument("--tx-center", type=float, default=20.0,
+                    help="beacon centre in TX baseband (MHz); DAC_NCO+this = RF")
+    ap.add_argument("--rx-search", type=float, default=20.0,
+                    help="approx RX baseband centre to search (MHz)")
+    ap.add_argument("--decim", type=int, default=8, help="RX decimation (122.88->15.36)")
+    ap.add_argument("--n-sc", type=int, default=63,
+                    help="occupied subcarriers (ZC length); longer = sharper timing peak")
+    ap.add_argument("--overdrive", type=float, default=1.0,
+                    help="envelope clip factor to cut OFDM PAPR (1.0=clean, no clip)")
+    ap.add_argument("--fold-max", type=int, default=300,
+                    help="max periods to fold (cap for inter-board clock drift; 0=all)")
+    ap.add_argument("--amp", type=float, default=0.9)
+    ap.add_argument("--secs", type=float, default=0.3)
+    ap.add_argument("--cap-mb", type=float, default=16.0)
+    ap.add_argument("--no-tx", action="store_true")
+    a = ap.parse_args()
+
+    rf = a.dac_nco + a.tx_center
+    print(f"TX {a.tx_ip} ch{a.tx_ch} (DAC_A) -> RX {a.rx_ip} ch{a.rx_ch} (ADC_C)")
+    print(f"beacon: ZC-{a.n_sc} u={ZC_U}, "
+          f"TX {a.tx_rate} MSPS N={a.n_fft} centre +{a.tx_center} MHz, "
+          f"DAC NCO {a.dac_nco} -> RF {rf:.1f} MHz (tooth), ADC NCO {a.adc_nco}")
+
+    tx_ctx = hs.open_device(node=a.tx_ip, ch=a.tx_ch, verbose=False)
+    rx_ctx = (tx_ctx if a.rx_ip == a.tx_ip           # single-board loopback: 1 handle
+              else hs.open_device(node=a.rx_ip, ch=a.rx_ch, verbose=False))
+    txd, rxd = tx_ctx["sdr"], rx_ctx["sdr"]
+    native, dtype = rx_ctx["native_fmt"], rx_ctx["dtype"]
+    # The TX REPLAY BRAM clocks at the DAC effective rate, NOT the host stream rate
+    # (the working CW test fed tx_iq_tone dac_rate=983.04) -> generate at that rate.
+    dac_rate = float(dict(txd.getChannelInfo(SOAPY_SDR_TX, a.tx_ch)).get(
+        "rfdc_effective_rate_hz", 983.04e6))
+    scs = dac_rate / a.n_fft
+    print(f"  replay rate {dac_rate/1e6:.2f} MSPS -> SCS {scs/1e3:.0f} kHz, "
+          f"occupied {a.n_sc*scs/1e6:.2f} MHz")
+
+    tx = None
+    try:
+        if not a.no_tx:
+            sym = beacon_symbol(a.n_fft, a.tx_center * 1e6, dac_rate, a.n_sc)
+            sym = sym / np.max(np.abs(sym))
+            if a.overdrive > 1.0:                    # clip envelope to cut PAPR
+                sym = sym * a.overdrive
+                m = np.abs(sym); hi = m > 1.0
+                sym[hi] = sym[hi] / m[hi]
+            sym = sym * a.amp
+            iq_i16 = np.zeros(2 * a.n_fft, dtype=np.int16)
+            iq_i16[0::2] = np.round(np.real(sym) * 32767).astype(np.int16)
+            iq_i16[1::2] = np.round(np.imag(sym) * 32767).astype(np.int16)
+            tx = txd.setupStream(SOAPY_SDR_TX, "CS16", [a.tx_ch], {"tx_mode": "replay"})
+            txd.setFrequency(SOAPY_SDR_TX, a.tx_ch, a.dac_nco * 1e6)
+            cs16 = np.ascontiguousarray(iq_i16, dtype=np.int16).view(np.int32)
+            txd.writeStream(tx, [cs16], cs16.size, 0, 0)
+            txd.activateStream(tx)
+
+        rxd.setSampleRate(SOAPY_SDR_RX, a.rx_ch, a.rx_rate * 1e6)
+        rxd.setFrequency(SOAPY_SDR_RX, a.rx_ch, a.adc_nco * 1e6)
+        fs = float(rxd.getSampleRate(SOAPY_SDR_RX, a.rx_ch))
+        print(f"RX {fs/1e6:.3f} MSPS -- capturing {a.secs}s ...")
+        buf, summ = hs.capture_rx(rxd, a.rx_ch, native, dtype, duration_sec=a.secs,
+                                  capture_bytes=int(a.cap_mb * 1024 * 1024))
+    finally:
+        if tx is not None:
+            try:
+                txd.deactivateStream(tx)
+                txd.closeStream(tx)
+            except Exception:  # noqa: BLE001
+                pass
+
+    iq = to_complex(hs.cs16_lanes(buf)).astype(np.complex128)
+    print(f"captured {len(iq)} samples  overflows={summ.get('overflows')}")
+
+    # 1) find the beacon centre in RX baseband (kills inter-board CFO/placement error)
+    seg = iq[:1 << 20] if len(iq) > (1 << 20) else iq
+    P = np.abs(np.fft.fftshift(np.fft.fft(seg * np.hanning(len(seg))))) ** 2
+    f = np.fft.fftshift(np.fft.fftfreq(len(seg), 1.0 / fs))
+    P = np.maximum(P - np.median(P), 0.0)
+    s = abs(a.rx_search) * 1e6                          # beacon lands at +/-rx_search
+    bp = (f > s - 3e6) & (f < s + 3e6)                  # (sign = R2C mixer convention)
+    bn = (f > -s - 3e6) & (f < -s + 3e6)
+    band = bp if float(np.sum(P[bp])) >= float(np.sum(P[bn])) else bn
+    f0 = float(np.sum(f[band] * P[band]) / (np.sum(P[band]) + 1e-30))
+    occ = float(np.sum(P[band]))                       # beacon band energy
+    ref = float(np.sum(P[(f > 40e6) & (f < 46e6)]) + 1e-30)  # empty-band ref
+    print(f"beacon centre f0 = {f0/1e6:+.4f} MHz  (band/empty energy ratio "
+          f"{10*np.log10(occ/ref):.1f} dB)")
+
+    # 2) DDC to baseband, LPF + decimate to 3.84 MHz (5G-UE narrowband search)
+    n = np.arange(len(iq))
+    ddc = iq * np.exp(-2j * np.pi * f0 * n / fs)
+    h = lowpass(32 * 8 + 1, 1.0 / a.decim)
+    dec = np.convolve(ddc, h, mode="same")[::a.decim]
+    fs_d = fs / a.decim
+    n_sym = int(round(a.n_fft * fs_d / dac_rate))   # replay period at fs_d
+    print(f"decimated to {fs_d/1e6:.3f} MSPS ({len(dec)} samples), "
+          f"symbol = {n_sym} samples")
+
+    # 3) matched filter against the ZC symbol at the decimated rate
+    match = beacon_symbol(n_sym, 0.0, fs_d, a.n_sc)
+    match = match / (np.sqrt(np.sum(np.abs(match) ** 2)) + 1e-30)
+    # the R2C mixer may deliver the beacon conjugated (it lands at -f) -> try both
+    # senses and keep the stronger correlation.
+    c0 = np.abs(np.correlate(dec, match, mode="valid"))
+    c1 = np.abs(np.correlate(dec, np.conj(match), mode="valid"))
+    corr = c0 if c0.max() >= c1.max() else c1
+    floor = float(np.median(corr))
+    pk = int(np.argmax(corr))
+    peak_snr = 20.0 * np.log10(corr[pk] / (floor + 1e-30))
+    print(f"\nmatched-filter peak: idx {pk}  |corr| {corr[pk]:.2e}  "
+          f"SNR {peak_snr:.1f} dB over median")
+
+    # 4) fold the matched-filter power at the loop period and integrate. The beacon
+    #    recurs every n_sym samples, so averaging |corr|^2 over the ~thousands of
+    #    replay periods holds the beacon phase steady while the noise variance
+    #    collapses (~1/sqrt(nfold)) -- the beacon phase then stands out cleanly
+    #    among only n_sym stable bins. This is how a UE integrates the periodic SSB.
+    nfold = len(corr) // n_sym
+    if a.fold_max and nfold > a.fold_max:      # cap: inter-board clock drift walks
+        nfold = a.fold_max                     # the beacon phase, smearing a long fold
+    prof = (corr[:nfold * n_sym].reshape(nfold, n_sym) ** 2).mean(axis=0)
+    ph = int(np.argmax(prof))
+    mask = np.ones(n_sym, dtype=bool)
+    mask[max(0, ph - 1):ph + 2] = False            # exclude the peak + neighbours
+    mu, sd = float(prof[mask].mean()), float(prof[mask].std())
+    z = (prof[ph] - mu) / (sd + 1e-30)             # detection statistic (sigmas)
+    fold_db = 10.0 * np.log10(prof[ph] / (mu + 1e-30))
+    band_db = 10.0 * np.log10(occ / ref)
+    print(f"folded over {nfold} periods: peak phase {ph}/{n_sym}, "
+          f"{fold_db:.1f} dB over floor, z = {z:.1f} sigma  (band {band_db:.1f} dB)")
+
+    detected = (not a.no_tx) and z >= 8.0
+    print("\nRESULT:",
+          f"BEACON DETECTED @ phase {ph}/{n_sym}  (folded z={z:.1f} sigma over "
+          f"{nfold} periods, single-shot peak {peak_snr:.1f} dB) -- "
+          ".21 DAC_A -> .22 ADC_C PSS link OK"
+          if detected else
+          f"no beacon (folded z={z:.1f}, single-shot {peak_snr:.1f} dB)"
+          + ("" if a.no_tx else " -- raise --overdrive / tune --tx-center on the tooth"))
+    return 0 if detected else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

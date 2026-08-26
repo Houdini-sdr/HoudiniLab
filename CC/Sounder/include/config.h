@@ -49,6 +49,29 @@ class Config {
   inline size_t guard_mult(void) const { return this->guard_mult_; }
   inline bool bs_hw_framer(void) const { return this->bs_hw_framer_; }
   inline bool hw_framer(void) const { return this->hw_framer_; }
+  // Radio backend selector within the SoapySDR (non-UHD) path: "iris" (default)
+  // drives the Iris HW correlator/TDD; "houdini" drives the Houdini RFSoC over
+  // SoapyHoudiniSDR with software beacon sync (find_beacon). See ClientRadioSet.
+  inline const std::string& radio_type(void) const { return this->radio_type_; }
+  inline bool is_houdini(void) const { return this->radio_type_ == "houdini"; }
+  inline const std::string& remote_port(void) const {
+    return this->remote_port_;
+  }
+  // Houdini closed loop: the UE fires its pilot via the native TDD replay strobe
+  // (3.125 us grid) so it lands in the BS native-TDD rx_gate window. The extra
+  // fine advance (ticks) is calibrated so the beacon-referenced pilot centers in
+  // the gate; the beacon carries the BS frame timing (no shared clock).
+  inline bool ue_tdd_pilot(void) const { return this->ue_tdd_pilot_; }
+  inline long long ue_tx_advance_ticks(void) const {
+    return this->ue_tx_advance_ticks_;
+  }
+  // Houdini pilot-only closed loop: emit the UE pilot on every frame across this
+  // many frames ahead of real time. The BS/UE loops are async and slower than
+  // real time, so a single once-per-loop pilot rarely lands in the frame the BS
+  // arms its rx_gate on; a continuous per-frame pilot (boards frequency-locked =>
+  // stable offset) is caught on every BS window. Must exceed the UE loop period
+  // in frames or coverage gaps appear (0 = off = legacy single pilot).
+  inline int ue_pilot_horizon(void) const { return this->ue_pilot_horizon_; }
   inline int prefix(void) const { return this->prefix_; }
   inline int postfix(void) const { return this->postfix_; }
   inline int beacon_size(void) const { return this->beacon_size_; }
@@ -143,6 +166,14 @@ class Config {
   inline std::vector<std::complex<int16_t>>& pilot_ci16(void) {
     return this->pilot_ci16_;
   }
+  // Self-contained UE uplink-data slot for viewing mode (random modulated symbols
+  // on the data subcarriers, one OFDM symbol repeated across the slot) + its
+  // modulation order (2/4/6 = QPSK/16/64-QAM). Transmitted continuously in the U
+  // slot; the BS equalizes it with the pilot CSI to show the constellation.
+  inline std::vector<std::complex<int16_t>>& ue_data_ci16(void) {
+    return this->ue_data_ci16_;
+  }
+  inline int ue_data_mod_order(void) const { return this->ue_data_mod_order_; }
   inline std::vector<size_t>& n_bs_sdrs(void) { return this->n_bs_sdrs_; }
 
   inline const std::vector<std::string>& cl_frames(void) const {
@@ -357,6 +388,11 @@ class Config {
   std::string frame_mode_;
   bool bs_hw_framer_;
   bool hw_framer_;
+  std::string radio_type_;
+  std::string remote_port_;
+  bool ue_tdd_pilot_ = false;
+  long long ue_tx_advance_ticks_ = 0;
+  int ue_pilot_horizon_ = 0;
   size_t max_frame_;
   size_t ul_data_frame_num_;
   size_t dl_data_frame_num_;
@@ -396,6 +432,9 @@ class Config {
   std::vector<size_t> data_ind_;
   std::vector<uint32_t> coeffs_;
   std::vector<std::complex<int16_t>> pilot_ci16_;
+  std::vector<std::complex<int16_t>> ue_data_ci16_;  // viewing-mode UE UL data slot
+  std::vector<std::complex<float>> ue_data_f_;  // its freq-domain ref (ul_data_f_*.bin)
+  int ue_data_mod_order_ = 2;                        // QPSK by default
   std::vector<uint32_t> pilot_;
   std::vector<std::complex<float>> pilot_sc_;
   std::vector<size_t> pilot_sc_ind_;

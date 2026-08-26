@@ -145,7 +145,10 @@ void Scheduler::do_it() {
         kRecvCore + cfg_->bs_rx_thread_num());
   }
 
-  if (cfg_->reader_thread_num() > 0) {
+  // The Hdf5Reader feeds the file-based UL/DL data path. Houdini generates its
+  // uplink-data slot in-process (Config::ue_data_ci16_, sent by clientTxPilots),
+  // so skip the reader -- it would fopen non-existent data files.
+  if (cfg_->reader_thread_num() > 0 && !cfg_->is_houdini()) {
     int reader_thread_index = 0;
     this->readers_.resize(2);
     if (cfg_->dl_slot_per_frame() > 0 && cfg_->bs_present()) {
@@ -225,8 +228,8 @@ void Scheduler::do_it() {
 
       // if kEventRxSymbol, dispatch to proper worker
       if (event.event_type == kEventRxSymbol) {
-        if (cfg_->internal_measurement() == false &&
-            event.slot_id == 0) {  // Beacon event, schedule read
+        if (cfg_->internal_measurement() == false && event.slot_id == 0 &&
+            !cfg_->is_houdini()) {  // Beacon event, schedule file read (not Houdini)
           Event_data do_read_task;
           do_read_task.event_type = kTaskRead;
           do_read_task.ant_id = event.ant_id;

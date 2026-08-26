@@ -229,6 +229,24 @@ herr_t Hdf5Lib::writeDataset(std::string dataset_name,
   return ret;
 }
 
+// One-shot 2-D int64 table (num_cols per row), created + fully written. Used for the
+// /Data/Gaps sample-gap table (ported from arc/rx-recorder). Non-extendable.
+void Hdf5Lib::writeTableInt64(const std::string& dataset_name, size_t num_cols,
+                              const std::vector<int64_t>& row_major_data) {
+  if (num_cols == 0) {
+    return;
+  }
+  const std::string ds_name("/" + this->group_name_ + "/" + dataset_name);
+  const hsize_t dims[2] = {row_major_data.size() / num_cols, num_cols};
+  H5::DataSpace space(2, dims);
+  H5::DataSet ds =
+      this->file_->createDataSet(ds_name, H5::PredType::STD_I64LE, space);
+  if (row_major_data.empty() == false) {
+    ds.write(row_major_data.data(), H5::PredType::NATIVE_INT64);
+  }
+  ds.close();
+}
+
 std::vector<short> Hdf5Lib::readDataset(
     std::string dataset_name, std::array<hsize_t, kDsDimsNum> target_id,
     std::array<hsize_t, kDsDimsNum> read_dim) {

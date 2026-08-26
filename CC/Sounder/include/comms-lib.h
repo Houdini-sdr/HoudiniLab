@@ -133,6 +133,12 @@ class CommsLib {
       const std::complex<int16_t>* raw_samples,
       const std::vector<std::complex<float>>& match_samples,
       size_t check_window, float corr_scale);
+  // GPU beacon detector (find_beacon_cuda.cu), defined only when built with
+  // -DUSE_CUDA (CMake HOUDINI_USE_CUDA). Same peak index as find_beacon_avx.
+  static ssize_t find_beacon_cuda(
+      const std::complex<int16_t>* raw_samples,
+      const std::vector<std::complex<float>>& match_samples,
+      size_t check_window, float corr_scale);
 
   static std::vector<float> correlate_avx_s(std::vector<float> const& f,
                                             std::vector<float> const& g);
@@ -153,12 +159,23 @@ class CommsLib {
   static std::vector<std::complex<int16_t>> correlate_avx(
       std::vector<std::complex<int16_t>> const& f,
       std::vector<std::complex<int16_t>> const& g);
+  // Portable + multi-threaded matched filter (see comms-lib-portable.cc),
+  // equivalent to the float correlate_avx. Compiles and auto-vectorizes on both
+  // x86 and aarch64. num_threads=0 => auto (env SOUNDER_CORR_THREADS, else 1).
+  static std::vector<std::complex<float>> correlate_mt(
+      const std::vector<std::complex<float>>& f,
+      const std::vector<std::complex<float>>& g, unsigned num_threads = 0);
   static std::vector<std::complex<float>> complex_mult_avx(
       std::vector<std::complex<float>> const& f,
       std::vector<std::complex<float>> const& g, const bool conj);
   static std::vector<std::complex<int16_t>> complex_mult_avx(
       std::vector<std::complex<int16_t>> const& f,
       std::vector<std::complex<int16_t>> const& g, const bool conj);
+  // Portable element-wise complex multiply (see comms-lib-portable.cc),
+  // equivalent to the float complex_mult_avx. Builds on x86 and aarch64.
+  static std::vector<std::complex<float>> complex_mult(
+      const std::vector<std::complex<float>>& f,
+      const std::vector<std::complex<float>>& g, bool conj);
   //private:
   //    static inline float** init_qpsk();
   //    static inline float** init_qam16();

@@ -14,6 +14,9 @@
 #include <atomic>
 #include <chrono>
 #include <climits>
+#include <algorithm>
+#include <cmath>
+#include <cstdlib>
 #include <random>
 
 #include "SoapySDR/Time.hpp"
@@ -133,6 +136,12 @@ void Receiver::initBuffers() {
     pilotbuffB_.at(1) = config_->pilot_ci16().data();
     pilotbuffB_.at(0) = zeros_.at(1);
   }
+  // Viewing-mode UE uplink-data slot buffer (ch A). Transmitted continuously in
+  // the U slot alongside the pilot so the BS can equalize it and show the
+  // constellation. Empty (0-length data()) when the config has no data slot.
+  ue_databuffA_.resize(2);
+  ue_databuffA_.at(0) = config_->ue_data_ci16().data();
+  ue_databuffA_.at(1) = zeros_.at(0);
 }
 
 std::vector<pthread_t> Receiver::startClientThreads(SampleBuffer* rx_buffer,
@@ -736,6 +745,53 @@ void Receiver::clientTxPilots(size_t user_id, long long base_time) {
   long long txTime = base_time +
                      config_->cl_pilot_slots().at(user_id).at(0) * num_samps -
                      config_->tx_advance(user_id);
+  // Houdini pilot-only closed loop: the BS and UE loops are async and slower than
+  // real-time (recvHoudini drains before it reads), so a single once-per-loop timed
+  // pilot rarely lands in the frame the BS happens to arm its rx_gate on. With the
+  // boards frequency-locked (CFO ~0, no drift) the pilot offset is stable, so emit
+  // it on EVERY frame across a horizon ahead of real time -- then whichever frame
+  // the BS listens on, a pilot is there. A per-thread cursor keeps the schedule
+  // continuous and non-overlapping (each client tid runs this on one thread).
+  // Viewing mode also sends an uplink DATA slot (U) each frame so the BS can
+  // equalize it and render the constellation. It rides the same continuous burst,
+  // offset from the pilot by (U_slot - P_slot) slots.
+  const bool ul_present = !config_->cl_ul_slots().at(user_id).empty() &&
+                          config_->ue_data_ci16().size() >= (size_t)num_samps;
+  const long long ul_off =
+      ul_present ? (static_cast<long long>(config_->cl_ul_slots().at(user_id).at(0)) -
+                    static_cast<long long>(config_->cl_pilot_slots().at(user_id).at(0))) *
+                       num_samps
+                 : 0;
+  const char* he = std::getenv("HOUDINI_PILOT_HORIZON");
+  const int horizon = he != nullptr ? std::atoi(he) : config_->ue_pilot_horizon();
+  if (horizon > 0 && config_->is_houdini() && config_->cl_sdr_ch() == 1) {
+    const long long frame = static_cast<long long>(config_->samps_per_frame());
+    thread_local long long pilot_cursor = 0;  // last-scheduled txTime (samples)
+    const long long end = txTime + static_cast<long long>(horizon) * frame;
+    long long cur = std::max(pilot_cursor + frame, txTime);
+    int nsched = 0;
+    for (; cur <= end; cur += frame) {
+      long long tt = cur;  // radioTx adds advance + grid-snaps a copy
+      const int rr = client_radio_set_->radioTx(user_id, pilotbuffA_.data(),
+                                                 num_samps, flags, tt);
+      if (rr < num_samps) {
+        MLPD_WARN("BAD Write (burst @%lld): %d/%d\n", cur, rr, num_samps);
+        break;
+      }
+      if (ul_present) {  // uplink data slot in the same frame
+        long long ut = cur + ul_off;
+        client_radio_set_->radioTx(user_id, ue_databuffA_.data(), num_samps, flags,
+                                   ut);
+      }
+      pilot_cursor = cur;
+      ++nsched;
+    }
+    if (std::getenv("HOUDINI_UE_TX_DEBUG") != nullptr && nsched > 0) {
+      MLPD_INFO("UE pilot burst: scheduled %d frames up to %lld\n", nsched,
+                pilot_cursor);
+    }
+    return;
+  }
   int r;
   r = client_radio_set_->radioTx(user_id, pilotbuffA_.data(), num_samps, flags,
                                  txTime);
@@ -810,12 +866,23 @@ ssize_t Receiver::syncSearch(const std::complex<int16_t>* check_data,
                              size_t search_window, float corr_scale) {
   ssize_t sync_index(-1);
   assert(search_window <= config_->samps_per_frame());
-#if defined(__x86_64__)
+#if defined(USE_CUDA)
+  const char* kPath = "cuda";
+  sync_index = CommsLib::find_beacon_cuda(check_data, config_->gold_cf32(),
+                                          search_window, corr_scale);
+#else
+  // portable find_beacon_avx works on x86 and aarch64 (see comms-lib-portable.cc)
+  const char* kPath = "avx";
   sync_index = CommsLib::find_beacon_avx(check_data, config_->gold_cf32(),
                                          search_window, corr_scale);
-#else
-  sync_index = CommsLib::find_beacon(check_data, search_window);
 #endif
+  if (std::getenv("HOUDINI_SYNC_DEBUG") != nullptr) {
+    static std::atomic<int> c{0};
+    if ((c.fetch_add(1) % 20) == 0)
+      MLPD_INFO("syncSearch[%s]: window=%zu corr_scale=%.3f gold=%zu -> idx=%ld\n",
+                kPath, search_window, corr_scale, config_->gold_cf32().size(),
+                sync_index);
+  }
   return sync_index;
 }
 
@@ -836,7 +903,7 @@ float Receiver::estimateCFO(const std::vector<std::complex<int16_t>>& sync_buff,
         std::complex<float>(sync_buff[beacon1_id].real() / SHRT_MAX,
                             sync_buff[beacon1_id].imag() / SHRT_MAX);
   }
-  const auto cfo_mult = CommsLib::complex_mult_avx(beacon1, beacon0, true);
+  const auto cfo_mult = CommsLib::complex_mult(beacon1, beacon0, true);
   float phase = 0.0f;
   float prev_phase = 0.0f;
   for (size_t i = 0; i < cfo_mult.size(); i++) {
@@ -982,6 +1049,18 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   //Always decreases the requested rx samples
   size_t beacon_adjust = 0;
 
+  // Houdini: recvHoudini drains the FIFO then reads, so the per-frame RX read
+  // timestamp (rx_beacon_time) is real-time accurate but at an ARBITRARY frame
+  // phase -- the pilot TX time (rx_beacon_time + txTimeDelta) then jitters across
+  // the whole frame and never seats in the BS rx_gate. With the boards
+  // frequency-locked (shared 10 MHz ref, CFO ~1 ppm) the frame period IS exactly
+  // samps_per_frame, so we ANCHOR a beacon-locked frame start on each successful
+  // (re)sync and, at pilot TX, SNAP the current read timestamp to that grid
+  // (anchor + k*frame) -- see the clientTxPilots call below. (Iris keeps the raw
+  // per-frame read timestamp -- its HW framer delivers frame-locked reads.)
+  long long houdini_pilot_ref = 0;
+  bool houdini_pilot_ref_valid = false;
+
   while (config_->running() == true) {
     if (config_->max_frame() > 0 && frame_id >= config_->max_frame()) {
       config_->running(false);
@@ -997,8 +1076,9 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
       config_->running(false);
       break;
     }
-    if (config_->ul_data_slot_present() == true) {
-      // Notify new frame
+    if (config_->ul_data_slot_present() == true && !config_->is_houdini()) {
+      // Notify new frame (file-based UL data path; Houdini uses the self-contained
+      // continuous P+U burst in clientTxPilots instead).
       this->notifyPacket(kClient, frame_id + this->txFrameDelta_, 0, tid,
                          tx_buffer_size);
     }
@@ -1018,6 +1098,17 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
             sync_index - (config_->beacon_size() + config_->prefix());
         //Adjust tx time
         rx_beacon_time += new_rx_offset;
+        // Anchor the Houdini pilot reference ONCE, to the first beacon-locked frame
+        // start (read_ts + sync_index - beacon_size - prefix). The dense beacon fills
+        // the whole beacon symbol (slots 0..14), so a later resync can lock to a
+        // DIFFERENT beacon copy (4096 apart) -- re-anchoring would jump the pilot by
+        // whole slots. Anchor once and keep it: with frequency-locked boards the
+        // residual drift is ~0.14 samp/frame (< a slot over a run), and the per-frame
+        // grid-snap below tracks real time.
+        if (config_->is_houdini() && !houdini_pilot_ref_valid) {
+          houdini_pilot_ref = rx_beacon_time;
+          houdini_pilot_ref_valid = true;
+        }
         resync = false;
         resync_retry_cnt = 0;
         resync_success++;
@@ -1058,14 +1149,31 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
     }
     // schedule all TX slot
     // config_->tx_advance() needs calibration based on SDR model and sampling rate
-    if (config_->ul_data_slot_present() == true) {
+    // Houdini always uses the continuous P(+U) burst below (clientTxPilots now
+    // transmits the uplink-data slot too); the file-based clientTxData path is for
+    // Iris/UHD.
+    if (config_->ul_data_slot_present() == true && !config_->is_houdini()) {
       int tx_return = 0;
       while (tx_return >= 0) {
         tx_return = this->clientTxData(tid, frame_id, rx_beacon_time);
       }
     } else {
       if (config_->cl_pilot_slots().at(tid).size() > 0) {
-        this->clientTxPilots(tid, rx_beacon_time + txTimeDelta_);
+        // Houdini: the per-frame read timestamp (rx_beacon_time) is real-time
+        // accurate but at an ARBITRARY frame phase (recvHoudini drains then reads),
+        // so SNAP it to the beacon-locked frame grid (anchor + k*frame) -- keeps
+        // real-time tracking (the loop rate != real-time because of the drain) AND
+        // a constant frame phase, so the pilot lands at the same BS-frame position.
+        long long pilot_base = rx_beacon_time;
+        if (config_->is_houdini() && houdini_pilot_ref_valid) {
+          const long long frame =
+              static_cast<long long>(config_->samps_per_frame());
+          const long long k = std::llround(
+              static_cast<double>(rx_beacon_time - houdini_pilot_ref) /
+              static_cast<double>(frame));
+          pilot_base = houdini_pilot_ref + k * frame;
+        }
+        this->clientTxPilots(tid, pilot_base + txTimeDelta_);
       }
     }  // end if config_->ul_data_slot_present()
 
