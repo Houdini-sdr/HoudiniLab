@@ -382,10 +382,44 @@ adjusting for your path.
 ### 8.3 Channel estimate looks fine but the constellation is a smear
 
 Confirm you are running `houdini-ul.json`, since the other config has no
-uplink data slot to equalize. If you are, this is usually the FFT window
-sitting late and taking in interference. Try `HOUDINI_CSI_SYM_START` a few
-samples lower and watch the constellation tighten. Section 7 explains the
-asymmetry: early is recoverable, late is not.
+uplink data slot to equalize. If you are, work through the three causes below
+in order.
+
+**Cause 1: the FFT window is sitting late and taking in interference.** Try
+`HOUDINI_CSI_SYM_START` a few samples lower and watch the constellation
+tighten. Section 7 explains the asymmetry: early is recoverable, late is not.
+
+**Cause 2: dropped receive packets, which the live view cannot currently see.**
+This one matters most if the smear comes and goes rather than sitting there
+steadily, and if it appears live while recorded captures of the same link look
+fine. When a receive packet is lost, `Radio::recvHoudini` zero-pads the hole so
+the rest of the window keeps its true timing, and logs the extent. Recording
+mode writes those extents into the file's gap table, so offline analysis can
+see exactly which samples are untrusted. **Viewing mode has no equivalent.** It
+computes the channel estimate straight over the padded slot, with no indication
+that part of it is zeros.
+
+That has a tail. The estimate is cached per antenna and reused to equalize
+every following uplink data slot, so one damaged pilot smears frames until the
+next clean pilot replaces it. A single lost packet can therefore show up as a
+burst of smearing plus a phase jump, not a single bad frame.
+
+Recorded data looking clean while the live view does not is expected here, and
+is not evidence that the link is fine. The recording is not cleaner; it just
+carries the gap table that lets you find the damage.
+
+To check whether this is what you are seeing, record a capture over the same
+link and inspect its gap table. If gaps appear at roughly the rate the smearing
+appears, this is your cause. Tracked as AP-10.
+
+**Cause 3: a failed uplink data transmission at the client.** The constellation
+is built from the client's uplink data slot. Watch the sounder log for
+`BAD Write` and `unexpected writeStream error`. Note two blind spots. The
+uplink data burst does not check its own transmit return, so a short write on
+that slot specifically is silent, and no code polls the driver's asynchronous
+transmit status, so a burst that was accepted but sent late, or dropped for
+being late, is never reported. A late pilot on the fine timing grid produces
+exactly the phase jumps you would be chasing. Both are tracked as AP-10.
 
 ### 8.4 The sounder will not start, and discovery looks broken
 
