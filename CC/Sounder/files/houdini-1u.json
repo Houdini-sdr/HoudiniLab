@@ -1,5 +1,5 @@
 {
-    "_comment": "Houdini RFSoC single-UE client. Runs the unmodified receiver.cc client-sync path (clientSyncTxRx -> syncSearch -> find_beacon) on the Houdini radio via the ClientRadioSet houdini backend. Beacon is transmitted separately by beacon_tx_gold from the BS board. Matched-NCO Zone-1 loopback: TX ch1 -> RX ch1, NCO 500 MHz. slot=4096 samps -> detect window ~9544 > beacon. 30 slots x 4096 = 122880 samps = EXACTLY 1 ms per frame so the UE pilot TX time quantizes onto Houdini's whole-ms TX grid at a constant advance.",
+    "_comment": "Houdini RFSoC single-UE client. Runs the unmodified receiver.cc client-sync path (clientSyncTxRx -> syncSearch -> find_beacon) on the Houdini radio via the ClientRadioSet houdini backend. The BS beacon is armed by the sounder itself (BaseRadioSet::armHoudiniTdd when bs_hw_framer=true, armHoudiniBeacon otherwise); the standalone beacon_tx_gold helper is a pre-sounder test tool and is NOT used by this config. Run procedure: CSI_DEMO_WALKTHROUGH.md. Matched-NCO Zone-1 loopback: TX ch1 -> RX ch1, NCO 500 MHz. slot=4096 samps -> detect window ~9544 > beacon. 30 slots x 4096 = 122880 samps = EXACTLY 1 ms per frame so the UE pilot TX time quantizes onto Houdini's whole-ms TX grid at a constant advance.",
     "serial_file": "files/topology-houdini.json",
     "radio_type": "houdini",
     "remote_port": "55132",
