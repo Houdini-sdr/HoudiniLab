@@ -160,6 +160,20 @@ class Handler(BaseHTTPRequestHandler):
 
 
 # ---- sounder launcher ------------------------------------------------------
+def _topology_of(sounder_dir, conf):
+    """The topology file a config names, or None if it cannot be determined.
+
+    Falling back to None is fine: teardown_framer.py then uses its own default,
+    which is the same file every shipped config points at.
+    """
+    try:
+        path = conf if os.path.isabs(conf) else os.path.join(sounder_dir, conf)
+        with open(path, encoding="utf-8") as f:
+            return json.load(f).get("serial_file") or None
+    except (OSError, ValueError):
+        return None
+
+
 def _launch_sounder(args, udp_dest):
     """Run the sounder in viewing mode on this host (teardown + env + retries)."""
     env = os.environ.copy()
@@ -168,20 +182,27 @@ def _launch_sounder(args, udp_dest):
     if args.csi_fps:
         env["HOUDINI_CSI_FPS"] = str(args.csi_fps)
     sd = args.sounder_dir
+    # Tear down against the radios THIS run will use: the config names its own
+    # topology file, so a config pointed at a different bench tears down that
+    # bench rather than whatever the default topology happens to list.
+    topo = _topology_of(sd, args.conf)
+    td = 'csi_gui/teardown_framer.py' + (' --topology "%s"' % topo if topo else '')
     # A tiny shell wrapper: teardown any stuck framer, then run sounder --view,
-    # retrying the flaky cold-start. Mirrors the HIL test harness.
+    # retrying the flaky cold-start. Mirrors the HIL test harness. The teardown's
+    # output is kept (not sent to /dev/null): it exits non-zero when a radio could
+    # not be cleared, and that is usually the reason the sounder then fails.
     script = (
-        'source ~/houdini_test/bin/activate 2>/dev/null; '
-        'export LD_LIBRARY_PATH=$HOME/houdini_test/lib '
-        'SOAPY_SDR_PLUGIN_PATH=$HOME/houdini_test/lib/SoapySDR/modules0.8-3; '
+        'source "%s"/bin/activate 2>/dev/null; '
+        'export LD_LIBRARY_PATH="%s"/lib '
+        'SOAPY_SDR_PLUGIN_PATH="%s"/lib/SoapySDR/modules0.8-3; '
         'cd "%s"; '
         'for a in 1 2 3 4; do '
-        '  timeout 60 python3 /tmp/td.py >/dev/null 2>&1; sleep 8; '
+        '  timeout 60 python3 %s 2>&1 | sed -u "s/^/[teardown] /"; sleep 8; '
         '  ./build/sounder --view --conf_file "%s" --storepath "%s" 2>&1 | '
         '     sed -u "s/^/[sounder] /"; '
         '  echo "[sounder] exited, retrying..."; sleep 5; '
         'done'
-    ) % (sd, args.conf, args.storepath)
+    ) % (args.venv, args.venv, args.venv, sd, td, args.conf, args.storepath)
     print("[csi] launching sounder --view in %s" % sd, flush=True)
     return subprocess.Popen(["bash", "-lc", script], env=env,
                             preexec_fn=os.setsid)
@@ -198,6 +219,9 @@ def main():
     ap.add_argument("--launch", action="store_true",
                     help="also launch the sounder in viewing mode on this host")
     ap.add_argument("--sounder-dir", default=os.path.expanduser("~/repos/HoudiniLab/CC/Sounder"))
+    ap.add_argument("--venv", default=os.path.expanduser("~/houdini_test"),
+                    help="virtualenv prefix holding SoapySDR and the Houdini "
+                         "plugin, used when --launch runs the sounder")
     ap.add_argument("--conf", default="files/houdini-1u.json")
     ap.add_argument("--storepath", default="/tmp/houdini_hdf5")
     ap.add_argument("--max-frame", type=int, default=2_000_000_000,

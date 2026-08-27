@@ -109,6 +109,18 @@ If `SoapySDRUtil` is missing, or the module directory has no Houdini entry,
 stop here and complete the SoapyHoudiniSDR host install first. Nothing in this
 walkthrough can work without it.
 
+One more thing comes from that repository: the framer teardown in section 8.4
+imports `houdini_setup` from its host examples directory. The default location
+is `~/repos/SoapyHoudiniSDR/host/examples`. If you keep it somewhere else,
+export the path once:
+
+```sh
+export HOUDINI_EXAMPLES=<path-to-SoapyHoudiniSDR>/host/examples
+```
+
+This is the same environment variable the HIL tests under `tests/hil/` use for
+the same dependency.
+
 ### 2.5 Get and build the sounder
 
 Clone the repository and initialize the muFFT submodule. The build links muFFT
@@ -202,14 +214,16 @@ The backend sets the environment, starts `sounder --view`, and retries the cold
 start up to four times, which matters because radio discovery often fails on
 the first attempt.
 
-Two cautions about this path:
+Before each attempt it also runs `csi_gui/teardown_framer.py` to release a
+framer that a previous run may have left armed (section 8.4). You will see its
+output prefixed `[teardown]`, and the sounder's prefixed `[sounder]`.
 
-1. The launcher hardcodes the virtual environment as `~/houdini_test` and the
-   source directory as `~/repos/HoudiniLab/CC/Sounder`. If yours differ, pass
-   `--sounder-dir <path-to-HoudiniLab>/CC/Sounder` and use mode B, or edit
-   `_launch_sounder` in `csi_gui/csi_server.py`.
-2. The launcher calls `/tmp/td.py` before each attempt to tear down a stuck
-   framer. That script is not in this repository. See section 8.4.
+Two defaults assume one particular layout. If yours differs, override them:
+
+- `--sounder-dir <path-to-HoudiniLab>/CC/Sounder` if the repository is not at
+  `~/repos/HoudiniLab`.
+- `--venv <your-houdini-venv>` if the SoapySDR virtual environment is not at
+  `~/houdini_test`.
 
 ### 4.2 Mode B: run the two pieces yourself
 
@@ -373,18 +387,33 @@ sitting late and taking in interference. Try `HOUDINI_CSI_SYM_START` a few
 samples lower and watch the constellation tighten. Section 7 explains the
 asymmetry: early is recoverable, late is not.
 
-### 8.4 The teardown script `/tmp/td.py` is missing
+### 8.4 The sounder will not start, and discovery looks broken
 
-Known gap. The `--launch` path runs `timeout 60 python3 /tmp/td.py` before each
-attempt, to release a framer left armed by a previous run. That script is not
-in this repository and not shipped anywhere. If it is absent the command fails
-silently and the launcher continues, so `--launch` still works, but a genuinely
-stuck framer will not be cleared and the sounder will keep failing to start.
+A run that was killed rather than stopped can leave the base station framer
+armed and the transmit RAM loaded. The next run then fails to start, and it
+usually looks like a discovery or network problem rather than leftover state.
 
-Until it is vendored, tear down by hand using the helper this repository does
-ship. From `tests/hil/`, `beacon_tdd._teardown(sdr)` issues an abort, clears
-the transmit RAM, and releases the gate. Alternatively, restart the Houdini
-server on the affected board.
+Clear it:
+
+```sh
+cd <path-to-HoudiniLab>/CC/Sounder
+python3 csi_gui/teardown_framer.py
+```
+
+It reads the radio addresses from `files/topology-houdini.json`, opens each
+one, issues the framer abort, clears the transmit RAM, and releases the gate.
+Point it elsewhere with `--topology <file>`, or name radios directly with
+`--node <addr>` (repeatable).
+
+Read the exit status, not just the output. It is 0 only when every radio was
+cleared, and non-zero when one could not be opened or torn down, which is
+normally the actual reason the sounder then fails. `--launch` runs this for you
+before each attempt and prefixes its output `[teardown]`.
+
+This script opens a connection to each radio, so it is a device-touching
+operation. Do not run it against boards someone else is using.
+
+If it cannot import `houdini_setup`, set `HOUDINI_EXAMPLES` (section 2.4).
 
 ### 8.5 Client never finds the beacon
 
@@ -399,6 +428,11 @@ Press Ctrl+C in the backend terminal. In mode A it kills the whole sounder
 process group on the way out, so one Ctrl+C stops everything. In mode B stop
 the sounder in its own terminal as well.
 
-After any run that ended abnormally, confirm the base station framer is not
-left armed before starting again (section 8.4). A framer left armed is the most
-common reason the next run fails to start.
+After any run that ended abnormally, release the framer before starting again:
+
+```sh
+python3 csi_gui/teardown_framer.py
+```
+
+A framer left armed is the most common reason the next run fails to start, and
+the failure does not look like leftover state (section 8.4).
