@@ -611,6 +611,9 @@ int BaseRadioSet::houdiniTddRx(size_t radio_id, void* const* buffs,
   void* cb[1] = {htdd_cap_buf_.data()};
   long long ft = 0;
   const int cg = r->recv(cb, fn, ft);
+  // This one read backs every rx slot of the frame, so its padding applies to all of
+  // them; latch it before any later recv on this radio overwrites the radio's copy.
+  htdd_frame_pad_ = r->lastPadSamples();
   if (cg < n) return (cg < 0) ? cg : 0;
   const int16_t* s = htdd_cap_buf_.data();
   std::vector<double> cse(static_cast<size_t>(cg) + 1, 0.0);
@@ -979,6 +982,16 @@ void BaseRadioSet::radioRx(void* const* buffs) {
       bsRadios.at(c).at(i)->recv(buff, _cfg->samps_per_slot(), frameTime);
     }
   }
+}
+
+size_t BaseRadioSet::lastRxPadSamples(size_t radio_id, size_t cell_id) const {
+  // Native-TDD path: every slot of a frame is served from one cached read, so the
+  // frame-level count is the honest answer for each of them. Other paths read per
+  // slot, so the radio's own count is.
+  if (_cfg->is_houdini() && _cfg->bs_hw_framer()) return htdd_frame_pad_;
+  if (cell_id < bsRadios.size() && radio_id < bsRadios.at(cell_id).size())
+    return bsRadios.at(cell_id).at(radio_id)->lastPadSamples();
+  return 0;
 }
 
 int BaseRadioSet::radioRx(size_t radio_id, size_t cell_id, void* const* buffs,

@@ -43,6 +43,12 @@ class Radio {
   void activateXmit(void);
   void deactivateXmit(void);
   int getTriggers(void) const;
+  // Samples zero-padded into the window the LAST recv() filled (0 = clean). Valid
+  // until the next recv() on this radio. Lets a consumer tell a window that carries
+  // inserted zeros from one that is all real samples, which the CSI/view path needs
+  // and which the /Data/Gaps table alone cannot answer (it is drained only by the
+  // HDF5 writer, and viewing mode writes no file). See AP-10.
+  size_t lastPadSamples(void) const { return last_pad_samples_; }
   void drain_buffers(std::vector<void*> buffs, int symSamp);
 
   void reset_DATA_clk_domain(void);
@@ -62,6 +68,7 @@ class Radio {
   // for the recorder's /Data/Gaps table.
   double rx_rate_ = 0.0;        // cached RX sample rate for the grid tracker
   int64_t rx_sample_pos_ = 0;  // absolute samples emitted across recvHoudini calls
+  size_t last_pad_samples_ = 0;  // zeros inserted into the last window (lastPadSamples)
 };
 
 #endif  // RADIO_H_

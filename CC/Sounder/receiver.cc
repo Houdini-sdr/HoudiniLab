@@ -602,9 +602,13 @@ void Receiver::loopRecv(int tid, int core_id, SampleBuffer* rx_buffer) {
       }
 #endif
 
+      // Zeros the RX path inserted to cover a dropped packet. Carried on the packet
+      // so consumers that compute on the samples can refuse to trust them (AP-10).
+      const uint32_t rx_pad = static_cast<uint32_t>(
+          this->base_radio_set_->lastRxPadSamples(radio_id, cell));
       for (size_t ch = 0; ch < num_packets; ++ch) {
         // new (pkt[ch]) Packet(frame_id, slot_id, 0, ant_id + ch);
-        new (pkt[ch]) Packet(frame_id, slot_id, cell, ant_id + ch);
+        new (pkt[ch]) Packet(frame_id, slot_id, cell, ant_id + ch, rx_pad);
         // push kEventRxSymbol event into the queue
         this->notifyPacket(kBS, frame_id, slot_id, ant_id + ch,
                            buffer_chunk_size, cursor + tid * buffer_chunk_size);
@@ -780,8 +784,15 @@ void Receiver::clientTxPilots(size_t user_id, long long base_time) {
       }
       if (ul_present) {  // uplink data slot in the same frame
         long long ut = cur + ul_off;
-        client_radio_set_->radioTx(user_id, ue_databuffA_.data(), num_samps, flags,
-                                   ut);
+        // Checked like the pilot above: this is the slot the live constellation is
+        // built from, so a short write here shows up as a smear with no other
+        // symptom. Warn but keep going, since the pilot for this frame already went
+        // out and the next frame may well succeed (AP-10).
+        const int ur = client_radio_set_->radioTx(
+            user_id, ue_databuffA_.data(), num_samps, flags, ut);
+        if (ur < num_samps)
+          MLPD_WARN("BAD Write, UL data (burst @%lld): %d/%d\n", ut, ur,
+                    num_samps);
       }
       pilot_cursor = cur;
       ++nsched;

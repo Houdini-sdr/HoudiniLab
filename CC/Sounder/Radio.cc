@@ -238,6 +238,8 @@ int Radio::recvHoudini(void* const* buffs, int samples, long long& frameTime) {
   Sounder::TimeGridTracker grid(rx_rate_);
   std::vector<void*> cur(num_rx_ch_);
   int got = 0;
+  size_t padded = 0;  // zeros inserted into THIS window (see lastPadSamples)
+  last_pad_samples_ = 0;  // cleared up front so an early return can't leave a stale count
   while (got < samples) {
     for (size_t c = 0; c < num_rx_ch_; c++)
       cur[c] = static_cast<uint8_t*>(buffs[c]) +
@@ -270,12 +272,14 @@ int Radio::recvHoudini(void* const* buffs, int samples, long long& frameTime) {
       Sounder::RxGapSink::instance().push({rx_sample_pos_ + got,
                                            static_cast<int64_t>(pad),
                                            Sounder::kGapTimeJump});
+      padded += pad;
       got += static_cast<int>(pad + keep);
     } else {
       got += r;
     }
   }
   rx_sample_pos_ += got;
+  last_pad_samples_ = padded;
   if ((getenv("HOUDINI_CL_RX_DEBUG") != nullptr ||
        getenv("HOUDINI_DUMP_WIN") != nullptr) &&
       got > 0 && buffs[0] != nullptr) {
@@ -313,6 +317,9 @@ int Radio::recvHoudini(void* const* buffs, int samples, long long& frameTime) {
 
 int Radio::recv(void* const* buffs, int samples, long long& frameTime) {
   if (houdini_) return recvHoudini(buffs, samples, frameTime);
+  // Non-Houdini path has no gap detection, so it reports no padding rather than
+  // leaving a stale count from an earlier call visible to lastPadSamples().
+  last_pad_samples_ = 0;
   int flags(0);
   int r = dev_->readStream(rxs_, buffs, samples, flags, frameTime, 1000000);
   if (r < 0) {

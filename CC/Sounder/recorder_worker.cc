@@ -146,6 +146,27 @@ std::vector<std::complex<float>> RecorderWorker::symbolFft(const short* d,
 
 // Route a received slot: pilot -> CSI (+ cache H); uplink data -> constellation.
 void RecorderWorker::streamCsi(Packet* pkt, NodeType node_type) {
+  // A dropped RX packet is covered by inserted zeros so the window keeps its true
+  // timing. Those zeros are not signal: an FFT over them yields a wrong H, and since
+  // H is cached and reused to equalize later data slots, accepting one would smear
+  // the view until the next clean pilot. Recording mode can afford to keep the
+  // samples because it writes the extents to /Data/Gaps; viewing mode has no such
+  // record, so it drops the slot instead of rendering something untrue (AP-10).
+  if (pkt->rx_pad > 0) {
+    csi_slots_dropped_++;
+    const long long now =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count();
+    if (now - csi_drop_log_ns_ > 5000000000LL) {  // at most one line per 5 s
+      csi_drop_log_ns_ = now;
+      MLPD_WARN(
+          "CSI view: dropped %zu slot(s) with RX gaps (latest %u padded samples, "
+          "ant %u). The display is stale, not wrong; the link is losing packets.\n",
+          csi_slots_dropped_, pkt->rx_pad, pkt->ant_id);
+    }
+    return;
+  }
   const size_t num_channels = cfg_->bs_channel().size();
   const size_t radio_id = pkt->ant_id / num_channels;
   const bool is_pilot =

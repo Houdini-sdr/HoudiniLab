@@ -69,6 +69,10 @@ class RecorderWorker {
   bool csi_timing_fix_ = false;
   std::unordered_map<uint32_t, long long> csi_last_ns_;   // CSI (pilot) send timer
   std::unordered_map<uint32_t, long long> cns_last_ns_;   // constellation send timer
+  // Slots refused because the RX path had zero-padded a dropped-packet gap into them
+  // (AP-10), plus a throttle so the warning cannot flood a lossy run.
+  size_t csi_slots_dropped_ = 0;
+  long long csi_drop_log_ns_ = 0;
   // Latest channel estimate H[k] per antenna (DC-centered), cached from the pilot
   // slot and used to equalize that antenna's uplink-data (U) slot.
   std::unordered_map<uint32_t, std::vector<std::complex<float>>> csi_h_;
