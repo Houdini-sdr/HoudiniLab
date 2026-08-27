@@ -614,6 +614,15 @@ int BaseRadioSet::houdiniTddRx(size_t radio_id, void* const* buffs,
   // This one read backs every rx slot of the frame, so its padding applies to all of
   // them; latch it before any later recv on this radio overwrites the radio's copy.
   htdd_frame_pad_ = r->lastPadSamples();
+  if (cg < fn) {
+    // Short read: the frame is not fully covered. align_slot() clamps a slot start
+    // to cg, so any slot past the received data would be extracted from the tail
+    // and look perfectly valid downstream. Fold the shortfall into the frame's
+    // untrusted count so consumers refuse those slots instead of trusting them.
+    // With rx_gap_break on (the driver default) a short return is how a dropped
+    // packet surfaces, so this is the normal loss path, not an exotic one (AP-10).
+    htdd_frame_pad_ += static_cast<size_t>(fn - cg);
+  }
   if (cg < n) return (cg < 0) ? cg : 0;
   const int16_t* s = htdd_cap_buf_.data();
   std::vector<double> cse(static_cast<size_t>(cg) + 1, 0.0);
@@ -758,6 +767,11 @@ void BaseRadioSet::init(BaseRadioContext* context) {
     // bind that same port. The BS and UE are on different interface IPs, so both
     // can bind 10002 without colliding.
     rx_stream_args["local_port"] = "10002";
+    // Break-at-gap (SH-253). The driver defaults this ON, but our whole gap
+    // account depends on it: recvHoudini only compares timestamps BETWEEN reads,
+    // so a splice INSIDE one returned buffer would be invisible to us. Ask for it
+    // explicitly rather than inheriting a default another repo owns (AP-10).
+    rx_stream_args["rx_gap_break"] = "1";
     tx_stream_args["tx_mode"] = "replay";
   } else if (kUseSoapyUHD == false) {
     args["driver"] = "iris";

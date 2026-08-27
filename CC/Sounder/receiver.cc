@@ -556,11 +556,30 @@ void Receiver::loopRecv(int tid, int core_id, SampleBuffer* rx_buffer) {
         }
 
       } else {
-        long long frameTime;
-        if (this->base_radio_set_->radioRx(radio_id, cell, samp, frameTime) <
-            0) {
+        long long frameTime = 0;
+        const int rx_ret =
+            this->base_radio_set_->radioRx(radio_id, cell, samp, frameTime);
+        if (rx_ret < 0) {
           config_->running(false);
           break;
+        }
+        if (rx_ret == 0) {
+          // No slot this round: the framer has no rx slots yet, or the read came
+          // back too short to yield one. Either way buffs and frameTime were left
+          // untouched, so publishing here would build a packet on an unset
+          // frameTime (garbage frame/slot ids) over stale samples. Release the
+          // reserved buffers and move on (AP-10).
+          for (size_t ch = 0; ch < num_packets; ++ch) {
+            const int bit = 1 << (cursor + ch) % sizeof(std::atomic_int);
+            const int offs = (cursor + ch) / sizeof(std::atomic_int);
+            const int old =
+                std::atomic_fetch_and(&pkt_buf_inuse[offs], ~bit);  // now empty
+            if ((old & bit) != bit) {
+              MLPD_ERROR("thread %d freed buffer when already free\n", tid);
+              throw std::runtime_error("buffer empty during free\n");
+            }
+          }
+          continue;
         }
 
         frame_id = (size_t)(frameTime >> 32);
@@ -790,13 +809,21 @@ void Receiver::clientTxPilots(size_t user_id, long long base_time) {
         // out and the next frame may well succeed (AP-10).
         const int ur = client_radio_set_->radioTx(
             user_id, ue_databuffA_.data(), num_samps, flags, ut);
-        if (ur < num_samps)
+        // Braces are load-bearing: MLPD_WARN is a multi-statement macro, so an
+        // unbraced guard prints the body on every burst instead of on failure.
+        if (ur < num_samps) {
           MLPD_WARN("BAD Write, UL data (burst @%lld): %d/%d\n", ut, ur,
                     num_samps);
+        }
       }
       pilot_cursor = cur;
       ++nsched;
     }
+    // A full writeStream return only means the burst was ACCEPTED. Whether it
+    // actually went out on its tick is asynchronous, and on the fine TDD grid a
+    // late burst is exactly a phase jump with no other symptom. Drain here, after
+    // scheduling, so the cost is once per horizon rather than per burst (AP-10).
+    client_radio_set_->drainTxStatus(user_id);
     if (std::getenv("HOUDINI_UE_TX_DEBUG") != nullptr && nsched > 0) {
       MLPD_INFO("UE pilot burst: scheduled %d frames up to %lld\n", nsched,
                 pilot_cursor);

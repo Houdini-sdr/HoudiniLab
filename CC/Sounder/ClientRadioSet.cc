@@ -298,6 +298,10 @@ void ClientRadioSet::init(ClientRadioContext* context) {
     // starts on the 3.125 us TDD window grid (SH-248/SH-301) instead of whole-ms,
     // so the pilot places finely with no ms drift-cliff.
     rx_stream_args["local_port"] = std::to_string(10002 + i);
+    // Break-at-gap (SH-253), for the same reason as the BS side: recvHoudini's
+    // continuity check only sees read boundaries, so an intra-buffer splice would
+    // slip past it. Driver-default ON; asked for explicitly (AP-10).
+    rx_stream_args["rx_gap_break"] = "1";
     tx_stream_args["tx_mode"] = "stream";
     if (_cfg->ue_tdd_pilot()) tx_stream_args["tdd"] = "1";
   } else if (kUseSoapyUHD == false) {
@@ -404,6 +408,11 @@ int ClientRadioSet::radioRx(size_t radio_id, void* const* buffs, int numSamps,
   }
   std::cout << "invalid radio id " << radio_id << std::endl;
   return 0;
+}
+
+int ClientRadioSet::drainTxStatus(size_t radio_id) {
+  if (radio_id >= radios.size() || radios.at(radio_id) == nullptr) return 0;
+  return radios.at(radio_id)->drainTxStatus();
 }
 
 int ClientRadioSet::radioTx(size_t radio_id, const void* const* buffs,

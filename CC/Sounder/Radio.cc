@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -257,6 +258,23 @@ int Radio::recvHoudini(void* const* buffs, int samples, long long& frameTime) {
     if (rx_rate_ > 0.0 && (flags & SOAPY_SDR_HAS_TIME) != 0) {
       const Sounder::GridCheck gc = grid.onStamp(t, got);
       pad = std::min(gc.pad_samples, static_cast<size_t>(samples - got));
+    } else {
+      // No usable stamp, so this read is spliced onto the previous one with no
+      // continuity check: precisely the corruption the grid tracker exists to
+      // prevent. HOUDINI_PROTOCOL stamps every packet, so on a conformant device
+      // this cannot fire; if it does, the guarantee is gone and the window is a
+      // guess. Say so rather than degrading silently (AP-10).
+      static std::atomic<int> unstamped{0};
+      const int n_unstamped = unstamped.fetch_add(1);
+      // Braces are load-bearing: MLPD_WARN expands to several statements, so an
+      // unbraced guard would gate only the header and print the body every read.
+      if ((n_unstamped % 200) == 0) {
+        MLPD_WARN(
+            "RX read without a usable timestamp (rate=%.0f, flags=0x%x), count "
+            "%d: splicing with NO gap check, so this window's timing is not "
+            "guaranteed.\n",
+            rx_rate_, flags, n_unstamped + 1);
+      }
     }
     if (pad > 0) {
       // The r samples just read belong at got+pad: shift them forward and zero-fill
@@ -313,6 +331,38 @@ int Radio::recvHoudini(void* const* buffs, int samples, long long& frameTime) {
     }
   }
   return got;
+}
+
+int Radio::drainTxStatus(void) {
+  if (tx_status_unsupported_ || txs_ == nullptr) return 0;
+  int problems = 0;
+  for (int i = 0; i < 32; ++i) {  // bounded so a hot queue cannot stall the caller
+    size_t chan_mask = 0;
+    int flags = 0;
+    long long t = 0;
+    const int st = dev_->readStreamStatus(txs_, chan_mask, flags, t, 0);
+    if (st == SOAPY_SDR_TIMEOUT) break;  // nothing queued: the normal case
+    if (st == SOAPY_SDR_NOT_SUPPORTED) {
+      tx_status_unsupported_ = true;
+      break;
+    }
+    if (st == 0) continue;  // a benign event (e.g. an end-of-burst ack)
+    ++problems;
+    ++tx_status_events_;
+    const long long now =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count();
+    if (now - tx_status_log_ns_ > 5000000000LL) {  // at most one line per 5 s
+      tx_status_log_ns_ = now;
+      MLPD_WARN(
+          "TX status: %zu problem event(s), latest %s at %lld ns. A burst the "
+          "driver accepted was sent late or dropped; on the TDD grid that shows "
+          "up as a phase jump, not as a write error.\n",
+          tx_status_events_, SoapySDR::errToStr(st), t);
+    }
+  }
+  return problems;
 }
 
 int Radio::recv(void* const* buffs, int samples, long long& frameTime) {

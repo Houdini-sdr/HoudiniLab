@@ -49,6 +49,13 @@ class Radio {
   // and which the /Data/Gaps table alone cannot answer (it is drained only by the
   // HDF5 writer, and viewing mode writes no file). See AP-10.
   size_t lastPadSamples(void) const { return last_pad_samples_; }
+  // Drain queued asynchronous TX status events and report how many indicated a
+  // problem. writeStream returning the full count only means the burst was ACCEPTED;
+  // a burst sent late or dropped for being off-grid shows up only here. The driver
+  // merges device-side events for live TX streams (tx_mode=stream), so on the fine
+  // TDD grid this is the difference between a silent phase jump and a logged one.
+  // Latches off if the stream does not support status. See AP-10.
+  int drainTxStatus(void);
   void drain_buffers(std::vector<void*> buffs, int symSamp);
 
   void reset_DATA_clk_domain(void);
@@ -69,6 +76,9 @@ class Radio {
   double rx_rate_ = 0.0;        // cached RX sample rate for the grid tracker
   int64_t rx_sample_pos_ = 0;  // absolute samples emitted across recvHoudini calls
   size_t last_pad_samples_ = 0;  // zeros inserted into the last window (lastPadSamples)
+  bool tx_status_unsupported_ = false;  // stream reported no status surface: stop asking
+  size_t tx_status_events_ = 0;         // cumulative problem events seen
+  long long tx_status_log_ns_ = 0;      // warn throttle
 };
 
 #endif  // RADIO_H_
