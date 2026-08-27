@@ -3,8 +3,28 @@
 **Lane:** application (HoudiniLab) investigation; **root-cause/fix lane:** software
 (SoapyHoudiniSDR device firmware `clock_driver.cpp`), deployed via the os lane
 (`deploy-fw`). This doc is evidence + options ruled in/out for a
-`[→ propose SH ticket]` hand-off (AP-2). It is **not** a fix directive — the board
-clock tree and its bring-up are the software+fpga lanes' design.
+`[→ propose SH ticket]` hand-off (AP-9, now RESOLVED — see below). It is **not** a
+fix directive — the board clock tree and its bring-up are the software+fpga lanes'
+design.
+
+## RESOLUTION — both boards locked to a common external 10 MHz on `CLK IN`
+
+**Status: RESOLVED.** The firmware `CLK_SEL0/1` external-mux path (described below)
+landed via the software/os lanes. Verified app-side (`.21` beacon → `.22`, coherent
+per-4096-period phase over a 20 ms capture):
+
+- **CFO = +0.1 Hz** (0.0002 ppm at the 500 MHz NCO), was **+447 kHz / 894 ppm**.
+- **Sample-clock drift ~0.0000 samples/frame**, was **~110 samples per 1-ms frame**.
+- The gold-corr DDC offset moved **+447 kHz → +0.0 MHz**, and the beacon folds
+  ISOLATED at period 4096.
+
+Sample clocks are now identical (shared reference), so the beacon-synced UE pilot no
+longer walks the BS frame — the blocker this doc was written about is gone. Residual
+`SYNC IN`/SYSREF phase determinism (power-cycle-repeatable epochs, coherent/MIMO) is a
+separate later step, not needed for the sounder loop.
+
+Everything below is the ORIGINAL hand-off, kept as the investigation record; read it
+through the resolution above.
 
 ## The need
 
@@ -102,5 +122,5 @@ watch (a) `ClockVerifyLocks()` PLL1/PLL2 DLD, (b) the application tone-test beat
 
 - App-lane closed-loop analysis + all the "everything-else-works" evidence lives in the
   application memory (`houdini-find-beacon-dense-corr-scale`,
-  `houdini-hil-comb-channel`). AP-1 (`UE_TX_FINE_GRID_TIMING.md`) was the prior loop
+  `houdini-hil-comb-channel`). AP-8 (`UE_TX_FINE_GRID_TIMING.md`) was the prior loop
   hand-off (resolved by SH-301).

@@ -2,10 +2,10 @@
 
 **Lane:** application (HoudiniLab) investigation; **root-cause/fix lane:** software
 (SoapyHoudiniSDR). This doc is evidence + options ruled in/out for a
-`[→ propose SH ticket]` hand-off (AP-1). It is not a fix directive — the driver
+`[→ propose SH ticket]` hand-off (AP-8). It is not a fix directive — the driver
 timing contract is the software+fpga lanes' design.
 
-## RESOLUTION (SH-301 → relay to AP-1) — the capability already exists
+## RESOLUTION (SH-301 → relay to AP-8) — the capability already exists
 
 The software lane filed **SH-301**, grounded this doc against current `develop`, and
 relayed it back: **the fix is APP-SIDE, and this doc's premise was partly stale.**
@@ -17,7 +17,7 @@ relayed it back: **the fix is APP-SIDE, and this doc's premise was partly stale.
   `cfg.tx_tdd_grid` at `host/SoapyHoudiniSDR_streaming.cpp:~483`, advertised `:~212`).
   Verified in the DEPLOYED driver on the DGX (SH-248 in history, `.so` built Jul 22).
 - **My evidence #3 mis-cited the device file.** The whole-ms guard at
-  `device/…:1187` is the **replay** branch (AP-1 explicitly ruled replay out); the
+  `device/…:1187` is the **replay** branch (AP-8 explicitly ruled replay out); the
   live-TX activate imposes no time grid (plays host-stamped ticks, `:1130`); and
   `:1846` is `setHardwareTime`, not the streaming write. The streaming-TX timing
   lives in the **host `TxTickAnchor`**, which I missed — so "TX doesn't accept the
@@ -28,7 +28,7 @@ relayed it back: **the fix is APP-SIDE, and this doc's premise was partly stale.
   timed pilots on the 3.125 µs grid — no driver change needed.
 - **Residual software-lane gap (OPTIONAL, non-blocking, deferred):** the device
   TX-**replay** timed path (`:1187`) is still whole-ms; mirror RX@1538 onto it only
-  if replay-mode sub-ms TX is ever wanted. Not needed for AP-1 (streaming).
+  if replay-mode sub-ms TX is ever wanted. Not needed for AP-8 (streaming).
 
 Everything below is the ORIGINAL hand-off, kept as the investigation record; read it
 through the correction above.
