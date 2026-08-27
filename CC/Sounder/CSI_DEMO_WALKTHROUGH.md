@@ -166,12 +166,33 @@ your bench:
 - `frequency` and `nco_frequency`: both default to 500 MHz. They must match
   each other for the matched NCO loopback path to work.
 - `channel` and `ue_channel`: which RF channel each board uses.
-- `ue_rx_gain_a` / `ue_tx_gain_a` and the `_b` pair: set for your RF path. A
-  cabled loopback with an attenuator needs very different gains from an over
-  the air link.
+- `ue_rx_gain_a` / `ue_tx_gain_a` and the `_b` pair: **ignore these on Houdini
+  hardware.** The board has no LNA, PGA, TIA or PAD stage to program, so the
+  radio setup returns before any gain call and discards the values. They are
+  carried in the config because the same file format drives Iris and USRP
+  hardware, where they do apply. Changing them here has no effect, so do not
+  spend time sweeping them.
+- `ue_power_ramp` and the `ue_ramp_*` gains are equally inert here: that block
+  only runs under the Iris hardware framer, which these configs do not use.
 - `ue_tx_advance_ticks`: the fine calibration that seats the client pilot
   inside the base station receive window. Start at 0 and sweep it if the pilot
   does not land (section 8).
+
+Since the gain fields do nothing here, signal level is set two other ways:
+
+- **Physically**, by cabling and attenuation between the two boards. A direct
+  cable normally needs an attenuator; an over the air path normally does not.
+- **Digitally**, by the optional `tx_scale` field. Neither shipped config sets
+  it, which means it is computed automatically to normalize the OFDM peak, and
+  that is the right starting point. Set it explicitly only when you need to back
+  the transmitted amplitude off.
+
+Judge the level from the receive side rather than guessing at it. The
+dashboard's magnitude panel shows the peak in dB, and running the sounder with
+`HOUDINI_CL_RX_DEBUG=1` makes it print the received RMS and absolute maximum
+periodically. Samples are 16 bit, so an absolute maximum near 32767 means you
+are clipping and should attenuate; an RMS in the low tens means you are close
+to the noise floor and the beacon correlation will be marginal.
 
 Leave the frame geometry alone unless you know why you are changing it. The
 shipped numbers are load bearing: 30 slots of 4096 samples is 122880 samples,
