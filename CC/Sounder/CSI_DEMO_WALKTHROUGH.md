@@ -260,6 +260,7 @@ from before that path existed, and it is not part of this demo.
 | `--http-port` | 8080 | Web server port |
 | `--udp-port` | 9999 | Port the CSI datagrams arrive on |
 | `--fps` | 30 | How often the page is pushed new data |
+| `--stale-ms` | 1500 | Dim an antenna's plots when its last update is older than this (section 5.1) |
 | `--csi-fps` | sounder default (30) | Per antenna stream rate out of the sounder |
 | `--dest-host` | 127.0.0.1 | Where the sounder sends datagrams, when using `--launch` |
 
@@ -303,6 +304,22 @@ Each receive antenna gets one card with four panels:
 
 Guard band and DC null subcarriers are drawn as gaps, not as zeros, so the
 empty channel edges are expected.
+
+### 5.1 When a card dims
+
+If an antenna stops producing updates, its plots dim and a `stale 2.3 s` badge
+appears next to the antenna name, counting up until fresh data arrives. The
+card then returns to normal on its own.
+
+This matters because the sounder refuses slots whose samples carry receive gaps
+(section 8.3), so a losing link stops sending rather than sending something
+untrue. Without the badge, the panels would simply hold their last good values,
+and on a stationary bench a frozen display and a healthy static channel look
+exactly the same. A dim card means "this is the last thing we knew, not what is
+happening now".
+
+The threshold is 1.5 seconds by default. If you lower `--csi-fps`, raise it to
+match with `--stale-ms`, or every card will read as stale.
 
 ## 6. Confirming it is actually working
 
@@ -398,16 +415,18 @@ to smear frames until the next clean pilot replaced it, so a single lost packet
 showed up as a burst of smearing plus a phase jump rather than one bad frame.
 
 Viewing mode now refuses those slots instead of rendering them. When a slot
-arrives carrying padded samples it is dropped, and the sounder logs, at most
-once every five seconds:
+arrives carrying padded samples it is dropped, that antenna's card dims with a
+`stale` badge (section 5.1), and the sounder logs, at most once every five
+seconds:
 
 ```
 CSI view: dropped 12 slot(s) with RX gaps (latest 848 padded samples, ant 0)
 ```
 
-So the display holds its last good estimate rather than showing a false one.
-**A stale panel plus that warning means the link is losing packets**, and the
-fix is on the link, not in the viewer. Recording mode is unchanged: it still
+So the display holds its last good estimate rather than showing a false one,
+and marks it as old rather than passing it off as current. **A dimmed card plus
+that warning means the link is losing packets**, and the fix is on the link, not
+in the viewer. Recording mode is unchanged: it still
 keeps every sample and records the damaged ranges in the file's gap table.
 
 If you saw this before the fix landed, note that a clean recording was never

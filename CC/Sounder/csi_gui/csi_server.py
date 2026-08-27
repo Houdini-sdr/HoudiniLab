@@ -102,14 +102,29 @@ def _udp_loop(bind_host, bind_port):
             continue
         ant, rec = parsed
         with _lock:
-            _latest.setdefault(ant, {})[kind] = rec
+            slot = _latest.setdefault(ant, {})
+            slot[kind] = rec
+            slot["t"] = time.monotonic()   # last datagram seen for this antenna
             _seq += 1
             _stats["pkts"] += 1
 
 
 def _snapshot():
+    """Latest record per antenna, each stamped with how old it is.
+
+    The sounder drops slots whose samples carry RX gap padding, so a lossy link
+    simply stops producing datagrams rather than sending bad ones. Without an age
+    the page cannot tell a frozen panel from a healthy static channel, which on a
+    stationary bench look identical.
+    """
+    now = time.monotonic()
     with _lock:
-        return _seq, {str(a): _latest[a] for a in _latest}
+        out = {}
+        for a, slot in _latest.items():
+            rec = {k: v for k, v in slot.items() if k != "t"}
+            rec["age_ms"] = int(max(0.0, now - slot.get("t", now)) * 1000)
+            out[str(a)] = rec
+        return _seq, out
 
 
 # ---- HTTP / SSE ------------------------------------------------------------
@@ -121,7 +136,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/" or self.path.startswith("/index"):
-            body = PAGE.encode("utf-8")
+            body = PAGE.replace("__STALE_MS__",
+                                str(self.server.stale_ms)).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -141,12 +157,21 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Connection", "close")
         self.end_headers()
         fps = self.server.fps
+        stale_ms = self.server.stale_ms
         last_seq = -1
+        last_stale_push = 0.0
         try:
             while True:
                 seq, snap = _snapshot()
-                if seq != last_seq and snap:
+                # While the stream is stalled _seq never moves, so pushing only on
+                # a seq change would freeze the age on screen too and the badge
+                # would never appear. Re-send slowly whenever anything is stale.
+                now = time.monotonic()
+                stale = any(r.get("age_ms", 0) >= stale_ms for r in snap.values())
+                if snap and (seq != last_seq or
+                             (stale and now - last_stale_push >= 0.5)):
                     last_seq = seq
+                    last_stale_push = now
                     msg = "data: %s\n\n" % json.dumps({"ant": snap})
                     self.wfile.write(msg.encode("utf-8"))
                     self.wfile.flush()
@@ -216,6 +241,10 @@ def main():
     ap.add_argument("--http-host", default="0.0.0.0", help="web server bind host")
     ap.add_argument("--http-port", type=int, default=8080, help="web server port")
     ap.add_argument("--fps", type=float, default=30.0, help="dashboard push rate")
+    ap.add_argument("--stale-ms", type=int, default=1500,
+                    help="dim an antenna's plots when its last update is older "
+                         "than this. Raise it if you lower --csi-fps, or every "
+                         "card will read as stale (default: %(default)s)")
     ap.add_argument("--launch", action="store_true",
                     help="also launch the sounder in viewing mode on this host")
     ap.add_argument("--sounder-dir", default=os.path.expanduser("~/repos/HoudiniLab/CC/Sounder"))
@@ -251,6 +280,7 @@ def main():
 
     srv = ThreadingHTTPServer((args.http_host, args.http_port), Handler)
     srv.fps = args.fps
+    srv.stale_ms = args.stale_ms
     srv.daemon_threads = True
     # Serve in a daemon thread so the main thread can wait for Ctrl+C. (Calling
     # srv.shutdown() from a signal handler on the serve_forever thread deadlocks.)
@@ -292,6 +322,11 @@ PAGE = r"""<!doctype html>
  #ants{display:flex;flex-wrap:wrap;gap:14px;padding:14px}
  .card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:10px;width:520px}
  .card h2{font-size:13px;margin:0 0 8px;color:#58a6ff}
+ .card.stale .row{opacity:.4}
+ .card h2 .badge{display:none;margin-left:8px;font-size:11px;font-weight:500;
+        padding:2px 6px;border-radius:10px;background:#3d2d16;color:#e3b341;
+        border:1px solid #6b4f1d;vertical-align:middle}
+ .card.stale h2 .badge{display:inline-block}
  .row{display:flex;gap:8px}
  .plot{position:relative}
  .plot .lbl{position:absolute;top:2px;left:6px;font-size:10px;color:#8b949e}
@@ -307,6 +342,7 @@ PAGE = r"""<!doctype html>
 <div id="ants"></div>
 <script>
 const W=250,H=120,WFW=250,WFH=120;   // plot sizes
+const STALE_MS=__STALE_MS__;         // no update for this long -> dim + badge
 const cards={};                       // ant_id -> {mag,phase,wf,wfimg,wfrow,frame}
 
 function jet(v){ // v in [0,1] -> [r,g,b]
@@ -319,7 +355,7 @@ function jet(v){ // v in [0,1] -> [r,g,b]
 
 function makeCard(ant){
   const wrap=document.createElement('div'); wrap.className='card';
-  wrap.innerHTML=`<h2>RX antenna ${ant}</h2>
+  wrap.innerHTML=`<h2>RX antenna ${ant}<span class="badge"></span></h2>
     <div class="row">
       <div class="plot"><span class="lbl">|H| (dB) vs subcarrier</span>
         <canvas width="${W}" height="${H}"></canvas></div>
@@ -339,7 +375,9 @@ function makeCard(ant){
   cards[ant]={mag:cvs[0].getContext('2d'),phase:cvs[1].getContext('2d'),
               wf:wf,wfimg:wf.createImageData(WFW,1),
               cons:cvs[3].getContext('2d'),
-              status:wrap.querySelector('.status'),frame:0};
+              status:wrap.querySelector('.status'),frame:0,
+              el:wrap,badge:wrap.querySelector('.badge'),
+              lastCsi:-1,lastCns:-1};
 }
 
 function axes(ctx,ymin,ymax,label){
@@ -409,10 +447,25 @@ function onData(obj){
   const ant=obj.ant;
   for(const a in ant){
     if(!cards[a]) makeCard(a);
-    const rec=ant[a];
-    if(rec.csi) drawCsi(cards[a],rec.csi);
-    if(rec.cns) drawCons(cards[a],rec.cns);
-    pktCount++;
+    const rec=ant[a], card=cards[a];
+    // A stale re-push carries the SAME record, so gate redraw and the rate meter
+    // on the frame number. Otherwise a stalled link would read as busy.
+    if(rec.csi && rec.csi.frame!==card.lastCsi){
+      drawCsi(card,rec.csi); card.lastCsi=rec.csi.frame; pktCount++;
+    }
+    if(rec.cns && rec.cns.frame!==card.lastCns){
+      drawCons(card,rec.cns); card.lastCns=rec.cns.frame;
+    }
+    // The sounder stops sending for an antenna whose slots carried RX gaps, so
+    // the panels hold their last good estimate. Say that on screen: a frozen
+    // panel and a healthy static channel look identical otherwise.
+    const age=rec.age_ms||0;
+    if(age>=STALE_MS){
+      card.el.classList.add('stale');
+      card.badge.textContent='stale '+(age/1000).toFixed(1)+' s';
+    }else{
+      card.el.classList.remove('stale');
+    }
   }
   const dt=(Date.now()-t0)/1000;
   document.getElementById('meta').textContent=
