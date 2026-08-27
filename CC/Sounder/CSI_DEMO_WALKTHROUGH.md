@@ -166,19 +166,26 @@ your bench:
 - `frequency` and `nco_frequency`: both default to 500 MHz. They must match
   each other for the matched NCO loopback path to work.
 - `channel` and `ue_channel`: which RF channel each board uses.
-- `ue_rx_gain_a` / `ue_tx_gain_a` and the `_b` pair: **ignore these on Houdini
-  hardware.** The board has no LNA, PGA, TIA or PAD stage to program, so the
-  radio setup returns before any gain call and discards the values. They are
-  carried in the config because the same file format drives Iris and USRP
-  hardware, where they do apply. Changing them here has no effect, so do not
-  spend time sweeping them.
+- `ue_rx_gain_a` / `ue_tx_gain_a` and the `_b` pair: **these do nothing today,
+  so do not spend bench time sweeping them.** The gain stages they name (LNA,
+  PGA, TIA, PAD) belong to the Iris and USRP front ends that share this config
+  format; the Houdini radio setup returns before those calls and discards the
+  values.
+
+  This is a "not wired up yet", not a "no such thing". The board does have gain
+  control of its own: a digital step attenuator on the receive path, and QMC
+  offset and gain in the RF data converter. Neither is exposed through the
+  driver at the time of writing (the SoapyHoudiniSDR device README lists QMC
+  among its deferred RFDC features), so there is no knob to turn from here yet.
+  Expect that to change, and re-check this section against the driver's
+  advertised gains before concluding the fields are still inert.
 - `ue_power_ramp` and the `ue_ramp_*` gains are equally inert here: that block
   only runs under the Iris hardware framer, which these configs do not use.
 - `ue_tx_advance_ticks`: the fine calibration that seats the client pilot
   inside the base station receive window. Start at 0 and sweep it if the pilot
   does not land (section 8).
 
-Since the gain fields do nothing here, signal level is set two other ways:
+Until a gain surface lands, signal level is set two other ways:
 
 - **Physically**, by cabling and attenuation between the two boards. A direct
   cable normally needs an attenuator; an over the air path normally does not.
