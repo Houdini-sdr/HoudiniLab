@@ -503,7 +503,51 @@ operation. Do not run it against boards someone else is using.
 
 If it cannot import `houdini_setup`, set `HOUDINI_EXAMPLES` (section 2.4).
 
-### 8.5 Client never finds the beacon
+If the teardown itself reports that an RX stream is still open, a dead process
+left one behind and no teardown can close another process's stream. Restart the
+server on that node and try again:
+
+```sh
+ssh <user>@<radio-ip> 'sudo systemctl restart SoapySDRServer'
+```
+
+That is also the recovery when a radio open fails with
+`SoapyRPCUnpacker::recv() TIMEOUT`.
+
+### 8.5 A radio is discoverable but still will not open
+
+This one costs the most time if you do not know it, because the tool that
+reassures you is testing the wrong thing.
+
+**The two planes are independent.** `SoapySDRUtil --find` talks to the radio's
+control plane over TCP. Streaming uses a separate data-plane network, and the
+host needs a route to the address the radio advertises there. A radio can list
+perfectly in `--find` and still fail to open, and the error you get names the
+open failure, not the routing:
+
+```
+Ignoring houdini radio <addr>: FindLocalAddrForRemote: no interface routes to <data-ip>
+ERROR: the above base station radio(s) could not be opened.
+```
+
+Check the route rather than the discovery:
+
+```sh
+ip route get <the data-plane IP from the error>   # want a real data interface
+ip -br addr                                       # is that interface UP with an address?
+cat /sys/class/net/<iface>/carrier                # 1 = cable and link partner present
+```
+
+`NO-CARRIER` means the data cable is not plugged in or the far end is down. An
+interface with no address on that subnet means it needs one; the two radios may
+sit on different data subnets and need one host port each.
+
+**Do not use ping to test this.** The radios do not answer ICMP on their
+data-plane addresses even while streaming perfectly, because that address is a
+raw UDP egress engine in the FPGA, not a full IP stack. A failed ping proves
+nothing here. The route existing is the check that matters.
+
+### 8.6 Client never finds the beacon
 
 Check in this order: both boards on a common clock, the RF path is actually
 connected and at a sane level, `frequency` and `nco_frequency` match each other
@@ -515,6 +559,17 @@ in the config, and the beacon board is really the one named under
 Press Ctrl+C in the backend terminal. In mode A it kills the whole sounder
 process group on the way out, so one Ctrl+C stops everything. In mode B stop
 the sounder in its own terminal as well.
+
+Stop the whole process group, not just the backend. `--launch` starts the
+sounder in a child shell that keeps running if you kill only `csi_server`; the
+orphan then starts a SECOND sounder against the same radios, both streaming to
+the same UDP port. The dashboard interleaves frames from both and the display
+cannot be trusted in either direction. If you started it detached, kill by
+group (`kill -- -<pgid>`), then confirm:
+
+```sh
+pgrep -cx sounder      # want 0 when stopped, exactly 1 while running
+```
 
 After any run that ended abnormally, release the framer before starting again:
 
