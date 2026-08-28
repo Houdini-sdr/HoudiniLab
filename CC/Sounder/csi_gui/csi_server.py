@@ -136,8 +136,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/" or self.path.startswith("/index"):
-            body = PAGE.replace("__STALE_MS__",
-                                str(self.server.stale_ms)).encode("utf-8")
+            body = (PAGE.replace("__STALE_MS__", str(self.server.stale_ms))
+                        .replace("__MAG_TOP__", str(self.server.mag_top))
+                        .replace("__MAG_SPAN__", str(self.server.mag_span))
+                        .encode("utf-8"))
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -241,6 +243,12 @@ def main():
     ap.add_argument("--http-host", default="0.0.0.0", help="web server bind host")
     ap.add_argument("--http-port", type=int, default=8080, help="web server port")
     ap.add_argument("--fps", type=float, default=30.0, help="dashboard push rate")
+    ap.add_argument("--mag-top", type=float, default=90.0,
+                    help="top of the FIXED |H| axis in dB (default: %(default)s)")
+    ap.add_argument("--mag-span", type=float, default=40.0,
+                    help="height of the FIXED |H| axis in dB (default: %(default)s). "
+                         "Both panels are fixed frame to frame; widen the span if "
+                         "the trace runs off scale")
     ap.add_argument("--stale-ms", type=int, default=1500,
                     help="dim an antenna's plots when its last update is older "
                          "than this. Raise it if you lower --csi-fps, or every "
@@ -281,6 +289,8 @@ def main():
     srv = ThreadingHTTPServer((args.http_host, args.http_port), Handler)
     srv.fps = args.fps
     srv.stale_ms = args.stale_ms
+    srv.mag_top = args.mag_top
+    srv.mag_span = args.mag_span
     srv.daemon_threads = True
     # Serve in a daemon thread so the main thread can wait for Ctrl+C. (Calling
     # srv.shutdown() from a signal handler on the serve_forever thread deadlocks.)
@@ -343,6 +353,9 @@ PAGE = r"""<!doctype html>
 <script>
 const W=250,H=120,WFW=250,WFH=120;   // plot sizes
 const STALE_MS=__STALE_MS__;         // no update for this long -> dim + badge
+// Both top panels are FIXED frame to frame. An axis that re-ranges per frame makes
+// a static channel look alive and hides real drift, so nothing here auto-scales.
+const MAG_TOP=__MAG_TOP__, MAG_BOT=__MAG_TOP__-__MAG_SPAN__;
 const cards={};                       // ant_id -> {mag,phase,wf,wfimg,wfrow,frame}
 
 function jet(v){ // v in [0,1] -> [r,g,b]
@@ -416,23 +429,24 @@ function line(ctx,vals,ymin,ymax,color){
 
 function drawCsi(card,c){
   card.frame=c.frame;
-  // Magnitude: HOLD the dB reference instead of re-ranging every frame. The old
-  // code took [peak-40, peak+3] from THIS frame's peak, so the axis slid under a
-  // perfectly static channel and the panel looked alive when nothing had moved.
-  // Re-reference only on a real level change (>6 dB), and say so in the label.
-  if(card.magRef===undefined || Math.abs(c.peak_db-card.magRef)>6){
-    card.magRef=c.peak_db; card.magRescaled=true;
-  }
-  const top=card.magRef+3, bot=card.magRef-40;
+  // Magnitude: FIXED axis, never re-ranged. Set with --mag-top / --mag-span.
+  const top=MAG_TOP, bot=MAG_BOT;
   axes(card.mag,bot,top,v=>v.toFixed(0),c.sc);
   line(card.mag,c.mag_db,bot,top,'#58a6ff');
-  card.mag.fillStyle=card.magRescaled?'#e3b341':'#6e7681';
   card.mag.font='9px sans-serif'; card.mag.textAlign='right';
-  card.mag.fillText(card.magRescaled?'dB (rescaled)':'dB', W-2, 10);
-  card.mag.textAlign='left'; card.magRescaled=false;
-  // Phase: fixed -pi..+pi, now with ticks so jitter is readable against a scale.
+  // A fixed axis can hide the trace entirely if the level moves off scale, so say
+  // so rather than showing an innocent-looking empty panel.
+  const fin=c.mag_db.filter(v=>v!==null);
+  const off=fin.length&&(Math.max(...fin)>top||Math.min(...fin)<bot);
+  card.mag.fillStyle=off?'#f85149':'#6e7681';
+  card.mag.fillText(off?'dB  OFF SCALE':'dB', W-2, 10);
+  card.mag.textAlign='left';
+  // Phase: fixed -pi..+pi (it always was), now with ticks in units of pi.
   axes(card.phase,-Math.PI,Math.PI,v=>(v/Math.PI).toFixed(1)+'\u03c0',c.sc);
   line(card.phase,c.phase,-Math.PI,Math.PI,'#3fb950');
+  card.phase.fillStyle='#6e7681'; card.phase.font='9px sans-serif';
+  card.phase.textAlign='right'; card.phase.fillText('rad', W-2, 10);
+  card.phase.textAlign='left';
   // waterfall: scroll up 1px, draw new bottom row colored by magnitude
   card.wf.drawImage(card.wf.canvas,0,-1);
   const n=c.mag_db.length, d=card.wfimg.data;
