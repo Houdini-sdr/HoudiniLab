@@ -380,10 +380,25 @@ function makeCard(ant){
               lastCsi:-1,lastCns:-1};
 }
 
-function axes(ctx,ymin,ymax,label){
+// Grid + labelled ticks. yfmt(v) renders a y value; nsc labels the x axis in
+// subcarriers (DC centred). Without labels you cannot tell a rescale from real
+// movement, which is exactly how an auto-ranged panel misleads.
+function axes(ctx,ymin,ymax,yfmt,nsc){
   ctx.clearRect(0,0,W,H); ctx.strokeStyle='#21262d'; ctx.lineWidth=1;
   for(let i=0;i<=4;i++){const y=H*i/4|0;ctx.beginPath();ctx.moveTo(0,y+.5);ctx.lineTo(W,y+.5);ctx.stroke();}
   const xz=W/2|0; ctx.beginPath();ctx.moveTo(xz+.5,0);ctx.lineTo(xz+.5,H);ctx.stroke();
+  if(!yfmt) return;
+  ctx.fillStyle='#6e7681'; ctx.font='9px sans-serif'; ctx.textAlign='left';
+  for(let i=0;i<=4;i++){
+    const y=H*i/4, v=ymax-(ymax-ymin)*i/4;
+    ctx.fillText(yfmt(v), 2, Math.min(H-2, Math.max(9, y+ (i===0?9:(i===4?-2:3)))));
+  }
+  if(nsc){
+    ctx.textAlign='center'; ctx.fillText('DC', xz, H-2);
+    ctx.textAlign='left';   ctx.fillText('-'+(nsc>>1), 20, H-2);
+    ctx.textAlign='right';  ctx.fillText('+'+(nsc>>1), W-2, H-2);
+    ctx.textAlign='left';
+  }
 }
 
 function line(ctx,vals,ymin,ymax,color){
@@ -401,13 +416,23 @@ function line(ctx,vals,ymin,ymax,color){
 
 function drawCsi(card,c){
   card.frame=c.frame;
-  // magnitude, auto-ranged to [peak-40, peak+3] dB
-  const top=c.peak_db+3, bot=c.peak_db-40;
-  axes(card.mag); line(card.mag,c.mag_db,bot,top,'#58a6ff');
-  card.mag.fillStyle='#8b949e';card.mag.font='9px sans-serif';
-  card.mag.fillText(top.toFixed(0)+'dB',2,10);card.mag.fillText(bot.toFixed(0),2,H-2);
-  // phase
-  axes(card.phase); line(card.phase,c.phase,-Math.PI,Math.PI,'#3fb950');
+  // Magnitude: HOLD the dB reference instead of re-ranging every frame. The old
+  // code took [peak-40, peak+3] from THIS frame's peak, so the axis slid under a
+  // perfectly static channel and the panel looked alive when nothing had moved.
+  // Re-reference only on a real level change (>6 dB), and say so in the label.
+  if(card.magRef===undefined || Math.abs(c.peak_db-card.magRef)>6){
+    card.magRef=c.peak_db; card.magRescaled=true;
+  }
+  const top=card.magRef+3, bot=card.magRef-40;
+  axes(card.mag,bot,top,v=>v.toFixed(0),c.sc);
+  line(card.mag,c.mag_db,bot,top,'#58a6ff');
+  card.mag.fillStyle=card.magRescaled?'#e3b341':'#6e7681';
+  card.mag.font='9px sans-serif'; card.mag.textAlign='right';
+  card.mag.fillText(card.magRescaled?'dB (rescaled)':'dB', W-2, 10);
+  card.mag.textAlign='left'; card.magRescaled=false;
+  // Phase: fixed -pi..+pi, now with ticks so jitter is readable against a scale.
+  axes(card.phase,-Math.PI,Math.PI,v=>(v/Math.PI).toFixed(1)+'\u03c0',c.sc);
+  line(card.phase,c.phase,-Math.PI,Math.PI,'#3fb950');
   // waterfall: scroll up 1px, draw new bottom row colored by magnitude
   card.wf.drawImage(card.wf.canvas,0,-1);
   const n=c.mag_db.length, d=card.wfimg.data;
