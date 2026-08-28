@@ -28,6 +28,7 @@
 #include "include/comms-lib.h"
 #include "include/logger.h"
 #include "include/macros.h"
+#include "include/node_version.h"
 #include "include/utils.h"
 
 //Default to detect the beacon on first channel
@@ -92,6 +93,12 @@ Receiver::Receiver(
     }
     throw ReceiverException("Invalid Radio Setup");
   }
+
+  // Both radio sets are up: compare the stack every participating node is
+  // running. A run split across mismatched gateware / device firmware / host
+  // builds can fail as an RF or timing symptom, which is expensive to chase, so
+  // print the versions once and WARN on any disagreement before we start.
+  Sounder::NodeVersions::instance().checkAndWarn();
 
   this->initBuffers();
   MLPD_TRACE("Construction complete\n");

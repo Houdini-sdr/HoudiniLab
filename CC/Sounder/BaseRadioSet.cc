@@ -27,6 +27,7 @@
 #include "include/comms-lib.h"
 #include "include/logger.h"
 #include "include/macros.h"
+#include "include/node_version.h"
 #include "include/utils.h"
 #include "nlohmann/json.hpp"
 
@@ -168,6 +169,10 @@ BaseRadioSet::BaseRadioSet(Config* cfg, const bool calibrate_proc) : _cfg(cfg) {
         std::cout << _cfg->bs_sdr_ids().at(c).at(i) << ": Houdini RFSoC BS, TX "
                   << (dev->getSampleRate(SOAPY_SDR_TX, channels.at(0)) / 1e6)
                   << " MSPS" << std::endl;
+        // Register this node's gateware/firmware/host stack for the cross-node
+        // skew check the Receiver runs once every radio set is up.
+        Sounder::NodeVersions::instance().add(
+            "BS " + _cfg->bs_sdr_ids().at(c).at(i), dev->getHardwareInfo());
         continue;
       }
       std::cout << _cfg->bs_sdr_ids().at(c).at(i) << ": Front end "

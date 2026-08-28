@@ -18,6 +18,7 @@
 #include "include/comms-lib.h"
 #include "include/logger.h"
 #include "include/macros.h"
+#include "include/node_version.h"
 #include "include/utils.h"
 #include "nlohmann/json.hpp"
 
@@ -88,6 +89,8 @@ ClientRadioSet::ClientRadioSet(Config* cfg) : _cfg(cfg) {
       std::cout << _cfg->cl_sdr_ids().at(i) << ": Houdini RFSoC, RX rate "
                 << (dev->getSampleRate(SOAPY_SDR_RX, channels.at(0)) / 1e6)
                 << " MSPS" << std::endl;
+      Sounder::NodeVersions::instance().add(
+          "UE " + _cfg->cl_sdr_ids().at(i), dev->getHardwareInfo());
       continue;
     }
     std::cout << _cfg->cl_sdr_ids().at(i) << ": Front end "
