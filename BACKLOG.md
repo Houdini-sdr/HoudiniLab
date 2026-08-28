@@ -10,6 +10,14 @@ traced. Cross-lane needs are AP rows tagged for the receiving lane
 `[→ propose OS ticket]` image, `[→ propose AG ticket]` workspace) — never
 written into another lane's tracker.
 
+
+> **TEST BASELINE [user, 2026-08-28]: fpga v1.30 or newer, only.** The v1.20 TDD baseline is RETIRED.
+> Rows below that record results against fpga v1.20 / device+host v0.2.0 (notably AP-3's max-rate
+> 99.998 % and AP-5's V5 tone leg) were validated on a SUPERSEDED stack and are NOT re-confirmed on
+> v1.30+. Re-run before citing them as current. Live stack 2026-08-28, both nodes agreeing: fpga 1.30
+> `c88e0b5f`, device 0.2.2 `71bcbc6b`, host 0.2.2 `c20d7975`, proto 1.0. `sounder` now prints the
+> per-node stack at bring-up and warns `VERSION SKEW:` when participating nodes disagree.
+
 | Pri | Id | Item | Status |
 |---|---|---|---|
 | P1 | AP-1 | **rx-recorder: timed RX capture to HDF5 via the Houdini SDR.** New lean CC/Sounder tool (`rx-recorder` binary) that opens the SoapyHoudiniSDR device (`driver=houdinisdr`), applies rate/freq/gain from a JSON config, activates a continuous RX stream NOW, records X seconds of CS16 samples to an HDF5 file, and reports timing gaps/overruns. No beacon/TDD/Iris machinery — single-channel continuous RX is the validated device path. Includes a small refactor: `RecorderThread` decoupled from the sounder `RecorderWorker`/`Config` via a worker interface, so the recorder pipeline is reusable. Branch `feat/rx-recorder`. **SILICON-VALIDATED 2026-07-10 (rig B, .64 GB10 aarch64 -> node .22, fpga v1.19 / device 2695498b / host a040debf):** 30.72 MSPS 938/938 slots AND 245.76 MSPS (top rung, 983 MB/s) 7500/7500 slots -- both 2 s, zero drops/gaps/overflows, `TOTAL_UNTRUSTED_SAMPLES=0`, payload = live ADC noise floor; radio-free ctest suite also green on aarch64. Measured bring-up latency START_HW->FIRST_SAMPLE ~98 ms (validates recording both). Merge to develop DEFERRED [user 2026-07-10]: work continues on **`arc/rx-recorder`** (renamed from `feat/rx-recorder` per the staged-arc shape — future features fold in as `feat/*`; develop rippled in to stay synced); merge discussion later. | VALIDATED — branch active |
