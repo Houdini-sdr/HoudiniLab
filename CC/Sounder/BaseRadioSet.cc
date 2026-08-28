@@ -104,6 +104,24 @@ BaseRadioSet::BaseRadioSet(Config* cfg, const bool calibrate_proc) : _cfg(cfg) {
     }
     bsRadios.at(c).shrink_to_fit();
     _cfg->n_bs_sdrs().at(c) = num_radios;
+    // Zero radios is never success. The line above writes the surviving count
+    // back into the SHARED Config, and main() builds Config ONCE and reuses it
+    // across its retry loop -- so an attempt that strips the only radio leaves
+    // n_bs_sdrs=0 behind, and the NEXT attempt constructs nothing, finds nothing
+    // to strip, keeps radioNotFound false and reports "BaseRadioSet done". The
+    // run then looks healthy while activateHoudiniRx() iterates an empty vector,
+    // no RX is ever started, and the receive loop spins forever on a dead
+    // stream. Observed twice on the bench: a transient open failure turned into
+    // a permanently silent run that the retry could not recover. Fail loudly
+    // instead, so the caller retries in a fresh process with a clean config.
+    if (bsRadios.at(c).empty()) {
+      radioNotFound = true;
+      radio_serial_not_found.push_back(
+          "(cell " + std::to_string(c) +
+          ": no base station radios were constructed; if an earlier attempt in "
+          "this process failed, it zeroed n_bs_sdrs in the shared config -- "
+          "retry in a fresh process)");
+    }
     if (radioNotFound == true) {
       break;
     }

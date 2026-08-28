@@ -44,6 +44,7 @@ _EXAMPLES = os.environ.get(
     os.path.expanduser("~/repos/SoapyHoudiniSDR/host/examples"))
 
 DEFAULT_TOPOLOGY = os.path.join(_SOUNDER, "files", "topology-houdini.json")
+SOAPY_SDR_RX = None   # bound in _import_deps once SoapySDR is importable
 
 
 def _import_deps():
@@ -69,6 +70,9 @@ def _import_deps():
             "  Looked in: %s\n" % (e, _HIL))
         return None, None
     import houdini_setup as hs
+    global SOAPY_SDR_RX
+    import SoapySDR
+    SOAPY_SDR_RX = SoapySDR.SOAPY_SDR_RX
     return hs, _teardown
 
 
@@ -136,6 +140,28 @@ def teardown_node(hs, teardown, ip, ch, passes):
         state = " (TDD_ARM: %s)" % sdr.readSetting("TDD_ARM").strip()
     except Exception:  # noqa: BLE001
         pass
+
+    # This teardown clears the framer, the transmit RAM and the gate. It CANNOT
+    # close an RX stream a dead process left open on the device -- and that
+    # leftover stream is what makes the next run fail, several layers away, with
+    # "setSampleRate(RX): an RX stream is open; a rate change is NOT live".
+    # Probe for it here so the operator learns it from the teardown instead of
+    # from a confusing failure later. The probe re-applies the CURRENT rate, so
+    # it changes nothing when no stream is open.
+    try:
+        sdr.setSampleRate(SOAPY_SDR_RX, ch, sdr.getSampleRate(SOAPY_SDR_RX, ch))
+    except Exception as e:  # noqa: BLE001
+        if "stream is open" in str(e):
+            print("  %s: WARNING an RX stream is still open on the device.%s\n"
+                  "      This teardown cannot close another process's stream, and "
+                  "the next run will fail\n"
+                  "      with 'setSampleRate(RX): an RX stream is open'. Clear it "
+                  "with:\n"
+                  "          sudo systemctl restart SoapySDRServer   (on %s)"
+                  % (ip, state, ip))
+            return False
+        # Anything else is not this condition; do not fail the teardown over it.
+
     print("  %s: torn down%s" % (ip, state))
     return True
 

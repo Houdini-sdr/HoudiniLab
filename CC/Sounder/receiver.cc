@@ -569,6 +569,20 @@ void Receiver::loopRecv(int tid, int core_id, SampleBuffer* rx_buffer) {
           // untouched, so publishing here would build a packet on an unset
           // frameTime (garbage frame/slot ids) over stale samples. Release the
           // reserved buffers and move on (AP-10).
+          //
+          // Say so, throttled. Dropping the packet is right, but doing it
+          // SILENTLY turned a dead RX stream into a run that printed nothing at
+          // all and looked alive -- worse to diagnose than the garbage packets
+          // this replaced. Braces matter: MLPD_WARN is multi-statement.
+          static std::atomic<long long> noslot{0};
+          const long long n_noslot = noslot.fetch_add(1);
+          if ((n_noslot % 2000) == 0) {
+            MLPD_WARN(
+                "BS recv: no slot from radio %zu for %lld consecutive reads. The "
+                "RX stream is delivering nothing; check that the base station "
+                "actually opened and that its data-plane egress was programmed.\n",
+                radio_id, n_noslot + 1);
+          }
           for (size_t ch = 0; ch < num_packets; ++ch) {
             const int bit = 1 << (cursor + ch) % sizeof(std::atomic_int);
             const int offs = (cursor + ch) / sizeof(std::atomic_int);
