@@ -157,8 +157,11 @@ ClientRadioSet::ClientRadioSet(Config* cfg) : _cfg(cfg) {
     for (auto st = radioSerialNotFound.begin(); st != radioSerialNotFound.end();
          st++)
       std::cout << "\033[1;31m" << *st << "\033[0m" << std::endl;
-    std::cout << "\033[1;31mERROR: the above client serials were not "
-                 "discovered in the network!\033[0m"
+    std::cout << "\033[1;31mERROR: the above client radio(s) could not be "
+                 "opened. The reason is logged above each address; note that "
+                 "a radio can be discoverable (SoapySDRUtil --find) and still "
+                 "fail here, e.g. no route to its data-plane address."
+                 "\033[0m"
               << std::endl;
   } else {
     //beaconSize + 82 (BS FE delay) + 68 (path delay) + 17 (correlator delay) + 82 (Client FE Delay)

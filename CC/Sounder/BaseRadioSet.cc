@@ -225,8 +225,11 @@ BaseRadioSet::BaseRadioSet(Config* cfg, const bool calibrate_proc) : _cfg(cfg) {
     for (auto st = radio_serial_not_found.begin();
          st != radio_serial_not_found.end(); st++)
       std::cout << "\033[1;31m" << *st << "\033[0m" << std::endl;
-    std::cout << "\033[1;31mERROR: the above base station serials were not "
-                 "discovered in the network!\033[0m"
+    std::cout << "\033[1;31mERROR: the above base station radio(s) could not "
+                 "be opened. The reason is logged above each address; note "
+                 "that a radio can be discoverable (SoapySDRUtil --find) and "
+                 "still fail here, e.g. no route to its data-plane address."
+                 "\033[0m"
               << std::endl;
   } else if (_cfg->is_houdini()) {
     // Houdini BS. bs_hw_framer=true -> native TDD framer (beacon replay strobe +
@@ -797,13 +800,18 @@ void BaseRadioSet::init(BaseRadioContext* context) {
                   _cfg->is_houdini() ? _cfg->rate() : 0.0,
                   _cfg->is_houdini() ? _cfg->nco() : 0.0);
   } catch (std::runtime_error& err) {
-    if (kUseSoapyUHD == false) {
-      std::cerr << "Ignoring iris " << _cfg->bs_sdr_ids().at(c).at(i)
-                << std::endl;
-    } else {
-      std::cerr << "Ignoring uhd device " << _cfg->bs_sdr_ids().at(c).at(i)
-                << std::endl;
-    }
+    // Name the radio by what it actually is, and SAY WHY it was dropped. This
+    // used to print "Ignoring iris <addr>" (upstream RENEWLab hardware we do not
+    // run) and throw err.what() away, so a base station that failed to open gave
+    // only its address before surfacing as "serials were not discovered in the
+    // network" -- which sends you to check discovery when the real cause was in
+    // the exception all along (a missing data-plane route, a busy stream). The
+    // client path already logs its reason; this matches it.
+    const char* kind = kUseSoapyUHD ? "uhd device"
+                                    : (_cfg->is_houdini() ? "houdini radio"
+                                                          : "iris");
+    std::cerr << "Ignoring " << kind << " " << _cfg->bs_sdr_ids().at(c).at(i)
+              << ": " << err.what() << std::endl;
     if (bsRadios.at(c).at(i) != nullptr) {
       MLPD_TRACE("Deleting radio ptr due to exception\n");
       delete bsRadios.at(c).at(i);
