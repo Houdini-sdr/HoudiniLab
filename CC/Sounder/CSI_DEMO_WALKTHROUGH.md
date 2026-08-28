@@ -29,8 +29,12 @@ clock).
   streams the result out as UDP datagrams, one per frame per antenna.
 - A small Python backend, `csi_gui/csi_server.py`, receives those datagrams and
   serves a self contained web page. The page uses Server Sent Events and an
-  HTML5 canvas, with no external JavaScript libraries, so it works on a host
-  with no internet access.
+  HTML5 canvas, with no external JavaScript libraries.
+- The page is styled with the Tabler theme, so it matches the RayNet compiler
+  dashboard. Tabler ships as one stylesheet inside this repo at
+  `csi_gui/vendor/tabler.min.css`, and the backend serves it. Nothing is
+  fetched from the internet and nothing has to be installed, so the dashboard
+  still works on a host with no network access.
 - Two radios take part. One is the base station: it transmits a beacon and
   opens a receive window on each pilot slot. The other is the client: it locks
   onto the beacon and transmits a pilot back inside that window.
@@ -69,6 +73,7 @@ section 3:
 ls <path-to-HoudiniLab>/CC/Sounder/build/sounder      # binary exists
 SoapySDRUtil --info                                   # plugin path is set
 python3 -c "import http.server, socket, struct"       # dashboard needs only stdlib
+ls <path-to-HoudiniLab>/CC/Sounder/csi_gui/vendor/tabler.min.css  # page stylesheet
 cat <path-to-HoudiniLab>/CC/Sounder/files/topology-houdini.json   # your two IPs
 ```
 
@@ -289,6 +294,8 @@ from before that path existed, and it is not part of this demo.
 | `--udp-port` | 9999 | Port the CSI datagrams arrive on |
 | `--fps` | 30 | How often the page is pushed new data |
 | `--stale-ms` | 1500 | Dim an antenna's plots when its last update is older than this (section 5.1) |
+| `--mag-top` | 0 | Top of the fixed magnitude axis, in dB |
+| `--mag-span` | 60 | Height of the fixed magnitude axis, in dB below `--mag-top` |
 | `--csi-fps` | sounder default (30) | Per antenna stream rate out of the sounder |
 | `--dest-host` | 127.0.0.1 | Where the sounder sends datagrams, when using `--launch` |
 
@@ -314,8 +321,14 @@ Then open `http://localhost:8080/` in a browser. The page connects on its own
 and reconnects if the stream drops, so you can leave it open across sounder
 restarts.
 
-The page serves two routes: `/` is the dashboard itself, and `/stream` is the
-Server Sent Events feed it reads. You will not normally open `/stream` by hand.
+The page serves three routes: `/` is the dashboard itself, `/stream` is the
+Server Sent Events feed it reads, and `/vendor/tabler.min.css` is the
+stylesheet. You will not normally open the last two by hand.
+
+The button at the top right switches between the dark and light theme. Your
+choice is stored in the browser, so it survives a reload and a restart of the
+backend. It is the same control, and the same two themes, as the RayNet
+compiler dashboard.
 
 Each receive antenna gets one card with four panels:
 
@@ -329,6 +342,18 @@ Each receive antenna gets one card with four panels:
    that keeps re-locking draws horizontal tearing.
 4. **Constellation**, equalized uplink data. Only populated when you run
    `houdini-ul.json`. Clean QPSK shows four tight clusters.
+
+Every panel carries its tick labels in the margin beside the plot rather than
+inside it, and both top panels use a fixed axis that never re-ranges. That is
+deliberate. An axis that rescales itself every frame makes a static channel
+look alive and hides slow drift, so the numbers next to a panel mean the same
+thing in every frame you compare.
+
+The magnitude axis runs from `--mag-top` down by `--mag-span` decibels. If the
+trace leaves that window it would vanish off the top or the bottom of an
+otherwise innocent looking empty panel, so an `off scale` badge appears next to
+the panel title instead. If you see it, move the axis with `--mag-top` rather
+than assuming the channel died.
 
 Guard band and DC null subcarriers are drawn as gaps, not as zeros, so the
 empty channel edges are expected.

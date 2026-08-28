@@ -5,9 +5,14 @@ Runs the sounder in *viewing mode* (``sounder --view``), which computes per-ante
 CSI in C++ (pilot-agnostic -- uses the config's freq-domain reference, so LTS /
 Zadoff-Chu / any ``pilot_seq`` works) and streams one UDP datagram per (frame,
 antenna). This backend receives those datagrams, and serves a self-contained web
-page (Server-Sent Events + HTML5 canvas -- no external libraries) that shows, per
-RX antenna, live magnitude & phase across subcarriers plus a scrolling waterfall.
+page (Server-Sent Events + HTML5 canvas) that shows, per RX antenna, live magnitude
+& phase across subcarriers, a scrolling waterfall, and the equalized constellation.
 Scales automatically to however many antennas appear in the stream.
+
+The page is styled with Tabler, vendored at ``csi_gui/vendor/tabler.min.css`` and
+served from this process, so the dashboard matches the RayNet compiler dashboard
+and still needs nothing installed: Python's standard library plus one CSS file
+that ships in the repo.
 
 Usage (on the DGX, then browse via SSH port-forward ``-L 8080:localhost:8080``):
 
@@ -145,10 +150,39 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+        elif self.path.startswith("/vendor/"):
+            self._static(self.path[len("/vendor/"):].split("?", 1)[0])
         elif self.path.startswith("/stream"):
             self._sse()
         else:
             self.send_error(404)
+
+    def _static(self, name):
+        """Serve one vendored asset out of ``csi_gui/vendor``.
+
+        The allow-list is the whole access control: the page is the only client and
+        it asks for exactly one file, so there is no reason to let a request name a
+        path at all, let alone walk out of the directory.
+        """
+        mime = {"tabler.min.css": "text/css; charset=utf-8"}.get(name)
+        if mime is None:
+            self.send_error(404)
+            return
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vendor", name)
+        try:
+            with open(path, "rb") as f:
+                body = f.read()
+        except OSError:
+            self.send_error(404)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", mime)
+        self.send_header("Content-Length", str(len(body)))
+        # Vendored with the repo, so it cannot change under a running server: let
+        # the browser keep it rather than refetch half a megabyte on every reload.
+        self.send_header("Cache-Control", "public, max-age=86400")
+        self.end_headers()
+        self.wfile.write(body)
 
     def _sse(self):
         self.send_response(200)
@@ -322,41 +356,126 @@ def main():
 
 
 PAGE = r"""<!doctype html>
-<html><head><meta charset="utf-8"><title>Houdini live CSI</title>
+<html lang="en" data-bs-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Houdini live CSI</title>
+<link rel="stylesheet" href="/vendor/tabler.min.css">
 <style>
- body{font-family:system-ui,Arial,sans-serif;margin:0;background:#0e1116;color:#e6edf3}
- header{padding:10px 16px;background:#161b22;border-bottom:1px solid #30363d;
-        display:flex;gap:16px;align-items:baseline}
- header h1{font-size:16px;margin:0;font-weight:600}
- header .meta{font-size:12px;color:#8b949e}
- #ants{display:flex;flex-wrap:wrap;gap:14px;padding:14px}
- .card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:10px;width:520px}
- .card h2{font-size:13px;margin:0 0 8px;color:#58a6ff}
- .card.stale .row{opacity:.4}
- .card h2 .badge{display:none;margin-left:8px;font-size:11px;font-weight:500;
-        padding:2px 6px;border-radius:10px;background:#3d2d16;color:#e3b341;
-        border:1px solid #6b4f1d;vertical-align:middle}
- .card.stale h2 .badge{display:inline-block}
- .row{display:flex;gap:8px}
- .plot{position:relative}
- .plot .lbl{position:absolute;top:2px;left:6px;font-size:10px;color:#8b949e}
- canvas{background:#0b0f14;border:1px solid #21262d;border-radius:4px;display:block}
- .status{font-size:11px;color:#8b949e;margin-top:6px}
- .off{color:#f85149}
-</style></head>
+/* Local layer: only what Tabler has no class for. Every colour here is a Tabler
+   variable, so light and dark both follow the theme and there is no second palette
+   to keep in step. Same reason the canvases read their colours from these vars. */
+.csi-cards{display:flex;flex-wrap:wrap;gap:1rem;padding:1rem;align-items:flex-start}
+.csi-card{width:620px}
+/* A stale card dims its plots but NOT its header, so the badge that explains the
+   dimming does not dim along with the thing it is explaining. */
+.csi-card.stale .csi-plots{opacity:.4}
+.csi-plots{display:grid;grid-template-columns:1fr 1fr;gap:.75rem 1rem}
+.csi-plot-title{font-size:.7rem;color:var(--tblr-secondary);margin-bottom:.15rem;
+  display:flex;align-items:center;gap:.35rem}
+.csi-stage{display:flex}
+.csi-y-axis{position:relative;width:36px;flex:0 0 36px;font-size:.65rem;
+  color:var(--tblr-secondary);font-variant-numeric:tabular-nums}
+.csi-y-axis span{position:absolute;right:5px;transform:translateY(-50%);white-space:nowrap}
+/* The top and bottom labels sit ON the canvas edge, so centring them there would
+   clip half of each. Align them inward instead, which is what raynet's YAxis does
+   with its per-tick pixel nudge. */
+.csi-y-axis span:first-child{transform:translateY(0)}
+.csi-y-axis span:last-child{transform:translateY(-100%)}
+.csi-plot canvas{display:block;background:var(--tblr-bg-surface-tertiary);
+  border:1px solid var(--tblr-border-color);border-radius:4px}
+.csi-x-axis{display:flex;justify-content:space-between;margin-left:36px;margin-top:.1rem;
+  font-size:.65rem;color:var(--tblr-secondary);font-variant-numeric:tabular-nums}
+.tnum{font-variant-numeric:tabular-nums}
+</style>
+</head>
 <body>
-<header>
-  <h1>Houdini live CSI</h1>
-  <span class="meta" id="meta">connecting…</span>
+<header class="navbar navbar-expand-md d-print-none">
+  <div class="container-fluid">
+    <span class="navbar-brand d-flex align-items-center gap-2 fw-bold mb-0">
+      <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"
+           fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+           stroke-linejoin="round" class="icon"><path stroke="none" d="M0 0h24v24H0z" fill="none"/>
+        <path d="M6 18l0 -3"/><path d="M10 18l0 -6"/><path d="M14 18l0 -9"/><path d="M18 18l0 -12"/></svg>
+      <span>Houdini live CSI</span>
+    </span>
+    <div class="ms-auto d-flex align-items-center gap-3">
+      <span class="text-secondary tnum" id="meta">connecting&hellip;</span>
+      <button class="btn btn-icon btn-ghost-secondary" id="theme"
+              title="Toggle light / dark" aria-label="Toggle light / dark"></button>
+    </div>
+  </div>
 </header>
-<div id="ants"></div>
+<div class="csi-cards" id="ants"></div>
 <script>
 const W=250,H=120,WFW=250,WFH=120;   // plot sizes
 const STALE_MS=__STALE_MS__;         // no update for this long -> dim + badge
 // Both top panels are FIXED frame to frame. An axis that re-ranges per frame makes
 // a static channel look alive and hides real drift, so nothing here auto-scales.
+// (raynet-compiler's LinePlot deliberately does re-range: that is right for a
+// reviewed capture and wrong for a live one. Do not copy it here.)
 const MAG_TOP=__MAG_TOP__, MAG_BOT=__MAG_TOP__-__MAG_SPAN__;
-const cards={};                       // ant_id -> {mag,phase,wf,wfimg,wfrow,frame}
+const CONS_R=1.7;                     // constellation half-width, in unit-power units
+const cards={};                       // ant_id -> {mag,phase,wf,wfimg,cons,...}
+
+// ---- theme ---------------------------------------------------------------
+// Same mechanism as the RayNet dashboard: the theme is one attribute on <html>,
+// Tabler's variables do the rest, and localStorage remembers the choice. The
+// markup above declares the fallback, exactly as their index.html does.
+const THEME_KEY='houdini-csi-theme';
+const ICON='<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"'
+  +' fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"'
+  +' stroke-linejoin="round" class="icon"><path stroke="none" d="M0 0h24v24H0z" fill="none"/>';
+const SUN=ICON+'<path d="M12 12m-4 0a4 4 0 1 0 8 0a4 4 0 1 0 -8 0"/><path d="M3 12h1m8 -9v1m8 8h1'
+  +'m-9 8v1m-6.4 -15.4l.7 .7m12.1 -.7l-.7 .7m0 11.4l.7 .7m-12.1 -.7l-.7 .7"/></svg>';
+const MOON=ICON+'<path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313'
+  +' -12.454z"/></svg>';
+
+// A canvas gets no CSS, so read the theme's colours out of Tabler once per change
+// and hand them to the draw functions. This is the only place the page names a
+// colour at all, which is what keeps the plots and the chrome in step.
+let C={};
+function readTheme(){
+  const s=getComputedStyle(document.documentElement), v=n=>s.getPropertyValue(n).trim();
+  C={grid:v('--tblr-border-color'), bg:v('--tblr-bg-surface-tertiary'),
+     mag:v('--tblr-azure'), phase:v('--tblr-green'), warn:v('--tblr-red'),
+     muted:v('--tblr-secondary'),
+     pts:'rgba('+v('--tblr-azure-rgb')+',0.55)'};
+}
+function applyTheme(t){
+  document.documentElement.setAttribute('data-bs-theme',t);
+  try{ localStorage.setItem(THEME_KEY,t); }catch(e){}
+  document.getElementById('theme').innerHTML=(t==='dark'?SUN:MOON);
+  readTheme(); redrawAll();
+}
+function initTheme(){
+  let t=null;
+  try{ t=localStorage.getItem(THEME_KEY); }catch(e){}
+  if(t!=='light'&&t!=='dark') t=document.documentElement.getAttribute('data-bs-theme')||'dark';
+  applyTheme(t);
+  document.getElementById('theme').addEventListener('click',()=>applyTheme(
+    document.documentElement.getAttribute('data-bs-theme')==='dark'?'light':'dark'));
+}
+
+// ---- formatting ----------------------------------------------------------
+// Ported from raynet-compiler src/dashboard/components/plots.tsx so a number reads
+// the same in both tools.
+function formatAxisValue(v){
+  if(!Number.isFinite(v)) return 'n/a';
+  const a=Math.abs(v);
+  if(a!==0&&(a>=10000||a<0.01)) return v.toExponential(1);
+  if(a>=100) return v.toFixed(0);
+  if(a>=10) return v.toFixed(1);
+  return v.toFixed(2);
+}
+function formatScaled(v,mode){
+  if(!Number.isFinite(v)) return 'n/a';
+  if(mode==='db') return v.toFixed(1)+' dB';
+  const a=Math.abs(v);
+  if(a!==0&&(a>=10000||a<0.001)) return v.toExponential(2);
+  return v.toFixed(a>=100?1:4);
+}
 
 function jet(v){ // v in [0,1] -> [r,g,b]
   v=Math.max(0,Math.min(1,v));
@@ -366,52 +485,65 @@ function jet(v){ // v in [0,1] -> [r,g,b]
   return [r*255|0,g*255|0,b*255|0];
 }
 
-function makeCard(ant){
-  const wrap=document.createElement('div'); wrap.className='card';
-  wrap.innerHTML=`<h2>RX antenna ${ant}<span class="badge"></span></h2>
-    <div class="row">
-      <div class="plot"><span class="lbl">|H| (dB) vs subcarrier</span>
-        <canvas width="${W}" height="${H}"></canvas></div>
-      <div class="plot"><span class="lbl">phase (rad)</span>
-        <canvas width="${W}" height="${H}"></canvas></div>
-    </div>
-    <div class="row" style="margin-top:8px">
-      <div class="plot"><span class="lbl">waterfall |H| (time ↓)</span>
-        <canvas width="${WFW}" height="${WFH}"></canvas></div>
-      <div class="plot"><span class="lbl">constellation (equalized U)</span>
-        <canvas width="${WFH}" height="${WFH}"></canvas></div>
-    </div>
-    <div class="status"></div>`;
-  document.getElementById('ants').appendChild(wrap);
-  const cvs=wrap.querySelectorAll('canvas');
-  const wf=cvs[2].getContext('2d');
-  cards[ant]={mag:cvs[0].getContext('2d'),phase:cvs[1].getContext('2d'),
-              wf:wf,wfimg:wf.createImageData(WFW,1),
-              cons:cvs[3].getContext('2d'),
-              status:wrap.querySelector('.status'),frame:0,
-              el:wrap,badge:wrap.querySelector('.badge'),
-              lastCsi:-1,lastCns:-1};
+// ---- card construction ---------------------------------------------------
+// Tick labels live in HTML gutters beside the canvas rather than inside it: the
+// trace gets the whole canvas back, and the labels pick up the theme's text colour
+// for free. They are written ONCE because these axes never move -- a label that
+// never changes is the honest rendering of an axis that never re-ranges.
+function yAxis(labels){   // labels top -> bottom
+  return '<div class="csi-y-axis">'+labels.map((t,i)=>
+    '<span style="top:'+(i/(labels.length-1)*100).toFixed(1)+'%">'+t+'</span>').join('')+'</div>';
+}
+function frame(title, w, h, ylabels, xlabels, extra){
+  return '<div class="csi-plot"><div class="csi-plot-title"><span>'+title+'</span>'
+    +(extra||'')+'</div><div class="csi-stage">'+yAxis(ylabels)
+    +'<canvas width="'+w+'" height="'+h+'"></canvas></div>'
+    +'<div class="csi-x-axis">'+xlabels.map(t=>'<span>'+t+'</span>').join('')+'</div></div>';
 }
 
-// Grid + labelled ticks. yfmt(v) renders a y value; nsc labels the x axis in
-// subcarriers (DC centred). Without labels you cannot tell a rescale from real
-// movement, which is exactly how an auto-ranged panel misleads.
-function axes(ctx,ymin,ymax,yfmt,nsc){
-  ctx.clearRect(0,0,W,H); ctx.strokeStyle='#21262d'; ctx.lineWidth=1;
-  for(let i=0;i<=4;i++){const y=H*i/4|0;ctx.beginPath();ctx.moveTo(0,y+.5);ctx.lineTo(W,y+.5);ctx.stroke();}
-  const xz=W/2|0; ctx.beginPath();ctx.moveTo(xz+.5,0);ctx.lineTo(xz+.5,H);ctx.stroke();
-  if(!yfmt) return;
-  ctx.fillStyle='#6e7681'; ctx.font='9px sans-serif'; ctx.textAlign='left';
-  for(let i=0;i<=4;i++){
-    const y=H*i/4, v=ymax-(ymax-ymin)*i/4;
-    ctx.fillText(yfmt(v), 2, Math.min(H-2, Math.max(9, y+ (i===0?9:(i===4?-2:3)))));
-  }
-  if(nsc){
-    ctx.textAlign='center'; ctx.fillText('DC', xz, H-2);
-    ctx.textAlign='left';   ctx.fillText('-'+(nsc>>1), 20, H-2);
-    ctx.textAlign='right';  ctx.fillText('+'+(nsc>>1), W-2, H-2);
-    ctx.textAlign='left';
-  }
+function magLabels(){
+  const out=[];
+  for(let i=0;i<=4;i++) out.push(formatAxisValue(MAG_TOP-(MAG_TOP-MAG_BOT)*i/4));
+  return out;
+}
+function makeCard(ant){
+  const wrap=document.createElement('div');
+  wrap.className='card csi-card';
+  const off='<span class="badge bg-red-lt text-red csi-off" hidden>off scale</span>';
+  wrap.innerHTML=
+    '<div class="card-header py-2">'
+     +'<h3 class="card-title">RX antenna '+ant+'</h3>'
+     +'<div class="card-actions"><span class="badge bg-orange-lt text-orange csi-stale" hidden></span></div>'
+    +'</div>'
+    +'<div class="card-body p-3">'
+     +'<div class="csi-plots">'
+      +frame('|H| (dB) vs subcarrier',W,H,magLabels(),['','',''],off)
+      +frame('phase (rad)',W,H,['1.0π','0.5π','0.0π','-0.5π','-1.0π'],['','',''])
+      +frame('waterfall |H| (time down)',WFW,WFH,['older','','now'],['','',''])
+      +frame('constellation (equalized U)',WFH,WFH,
+             [formatAxisValue(CONS_R),'0.00',formatAxisValue(-CONS_R)],
+             [formatAxisValue(-CONS_R),'I','+'+formatAxisValue(CONS_R)])
+     +'</div>'
+     +'<div class="text-secondary tnum mt-3 csi-status" style="font-size:.75rem"></div>'
+    +'</div>';
+  document.getElementById('ants').appendChild(wrap);
+  const cvs=wrap.querySelectorAll('canvas'), wf=cvs[2].getContext('2d');
+  cards[ant]={mag:cvs[0].getContext('2d'),phase:cvs[1].getContext('2d'),
+              wf:wf,wfimg:wf.createImageData(WFW,1),cons:cvs[3].getContext('2d'),
+              status:wrap.querySelector('.csi-status'),
+              el:wrap,badge:wrap.querySelector('.csi-stale'),
+              off:wrap.querySelector('.csi-off'),
+              xax:wrap.querySelectorAll('.csi-x-axis'),
+              lastCsi:-1,lastCns:-1,csiRec:null,cnsRec:null,frame:0};
+}
+
+// Grid only: the labels are HTML now. Horizontal quarters plus the DC centre line.
+function grid(ctx,w,h){
+  ctx.clearRect(0,0,w,h);
+  ctx.strokeStyle=C.grid; ctx.lineWidth=1;
+  for(let i=0;i<=4;i++){const y=(h*i/4)|0;
+    ctx.beginPath();ctx.moveTo(0,y+.5);ctx.lineTo(w,y+.5);ctx.stroke();}
+  const xz=(w/2)|0; ctx.beginPath();ctx.moveTo(xz+.5,0);ctx.lineTo(xz+.5,h);ctx.stroke();
 }
 
 function line(ctx,vals,ymin,ymax,color){
@@ -427,38 +559,46 @@ function line(ctx,vals,ymin,ymax,color){
   ctx.stroke();
 }
 
-function drawCsi(card,c){
-  card.frame=c.frame;
+// The subcarrier axis is only known once a frame has arrived, so the three x-axis
+// gutters that share it are filled in on the first one and left alone after.
+function setScAxis(card,nsc){
+  if(card.nsc===nsc) return;
+  card.nsc=nsc;
+  const lab=['-'+(nsc>>1),'DC','+'+(nsc>>1)];
+  for(let i=0;i<3;i++){
+    const sp=card.xax[i].querySelectorAll('span');
+    for(let j=0;j<3;j++) sp[j].textContent=lab[j];
+  }
+}
+
+function drawCsi(card,c,advance){
+  card.frame=c.frame; card.csiRec=c;
+  setScAxis(card,c.sc);
   // Magnitude: FIXED axis, never re-ranged. Set with --mag-top / --mag-span.
   const top=MAG_TOP, bot=MAG_BOT;
-  axes(card.mag,bot,top,v=>v.toFixed(0),c.sc);
-  line(card.mag,c.mag_db,bot,top,'#58a6ff');
-  card.mag.font='9px sans-serif'; card.mag.textAlign='right';
+  grid(card.mag,W,H);
+  line(card.mag,c.mag_db,bot,top,C.mag);
   // A fixed axis can hide the trace entirely if the level moves off scale, so say
   // so rather than showing an innocent-looking empty panel.
   const fin=c.mag_db.filter(v=>v!==null);
-  const off=fin.length&&(Math.max(...fin)>top||Math.min(...fin)<bot);
-  card.mag.fillStyle=off?'#f85149':'#6e7681';
-  card.mag.fillText(off?'dB  OFF SCALE':'dB', W-2, 10);
-  card.mag.textAlign='left';
-  // Phase: fixed -pi..+pi (it always was), now with ticks in units of pi.
-  axes(card.phase,-Math.PI,Math.PI,v=>(v/Math.PI).toFixed(1)+'\u03c0',c.sc);
-  line(card.phase,c.phase,-Math.PI,Math.PI,'#3fb950');
-  card.phase.fillStyle='#6e7681'; card.phase.font='9px sans-serif';
-  card.phase.textAlign='right'; card.phase.fillText('rad', W-2, 10);
-  card.phase.textAlign='left';
-  // waterfall: scroll up 1px, draw new bottom row colored by magnitude
-  card.wf.drawImage(card.wf.canvas,0,-1);
-  const n=c.mag_db.length, d=card.wfimg.data;
-  for(let x=0;x<WFW;x++){
-    const k=Math.min(n-1,(x*n/WFW)|0), v=c.mag_db[k];
-    let col=[13,15,20];
-    if(v!==null){ col=jet((v-bot)/(top-bot)); }
-    d[4*x]=col[0];d[4*x+1]=col[1];d[4*x+2]=col[2];d[4*x+3]=255;
+  card.off.hidden=!(fin.length&&(Math.max(...fin)>top||Math.min(...fin)<bot));
+  // Phase: fixed -pi..+pi (it always was).
+  grid(card.phase,W,H);
+  line(card.phase,c.phase,-Math.PI,Math.PI,C.phase);
+  // waterfall: scroll up 1px, draw new bottom row coloured by magnitude
+  if(advance!==false){
+    card.wf.drawImage(card.wf.canvas,0,-1);
+    const n=c.mag_db.length, d=card.wfimg.data;
+    for(let x=0;x<WFW;x++){
+      const k=Math.min(n-1,(x*n/WFW)|0), v=c.mag_db[k];
+      let col=[0,0,0];
+      if(v!==null) col=jet((v-bot)/(top-bot));
+      d[4*x]=col[0];d[4*x+1]=col[1];d[4*x+2]=col[2];d[4*x+3]=255;
+    }
+    card.wf.putImageData(card.wfimg,0,WFH-1);
   }
-  card.wf.putImageData(card.wfimg,0,WFH-1);
   card.status.textContent='frame '+c.frame+' · '+c.sc+' subcarriers · '
-     +(c.rate/1e6).toFixed(2)+' MS/s · peak '+c.peak_db.toFixed(1)+' dB';
+     +(c.rate/1e6).toFixed(2)+' MS/s · peak '+formatScaled(c.peak_db,'db');
 }
 
 // ideal alphabet (unit average power), mod = bits/symbol (2=QPSK,4=16QAM,6=64QAM)
@@ -471,14 +611,28 @@ function idealPts(mod){
   return out;
 }
 function drawCons(card,cn){
-  const ctx=card.cons, S=WFH, R=S/2/1.7;  // unit power -> R px
+  card.cnsRec=cn;
+  const ctx=card.cons, S=WFH, R=S/2/CONS_R;  // unit power -> R px
   ctx.clearRect(0,0,S,S);
-  ctx.strokeStyle='#21262d'; ctx.lineWidth=1; ctx.beginPath();
+  ctx.strokeStyle=C.grid; ctx.lineWidth=1; ctx.beginPath();
   ctx.moveTo(S/2,0);ctx.lineTo(S/2,S);ctx.moveTo(0,S/2);ctx.lineTo(S,S/2);ctx.stroke();
-  ctx.fillStyle='rgba(88,166,255,0.55)';   // received points
+  ctx.fillStyle=C.pts;                     // received points
   for(const p of cn.pts){const x=S/2+p[0]*R,y=S/2-p[1]*R;ctx.fillRect(x,y,1.6,1.6);}
-  ctx.fillStyle='#f85149';                 // ideal alphabet
+  ctx.fillStyle=C.warn;                    // ideal alphabet
   for(const p of idealPts(cn.mod)){const x=S/2+p[0]*R,y=S/2-p[1]*R;ctx.fillRect(x-2,y-2,4,4);}
+}
+
+// A theme change has to repaint every canvas from the last record, because a
+// stalled stream will not repaint them for us. The waterfall history lives in the
+// bitmap and cannot be recoloured, so it is cleared to the new background rather
+// than left as a rectangle of the old theme.
+function redrawAll(){
+  for(const a in cards){
+    const card=cards[a];
+    card.wf.fillStyle=C.bg; card.wf.fillRect(0,0,WFW,WFH);
+    if(card.csiRec) drawCsi(card,card.csiRec,false);
+    if(card.cnsRec) drawCons(card,card.cnsRec);
+  }
 }
 
 let pktCount=0,t0=Date.now();
@@ -490,7 +644,7 @@ function onData(obj){
     // A stale re-push carries the SAME record, so gate redraw and the rate meter
     // on the frame number. Otherwise a stalled link would read as busy.
     if(rec.csi && rec.csi.frame!==card.lastCsi){
-      drawCsi(card,rec.csi); card.lastCsi=rec.csi.frame; pktCount++;
+      drawCsi(card,rec.csi,true); card.lastCsi=rec.csi.frame; pktCount++;
     }
     if(rec.cns && rec.cns.frame!==card.lastCns){
       drawCons(card,rec.cns); card.lastCns=rec.cns.frame;
@@ -501,9 +655,11 @@ function onData(obj){
     const age=rec.age_ms||0;
     if(age>=STALE_MS){
       card.el.classList.add('stale');
+      card.badge.hidden=false;
       card.badge.textContent='stale '+(age/1000).toFixed(1)+' s';
     }else{
       card.el.classList.remove('stale');
+      card.badge.hidden=true;
     }
   }
   const dt=(Date.now()-t0)/1000;
@@ -515,8 +671,9 @@ function connect(){
   const es=new EventSource('/stream');
   es.onmessage=e=>{ try{onData(JSON.parse(e.data));}catch(err){} };
   es.onerror=()=>{ document.getElementById('meta').innerHTML=
-     '<span class="off">disconnected — retrying…</span>'; };
+     '<span class="text-red">disconnected, retrying&hellip;</span>'; };
 }
+initTheme();
 connect();
 </script>
 </body></html>
