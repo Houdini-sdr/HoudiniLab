@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -27,6 +28,20 @@
 #include "include/utils.h"
 
 namespace Sounder {
+
+// Raw-ADC envelope panel. kAdcCols columns cover the whole slot however long it is;
+// 250 matches the panel width, so one column is one pixel and nothing is thrown away
+// that the display could have shown.
+static constexpr int kAdcCols = 250;
+// Full scale for the int16 sample format this code uses everywhere (see utils.cc).
+// A sample within 1% of the rail is counted as clipped. NOTE this is the rail of the
+// SAMPLE FORMAT, not necessarily of the converter: if the RFSoC delivers a 14-bit
+// sample that is not left-justified, the true rail is lower and this count stays 0
+// while the input is in fact clipping. The peak is reported alongside for exactly
+// that reason -- a peak that sits on the same value every frame IS the rail,
+// whatever value it reads.
+static constexpr int32_t kAdcFullScale = 32767;
+static constexpr int32_t kAdcClip = (kAdcFullScale * 99) / 100;
 
 // Parse HOUDINI_CSI_UDP ("host:port"), open a connected UDP socket, precompute the
 // DC-centered freq-domain pilot reference + a DC-centered DFT matrix, and set the
@@ -167,6 +182,7 @@ void RecorderWorker::streamCsi(Packet* pkt, NodeType node_type) {
     }
     return;
   }
+  sendAdc(pkt);  // raw-ADC envelope, before any of the routing below
   const size_t num_channels = cfg_->bs_channel().size();
   const size_t radio_id = pkt->ant_id / num_channels;
   const bool is_pilot =
@@ -180,6 +196,74 @@ void RecorderWorker::streamCsi(Packet* pkt, NodeType node_type) {
   }
 }
 
+// Any received slot -> raw-ADC min/max envelope, for spotting converter saturation.
+//
+// The envelope, not a decimated copy of the samples: decimation picks every Mth
+// sample, so a slot that clips for a handful of samples can decimate to a trace that
+// never touches full scale, which is the exact failure this panel exists to catch.
+// Column c carries the min and max of every sample it covers, so one clipped sample
+// pins its column to the rail and cannot be missed. The whole slot is covered in
+// kAdcCols columns regardless of how long it is.
+void RecorderWorker::sendAdc(Packet* pkt) {
+  const int slot = static_cast<int>(cfg_->samps_per_slot());
+  if (slot <= 0) return;
+  const long long now =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count();
+  auto it = adc_last_ns_.find(pkt->ant_id);
+  if (it != adc_last_ns_.end() &&
+      (now - it->second) < static_cast<long long>(csi_throttle_ns_))
+    return;
+  adc_last_ns_[pkt->ant_id] = now;
+
+  const int cols = std::min(kAdcCols, slot);
+  const short* d = pkt->data;
+  std::vector<int16_t> env(static_cast<size_t>(4) * cols);
+  // Full-scale counts are taken over the WHOLE slot, not the plotted envelope, so the
+  // clipped-sample number stays exact however wide the panel is.
+  int32_t peak = 0;
+  uint32_t clipped = 0;
+  for (int c = 0; c < cols; ++c) {
+    const int from = static_cast<int>(static_cast<int64_t>(c) * slot / cols);
+    const int to = static_cast<int>(static_cast<int64_t>(c + 1) * slot / cols);
+    int16_t imin = INT16_MAX, imax = INT16_MIN, qmin = INT16_MAX, qmax = INT16_MIN;
+    for (int n = from; n < to; ++n) {
+      const short si = d[2 * n], sq = d[2 * n + 1];
+      imin = std::min(imin, static_cast<int16_t>(si));
+      imax = std::max(imax, static_cast<int16_t>(si));
+      qmin = std::min(qmin, static_cast<int16_t>(sq));
+      qmax = std::max(qmax, static_cast<int16_t>(sq));
+      const int32_t ai = std::abs(static_cast<int32_t>(si));
+      const int32_t aq = std::abs(static_cast<int32_t>(sq));
+      peak = std::max(peak, std::max(ai, aq));
+      if (ai >= kAdcClip || aq >= kAdcClip) ++clipped;
+    }
+    env[4 * c + 0] = imin;
+    env[4 * c + 1] = imax;
+    env[4 * c + 2] = qmin;
+    env[4 * c + 3] = qmax;
+  }
+
+  // [magic 'ADC1'][frame][ant][cols][samps][rate][peak][clipped][Imin,Imax,Qmin,Qmax]*cols
+  std::vector<uint8_t> buf(32 + static_cast<size_t>(8) * cols);
+  const uint32_t magic = 0x41444331u, fr = pkt->frame_id, an = pkt->ant_id,
+                 nc = static_cast<uint32_t>(cols),
+                 ns = static_cast<uint32_t>(slot),
+                 pk = static_cast<uint32_t>(peak);
+  const float rate = static_cast<float>(cfg_->rate());
+  std::memcpy(&buf[0], &magic, 4);
+  std::memcpy(&buf[4], &fr, 4);
+  std::memcpy(&buf[8], &an, 4);
+  std::memcpy(&buf[12], &nc, 4);
+  std::memcpy(&buf[16], &ns, 4);
+  std::memcpy(&buf[20], &rate, 4);
+  std::memcpy(&buf[24], &pk, 4);
+  std::memcpy(&buf[28], &clipped, 4);
+  std::memcpy(&buf[32], env.data(), static_cast<size_t>(8) * cols);
+  (void)::send(csi_sock_, buf.data(), buf.size(), 0);
+}
+
 // Pilot slot -> channel estimate H[k] (DC-centered), cached per antenna + streamed.
 void RecorderWorker::sendCsi(Packet* pkt) {
   const int N = static_cast<int>(cfg_->fft_size());
@@ -191,12 +275,17 @@ void RecorderWorker::sendCsi(Packet* pkt) {
   int s0 = nsym / 8, s1 = nsym - nsym / 8;
   if (s1 <= s0) { s0 = 0; s1 = nsym; }
   std::vector<std::complex<float>> hacc(N, {0.0f, 0.0f});
+  std::vector<float> pacc(N, 0.0f);  // incoherent power, for the repeat coherence below
   int used = 0;
   for (int sym = s0; sym < s1; ++sym) {
     const int base = es + sym * (cp + N) + cp;
     if (base + N > slot) break;
     auto F = symbolFft(d, base);
-    for (int k = 0; k < N; ++k) hacc[k] += F[k] * std::conj(pilot_ref_[k]);
+    for (int k = 0; k < N; ++k) {
+      const std::complex<float> g = F[k] * std::conj(pilot_ref_[k]);
+      hacc[k] += g;
+      pacc[k] += std::norm(g);
+    }
     ++used;
   }
   // Cache H per antenna (always -- keeps it fresh for equalizing this ant's data).
@@ -206,6 +295,23 @@ void RecorderWorker::sendCsi(Packet* pkt) {
     const float pw = std::norm(pilot_ref_[k]);
     if (pw > 1e-6f && used > 0) H[k] = hacc[k] / (static_cast<float>(used) * pw);
   }
+  // Per-subcarrier REPEAT COHERENCE, |mean of the per-symbol estimates|^2 over their
+  // mean power. This slot already carries `used` repetitions of the same pilot and we
+  // were averaging them and throwing the spread away. 1.0 means every repetition
+  // agreed, so H[k] is signal; low means they disagreed, so H[k] is noise wearing a
+  // channel's clothes and the magnitude and phase at that subcarrier mean nothing.
+  //
+  // Cauchy-Schwarz bounds the ratio to [0,1], but the floor for PURE NOISE is 1/used,
+  // not 0 (measured: 8 reps -> 0.128, 32 reps -> 0.030). The dashboard draws that
+  // floor as a reference line, because 0.2 out of 1.0 sounds poor and at 6 reps is
+  // indistinguishable from noise. It is only a measurement at all when used >= 2:
+  // a single term makes the ratio exactly 1.0 however bad the noise, which is why
+  // `used` goes on the wire instead of being assumed.
+  std::vector<float> qual(N, 0.0f);
+  for (int k = 0; k < N; ++k)
+    if (pacc[k] > 0.0f && used > 0)
+      qual[k] = std::min(
+          1.0f, std::norm(hacc[k]) / (static_cast<float>(used) * pacc[k]));
   // Throttle the CSI datagram (H is cached above regardless).
   const long long now =
       std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -216,21 +322,28 @@ void RecorderWorker::sendCsi(Packet* pkt) {
       (now - it->second) < static_cast<long long>(csi_throttle_ns_))
     return;
   csi_last_ns_[pkt->ant_id] = now;
-  // [magic 'CSI1'][frame][ant][num_sc][rate][H re,im]*N
-  std::vector<uint8_t> buf(20 + static_cast<size_t>(8) * N);
-  const uint32_t magic = 0x43534931u, fr = pkt->frame_id, an = pkt->ant_id,
-                 nsc = static_cast<uint32_t>(N);
+  // [magic 'CSI2'][frame][ant][num_sc][rate][reps][H re,im]*N[quality]*N
+  // 'CSI2' supersedes 'CSI1' (same layout without reps and quality). The dashboard
+  // still accepts 'CSI1', so a backend running ahead of an un-rebuilt sounder shows
+  // everything but the quality panel rather than showing nothing.
+  std::vector<uint8_t> buf(24 + static_cast<size_t>(12) * N);
+  const uint32_t magic = 0x43534932u, fr = pkt->frame_id, an = pkt->ant_id,
+                 nsc = static_cast<uint32_t>(N),
+                 reps = static_cast<uint32_t>(used);
   const float rate = static_cast<float>(cfg_->rate());
   std::memcpy(&buf[0], &magic, 4);
   std::memcpy(&buf[4], &fr, 4);
   std::memcpy(&buf[8], &an, 4);
   std::memcpy(&buf[12], &nsc, 4);
   std::memcpy(&buf[16], &rate, 4);
+  std::memcpy(&buf[20], &reps, 4);
   for (int k = 0; k < N; ++k) {
     const float re = H[k].real(), im = H[k].imag();
-    std::memcpy(&buf[20 + 8 * k], &re, 4);
-    std::memcpy(&buf[24 + 8 * k], &im, 4);
+    std::memcpy(&buf[24 + 8 * k], &re, 4);
+    std::memcpy(&buf[28 + 8 * k], &im, 4);
   }
+  for (int k = 0; k < N; ++k)
+    std::memcpy(&buf[24 + 8 * N + 4 * k], &qual[k], 4);
   (void)::send(csi_sock_, buf.data(), buf.size(), 0);
 }
 

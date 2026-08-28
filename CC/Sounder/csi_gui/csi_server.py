@@ -22,8 +22,18 @@ Usage (on the DGX, then browse via SSH port-forward ``-L 8080:localhost:8080``):
     # B) backend only receives (you run `sounder --view` yourself):
     python3 csi_server.py
 
-Wire format (little-endian): [magic u32 'CSI1'][frame u32][ant u32][num_sc u32]
-[rate f32] then num_sc * (H_re f32, H_im f32).
+Wire formats (little-endian), one datagram per (frame, antenna) per kind:
+
+  CSI2  [magic][frame][ant][num_sc][rate f32][reps]  then num_sc * (H_re f32, H_im f32)
+        then num_sc * (quality f32).  quality is the per-subcarrier repeat coherence
+        in [0,1] across the `reps` pilot symbols averaged into H, so it is only a
+        measurement when reps >= 2.  CSI1 is the same without [reps] and without the
+        quality block, and is still accepted.
+  CNS1  [magic][frame][ant][num_pts][mod_order]      then num_pts * (I f32, Q f32)
+  ADC1  [magic][frame][ant][cols][samps][rate f32][peak][clipped]
+        then cols * (I_min, I_max, Q_min, Q_max) as int16.  A min/max envelope of the
+        whole slot rather than decimated samples, so a brief clip cannot fall between
+        two plotted points; peak and clipped are counted over every sample.
 """
 import argparse
 import json
@@ -38,10 +48,14 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-MAGIC_CSI = 0x43534931  # "CSI1" -- pilot channel estimate
-MAGIC_CNS = 0x434E5331  # "CNS1" -- equalized uplink-data constellation
-CSI_HDR = struct.Struct("<IIIIf")  # magic, frame, ant, num_sc, rate
-CNS_HDR = struct.Struct("<IIIII")  # magic, frame, ant, num_pts, mod_order
+MAGIC_CSI = 0x43534931   # "CSI1" -- pilot channel estimate (legacy, no quality)
+MAGIC_CSI2 = 0x43534932  # "CSI2" -- as CSI1 plus per-subcarrier repeat coherence
+MAGIC_CNS = 0x434E5331   # "CNS1" -- equalized uplink-data constellation
+MAGIC_ADC = 0x41444331   # "ADC1" -- raw-ADC min/max envelope, for saturation
+CSI_HDR = struct.Struct("<IIIIf")   # magic, frame, ant, num_sc, rate
+CSI2_HDR = struct.Struct("<IIIIfI")  # ... plus reps (pilot symbols averaged)
+CNS_HDR = struct.Struct("<IIIII")   # magic, frame, ant, num_pts, mod_order
+ADC_HDR = struct.Struct("<IIIIIfII")  # magic, frame, ant, cols, samps, rate, peak, clipped
 
 # ---- shared state: latest CSI + constellation per antenna ------------------
 _lock = threading.Lock()
@@ -50,13 +64,26 @@ _seq = 0       # bumps on every new datagram so the SSE loop knows there's fresh
 _stats = {"pkts": 0, "t0": time.time()}
 
 
-def _parse_csi(payload):
-    magic, frame, ant, nsc, rate = CSI_HDR.unpack_from(payload, 0)
-    off = CSI_HDR.size
-    if len(payload) < off + 8 * nsc:
+def _parse_csi(payload, with_quality):
+    """CSI1 or CSI2 -> one antenna's channel estimate.
+
+    Both layouts are accepted so a dashboard running ahead of an un-rebuilt sounder
+    still draws everything except the quality panel, rather than drawing nothing.
+    """
+    if with_quality:
+        magic, frame, ant, nsc, rate, reps = CSI2_HDR.unpack_from(payload, 0)
+        off = CSI2_HDR.size
+        need = off + 12 * nsc
+    else:
+        magic, frame, ant, nsc, rate = CSI_HDR.unpack_from(payload, 0)
+        off, reps = CSI_HDR.size, 0
+        need = off + 8 * nsc
+    if len(payload) < need:
         return None
     vals = struct.unpack_from("<%df" % (2 * nsc), payload, off)
-    mag_db, phase, mags = [], [], []
+    qual_in = (struct.unpack_from("<%df" % nsc, payload, off + 8 * nsc)
+               if with_quality else None)
+    mag_db, phase, mags, qual = [], [], [], []
     for k in range(nsc):
         re, im = vals[2 * k], vals[2 * k + 1]
         m = math.hypot(re, im)
@@ -64,13 +91,41 @@ def _parse_csi(payload):
         if m < 1e-9:               # unused subcarrier (guard band / DC null)
             mag_db.append(None)
             phase.append(None)
+            qual.append(None)      # a gap, not a zero: nothing was measured here
         else:
             mag_db.append(20.0 * math.log10(m))
             phase.append(math.atan2(im, re))
+            qual.append(qual_in[k] if qual_in else None)
     peak = max((m for m in mags if m > 0), default=0.0)
+    # Below two repetitions there is nothing to compare, and the coherence of a single
+    # term is exactly 1.0 whatever the noise. Publishing that array would draw a
+    # flawless quality trace for a slot that measured nothing, so drop it here rather
+    # than expect every consumer to remember the caveat. None means "no measurement":
+    # reps is None when the sounder predates the field entirely.
+    measurable = with_quality and reps >= 2
+    if not measurable:
+        qual = None
+    meas = [q for q in (qual or []) if q is not None]
     return int(ant), {"frame": int(frame), "sc": int(nsc), "rate": float(rate),
-                      "mag_db": mag_db, "phase": phase,
+                      "mag_db": mag_db, "phase": phase, "qual": qual,
+                      "reps": (int(reps) if with_quality else None),
+                      # one number to watch, the median of the measured subcarriers
+                      "qual_med": (sorted(meas)[len(meas) // 2] if meas else None),
                       "peak_db": (20.0 * math.log10(peak) if peak > 0 else 0.0)}
+
+
+def _parse_adc(payload):
+    """ADC1 -> one antenna's raw-sample min/max envelope plus exact clip counts."""
+    magic, frame, ant, cols, samps, rate, peak, clipped = ADC_HDR.unpack_from(payload, 0)
+    off = ADC_HDR.size
+    if len(payload) < off + 8 * cols:
+        return None
+    e = struct.unpack_from("<%dh" % (4 * cols), payload, off)
+    return int(ant), {"frame": int(frame), "cols": int(cols), "samps": int(samps),
+                      "rate": float(rate), "peak": int(peak), "clipped": int(clipped),
+                      "i_min": e[0::4], "i_max": e[1::4],
+                      "q_min": e[2::4], "q_max": e[3::4],
+                      "full_scale": 32767}
 
 
 def _parse_cns(payload):
@@ -100,9 +155,13 @@ def _udp_loop(bind_host, bind_port):
         magic = struct.unpack_from("<I", data, 0)[0]
         parsed, kind = (None, None)
         if magic == MAGIC_CSI:
-            parsed, kind = _parse_csi(data), "csi"
+            parsed, kind = _parse_csi(data, False), "csi"
+        elif magic == MAGIC_CSI2:
+            parsed, kind = _parse_csi(data, True), "csi"
         elif magic == MAGIC_CNS:
             parsed, kind = _parse_cns(data), "cns"
+        elif magic == MAGIC_ADC:
+            parsed, kind = _parse_adc(data), "adc"
         if parsed is None:
             continue
         ant, rec = parsed
@@ -372,6 +431,12 @@ PAGE = r"""<!doctype html>
    dimming does not dim along with the thing it is explaining. */
 .csi-card.stale .csi-plots{opacity:.4}
 .csi-plots{display:grid;grid-template-columns:1fr 1fr;gap:.75rem 1rem}
+/* The quality strip sits in the SAME grid cell as the magnitude panel, directly
+   under it, so the two share one subcarrier axis exactly. A strip in its own
+   full-width row would be a different pixels-per-subcarrier scale, and a null would
+   appear at two different x positions in two panels that describe the same tone. */
+.csi-quality{margin-top:.35rem}
+.csi-adc .csi-plot{grid-column:1 / -1}
 .csi-plot-title{font-size:.7rem;color:var(--tblr-secondary);margin-bottom:.15rem;
   display:flex;align-items:center;gap:.35rem}
 .csi-stage{display:flex}
@@ -410,6 +475,9 @@ PAGE = r"""<!doctype html>
 <div class="csi-cards" id="ants"></div>
 <script>
 const W=250,H=120,WFW=250,WFH=120;   // plot sizes
+const QH=42;                         // per-subcarrier quality strip
+const AW=W*2+36+16,AH=150;           // ADC envelope spans both grid columns
+const ADC_FS=32767;                  // int16 sample full scale (see recorder_worker.cc)
 const STALE_MS=__STALE_MS__;         // no update for this long -> dim + badge
 // Both top panels are FIXED frame to frame. An axis that re-ranges per frame makes
 // a static channel look alive and hides real drift, so nothing here auto-scales.
@@ -440,7 +508,10 @@ function readTheme(){
   const s=getComputedStyle(document.documentElement), v=n=>s.getPropertyValue(n).trim();
   C={grid:v('--tblr-border-color'), bg:v('--tblr-bg-surface-tertiary'),
      mag:v('--tblr-azure'), phase:v('--tblr-green'), warn:v('--tblr-red'),
-     muted:v('--tblr-secondary'),
+     muted:v('--tblr-secondary'), qual:v('--tblr-yellow'),
+     iCh:v('--tblr-azure'), qCh:v('--tblr-orange'),
+     iFill:'rgba('+v('--tblr-azure-rgb')+',0.35)',
+     qFill:'rgba('+v('--tblr-orange-rgb')+',0.35)',
      pts:'rgba('+v('--tblr-azure-rgb')+',0.55)'};
 }
 function applyTheme(t){
@@ -510,31 +581,71 @@ function makeCard(ant){
   const wrap=document.createElement('div');
   wrap.className='card csi-card';
   const off='<span class="badge bg-red-lt text-red csi-off" hidden>off scale</span>';
+  const clip='<span class="badge bg-red-lt text-red csi-clip" hidden>clipping</span>';
+  // The quality strip lives inside the magnitude plot's own frame so the two share
+  // one x scale. It qualifies the phase panel just as much, which the title says.
+  const qual='<div class="csi-quality">'
+    +'<div class="csi-plot-title"><span class="csi-qtitle">repeat quality</span></div>'
+    +'<div class="csi-stage">'+yAxis(['1.0','0.5','0.0'])
+    +'<canvas width="'+W+'" height="'+QH+'"></canvas></div></div>';
   wrap.innerHTML=
     '<div class="card-header py-2">'
      +'<h3 class="card-title">RX antenna '+ant+'</h3>'
-     +'<div class="card-actions"><span class="badge bg-orange-lt text-orange csi-stale" hidden></span></div>'
+     +'<div class="card-actions d-flex gap-1">'
+       +'<span class="badge bg-orange-lt text-orange csi-stale" hidden></span>'
+     +'</div>'
     +'</div>'
     +'<div class="card-body p-3">'
-     +'<div class="csi-plots">'
-      +frame('|H| (dB) vs subcarrier',W,H,magLabels(),['','',''],off)
+     +'<ul class="nav nav-underline mb-3 csi-tabs">'
+       +'<li class="nav-item"><a href="#" class="nav-link active" data-view="channel">Channel</a></li>'
+       +'<li class="nav-item"><a href="#" class="nav-link" data-view="adc">ADC</a></li>'
+     +'</ul>'
+     +'<div class="csi-plots csi-view" data-view="channel">'
+      +frame('|H| (dB) vs subcarrier',W,H,magLabels(),['','',''],off+qual)
       +frame('phase (rad)',W,H,['1.0π','0.5π','0.0π','-0.5π','-1.0π'],['','',''])
       +frame('waterfall |H| (time down)',WFW,WFH,['older','','now'],['','',''])
       +frame('constellation (equalized U)',WFH,WFH,
              [formatAxisValue(CONS_R),'0.00',formatAxisValue(-CONS_R)],
              [formatAxisValue(-CONS_R),'I','+'+formatAxisValue(CONS_R)])
      +'</div>'
+     +'<div class="csi-plots csi-adc csi-view" data-view="adc" hidden>'
+      +frame('raw ADC min/max envelope, whole slot',AW,AH,
+             ['+FS','+\u00bd','0','-\u00bd','-FS'],['0','sample','end'],clip)
+     +'</div>'
      +'<div class="text-secondary tnum mt-3 csi-status" style="font-size:.75rem"></div>'
+     +'<div class="text-secondary tnum mt-1 csi-adc-status" style="font-size:.75rem"></div>'
     +'</div>';
   document.getElementById('ants').appendChild(wrap);
-  const cvs=wrap.querySelectorAll('canvas'), wf=cvs[2].getContext('2d');
+  // The quality canvas is nested INSIDE the first plot frame, so index by role
+  // rather than by position: querySelectorAll order would silently shift the moment
+  // a panel is added above it.
+  const q = wrap.querySelector('.csi-quality canvas');
+  const cvs=[...wrap.querySelectorAll('.csi-view canvas')].filter(c=>c!==q);
+  const wf=cvs[2].getContext('2d');
   cards[ant]={mag:cvs[0].getContext('2d'),phase:cvs[1].getContext('2d'),
               wf:wf,wfimg:wf.createImageData(WFW,1),cons:cvs[3].getContext('2d'),
+              adc:cvs[4].getContext('2d'),qual:q.getContext('2d'),
+              qtitle:wrap.querySelector('.csi-qtitle'),
               status:wrap.querySelector('.csi-status'),
+              adcStatus:wrap.querySelector('.csi-adc-status'),
               el:wrap,badge:wrap.querySelector('.csi-stale'),
               off:wrap.querySelector('.csi-off'),
-              xax:wrap.querySelectorAll('.csi-x-axis'),
-              lastCsi:-1,lastCns:-1,csiRec:null,cnsRec:null,frame:0};
+              clip:wrap.querySelector('.csi-clip'),
+              xax:wrap.querySelectorAll('.csi-view[data-view=channel] .csi-x-axis'),
+              lastCsi:-1,lastCns:-1,lastAdc:-1,
+              csiRec:null,cnsRec:null,adcRec:null,frame:0};
+  // Tabs are per card so you can watch one antenna's ADC while another shows its
+  // channel, which is how you find the one converter that is actually clipping.
+  wrap.querySelectorAll('.csi-tabs .nav-link').forEach(a=>{
+    a.addEventListener('click',e=>{
+      e.preventDefault();
+      const want=a.dataset.view;
+      wrap.querySelectorAll('.csi-tabs .nav-link').forEach(
+        b=>b.classList.toggle('active',b===a));
+      wrap.querySelectorAll('.csi-view').forEach(
+        v=>{v.hidden=(v.dataset.view!==want);});
+    });
+  });
 }
 
 // Grid only: the labels are HTML now. Horizontal quarters plus the DC centre line.
@@ -585,6 +696,7 @@ function drawCsi(card,c,advance){
   // Phase: fixed -pi..+pi (it always was).
   grid(card.phase,W,H);
   line(card.phase,c.phase,-Math.PI,Math.PI,C.phase);
+  drawQuality(card,c);
   // waterfall: scroll up 1px, draw new bottom row coloured by magnitude
   if(advance!==false){
     card.wf.drawImage(card.wf.canvas,0,-1);
@@ -598,7 +710,92 @@ function drawCsi(card,c,advance){
     card.wf.putImageData(card.wfimg,0,WFH-1);
   }
   card.status.textContent='frame '+c.frame+' · '+c.sc+' subcarriers · '
-     +(c.rate/1e6).toFixed(2)+' MS/s · peak '+formatScaled(c.peak_db,'db');
+     +(c.rate/1e6).toFixed(2)+' MS/s · peak '+formatScaled(c.peak_db,'db')
+     +(c.qual_med!==undefined&&c.qual_med!==null
+       ? ' · median quality '+c.qual_med.toFixed(3) : '');
+}
+
+// Per-subcarrier repeat coherence, on a fixed 0..1 axis because the quantity IS a
+// fraction: re-ranging it would turn "everything is fine" into a panel full of
+// dramatic looking noise. Nulls stay gaps, exactly as they do in the panel above.
+//
+// It is only a measurement when the slot carried two or more pilot symbols to
+// compare, so with fewer the panel says so rather than drawing a flat 1.0 that
+// would read as a perfect channel.
+function drawQuality(card,c){
+  const ctx=card.qual;
+  ctx.clearRect(0,0,W,QH);
+  // Three states, all decided by the backend: no field at all (old sounder), a field
+  // but too few repetitions to mean anything, or a real measurement.
+  const note=(msg,title)=>{
+    card.qtitle.textContent='repeat quality ('+title+')';
+    ctx.fillStyle=C.muted; ctx.font='10px sans-serif'; ctx.textAlign='center';
+    ctx.fillText(msg, W/2, QH/2+3); ctx.textAlign='left';
+  };
+  if(c.reps===undefined||c.reps===null){
+    note('not reported','sounder predates this panel'); return;
+  }
+  if(c.qual===undefined||c.qual===null){
+    note('not measurable','needs 2+ pilot symbols, slot has '+c.reps); return;
+  }
+  const reps=c.reps;
+  card.qtitle.textContent='repeat quality (coherence over '+reps+' pilot symbols, '
+    +'noise floor '+(1/reps).toFixed(2)+')';
+  ctx.strokeStyle=C.grid; ctx.lineWidth=1;
+  for(let i=0;i<=2;i++){const y=(QH*i/2)|0;
+    ctx.beginPath();ctx.moveTo(0,y+.5);ctx.lineTo(W,y+.5);ctx.stroke();}
+  const xz=(W/2)|0; ctx.beginPath();ctx.moveTo(xz+.5,0);ctx.lineTo(xz+.5,QH);ctx.stroke();
+  // Pure noise does not read 0, it reads 1/reps. Without this line a trace sitting at
+  // the floor looks merely mediocre instead of meaning "there is no signal here".
+  const floorY=QH-(1/reps)*QH;
+  ctx.strokeStyle=C.warn; ctx.setLineDash([3,3]);
+  ctx.beginPath();ctx.moveTo(0,floorY);ctx.lineTo(W,floorY);ctx.stroke();
+  ctx.setLineDash([]);
+  const n=c.qual.length;
+  ctx.strokeStyle=C.qual; ctx.lineWidth=1.5; ctx.beginPath();
+  let started=false;
+  for(let k=0;k<n;k++){
+    const v=c.qual[k];
+    if(v===null){started=false;continue;}
+    const x=W*k/(n-1), y=QH-v*QH;
+    if(!started){ctx.moveTo(x,y);started=true;}else ctx.lineTo(x,y);
+  }
+  ctx.stroke();
+}
+
+// Raw-ADC min/max envelope on a FIXED full-scale axis. Fixed because the whole point
+// is the distance between the trace and the rail: an axis that grows with the signal
+// would draw a clipping converter and a quiet one identically.
+function drawAdc(card,a){
+  card.adcRec=a;
+  const ctx=card.adc, mid=AH/2, sc=(AH/2)/ADC_FS;
+  ctx.clearRect(0,0,AW,AH);
+  ctx.strokeStyle=C.grid; ctx.lineWidth=1;
+  for(let i=0;i<=4;i++){const y=(AH*i/4)|0;
+    ctx.beginPath();ctx.moveTo(0,y+.5);ctx.lineTo(AW,y+.5);ctx.stroke();}
+  // The rails, drawn in the warning colour: this is the line the trace must not touch.
+  ctx.strokeStyle=C.warn; ctx.setLineDash([4,3]);
+  for(const y of [0.5,AH-0.5]){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(AW,y);ctx.stroke();}
+  ctx.setLineDash([]);
+  const n=a.cols;
+  // Envelope as a filled band per channel: the band IS the min-to-max span of every
+  // sample in that column, so its top edge touching the rail means a real clipped
+  // sample, not an interpolation artefact.
+  const band=(mn,mx,fill)=>{
+    ctx.fillStyle=fill; ctx.beginPath();
+    for(let k=0;k<n;k++){const x=AW*k/(n-1); const y=mid-mx[k]*sc;
+      if(k===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);}
+    for(let k=n-1;k>=0;k--){const x=AW*k/(n-1); ctx.lineTo(x,mid-mn[k]*sc);}
+    ctx.closePath(); ctx.fill();
+  };
+  band(a.q_min,a.q_max,C.qFill);
+  band(a.i_min,a.i_max,C.iFill);
+  const pct=100*a.peak/ADC_FS;
+  card.clip.hidden=(a.clipped===0);
+  card.adcStatus.textContent='frame '+a.frame+' · '+a.samps+' samples · peak '
+    +a.peak+' of '+ADC_FS+' ('+pct.toFixed(1)+'% FS) · '
+    +(a.clipped?a.clipped+' sample(s) clipped':'no clipping')
+    +' · I blue, Q orange';
 }
 
 // ideal alphabet (unit average power), mod = bits/symbol (2=QPSK,4=16QAM,6=64QAM)
@@ -632,6 +829,7 @@ function redrawAll(){
     card.wf.fillStyle=C.bg; card.wf.fillRect(0,0,WFW,WFH);
     if(card.csiRec) drawCsi(card,card.csiRec,false);
     if(card.cnsRec) drawCons(card,card.cnsRec);
+    if(card.adcRec) drawAdc(card,card.adcRec);
   }
 }
 
@@ -648,6 +846,9 @@ function onData(obj){
     }
     if(rec.cns && rec.cns.frame!==card.lastCns){
       drawCons(card,rec.cns); card.lastCns=rec.cns.frame;
+    }
+    if(rec.adc && rec.adc.frame!==card.lastAdc){
+      drawAdc(card,rec.adc); card.lastAdc=rec.adc.frame;
     }
     // The sounder stops sending for an antenna whose slots carried RX gaps, so
     // the panels hold their last good estimate. Say that on screen: a frozen

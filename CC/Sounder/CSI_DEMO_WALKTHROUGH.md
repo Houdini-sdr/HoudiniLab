@@ -343,20 +343,25 @@ Each receive antenna gets one card with four panels:
 4. **Constellation**, equalized uplink data. Only populated when you run
    `houdini-ul.json`. Clean QPSK shows four tight clusters.
 
-Every panel carries its tick labels in the margin beside the plot rather than
-inside it, and both top panels use a fixed axis that never re-ranges. That is
-deliberate. An axis that rescales itself every frame makes a static channel
-look alive and hides slow drift, so the numbers next to a panel mean the same
-thing in every frame you compare.
+Under the magnitude panel, sharing its subcarrier axis, is a fifth trace:
 
-The magnitude axis runs from `--mag-top` down by `--mag-span` decibels. If the
-trace leaves that window it would vanish off the top or the bottom of an
-otherwise innocent looking empty panel, so an `off scale` badge appears next to
-the panel title instead. If you see it, move the axis with `--mag-top` rather
-than assuming the channel died.
+5. **Repeat quality**, the per subcarrier agreement between the pilot symbols
+   inside one slot. The sounder already averages several repetitions of the same
+   pilot to build H. This trace is how much they agreed. 1.0 means every
+   repetition produced the same estimate, so H at that subcarrier is signal.
+   A low value means they disagreed, so H there is noise and both the magnitude
+   and the phase above it are meaningless at that subcarrier.
 
-Guard band and DC null subcarriers are drawn as gaps, not as zeros, so the
-empty channel edges are expected.
+   Read it against the dashed line, not against zero. Pure noise does not
+   average to 0, it averages to 1 divided by the number of repetitions, and the
+   panel draws that floor for you. With six pilot symbols the floor is 0.17, so a
+   trace sitting at 0.2 has no signal in it at all despite sounding respectable.
+   The panel title states the repetition count and the floor.
+
+   The panel needs at least two repetitions to say anything. With one it reports
+   `not measurable` rather than drawing a trace, because the agreement of a
+   single measurement with itself is always perfect. The status line carries the
+   median across subcarriers as one number to watch.
 
 ### 5.1 When a card dims
 
@@ -373,6 +378,55 @@ happening now".
 
 The threshold is 1.5 seconds by default. If you lower `--csi-fps`, raise it to
 match with `--stale-ms`, or every card will read as stale.
+
+### 5.2 The ADC tab
+
+Each card has two tabs. **Channel** is everything above. **ADC** shows the raw
+converter samples for that antenna, which is where you look when the channel
+panels are strange and you suspect the front end rather than the algorithm.
+
+The trace is a minimum and maximum envelope of the whole slot, one band per
+component, blue for I and orange for Q. It is an envelope rather than a
+decimated copy of the samples on purpose: decimation keeps every Nth sample, so
+a slot that clips for a handful of samples can produce a trace that never
+touches the rail. With an envelope, one clipped sample pins its column to the
+rail and cannot be hidden.
+
+The dashed lines at the top and bottom are full scale. The status line under the
+card reports the peak sample, that peak as a percentage of full scale, and the
+exact count of samples at or above 99 percent of full scale, counted over every
+sample in the slot rather than over the plotted envelope. A `clipping` badge
+appears next to the panel title when that count is not zero.
+
+Aim for a peak somewhere around half to three quarters of full scale. Much lower
+wastes converter bits and the constellation gets noisy. At the rail the samples
+are simply wrong and every panel downstream inherits it.
+
+One caveat to know before you trust a reading of zero clipped samples. Full
+scale here means the rail of the 16 bit sample format the sounder uses
+throughout. If the converter ever delivers a narrower sample that is not shifted
+up into the top of those 16 bits, the true rail is lower, the clipped count
+stays at zero, and the peak reads as though there were headroom. The tell is the
+peak itself: a peak that reports the same value on every frame is the rail,
+whatever number it shows.
+
+The tabs are per card, so you can watch one antenna's converter while another
+shows its channel. That is how you find the single antenna that is clipping.
+
+Every panel carries its tick labels in the margin beside the plot rather than
+inside it, and both top panels use a fixed axis that never re-ranges. That is
+deliberate. An axis that rescales itself every frame makes a static channel
+look alive and hides slow drift, so the numbers next to a panel mean the same
+thing in every frame you compare.
+
+The magnitude axis runs from `--mag-top` down by `--mag-span` decibels. If the
+trace leaves that window it would vanish off the top or the bottom of an
+otherwise innocent looking empty panel, so an `off scale` badge appears next to
+the panel title instead. If you see it, move the axis with `--mag-top` rather
+than assuming the channel died.
+
+Guard band and DC null subcarriers are drawn as gaps, not as zeros, so the
+empty channel edges are expected.
 
 ## 6. Confirming it is actually working
 
