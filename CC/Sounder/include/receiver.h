@@ -71,11 +71,11 @@ class Receiver {
   static void* clientTxRx_launch(void* in_context);
   void clientTxRx(int tid);
   void clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer);
-  // pick_strongest: acquisition passes true (one beacon in the window, and the
+  // refine_first_cluster: acquisition passes true (one beacon in the window, and the
   // frame anchor depends on getting the right peak); re-sync leaves it false.
   ssize_t syncSearch(const std::complex<int16_t>* check_data,
                      size_t search_window, float corr_scale,
-                     bool pick_strongest = false);
+                     bool refine_first_cluster = false);
 
   float estimateCFO(const std::vector<std::complex<int16_t>>& sync_buff,
                     int sync_index);
