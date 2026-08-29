@@ -396,8 +396,13 @@ a slot that clips for a handful of samples can produce a trace that never
 touches the rail. With an envelope, one clipped sample pins its column to the
 rail and cannot be hidden.
 
-The vertical scale is fitted to the slot, and the panel title and the axis
-labels both state the fitted range in converter counts. It is fitted rather than
+The vertical scale is fitted to the signal and then held, and the panel title and
+the axis labels both state the held range in converter counts. Held, not refitted
+every frame: the peak wanders by a few percent on a steady link, so an axis that
+re-fitted on every update would redraw the same signal at a different size every
+time and the panel would shake while nothing was changing. It grows at once when
+the signal needs more room, and shrinks only after the level has stayed low for
+several frames, so a single near empty slot cannot collapse it. It is fitted rather than
 pinned to full scale because a signal well below the rail would otherwise draw as
 a flat line on the centre of an apparently empty panel, which is exactly when you
 most need to see it.

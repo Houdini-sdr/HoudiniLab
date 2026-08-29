@@ -588,11 +588,15 @@ function yAxis(labels){   // labels top -> bottom
   return '<div class="csi-y-axis">'+labels.map((t,i)=>
     '<span style="top:'+(i/(labels.length-1)*100).toFixed(1)+'%">'+t+'</span>').join('')+'</div>';
 }
-function frame(title, cls, ylabels, xlabels, extra){
+// `extra` goes in the title row and must stay small: it is a badge slot. Anything
+// with a body of its own goes in `after`, below the x axis, or it becomes a flex item
+// inside the caption and squashes the title it was meant to annotate.
+function frame(title, cls, ylabels, xlabels, extra, after){
   return '<div class="csi-plot '+cls+'"><div class="csi-plot-title"><span>'+title+'</span>'
     +(extra||'')+'</div><div class="csi-stage">'+yAxis(ylabels)
     +'<canvas></canvas></div>'
-    +'<div class="csi-x-axis">'+xlabels.map(t=>'<span>'+t+'</span>').join('')+'</div></div>';
+    +'<div class="csi-x-axis">'+xlabels.map(t=>'<span>'+t+'</span>').join('')+'</div>'
+    +(after||'')+'</div>';
 }
 
 function magLabels(){
@@ -624,7 +628,7 @@ function makeCard(ant){
        +'<li class="nav-item"><a href="#" class="nav-link" data-view="adc">ADC</a></li>'
      +'</ul>'
      +'<div class="csi-plots csi-view" data-view="channel">'
-      +frame('|H| (dB) vs subcarrier','csi-h-line',magLabels(),['','',''],off+qual)
+      +frame('|H| (dB) vs subcarrier','csi-h-line',magLabels(),['','',''],off,qual)
       +frame('phase (rad)','csi-h-line',['1.0π','0.5π','0.0π','-0.5π','-1.0π'],['','',''])
       +frame('waterfall |H| (time down)','csi-h-wf',['older','','now'],['','',''])
       +frame('constellation (equalized U)','csi-h-cons',
@@ -664,6 +668,7 @@ function makeCard(ant){
               headPct:wrap.querySelector('.csi-head-pct'),
               headBar:wrap.querySelector('.csi-head-bar'),
               xax:wrap.querySelectorAll('.csi-view[data-view=channel] .csi-x-axis'),
+              adcSpanHeld:0,adcLowRun:0,
               lastCsi:-1,lastCns:-1,lastAdc:-1,
               csiRec:null,cnsRec:null,adcRec:null,frame:0};
   // Tabs are per card so you can watch one antenna's ADC while another shows its
@@ -837,6 +842,35 @@ function drawQuality(card,c){
   ctx.stroke();
 }
 
+// The fitted ADC axis is STICKY, not recomputed per frame.
+//
+// Refitting every update is the auto-ranging failure this dashboard avoids
+// everywhere else: the peak wanders (measured 972..1831 counts on a steady link),
+// so a per-frame fit redraws the same signal at a different size every update and
+// the panel shakes while nothing is actually changing.
+//
+// So the span is quantised to a 1-2-5 ladder and held. It grows the moment the
+// signal needs more room, because clipping the trace to keep the axis still would
+// be a lie. It only shrinks when the signal has dropped well inside the current
+// span (below 35%), so ordinary wander cannot drive it back and forth. The result
+// is an axis that sits still for a steady link and moves once when the level
+// genuinely changes.
+function niceSpan(v){
+  const e=Math.pow(10,Math.floor(Math.log10(v))), m=v/e;
+  return (m<=1?1:m<=2?2:m<=5?5:10)*e;
+}
+function adcSpan(card,need){
+  const cur=card.adcSpanHeld||0;
+  if(need>cur){ card.adcSpanHeld=niceSpan(need); card.adcLowRun=0; }
+  else if(need<cur*0.35){
+    // One dropout frame must not collapse the axis and then bounce it back: the
+    // link really does deliver the occasional near-empty slot (16 counts observed
+    // among 1100s). Shrink only once the level has STAYED low.
+    if(++card.adcLowRun>=10){ card.adcSpanHeld=niceSpan(need); card.adcLowRun=0; }
+  } else card.adcLowRun=0;
+  return card.adcSpanHeld;
+}
+
 // Raw-ADC min/max envelope, FITTED to the slot, with the absolute answer beside it.
 //
 // The first version pinned this axis to full scale, reasoning that the distance to the
@@ -853,11 +887,12 @@ function drawAdc(card,a){
   card.adcRec=a;
   const ctx=card.adc, d=card.dim.adc, AW=d.w, AH=d.h, mid=AH/2;
   ctx.clearRect(0,0,AW,AH);
-  let span=0;
+  let need=0;
   for(let k=0;k<a.cols;k++)
-    span=Math.max(span,Math.abs(a.i_min[k]),Math.abs(a.i_max[k]),
+    need=Math.max(need,Math.abs(a.i_min[k]),Math.abs(a.i_max[k]),
                        Math.abs(a.q_min[k]),Math.abs(a.q_max[k]));
-  span=Math.max(1,span);
+  need=Math.max(1,need);
+  const span=adcSpan(card,need);
   const sc=(AH/2-2)/span;   // 2 px so a rail-to-rail slot still shows its edges
   ctx.strokeStyle=C.grid; ctx.lineWidth=1;
   for(let i=0;i<=4;i++){const y=(AH*i/4)|0;
@@ -878,7 +913,7 @@ function drawAdc(card,a){
   for(let i=0;i<=4;i++)
     if(card.adcY[i]) card.adcY[i].textContent=formatAxisValue(span-(2*span)*i/4);
   const pct=100*a.peak/ADC_FS;
-  card.adcTitle.textContent='raw ADC envelope, whole slot (fitted to \u00b1'
+  card.adcTitle.textContent='raw ADC envelope, whole slot (axis held at \u00b1'
     +span+' counts)';
   // The fixed-scale half of the panel. Under-driving is the failure we actually have,
   // so it gets a colour of its own rather than sharing "fine" with a healthy level.
