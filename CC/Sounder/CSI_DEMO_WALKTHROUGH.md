@@ -392,11 +392,20 @@ a slot that clips for a handful of samples can produce a trace that never
 touches the rail. With an envelope, one clipped sample pins its column to the
 rail and cannot be hidden.
 
-The dashed lines at the top and bottom are full scale. The status line under the
-card reports the peak sample, that peak as a percentage of full scale, and the
-exact count of samples at or above 99 percent of full scale, counted over every
-sample in the slot rather than over the plotted envelope. A `clipping` badge
-appears next to the panel title when that count is not zero.
+The vertical scale is fitted to the slot, and the panel title and the axis
+labels both state the fitted range in converter counts. It is fitted rather than
+pinned to full scale because a signal well below the rail would otherwise draw as
+a flat line on the centre of an apparently empty panel, which is exactly when you
+most need to see it.
+
+The absolute question, how much of the converter you are using, is answered
+underneath instead, by a bar that is always on a fixed full scale. The bar turns
+amber below 10 percent, meaning under driven, and red at 95 percent or on any
+clipped sample. The status line under it reports the peak sample, that peak as a
+percentage of full scale, and the exact count of samples at or above 99 percent
+of full scale, counted over every sample in the slot rather than over the plotted
+envelope. A `clipping` badge appears next to the panel title when that count is
+not zero.
 
 Aim for a peak somewhere around half to three quarters of full scale. Much lower
 wastes converter bits and the constellation gets noisy. At the rail the samples

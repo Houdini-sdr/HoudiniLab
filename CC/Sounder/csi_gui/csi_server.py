@@ -426,7 +426,10 @@ PAGE = r"""<!doctype html>
    variable, so light and dark both follow the theme and there is no second palette
    to keep in step. Same reason the canvases read their colours from these vars. */
 .csi-cards{display:flex;flex-wrap:wrap;gap:1rem;padding:1rem;align-items:flex-start}
-.csi-card{width:620px}
+.csi-card{width:640px}
+/* Both views need 588px of content and the card gives 606, but a future size change
+   should degrade to a scrollbar rather than silently clip a panel off the edge. */
+.csi-plots{overflow-x:auto}
 /* A stale card dims its plots but NOT its header, so the badge that explains the
    dimming does not dim along with the thing it is explaining. */
 .csi-card.stale .csi-plots{opacity:.4}
@@ -437,6 +440,9 @@ PAGE = r"""<!doctype html>
    appear at two different x positions in two panels that describe the same tone. */
 .csi-quality{margin-top:.35rem}
 .csi-adc .csi-plot{grid-column:1 / -1}
+.csi-head{grid-column:1 / -1;margin-top:.5rem}
+.csi-head-lbl{font-size:.7rem;color:var(--tblr-secondary);margin-bottom:.15rem}
+.csi-head-pct{font-variant-numeric:tabular-nums}
 .csi-plot-title{font-size:.7rem;color:var(--tblr-secondary);margin-bottom:.15rem;
   display:flex;align-items:center;gap:.35rem}
 .csi-stage{display:flex}
@@ -610,7 +616,14 @@ function makeCard(ant){
      +'</div>'
      +'<div class="csi-plots csi-adc csi-view" data-view="adc" hidden>'
       +frame('raw ADC min/max envelope, whole slot',AW,AH,
-             ['+FS','+\u00bd','0','-\u00bd','-FS'],['0','sample','end'],clip)
+             ['','','','',''],['0','sample','end'],clip)
+      // The trace is FITTED to the slot, so the absolute question it cannot answer
+      // ("how much converter range am I using") gets its own fixed-scale widget.
+      +'<div class="csi-head">'
+        +'<div class="d-flex justify-content-between csi-head-lbl">'
+          +'<span>converter range used</span><span class="csi-head-pct"></span></div>'
+        +'<div class="progress progress-sm"><div class="progress-bar csi-head-bar"'
+        +' style="width:0%"></div></div></div>'
      +'</div>'
      +'<div class="text-secondary tnum mt-3 csi-status" style="font-size:.75rem"></div>'
      +'<div class="text-secondary tnum mt-1 csi-adc-status" style="font-size:.75rem"></div>'
@@ -631,6 +644,10 @@ function makeCard(ant){
               el:wrap,badge:wrap.querySelector('.csi-stale'),
               off:wrap.querySelector('.csi-off'),
               clip:wrap.querySelector('.csi-clip'),
+              adcTitle:wrap.querySelector('.csi-adc .csi-plot-title span'),
+              adcY:wrap.querySelectorAll('.csi-adc .csi-y-axis span'),
+              headPct:wrap.querySelector('.csi-head-pct'),
+              headBar:wrap.querySelector('.csi-head-bar'),
               xax:wrap.querySelectorAll('.csi-view[data-view=channel] .csi-x-axis'),
               lastCsi:-1,lastCns:-1,lastAdc:-1,
               csiRec:null,cnsRec:null,adcRec:null,frame:0};
@@ -763,39 +780,61 @@ function drawQuality(card,c){
   ctx.stroke();
 }
 
-// Raw-ADC min/max envelope on a FIXED full-scale axis. Fixed because the whole point
-// is the distance between the trace and the rail: an axis that grows with the signal
-// would draw a clipping converter and a quiet one identically.
+// Raw-ADC min/max envelope, FITTED to the slot, with the absolute answer beside it.
+//
+// The first version pinned this axis to full scale, reasoning that the distance to the
+// rail is the point. On real hardware the signal came in at 1% of full scale, which put
+// the whole envelope 0.76 px from the midline: a panel that looked empty precisely when
+// it had the most to say. A fixed axis is right when you compare frames (the magnitude
+// panel) and wrong here, where the slot's own shape is what you are reading.
+//
+// So the trace is fitted and the y labels carry absolute counts, while "how much
+// converter range am I using" is answered by the fixed-scale bar underneath and by the
+// exact numbers below it. Nothing about the fit can flatter the signal: the scale is
+// written next to it, in counts, every frame.
 function drawAdc(card,a){
   card.adcRec=a;
-  const ctx=card.adc, mid=AH/2, sc=(AH/2)/ADC_FS;
+  const ctx=card.adc, mid=AH/2;
   ctx.clearRect(0,0,AW,AH);
+  let span=0;
+  for(let k=0;k<a.cols;k++)
+    span=Math.max(span,Math.abs(a.i_min[k]),Math.abs(a.i_max[k]),
+                       Math.abs(a.q_min[k]),Math.abs(a.q_max[k]));
+  span=Math.max(1,span);
+  const sc=(AH/2-2)/span;   // 2 px so a rail-to-rail slot still shows its edges
   ctx.strokeStyle=C.grid; ctx.lineWidth=1;
   for(let i=0;i<=4;i++){const y=(AH*i/4)|0;
     ctx.beginPath();ctx.moveTo(0,y+.5);ctx.lineTo(AW,y+.5);ctx.stroke();}
-  // The rails, drawn in the warning colour: this is the line the trace must not touch.
-  ctx.strokeStyle=C.warn; ctx.setLineDash([4,3]);
-  for(const y of [0.5,AH-0.5]){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(AW,y);ctx.stroke();}
-  ctx.setLineDash([]);
   const n=a.cols;
   // Envelope as a filled band per channel: the band IS the min-to-max span of every
-  // sample in that column, so its top edge touching the rail means a real clipped
-  // sample, not an interpolation artefact.
+  // sample in that column, so nothing brief can fall between two plotted points.
   const band=(mn,mx,fill)=>{
     ctx.fillStyle=fill; ctx.beginPath();
-    for(let k=0;k<n;k++){const x=AW*k/(n-1); const y=mid-mx[k]*sc;
-      if(k===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);}
-    for(let k=n-1;k>=0;k--){const x=AW*k/(n-1); ctx.lineTo(x,mid-mn[k]*sc);}
+    for(let k=0;k<n;k++){const x=AW*k/(n-1);
+      if(k===0) ctx.moveTo(x,mid-mx[k]*sc); else ctx.lineTo(x,mid-mx[k]*sc);}
+    for(let k=n-1;k>=0;k--) ctx.lineTo(AW*k/(n-1),mid-mn[k]*sc);
     ctx.closePath(); ctx.fill();
   };
   band(a.q_min,a.q_max,C.qFill);
   band(a.i_min,a.i_max,C.iFill);
+  // Absolute counts on the axis, so a fitted trace can never be mistaken for a big one.
+  for(let i=0;i<=4;i++)
+    if(card.adcY[i]) card.adcY[i].textContent=formatAxisValue(span-(2*span)*i/4);
   const pct=100*a.peak/ADC_FS;
+  card.adcTitle.textContent='raw ADC envelope, whole slot (fitted to \u00b1'
+    +span+' counts)';
+  // The fixed-scale half of the panel. Under-driving is the failure we actually have,
+  // so it gets a colour of its own rather than sharing "fine" with a healthy level.
+  card.headBar.style.width=Math.max(0.5,Math.min(100,pct)).toFixed(2)+'%';
+  card.headBar.className='progress-bar csi-head-bar '+
+    (a.clipped>0||pct>=95 ? 'bg-danger' : pct<10 ? 'bg-warning' : 'bg-success');
+  card.headPct.textContent=pct.toFixed(1)+'% of full scale'
+    +(pct<10 ? ' (under-driven)' : '');
   card.clip.hidden=(a.clipped===0);
-  card.adcStatus.textContent='frame '+a.frame+' · '+a.samps+' samples · peak '
-    +a.peak+' of '+ADC_FS+' ('+pct.toFixed(1)+'% FS) · '
+  card.adcStatus.textContent='frame '+a.frame+' \u00b7 '+a.samps+' samples \u00b7 peak '
+    +a.peak+' of '+ADC_FS+' ('+pct.toFixed(1)+'% FS) \u00b7 '
     +(a.clipped?a.clipped+' sample(s) clipped':'no clipping')
-    +' · I blue, Q orange';
+    +' \u00b7 I blue, Q orange';
 }
 
 // ideal alphabet (unit average power), mod = bits/symbol (2=QPSK,4=16QAM,6=64QAM)
