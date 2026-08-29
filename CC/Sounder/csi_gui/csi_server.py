@@ -425,11 +425,16 @@ PAGE = r"""<!doctype html>
 /* Local layer: only what Tabler has no class for. Every colour here is a Tabler
    variable, so light and dark both follow the theme and there is no second palette
    to keep in step. Same reason the canvases read their colours from these vars. */
-.csi-cards{display:flex;flex-wrap:wrap;gap:1rem;padding:1rem;align-items:flex-start}
-.csi-card{width:640px}
+.csi-cards{display:grid;gap:1rem;padding:1rem;align-items:start;
+  grid-template-columns:repeat(auto-fit,minmax(520px,1fr))}
+/* No fixed card width. The old 620px card gave 586px of content while the views
+   needed 588, so every panel was clipped by 2px: sizing a card by arithmetic that
+   has to be redone whenever a panel changes is the bug, not the number. The
+   canvases now stretch to whatever the grid gives them. */
+.csi-card{min-width:0}
 /* Both views need 588px of content and the card gives 606, but a future size change
    should degrade to a scrollbar rather than silently clip a panel off the edge. */
-.csi-plots{overflow-x:auto}
+.csi-plots{min-width:0}
 /* A stale card dims its plots but NOT its header, so the badge that explains the
    dimming does not dim along with the thing it is explaining. */
 .csi-card.stale .csi-plots{opacity:.4}
@@ -454,8 +459,17 @@ PAGE = r"""<!doctype html>
    with its per-tick pixel nudge. */
 .csi-y-axis span:first-child{transform:translateY(0)}
 .csi-y-axis span:last-child{transform:translateY(-100%)}
-.csi-plot canvas{display:block;background:var(--tblr-bg-surface-tertiary);
+.csi-plot canvas{display:block;width:100%;background:var(--tblr-bg-surface-tertiary);
   border:1px solid var(--tblr-border-color);border-radius:4px}
+/* Heights live here, widths come from the grid. Bigger than the first pass: at
+   120px a 64-subcarrier trace had under 2px per subcarrier. */
+.csi-h-line canvas{height:190px}
+.csi-h-wf   canvas{height:190px}
+.csi-h-cons canvas{height:250px}
+.csi-h-adc  canvas{height:220px}
+.csi-quality canvas{height:60px}
+.csi-stage{min-width:0}
+.csi-plot{min-width:0}
 .csi-x-axis{display:flex;justify-content:space-between;margin-left:36px;margin-top:.1rem;
   font-size:.65rem;color:var(--tblr-secondary);font-variant-numeric:tabular-nums}
 .tnum{font-variant-numeric:tabular-nums}
@@ -480,10 +494,13 @@ PAGE = r"""<!doctype html>
 </header>
 <div class="csi-cards" id="ants"></div>
 <script>
-const W=250,H=120,WFW=250,WFH=120;   // plot sizes
-const QH=42;                         // per-subcarrier quality strip
-const AW=W*2+36+16,AH=150;           // ADC envelope spans both grid columns
-const ADC_FS=32767;                  // int16 sample full scale (see recorder_worker.cc)
+// Canvas sizes are MEASURED from the layout every time it changes, not declared
+// here: the panels stretch with the card, so a hard-coded width could only ever be
+// wrong. Heights come from the .csi-h-* classes. See fitCard().
+// Full scale for the sample container: the 14-bit ADC is MSB-aligned in int16, so
+// the rail really is 32768 and not the converter's 8191 (device/README.md:239,
+// SoapyHoudiniSDR_streaming.cpp: full_scale = (1 << 13) << 2).
+const ADC_FS=32767;
 const STALE_MS=__STALE_MS__;         // no update for this long -> dim + badge
 // Both top panels are FIXED frame to frame. An axis that re-ranges per frame makes
 // a static channel look alive and hides real drift, so nothing here auto-scales.
@@ -571,10 +588,10 @@ function yAxis(labels){   // labels top -> bottom
   return '<div class="csi-y-axis">'+labels.map((t,i)=>
     '<span style="top:'+(i/(labels.length-1)*100).toFixed(1)+'%">'+t+'</span>').join('')+'</div>';
 }
-function frame(title, w, h, ylabels, xlabels, extra){
-  return '<div class="csi-plot"><div class="csi-plot-title"><span>'+title+'</span>'
+function frame(title, cls, ylabels, xlabels, extra){
+  return '<div class="csi-plot '+cls+'"><div class="csi-plot-title"><span>'+title+'</span>'
     +(extra||'')+'</div><div class="csi-stage">'+yAxis(ylabels)
-    +'<canvas width="'+w+'" height="'+h+'"></canvas></div>'
+    +'<canvas></canvas></div>'
     +'<div class="csi-x-axis">'+xlabels.map(t=>'<span>'+t+'</span>').join('')+'</div></div>';
 }
 
@@ -593,7 +610,7 @@ function makeCard(ant){
   const qual='<div class="csi-quality">'
     +'<div class="csi-plot-title"><span class="csi-qtitle">repeat quality</span></div>'
     +'<div class="csi-stage">'+yAxis(['1.0','0.5','0.0'])
-    +'<canvas width="'+W+'" height="'+QH+'"></canvas></div></div>';
+    +'<canvas></canvas></div></div>';
   wrap.innerHTML=
     '<div class="card-header py-2">'
      +'<h3 class="card-title">RX antenna '+ant+'</h3>'
@@ -607,15 +624,15 @@ function makeCard(ant){
        +'<li class="nav-item"><a href="#" class="nav-link" data-view="adc">ADC</a></li>'
      +'</ul>'
      +'<div class="csi-plots csi-view" data-view="channel">'
-      +frame('|H| (dB) vs subcarrier',W,H,magLabels(),['','',''],off+qual)
-      +frame('phase (rad)',W,H,['1.0π','0.5π','0.0π','-0.5π','-1.0π'],['','',''])
-      +frame('waterfall |H| (time down)',WFW,WFH,['older','','now'],['','',''])
-      +frame('constellation (equalized U)',WFH,WFH,
+      +frame('|H| (dB) vs subcarrier','csi-h-line',magLabels(),['','',''],off+qual)
+      +frame('phase (rad)','csi-h-line',['1.0π','0.5π','0.0π','-0.5π','-1.0π'],['','',''])
+      +frame('waterfall |H| (time down)','csi-h-wf',['older','','now'],['','',''])
+      +frame('constellation (equalized U)','csi-h-cons',
              [formatAxisValue(CONS_R),'0.00',formatAxisValue(-CONS_R)],
              [formatAxisValue(-CONS_R),'I','+'+formatAxisValue(CONS_R)])
      +'</div>'
      +'<div class="csi-plots csi-adc csi-view" data-view="adc" hidden>'
-      +frame('raw ADC min/max envelope, whole slot',AW,AH,
+      +frame('raw ADC min/max envelope, whole slot','csi-h-adc',
              ['','','','',''],['0','sample','end'],clip)
       // The trace is FITTED to the slot, so the absolute question it cannot answer
       // ("how much converter range am I using") gets its own fixed-scale widget.
@@ -634,10 +651,8 @@ function makeCard(ant){
   // a panel is added above it.
   const q = wrap.querySelector('.csi-quality canvas');
   const cvs=[...wrap.querySelectorAll('.csi-view canvas')].filter(c=>c!==q);
-  const wf=cvs[2].getContext('2d');
-  cards[ant]={mag:cvs[0].getContext('2d'),phase:cvs[1].getContext('2d'),
-              wf:wf,wfimg:wf.createImageData(WFW,1),cons:cvs[3].getContext('2d'),
-              adc:cvs[4].getContext('2d'),qual:q.getContext('2d'),
+  cards[ant]={magCv:cvs[0],phaseCv:cvs[1],wfCv:cvs[2],consCv:cvs[3],adcCv:cvs[4],
+              qualCv:q,dim:null,wfimg:null,
               qtitle:wrap.querySelector('.csi-qtitle'),
               status:wrap.querySelector('.csi-status'),
               adcStatus:wrap.querySelector('.csi-adc-status'),
@@ -653,6 +668,9 @@ function makeCard(ant){
               csiRec:null,cnsRec:null,adcRec:null,frame:0};
   // Tabs are per card so you can watch one antenna's ADC while another shows its
   // channel, which is how you find the one converter that is actually clipping.
+  // Measure once the card is in the document, and again whenever the grid reflows.
+  fitCard(cards[ant]);
+  if(cardObserver) cardObserver.observe(wrap);
   wrap.querySelectorAll('.csi-tabs .nav-link').forEach(a=>{
     a.addEventListener('click',e=>{
       e.preventDefault();
@@ -661,8 +679,46 @@ function makeCard(ant){
         b=>b.classList.toggle('active',b===a));
       wrap.querySelectorAll('.csi-view').forEach(
         v=>{v.hidden=(v.dataset.view!==want);});
+      // A canvas in a hidden div measures 0, so anything drawn while the tab was
+      // closed went nowhere. Re-fit and repaint the moment it becomes visible.
+      const card=cards[ant];
+      fitCard(card);
+      if(card.csiRec) drawCsi(card,card.csiRec,false);
+      if(card.cnsRec) drawCons(card,card.cnsRec);
+      if(card.adcRec) drawAdc(card,card.adcRec);
     });
   });
+}
+
+// Size each backing store to the box CSS gave it, at device resolution so a bigger
+// panel is a sharper one rather than the same pixels stretched. The waterfall is the
+// exception: it scrolls itself with drawImage and writes rows with putImageData,
+// which ignores the transform, so it stays in device pixels with no transform and
+// its history is dropped on a resize rather than rescaled into something untrue.
+function fitCanvas(cv, useDpr){
+  const w=Math.max(1,cv.clientWidth), h=Math.max(1,cv.clientHeight);
+  const dpr=useDpr ? (window.devicePixelRatio||1) : 1;
+  const bw=Math.max(1,Math.round(w*dpr)), bh=Math.max(1,Math.round(h*dpr));
+  const ctx=cv.getContext('2d');
+  if(cv.width!==bw||cv.height!==bh){ cv.width=bw; cv.height=bh; }
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  return {w:w,h:h,ctx:ctx,bw:bw,bh:bh};
+}
+function fitCard(card){
+  const d={};
+  d.mag  = fitCanvas(card.magCv,  true);
+  d.phase= fitCanvas(card.phaseCv,true);
+  d.qual = fitCanvas(card.qualCv, true);
+  d.cons = fitCanvas(card.consCv, true);
+  d.adc  = fitCanvas(card.adcCv,  true);
+  d.wf   = fitCanvas(card.wfCv,   false);
+  card.dim=d;
+  card.mag=d.mag.ctx; card.phase=d.phase.ctx; card.qual=d.qual.ctx;
+  card.cons=d.cons.ctx; card.adc=d.adc.ctx; card.wf=d.wf.ctx;
+  // The row buffer has to match the new device width, and the scrolled history in
+  // the bitmap cannot be resampled honestly, so clear it and start again.
+  card.wfimg=card.wf.createImageData(d.wf.bw,1);
+  card.wf.fillStyle=C.bg; card.wf.fillRect(0,0,d.wf.bw,d.wf.bh);
 }
 
 // Grid only: the labels are HTML now. Horizontal quarters plus the DC centre line.
@@ -674,14 +730,14 @@ function grid(ctx,w,h){
   const xz=(w/2)|0; ctx.beginPath();ctx.moveTo(xz+.5,0);ctx.lineTo(xz+.5,h);ctx.stroke();
 }
 
-function line(ctx,vals,ymin,ymax,color){
+function line(ctx,vals,ymin,ymax,color,w,h){
   const n=vals.length; ctx.strokeStyle=color; ctx.lineWidth=1.5; ctx.beginPath();
   let started=false;
   for(let k=0;k<n;k++){
     const v=vals[k];
     if(v===null){started=false;continue;}
-    const x=W*k/(n-1);
-    const y=H-(v-ymin)/(ymax-ymin)*H;
+    const x=w*k/(n-1);
+    const y=h-(v-ymin)/(ymax-ymin)*h;
     if(!started){ctx.moveTo(x,y);started=true;}else ctx.lineTo(x,y);
   }
   ctx.stroke();
@@ -704,27 +760,28 @@ function drawCsi(card,c,advance){
   setScAxis(card,c.sc);
   // Magnitude: FIXED axis, never re-ranged. Set with --mag-top / --mag-span.
   const top=MAG_TOP, bot=MAG_BOT;
-  grid(card.mag,W,H);
-  line(card.mag,c.mag_db,bot,top,C.mag);
+  const dm=card.dim.mag, dp=card.dim.phase, dw=card.dim.wf;
+  grid(card.mag,dm.w,dm.h);
+  line(card.mag,c.mag_db,bot,top,C.mag,dm.w,dm.h);
   // A fixed axis can hide the trace entirely if the level moves off scale, so say
   // so rather than showing an innocent-looking empty panel.
   const fin=c.mag_db.filter(v=>v!==null);
   card.off.hidden=!(fin.length&&(Math.max(...fin)>top||Math.min(...fin)<bot));
   // Phase: fixed -pi..+pi (it always was).
-  grid(card.phase,W,H);
-  line(card.phase,c.phase,-Math.PI,Math.PI,C.phase);
+  grid(card.phase,dp.w,dp.h);
+  line(card.phase,c.phase,-Math.PI,Math.PI,C.phase,dp.w,dp.h);
   drawQuality(card,c);
   // waterfall: scroll up 1px, draw new bottom row coloured by magnitude
   if(advance!==false){
     card.wf.drawImage(card.wf.canvas,0,-1);
-    const n=c.mag_db.length, d=card.wfimg.data;
-    for(let x=0;x<WFW;x++){
-      const k=Math.min(n-1,(x*n/WFW)|0), v=c.mag_db[k];
+    const n=c.mag_db.length, d=card.wfimg.data, WW=dw.bw;
+    for(let x=0;x<WW;x++){
+      const k=Math.min(n-1,(x*n/WW)|0), v=c.mag_db[k];
       let col=[0,0,0];
       if(v!==null) col=jet((v-bot)/(top-bot));
       d[4*x]=col[0];d[4*x+1]=col[1];d[4*x+2]=col[2];d[4*x+3]=255;
     }
-    card.wf.putImageData(card.wfimg,0,WFH-1);
+    card.wf.putImageData(card.wfimg,0,dw.bh-1);
   }
   card.status.textContent='frame '+c.frame+' · '+c.sc+' subcarriers · '
      +(c.rate/1e6).toFixed(2)+' MS/s · peak '+formatScaled(c.peak_db,'db')
@@ -740,7 +797,7 @@ function drawCsi(card,c,advance){
 // compare, so with fewer the panel says so rather than drawing a flat 1.0 that
 // would read as a perfect channel.
 function drawQuality(card,c){
-  const ctx=card.qual;
+  const ctx=card.qual, d=card.dim.qual, W=d.w, QH=d.h;
   ctx.clearRect(0,0,W,QH);
   // Three states, all decided by the backend: no field at all (old sounder), a field
   // but too few repetitions to mean anything, or a real measurement.
@@ -794,7 +851,7 @@ function drawQuality(card,c){
 // written next to it, in counts, every frame.
 function drawAdc(card,a){
   card.adcRec=a;
-  const ctx=card.adc, mid=AH/2;
+  const ctx=card.adc, d=card.dim.adc, AW=d.w, AH=d.h, mid=AH/2;
   ctx.clearRect(0,0,AW,AH);
   let span=0;
   for(let k=0;k<a.cols;k++)
@@ -848,14 +905,19 @@ function idealPts(mod){
 }
 function drawCons(card,cn){
   card.cnsRec=cn;
-  const ctx=card.cons, S=WFH, R=S/2/CONS_R;  // unit power -> R px
-  ctx.clearRect(0,0,S,S);
+  const ctx=card.cons, d=card.dim.cons;
+  ctx.clearRect(0,0,d.w,d.h);
+  // I and Q must share a scale or the cloud shears, so the plot is a centred square
+  // however wide the card gets.
+  const S=Math.min(d.w,d.h), cx=d.w/2, cy=d.h/2, R=S/2/CONS_R;
   ctx.strokeStyle=C.grid; ctx.lineWidth=1; ctx.beginPath();
-  ctx.moveTo(S/2,0);ctx.lineTo(S/2,S);ctx.moveTo(0,S/2);ctx.lineTo(S,S/2);ctx.stroke();
+  ctx.moveTo(cx,cy-S/2);ctx.lineTo(cx,cy+S/2);
+  ctx.moveTo(cx-S/2,cy);ctx.lineTo(cx+S/2,cy);ctx.stroke();
+  ctx.strokeRect(cx-S/2+.5,cy-S/2+.5,S-1,S-1);
   ctx.fillStyle=C.pts;                     // received points
-  for(const p of cn.pts){const x=S/2+p[0]*R,y=S/2-p[1]*R;ctx.fillRect(x,y,1.6,1.6);}
+  for(const p of cn.pts){ctx.fillRect(cx+p[0]*R,cy-p[1]*R,1.8,1.8);}
   ctx.fillStyle=C.warn;                    // ideal alphabet
-  for(const p of idealPts(cn.mod)){const x=S/2+p[0]*R,y=S/2-p[1]*R;ctx.fillRect(x-2,y-2,4,4);}
+  for(const p of idealPts(cn.mod)){ctx.fillRect(cx+p[0]*R-2.5,cy-p[1]*R-2.5,5,5);}
 }
 
 // A theme change has to repaint every canvas from the last record, because a
@@ -865,12 +927,21 @@ function drawCons(card,cn){
 function redrawAll(){
   for(const a in cards){
     const card=cards[a];
-    card.wf.fillStyle=C.bg; card.wf.fillRect(0,0,WFW,WFH);
+    fitCard(card);                     // also clears the waterfall to the new size
     if(card.csiRec) drawCsi(card,card.csiRec,false);
     if(card.cnsRec) drawCons(card,card.cnsRec);
     if(card.adcRec) drawAdc(card,card.adcRec);
   }
 }
+
+// One observer for the whole strip. Resizes arrive in bursts while a window is
+// dragged, so coalesce to the next frame rather than re-fitting per event.
+let resizePending=false;
+const cardObserver=(typeof ResizeObserver!=='undefined') ? new ResizeObserver(()=>{
+  if(resizePending) return;
+  resizePending=true;
+  requestAnimationFrame(()=>{ resizePending=false; redrawAll(); });
+}) : null;
 
 let pktCount=0,t0=Date.now();
 function onData(obj){

@@ -330,6 +330,10 @@ choice is stored in the browser, so it survives a reload and a restart of the
 backend. It is the same control, and the same two themes, as the RayNet
 compiler dashboard.
 
+The cards fill the width of the window and reflow as you resize it, so a wider
+window gives you more cards side by side rather than more empty space. The panels
+inside a card stretch with it, so making the window wider makes every plot bigger.
+
 Each receive antenna gets one card with four panels:
 
 1. **Magnitude of H in dB** across subcarriers. This is the frequency response
