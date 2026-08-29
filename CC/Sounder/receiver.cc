@@ -923,7 +923,7 @@ int Receiver::clientTxData(int tid, int frame_id, long long base_time) {
 
 ssize_t Receiver::syncSearch(const std::complex<int16_t>* check_data,
                              size_t search_window, float corr_scale,
-                             bool pick_strongest) {
+                             bool refine_first_cluster) {
   ssize_t sync_index(-1);
   assert(search_window <= config_->samps_per_frame());
 #if defined(USE_CUDA)
@@ -935,7 +935,7 @@ ssize_t Receiver::syncSearch(const std::complex<int16_t>* check_data,
   const char* kPath = "avx";
   sync_index = CommsLib::find_beacon_avx(check_data, config_->gold_cf32(),
                                          search_window, corr_scale,
-                                         pick_strongest);
+                                         refine_first_cluster);
 #endif
   if (std::getenv("HOUDINI_SYNC_DEBUG") != nullptr) {
     static std::atomic<int> c{0};
@@ -1327,12 +1327,14 @@ ssize_t Receiver::clientSyncBeacon(size_t radio_id, size_t sample_window) {
             "clientSyncBeacon - Samples %zu - Window %zu - Check Beacon %ld\n",
             new_samples, sample_window);
 
-        // Acquisition: the strict threshold, and the STRONGEST crossing rather
-        // than the earliest. Everything downstream is measured from this index.
+        // Acquisition: the strict threshold, and the earliest beacon copy refined
+        // to the best index within it. Everything downstream is measured from this
+        // index. NOTE this did NOT resolve the run-to-run constellation split it was
+        // investigated for -- see the corr_scale_init note in config.cc.
         sync_index = syncSearch(syncbuffmem.at(kSyncDetectChannel).data(),
                                 sample_window,
                                 config_->corr_scale_init(radio_id),
-                                /*pick_strongest=*/true);
+                                /*refine_first_cluster=*/true);
       } else {
         MLPD_ERROR(
             "clientSyncBeacon [%zu]: BAD SYNC - Rx samples not requested size "

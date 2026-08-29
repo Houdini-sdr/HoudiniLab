@@ -228,6 +228,14 @@ Config::Config(const std::string& jsonfile, const std::string& directory,
   // shipped corr_scale of 100 puts the bar at 0.01 -- far below anything real, which
   // is what let sidelobes cross first. Defaults to corr_scale when unset, so this is
   // inert until a config asks for it.
+  //
+  // WHAT THIS DID NOT FIX: it was investigated as the cause of the run-to-run
+  // constellation split (some restarts give clean QPSK, others a ring) and it is NOT
+  // that cause. With this in place the split persists. Measured afterwards: SNR is
+  // 27..31 dB in good and bad runs alike, the pilot slot is captured every run, and
+  // the fault is that each DATA subcarrier goes incoherent across the symbols of the
+  // U slot (per-tone coherence 0.63 vs 0.997) while the pilot tones in those same
+  // symbols stay perfect. The change here is still correct on its own terms.
   auto corr_scale_init = tddConf.value("corr_scale_init", json::array());
   if (corr_scale_init.empty() == true) {
     corr_scale_init_ = corr_scale_;

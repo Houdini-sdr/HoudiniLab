@@ -243,21 +243,34 @@ std::vector<float> TrailingWindowSum(const std::vector<float>& f,
 // Correlate against the 2-rep Gold beacon, reinforce the double peak, threshold
 // against trailing local energy, return a peak index (or -1).
 //
-// `pick_strongest` selects WHICH crossing is returned. The threshold admits every
-// index whose peak-to-local-energy ratio clears 1/corr_scale, and on a real link
-// several do: measured on the bench, a detecting call had a median of 4 crossings
-// and up to 12. Returning the earliest of those (the historical behaviour) returned
-// a sidelobe rather than the beacon on 58 of 62 detections, and since the frame
-// anchor is derived from this index, every slot in the frame inherits the error.
-// Taking the strongest crossing instead costs one pass over the candidates.
+// `refine_first_cluster` selects WHICH crossing is returned, and the choice matters
+// because the frame anchor is derived from it.
 //
-// It is only correct where the search window can hold at most ONE beacon, which is
-// true of the acquisition window (~9.7k samples against a 122.9k-sample frame) but
-// is not guaranteed for an arbitrary caller, so it is opt-in rather than the default.
+// The threshold admits every index whose peak-to-local-energy ratio clears
+// 1/corr_scale, and on a real link several do: measured on the bench, a detecting
+// call had a median of 4 crossings and up to 12. Two DIFFERENT things generate those
+// crossings and they need opposite treatment:
+//
+//   - Sidelobes of one beacon, within a sequence length of its true peak. Returning
+//     the earliest of these (the historical behaviour) returned a sidelobe rather
+//     than the peak on 58 of 62 detections. Here the STRONGEST is right.
+//   - Separate beacon COPIES. The beacon strobe covers slots 0..14 (the TDD symbol
+//     is 15 slots), so a 9.7k-sample acquisition window holds two or three copies
+//     4096 samples apart. Between copies the strongest is arbitrary -- whichever is
+//     momentarily louder wins -- while the earliest is at least repeatable across
+//     restarts, which matters because receiver.cc anchors the pilot reference ONCE
+//     and never re-anchors. NOT VERIFIED to affect the link: measured across 6
+//     restarts, the pilot slot was captured every time (ADC peak 557..955 counts,
+//     repeat quality 0.997..1.000) and the copy index did not track whether the
+//     run's constellation was good or bad. Repeatability is the argument here, not
+//     a demonstrated fault.
+//
+// So: take the earliest crossing, then refine within one sequence length of it. That
+// is deterministic across runs and still lands on the peak rather than its skirt.
 int CommsLib::find_beacon_avx(
     const std::vector<std::complex<float>>& raw_samples,
     const std::vector<std::complex<float>>& match_samples, float corr_scale,
-    bool pick_strongest) {
+    bool refine_first_cluster) {
   const int seqLen = static_cast<int>(match_samples.size());
 #ifdef TEST_BENCH
   const auto t0 = std::chrono::steady_clock::now();
@@ -312,12 +325,18 @@ int CommsLib::find_beacon_avx(
             << "PeakDetect took " << us(t3, t4) << " usec" << std::endl;
 #endif
   if (valid_peaks.empty()) return -1;
-  if (!pick_strongest) return valid_peaks.front();
-  int best = valid_peaks.front();
+  if (!refine_first_cluster) return valid_peaks.front();
+  // valid_peaks is built in increasing index order, so front() is the earliest
+  // crossing and therefore selects the earliest beacon copy in the window. Refine
+  // only inside that copy: anything more than a sequence length later is a different
+  // copy and must not be allowed to win.
+  const int first = valid_peaks.front();
+  int best = first;
   double best_ratio = -1.0;
   while (!valid_peaks.empty()) {
     const int i = valid_peaks.front();
     valid_peaks.pop();
+    if (i - first > seqLen) break;
     const double r = peak_metric[i] / (thresh[i] + 1e-30);
     if (r > best_ratio) { best_ratio = r; best = i; }
   }
@@ -328,7 +347,7 @@ int CommsLib::find_beacon_avx(
 ssize_t CommsLib::find_beacon_avx(
     const std::complex<int16_t>* raw_samples,
     const std::vector<std::complex<float>>& match_samples, size_t check_window,
-    float corr_scale, bool pick_strongest) {
+    float corr_scale, bool refine_first_cluster) {
   static constexpr float kShortMaxFloat = 32767.0f;
   std::vector<std::complex<float>> sync_compare(check_window);
   for (size_t i = 0; i < check_window; ++i) {
@@ -337,7 +356,7 @@ ssize_t CommsLib::find_beacon_avx(
         static_cast<float>(raw_samples[i].imag()) / kShortMaxFloat);
   }
   return CommsLib::find_beacon_avx(sync_compare, match_samples, corr_scale,
-                                   pick_strongest);
+                                   refine_first_cluster);
 }
 
 // Element-wise complex multiply, portable equivalent of the float
