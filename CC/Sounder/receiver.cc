@@ -922,7 +922,8 @@ int Receiver::clientTxData(int tid, int frame_id, long long base_time) {
 }
 
 ssize_t Receiver::syncSearch(const std::complex<int16_t>* check_data,
-                             size_t search_window, float corr_scale) {
+                             size_t search_window, float corr_scale,
+                             bool pick_strongest) {
   ssize_t sync_index(-1);
   assert(search_window <= config_->samps_per_frame());
 #if defined(USE_CUDA)
@@ -933,7 +934,8 @@ ssize_t Receiver::syncSearch(const std::complex<int16_t>* check_data,
   // portable find_beacon_avx works on x86 and aarch64 (see comms-lib-portable.cc)
   const char* kPath = "avx";
   sync_index = CommsLib::find_beacon_avx(check_data, config_->gold_cf32(),
-                                         search_window, corr_scale);
+                                         search_window, corr_scale,
+                                         pick_strongest);
 #endif
   if (std::getenv("HOUDINI_SYNC_DEBUG") != nullptr) {
     static std::atomic<int> c{0};
@@ -1325,8 +1327,12 @@ ssize_t Receiver::clientSyncBeacon(size_t radio_id, size_t sample_window) {
             "clientSyncBeacon - Samples %zu - Window %zu - Check Beacon %ld\n",
             new_samples, sample_window);
 
+        // Acquisition: the strict threshold, and the STRONGEST crossing rather
+        // than the earliest. Everything downstream is measured from this index.
         sync_index = syncSearch(syncbuffmem.at(kSyncDetectChannel).data(),
-                                sample_window, config_->corr_scale(radio_id));
+                                sample_window,
+                                config_->corr_scale_init(radio_id),
+                                /*pick_strongest=*/true);
       } else {
         MLPD_ERROR(
             "clientSyncBeacon [%zu]: BAD SYNC - Rx samples not requested size "

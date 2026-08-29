@@ -241,10 +241,23 @@ std::vector<float> TrailingWindowSum(const std::vector<float>& f,
 }  // namespace
 
 // Correlate against the 2-rep Gold beacon, reinforce the double peak, threshold
-// against trailing local energy, return the first peak index (or -1).
+// against trailing local energy, return a peak index (or -1).
+//
+// `pick_strongest` selects WHICH crossing is returned. The threshold admits every
+// index whose peak-to-local-energy ratio clears 1/corr_scale, and on a real link
+// several do: measured on the bench, a detecting call had a median of 4 crossings
+// and up to 12. Returning the earliest of those (the historical behaviour) returned
+// a sidelobe rather than the beacon on 58 of 62 detections, and since the frame
+// anchor is derived from this index, every slot in the frame inherits the error.
+// Taking the strongest crossing instead costs one pass over the candidates.
+//
+// It is only correct where the search window can hold at most ONE beacon, which is
+// true of the acquisition window (~9.7k samples against a 122.9k-sample frame) but
+// is not guaranteed for an arbitrary caller, so it is opt-in rather than the default.
 int CommsLib::find_beacon_avx(
     const std::vector<std::complex<float>>& raw_samples,
-    const std::vector<std::complex<float>>& match_samples, float corr_scale) {
+    const std::vector<std::complex<float>>& match_samples, float corr_scale,
+    bool pick_strongest) {
   const int seqLen = static_cast<int>(match_samples.size());
 #ifdef TEST_BENCH
   const auto t0 = std::chrono::steady_clock::now();
@@ -298,15 +311,24 @@ int CommsLib::find_beacon_avx(
             << "Threshold took " << us(t2, t3) << " usec\n"
             << "PeakDetect took " << us(t3, t4) << " usec" << std::endl;
 #endif
-  if (valid_peaks.empty()) valid_peaks.push(-1);
-  return valid_peaks.front();
+  if (valid_peaks.empty()) return -1;
+  if (!pick_strongest) return valid_peaks.front();
+  int best = valid_peaks.front();
+  double best_ratio = -1.0;
+  while (!valid_peaks.empty()) {
+    const int i = valid_peaks.front();
+    valid_peaks.pop();
+    const double r = peak_metric[i] / (thresh[i] + 1e-30);
+    if (r > best_ratio) { best_ratio = r; best = i; }
+  }
+  return best;
 }
 
 // Real-time entry: cint16 samples straight from the radio -> cfloat -> detect.
 ssize_t CommsLib::find_beacon_avx(
     const std::complex<int16_t>* raw_samples,
     const std::vector<std::complex<float>>& match_samples, size_t check_window,
-    float corr_scale) {
+    float corr_scale, bool pick_strongest) {
   static constexpr float kShortMaxFloat = 32767.0f;
   std::vector<std::complex<float>> sync_compare(check_window);
   for (size_t i = 0; i < check_window; ++i) {
@@ -314,7 +336,8 @@ ssize_t CommsLib::find_beacon_avx(
         static_cast<float>(raw_samples[i].real()) / kShortMaxFloat,
         static_cast<float>(raw_samples[i].imag()) / kShortMaxFloat);
   }
-  return CommsLib::find_beacon_avx(sync_compare, match_samples, corr_scale);
+  return CommsLib::find_beacon_avx(sync_compare, match_samples, corr_scale,
+                                   pick_strongest);
 }
 
 // Element-wise complex multiply, portable equivalent of the float

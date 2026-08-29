@@ -121,9 +121,13 @@ class CommsLib {
 
   // Functions using AVX
   static int find_beacon(const std::vector<std::complex<float>>& raw_samples);
+  // pick_strongest: return the crossing with the highest peak-to-local-energy
+  // ratio instead of the earliest one. Only valid when the window holds at most
+  // one beacon; see the definition for why the earliest is usually wrong.
   static int find_beacon_avx(
       const std::vector<std::complex<float>>& raw_samples,
-      const std::vector<std::complex<float>>& match_samples, float corr_scale);
+      const std::vector<std::complex<float>>& match_samples, float corr_scale,
+      bool pick_strongest = false);
 
   ///Find Beacon with raw samples from the radio
   static int find_beacon(const std::complex<int16_t>* raw_samples,
@@ -132,9 +136,12 @@ class CommsLib {
   static ssize_t find_beacon_avx(
       const std::complex<int16_t>* raw_samples,
       const std::vector<std::complex<float>>& match_samples,
-      size_t check_window, float corr_scale);
+      size_t check_window, float corr_scale, bool pick_strongest = false);
   // GPU beacon detector (find_beacon_cuda.cu), defined only when built with
-  // -DUSE_CUDA (CMake HOUDINI_USE_CUDA). Same peak index as find_beacon_avx.
+  // -DUSE_CUDA (CMake HOUDINI_USE_CUDA), which is OFF by default and OFF on the
+  // rig. NOTE it still returns the FIRST crossing (atomicMin over the index), so
+  // it does NOT match find_beacon_avx with pick_strongest set: it needs the same
+  // argmax-by-ratio change before the GPU path can be used for acquisition.
   static ssize_t find_beacon_cuda(
       const std::complex<int16_t>* raw_samples,
       const std::vector<std::complex<float>>& match_samples,

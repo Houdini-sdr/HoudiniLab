@@ -219,6 +219,25 @@ Config::Config(const std::string& jsonfile, const std::string& directory,
     }
     corr_scale_.assign(corr_scale.begin(), corr_scale.end());
   }
+  // Acquisition gets its own threshold. The re-sync path deliberately RELAXES on
+  // every retry (corr_scale + resync_retry_cnt) because there getting a lock back
+  // beats stalling; acquisition is the opposite case, because the frame anchor it
+  // produces is what every slot boundary in the frame is measured from. Measured on
+  // the bench the two populations are cleanly separated: windows with no beacon peak
+  // at a ratio of 3.4e-07, windows with one peak at 0.31 to 4.2 (median 2.8), and the
+  // shipped corr_scale of 100 puts the bar at 0.01 -- far below anything real, which
+  // is what let sidelobes cross first. Defaults to corr_scale when unset, so this is
+  // inert until a config asks for it.
+  auto corr_scale_init = tddConf.value("corr_scale_init", json::array());
+  if (corr_scale_init.empty() == true) {
+    corr_scale_init_ = corr_scale_;
+  } else {
+    if (client_present_ && corr_scale_init.size() != num_cl_sdrs_) {
+      MLPD_ERROR("corr_scale_init size must match the number of clients!\n");
+      exit(1);
+    }
+    corr_scale_init_.assign(corr_scale_init.begin(), corr_scale_init.end());
+  }
   ul_data_frame_num_ = tddConf.value("ul_data_frame_num", 1);
   dl_data_frame_num_ = tddConf.value("dl_data_frame_num", 1);
 

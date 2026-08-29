@@ -44,5 +44,9 @@
     "corr_scale": [
         100
     ],
+    "_corr_scale_init_note": "Acquisition-only detection threshold. The test is corr_scale * peak > local_energy, so a SMALLER value is STRICTER. Measured on this link: windows with no beacon peak at a ratio of 3.4e-07, windows with a beacon at 0.31 to 4.2 (median 2.8). corr_scale 100 puts the bar at 0.01, far below anything real, so sidelobes crossed first and the earliest crossing won. 10 puts it at 0.1, inside the empty gap between the two populations, keeping every real beacon with 3x margin. Re-sync still uses corr_scale and still relaxes per retry.",
+    "corr_scale_init": [
+        10
+    ],
     "ue_pilot_horizon": 96
 }
