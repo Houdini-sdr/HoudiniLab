@@ -35,6 +35,7 @@ MAGIC_CSI = 0x43534931
 MAGIC_CSI2 = 0x43534932
 MAGIC_CNS = 0x434E5331
 MAGIC_ADC = 0x41444331
+MAGIC_ADC2 = 0x41444332
 ADC_FS = 32767
 ADC_COLS = 250
 
@@ -97,8 +98,12 @@ def send_cns(sock, dest, frame, ant, mod, evm):
     sock.sendto(head + struct.pack("<%df" % len(pts), *pts), dest)
 
 
-def send_adc(sock, dest, frame, ant, samps, rate, clip):
-    """A burst inside an otherwise quiet slot, optionally driven into the rail."""
+def send_adc(sock, dest, frame, ant, samps, rate, clip, legacy=False):
+    """A burst inside an otherwise quiet slot, optionally driven into the rail.
+
+    Emits ADC2 (pilot-slot envelope + an all-slot clip ledger) unless `legacy`,
+    which emits ADC1 as a sounder built before the split does.
+    """
     amp = ADC_FS if clip else int(0.45 * ADC_FS)
     env, peak, clipped = [], 0, 0
     per_col = max(1, samps // ADC_COLS)
@@ -110,9 +115,16 @@ def send_adc(sock, dest, frame, ant, samps, rate, clip):
         peak = max(peak, a)
         if clip and active:
             clipped += per_col            # every sample in the column is at the rail
-    head = struct.pack("<IIIIIfII", MAGIC_ADC, frame, ant, ADC_COLS, samps, rate,
-                       min(peak, ADC_FS), clipped)
     body = b"".join(struct.pack("<4h", *e) for e in env)
+    if legacy:
+        head = struct.pack("<IIIIIfII", MAGIC_ADC, frame, ant, ADC_COLS, samps, rate,
+                           min(peak, ADC_FS), clipped)
+    else:
+        # the ledger reports a louder, undrawn slot, which is the case the split exists
+        # for: a beacon slot can clip while the drawn pilot slot looks healthy
+        head = struct.pack("<IIIIIfIIIII", MAGIC_ADC2, frame, ant, ADC_COLS, samps, rate,
+                           min(peak, ADC_FS), clipped, 16,
+                           min(int(peak * 1.7), ADC_FS), clipped)
     sock.sendto(head + body, dest)
 
 
@@ -160,7 +172,8 @@ def main():
                 send_csi(sock, dest, frame, ant, h, args.rate, args.reps,
                          args.noise, args.legacy)
                 send_cns(sock, dest, frame, ant, args.mod, args.evm)
-                send_adc(sock, dest, frame, ant, args.samps, args.rate, args.clip)
+                send_adc(sock, dest, frame, ant, args.samps, args.rate, args.clip,
+                         args.legacy)
             frame += 1
             time.sleep(1.0 / args.fps)
     except KeyboardInterrupt:

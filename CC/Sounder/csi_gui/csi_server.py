@@ -30,10 +30,14 @@ Wire formats (little-endian), one datagram per (frame, antenna) per kind:
         measurement when reps >= 2.  CSI1 is the same without [reps] and without the
         quality block, and is still accepted.
   CNS1  [magic][frame][ant][num_pts][mod_order]      then num_pts * (I f32, Q f32)
-  ADC1  [magic][frame][ant][cols][samps][rate f32][peak][clipped]
-        then cols * (I_min, I_max, Q_min, Q_max) as int16.  A min/max envelope of the
-        whole slot rather than decimated samples, so a brief clip cannot fall between
-        two plotted points; peak and clipped are counted over every sample.
+  ADC2  [magic][frame][ant][cols][samps][rate f32][peak][clipped][slot][any_peak]
+        [any_clipped]  then cols * (I_min, I_max, Q_min, Q_max) as int16.  A min/max
+        envelope of the whole slot rather than decimated samples, so a brief clip
+        cannot fall between two plotted points.  The envelope is the PILOT slot only,
+        because a frame's slots differ in level by orders of magnitude and mixing
+        them makes every update a different signal; peak/clipped describe that slot,
+        any_peak/any_clipped cover every slot since the previous send.  ADC1 is the
+        same without the last three fields and is still accepted.
 """
 import argparse
 import json
@@ -51,11 +55,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 MAGIC_CSI = 0x43534931   # "CSI1" -- pilot channel estimate (legacy, no quality)
 MAGIC_CSI2 = 0x43534932  # "CSI2" -- as CSI1 plus per-subcarrier repeat coherence
 MAGIC_CNS = 0x434E5331   # "CNS1" -- equalized uplink-data constellation
-MAGIC_ADC = 0x41444331   # "ADC1" -- raw-ADC min/max envelope, for saturation
+MAGIC_ADC = 0x41444331   # "ADC1" -- raw-ADC envelope, any slot (legacy)
+MAGIC_ADC2 = 0x41444332  # "ADC2" -- pilot-slot envelope + an all-slot clip ledger
 CSI_HDR = struct.Struct("<IIIIf")   # magic, frame, ant, num_sc, rate
 CSI2_HDR = struct.Struct("<IIIIfI")  # ... plus reps (pilot symbols averaged)
 CNS_HDR = struct.Struct("<IIIII")   # magic, frame, ant, num_pts, mod_order
-ADC_HDR = struct.Struct("<IIIIIfII")  # magic, frame, ant, cols, samps, rate, peak, clipped
+ADC_HDR = struct.Struct("<IIIIIfII")   # magic, frame, ant, cols, samps, rate, peak, clipped
+ADC2_HDR = struct.Struct("<IIIIIfIIIII")  # ... plus slot, any_peak, any_clipped
 
 # ---- shared state: latest CSI + constellation per antenna ------------------
 _lock = threading.Lock()
@@ -114,15 +120,29 @@ def _parse_csi(payload, with_quality):
                       "peak_db": (20.0 * math.log10(peak) if peak > 0 else 0.0)}
 
 
-def _parse_adc(payload):
-    """ADC1 -> one antenna's raw-sample min/max envelope plus exact clip counts."""
-    magic, frame, ant, cols, samps, rate, peak, clipped = ADC_HDR.unpack_from(payload, 0)
-    off = ADC_HDR.size
+def _parse_adc(payload, v2):
+    """ADC1/ADC2 -> one antenna's raw-sample min/max envelope plus clip counts.
+
+    ADC2 draws the PILOT slot only and carries a separate ledger covering every slot
+    seen since the previous send. A frame's slots differ in level by orders of
+    magnitude, so mixing them into one panel made every update a different signal;
+    the ledger is how clipping on an undrawn slot still gets reported.
+    """
+    if v2:
+        (magic, frame, ant, cols, samps, rate, peak, clipped,
+         slot, any_peak, any_clipped) = ADC2_HDR.unpack_from(payload, 0)
+        off = ADC2_HDR.size
+    else:
+        magic, frame, ant, cols, samps, rate, peak, clipped = ADC_HDR.unpack_from(payload, 0)
+        off = ADC_HDR.size
+        slot, any_peak, any_clipped = -1, peak, clipped
     if len(payload) < off + 8 * cols:
         return None
     e = struct.unpack_from("<%dh" % (4 * cols), payload, off)
     return int(ant), {"frame": int(frame), "cols": int(cols), "samps": int(samps),
                       "rate": float(rate), "peak": int(peak), "clipped": int(clipped),
+                      "slot": int(slot), "any_peak": int(any_peak),
+                      "any_clipped": int(any_clipped),
                       "i_min": e[0::4], "i_max": e[1::4],
                       "q_min": e[2::4], "q_max": e[3::4],
                       "full_scale": 32767}
@@ -161,7 +181,9 @@ def _udp_loop(bind_host, bind_port):
         elif magic == MAGIC_CNS:
             parsed, kind = _parse_cns(data), "cns"
         elif magic == MAGIC_ADC:
-            parsed, kind = _parse_adc(data), "adc"
+            parsed, kind = _parse_adc(data, False), "adc"
+        elif magic == MAGIC_ADC2:
+            parsed, kind = _parse_adc(data, True), "adc"
         if parsed is None:
             continue
         ant, rec = parsed
@@ -537,11 +559,15 @@ function readTheme(){
      qFill:'rgba('+v('--tblr-orange-rgb')+',0.35)',
      pts:'rgba('+v('--tblr-azure-rgb')+',0.55)'};
 }
+let themeChanged=false;
 function applyTheme(t){
   document.documentElement.setAttribute('data-bs-theme',t);
   try{ localStorage.setItem(THEME_KEY,t); }catch(e){}
   document.getElementById('theme').innerHTML=(t==='dark'?SUN:MOON);
-  readTheme(); redrawAll();
+  readTheme();
+  // The waterfall's existing rows are in the OLD palette's background, so a theme
+  // change is the one repaint that does have to restart it.
+  themeChanged=true; redrawAll(); themeChanged=false;
 }
 function initTheme(){
   let t=null;
@@ -705,11 +731,16 @@ function fitCanvas(cv, useDpr){
   const dpr=useDpr ? (window.devicePixelRatio||1) : 1;
   const bw=Math.max(1,Math.round(w*dpr)), bh=Math.max(1,Math.round(h*dpr));
   const ctx=cv.getContext('2d');
-  if(cv.width!==bw||cv.height!==bh){ cv.width=bw; cv.height=bh; }
+  // Assigning canvas.width WIPES the bitmap even when the value is unchanged, so
+  // the guard is not an optimisation: without it every observer callback erases
+  // the waterfall's history. `changed` is reported so callers can tell a real
+  // resize from a no-op.
+  const changed = (cv.width!==bw || cv.height!==bh);
+  if(changed){ cv.width=bw; cv.height=bh; }
   ctx.setTransform(dpr,0,0,dpr,0,0);
-  return {w:w,h:h,ctx:ctx,bw:bw,bh:bh};
+  return {w:w,h:h,ctx:ctx,bw:bw,bh:bh,changed:changed};
 }
-function fitCard(card){
+function fitCard(card, force){
   const d={};
   d.mag  = fitCanvas(card.magCv,  true);
   d.phase= fitCanvas(card.phaseCv,true);
@@ -720,10 +751,15 @@ function fitCard(card){
   card.dim=d;
   card.mag=d.mag.ctx; card.phase=d.phase.ctx; card.qual=d.qual.ctx;
   card.cons=d.cons.ctx; card.adc=d.adc.ctx; card.wf=d.wf.ctx;
-  // The row buffer has to match the new device width, and the scrolled history in
-  // the bitmap cannot be resampled honestly, so clear it and start again.
-  card.wfimg=card.wf.createImageData(d.wf.bw,1);
-  card.wf.fillStyle=C.bg; card.wf.fillRect(0,0,d.wf.bw,d.wf.bh);
+  // Only when the waterfall's device size ACTUALLY changed: its history lives in
+  // the bitmap and cannot be resampled honestly, so a real resize has to restart
+  // it -- but a no-op refit must not. The card's height changes whenever the
+  // status line's text changes width, which is every frame, so an unconditional
+  // clear here restarts the waterfall continuously.
+  if(d.wf.changed || !card.wfimg || force){
+    card.wfimg=card.wf.createImageData(d.wf.bw,1);
+    card.wf.fillStyle=C.bg; card.wf.fillRect(0,0,d.wf.bw,d.wf.bh);
+  }
 }
 
 // Grid only: the labels are HTML now. Horizontal quarters plus the DC centre line.
@@ -913,8 +949,8 @@ function drawAdc(card,a){
   for(let i=0;i<=4;i++)
     if(card.adcY[i]) card.adcY[i].textContent=formatAxisValue(span-(2*span)*i/4);
   const pct=100*a.peak/ADC_FS;
-  card.adcTitle.textContent='raw ADC envelope, whole slot (axis held at \u00b1'
-    +span+' counts)';
+  card.adcTitle.textContent='raw ADC envelope, pilot slot'
+    +(a.slot>=0?' '+a.slot:'')+' (axis held at \u00b1'+span+' counts)';
   // The fixed-scale half of the panel. Under-driving is the failure we actually have,
   // so it gets a colour of its own rather than sharing "fine" with a healthy level.
   card.headBar.style.width=Math.max(0.5,Math.min(100,pct)).toFixed(2)+'%';
@@ -922,10 +958,14 @@ function drawAdc(card,a){
     (a.clipped>0||pct>=95 ? 'bg-danger' : pct<10 ? 'bg-warning' : 'bg-success');
   card.headPct.textContent=pct.toFixed(1)+'% of full scale'
     +(pct<10 ? ' (under-driven)' : '');
-  card.clip.hidden=(a.clipped===0);
-  card.adcStatus.textContent='frame '+a.frame+' \u00b7 '+a.samps+' samples \u00b7 peak '
-    +a.peak+' of '+ADC_FS+' ('+pct.toFixed(1)+'% FS) \u00b7 '
-    +(a.clipped?a.clipped+' sample(s) clipped':'no clipping')
+  // Clipping anywhere in the frame lights the badge, not just on the drawn slot.
+  const anyClip=(a.any_clipped===undefined?a.clipped:a.any_clipped);
+  card.clip.hidden=(anyClip===0);
+  const anyPct=100*(a.any_peak===undefined?a.peak:a.any_peak)/ADC_FS;
+  card.adcStatus.textContent='frame '+a.frame+' \u00b7 '+a.samps+' samples \u00b7 pilot peak '
+    +a.peak+' of '+ADC_FS+' ('+pct.toFixed(1)+'% FS) \u00b7 all slots: peak '
+    +anyPct.toFixed(1)+'% FS, '
+    +(anyClip?anyClip+' sample(s) clipped':'no clipping')
     +' \u00b7 I blue, Q orange';
 }
 
@@ -962,7 +1002,7 @@ function drawCons(card,cn){
 function redrawAll(){
   for(const a in cards){
     const card=cards[a];
-    fitCard(card);                     // also clears the waterfall to the new size
+    fitCard(card, themeChanged);       // clears the waterfall only when it must
     if(card.csiRec) drawCsi(card,card.csiRec,false);
     if(card.cnsRec) drawCons(card,card.cnsRec);
     if(card.adcRec) drawAdc(card,card.adcRec);

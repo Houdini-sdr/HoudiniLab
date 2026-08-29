@@ -84,7 +84,11 @@ class RecorderWorker {
   std::vector<std::complex<float>> symbolFft(const short* d, int base) const;
   void sendCsi(Packet* pkt);                          // pilot -> CSI + cache H
   void sendConstellation(Packet* pkt);                // uplink data -> equalize
-  void sendAdc(Packet* pkt);                          // any slot -> raw-ADC envelope
+  void sendAdc(Packet* pkt, bool is_pilot);           // pilot slot -> raw-ADC envelope
+  // Saturation ledger across ALL slots between two sends: the drawn envelope is the
+  // pilot's, but clipping on any other slot still has to be reported.
+  struct AdcAny { int32_t peak = 0; uint32_t clipped = 0; };
+  std::unordered_map<uint32_t, AdcAny> adc_any_;
 };
 }; /* End namespace Sounder */
 

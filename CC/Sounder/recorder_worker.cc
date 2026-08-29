@@ -182,13 +182,20 @@ void RecorderWorker::streamCsi(Packet* pkt, NodeType node_type) {
     }
     return;
   }
-  sendAdc(pkt);  // raw-ADC envelope, before any of the routing below
   const size_t num_channels = cfg_->bs_channel().size();
   const size_t radio_id = pkt->ant_id / num_channels;
   const bool is_pilot =
       cfg_->internal_measurement()
           ? (node_type == kBS)
           : cfg_->isPilot(pkt->cell_id, radio_id, pkt->slot_id);
+  // The ADC panel gets the PILOT slot only. A frame carries a beacon, a pilot, an
+  // uplink slot and guards, and their levels differ by orders of magnitude (measured
+  // on the bench: 9% of sends under 50 counts, 73% around 1000, 18% over 1500). Feeding
+  // whichever slot happened to arrive into one panel makes every update a different
+  // signal, so the trace and its axis move constantly while nothing is changing.
+  // Saturation on the OTHER slots still has to be caught, so peak and clip counts are
+  // accumulated over every slot and ride along with the pilot's envelope.
+  sendAdc(pkt, is_pilot);
   if (is_pilot) {
     sendCsi(pkt);
   } else if (cfg_->isUlData(pkt->cell_id, radio_id, pkt->slot_id)) {
@@ -204,9 +211,19 @@ void RecorderWorker::streamCsi(Packet* pkt, NodeType node_type) {
 // Column c carries the min and max of every sample it covers, so one clipped sample
 // pins its column to the rail and cannot be missed. The whole slot is covered in
 // kAdcCols columns regardless of how long it is.
-void RecorderWorker::sendAdc(Packet* pkt) {
+void RecorderWorker::sendAdc(Packet* pkt, bool is_pilot) {
   const int slot = static_cast<int>(cfg_->samps_per_slot());
   if (slot <= 0) return;
+  const short* dd = pkt->data;
+  // Every slot contributes to the saturation ledger, whether or not it is drawn.
+  auto& any = adc_any_[pkt->ant_id];
+  for (int n = 0; n < slot; ++n) {
+    const int32_t ai = std::abs(static_cast<int32_t>(dd[2 * n]));
+    const int32_t aq = std::abs(static_cast<int32_t>(dd[2 * n + 1]));
+    any.peak = std::max(any.peak, std::max(ai, aq));
+    if (ai >= kAdcClip || aq >= kAdcClip) ++any.clipped;
+  }
+  if (!is_pilot) return;   // only the pilot slot is drawn
   const long long now =
       std::chrono::duration_cast<std::chrono::nanoseconds>(
           std::chrono::steady_clock::now().time_since_epoch())
@@ -245,12 +262,19 @@ void RecorderWorker::sendAdc(Packet* pkt) {
     env[4 * c + 3] = qmax;
   }
 
-  // [magic 'ADC1'][frame][ant][cols][samps][rate][peak][clipped][Imin,Imax,Qmin,Qmax]*cols
-  std::vector<uint8_t> buf(32 + static_cast<size_t>(8) * cols);
-  const uint32_t magic = 0x41444331u, fr = pkt->frame_id, an = pkt->ant_id,
+  // [magic 'ADC2'][frame][ant][cols][samps][rate][peak][clipped][slot][any_peak]
+  // [any_clipped] then [Imin,Imax,Qmin,Qmax]*cols.
+  // peak/clipped describe the PILOT slot that is drawn; any_* cover every slot seen
+  // since the last send, so a converter clipping on the beacon or the uplink slot is
+  // still reported even though its envelope is not the one on screen.
+  std::vector<uint8_t> buf(44 + static_cast<size_t>(8) * cols);
+  const uint32_t magic = 0x41444332u, fr = pkt->frame_id, an = pkt->ant_id,
                  nc = static_cast<uint32_t>(cols),
                  ns = static_cast<uint32_t>(slot),
-                 pk = static_cast<uint32_t>(peak);
+                 pk = static_cast<uint32_t>(peak),
+                 sl = static_cast<uint32_t>(pkt->slot_id),
+                 apk = static_cast<uint32_t>(any.peak),
+                 acl = any.clipped;
   const float rate = static_cast<float>(cfg_->rate());
   std::memcpy(&buf[0], &magic, 4);
   std::memcpy(&buf[4], &fr, 4);
@@ -260,8 +284,13 @@ void RecorderWorker::sendAdc(Packet* pkt) {
   std::memcpy(&buf[20], &rate, 4);
   std::memcpy(&buf[24], &pk, 4);
   std::memcpy(&buf[28], &clipped, 4);
-  std::memcpy(&buf[32], env.data(), static_cast<size_t>(8) * cols);
+  std::memcpy(&buf[32], &sl, 4);
+  std::memcpy(&buf[36], &apk, 4);
+  std::memcpy(&buf[40], &acl, 4);
+  std::memcpy(&buf[44], env.data(), static_cast<size_t>(8) * cols);
   (void)::send(csi_sock_, buf.data(), buf.size(), 0);
+  any.peak = 0;            // the ledger covers the interval between sends
+  any.clipped = 0;
 }
 
 // Pilot slot -> channel estimate H[k] (DC-centered), cached per antenna + streamed.
