@@ -891,9 +891,14 @@ function drawQuality(card,c){
 // span (below 35%), so ordinary wander cannot drive it back and forth. The result
 // is an axis that sits still for a steady link and moves once when the level
 // genuinely changes.
+// A 1-2-5 ladder overshoots badly here: the pilot peak ranges 15..2058 counts, so a
+// single 2058 frame pins the axis at 5000 and leaves the usual ~1000 trace occupying a
+// fifth of the panel. A finer ladder still gives round numbers on the axis.
 function niceSpan(v){
   const e=Math.pow(10,Math.floor(Math.log10(v))), m=v/e;
-  return (m<=1?1:m<=2?2:m<=5?5:10)*e;
+  const rungs=[1,1.5,2,3,4,5,7,10];
+  for(const r of rungs) if(m<=r) return r*e;
+  return 10*e;
 }
 function adcSpan(card,need){
   const cur=card.adcSpanHeld||0;
@@ -989,10 +994,22 @@ function drawCons(card,cn){
   ctx.moveTo(cx,cy-S/2);ctx.lineTo(cx,cy+S/2);
   ctx.moveTo(cx-S/2,cy);ctx.lineTo(cx+S/2,cy);ctx.stroke();
   ctx.strokeRect(cx-S/2+.5,cy-S/2+.5,S-1,S-1);
+  // Both marks are CENTRED on their value. fillRect places its top-left corner at the
+  // coordinate given, so drawing the received dots without the half-size back-off put
+  // every one of them down and right of the ideal marker it belongs to, by half a dot.
+  // Small, systematic, and in one direction: exactly the kind of offset that reads as
+  // the data not landing where it should.
+  const DOT=2.0, REF=6.0;
   ctx.fillStyle=C.pts;                     // received points
-  for(const p of cn.pts){ctx.fillRect(cx+p[0]*R,cy-p[1]*R,1.8,1.8);}
-  ctx.fillStyle=C.warn;                    // ideal alphabet
-  for(const p of idealPts(cn.mod)){ctx.fillRect(cx+p[0]*R-2.5,cy-p[1]*R-2.5,5,5);}
+  for(const p of cn.pts){ctx.fillRect(cx+p[0]*R-DOT/2,cy-p[1]*R-DOT/2,DOT,DOT);}
+  ctx.fillStyle=C.warn;                    // ideal alphabet, drawn as an open ring so
+  ctx.lineWidth=1.5;                       // it cannot bury the cloud it is marking
+  ctx.strokeStyle=C.warn;
+  for(const p of idealPts(cn.mod)){
+    ctx.beginPath();
+    ctx.arc(cx+p[0]*R, cy-p[1]*R, REF/2, 0, 2*Math.PI);
+    ctx.stroke();
+  }
 }
 
 // A theme change has to repaint every canvas from the last record, because a
