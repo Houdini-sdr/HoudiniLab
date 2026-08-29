@@ -401,9 +401,18 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
   // One-shot raw dump for offline analysis: [N cp prefix nsym ndata i32]
   // [H re,im f32]*N [data_ind i32]*ndata [U slot re,im i16]*slot.
   if (std::getenv("HOUDINI_CSI_DUMP") != nullptr) {
+    // Skip the first N constellation frames before dumping. One-shot on the FIRST
+    // frame captured the link before it had settled, so every dump looked alike no
+    // matter how its run turned out, and an offline analysis of them said nothing
+    // about the good/bad split it was meant to explain. HOUDINI_CSI_DUMP=<n> skips
+    // n frames (default 30, about a second at the shipped throttle).
+    static std::atomic<int> seen{0};
     static std::atomic<bool> dumped{false};
+    int skip = std::atoi(std::getenv("HOUDINI_CSI_DUMP"));
+    if (skip <= 1) skip = 30;
     bool exp = false;
-    if (dumped.compare_exchange_strong(exp, true)) {
+    if (seen.fetch_add(1) >= skip &&
+        dumped.compare_exchange_strong(exp, true)) {
       FILE* f = std::fopen("/tmp/cns_dump.bin", "wb");
       if (f) {
         const int32_t hdr[5] = {N, cp, es, nsym,
