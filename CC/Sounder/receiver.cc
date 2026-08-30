@@ -1289,47 +1289,37 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
           const long long kf = llround(
               static_cast<double>(abs_end - pred0) / static_cast<double>(fr));
           const long long resid = abs_end - (pred0 + kf * fr);
-          if (std::llabs(resid) <= kResyncDriftTol) {
-            houdini_pilot_ref += resid;
-            if (resid != 0) houdini_pilot_cursor_shift_.fetch_add(resid);
+          // Liveness model, not micro-correction: with locked clocks + MTS
+          // the drift is ~0, while INDEPENDENT detections of the same beacon
+          // scatter by +-hundreds of samples (the earliest-crossing/STS
+          // class, ledger 4.18) -- a tight drift gate rejected every real
+          // hit and the escalation churned ~every 1.7 s. A SNR-passing hit
+          // within the scatter tolerance = beacon ALIVE on the anchored
+          // grid, touch nothing; two consecutive hits beyond it = beacon
+          // MOVED -> escalate straight to re-acquisition, whose confirm
+          // loop is immune to the common detector bias.
+          constexpr long long kScatterTol = 1024;
+          if (std::llabs(resid) <= kScatterTol) {
             resync_hold_pending = false;
             resync_exhausted_streak = 0;
-            resync_hold_churn = 0;
             resync = false;
             resync_retry_cnt = 0;
             resync_success++;
             MLPD_INFO(
-                "Re-sync frame %zu: drift %+lld applied (snr %.1f dB, idx "
-                "%ld), tid %d\n",
-                frame_id, resid, snr, sync_index, tid);
-          } else if (resync_hold_pending &&
-                     std::llabs(resid - resync_held_resid) <=
-                         kResyncHoldMatch) {
-            houdini_pilot_ref += resid;
-            houdini_pilot_cursor_reset_.store(true);
-            resync_hold_pending = false;
-            resync_exhausted_streak = 0;
-            resync_hold_churn = 0;
-            resync = false;
-            resync_retry_cnt = 0;
-            resync_success++;
-            MLPD_WARN(
-                "Re-sync frame %zu: LARGE offset %+lld applied after "
-                "consecutive confirmation (snr %.1f dB), tid %d\n",
+                "Re-sync frame %zu: beacon alive on the anchored grid "
+                "(resid %+lld within scatter, snr %.1f dB), tid %d\n",
                 frame_id, resid, snr, tid);
           } else {
             MLPD_WARN(
-                "Re-sync frame %zu: large offset %+lld HELD (snr %.1f dB, "
-                "pending %+lld), tid %d\n",
-                frame_id, resid, snr,
-                resync_hold_pending ? resync_held_resid : 0, tid);
-            resync_held_resid = resid;
-            resync_hold_pending = true;
-            // stay in resync; a real shift will repeat, an artifact will not
-            if (++resync_hold_churn >= kEscalateHoldChurn) {
-              houdiniEscalate("incoherent detections");
+                "Re-sync frame %zu: off-grid detection %+lld (snr %.1f dB, "
+                "pending %d) -- beacon possibly moved, tid %d\n",
+                frame_id, resid, snr, resync_hold_pending ? 1 : 0, tid);
+            if (resync_hold_pending) {
+              houdiniEscalate("beacon moved");
               continue;  // rx_beacon_time is pre-hunt; restart the frame loop
             }
+            resync_hold_pending = true;
+            // stay in resync; a moved beacon repeats off-grid, noise does not
           }
         }
       } else if (sync_index >= 0) {
