@@ -862,6 +862,13 @@ void Receiver::clientTxPilots(size_t user_id, long long base_time) {
   if (horizon > 0 && config_->is_houdini() && config_->cl_sdr_ch() == 1) {
     const long long frame = static_cast<long long>(config_->samps_per_frame());
     thread_local long long pilot_cursor = 0;  // last-scheduled txTime (samples)
+    // An anchor change must reach the WIRE: the cursor otherwise keeps
+    // winning the max() below for ~horizon frames and the pilots stay on the
+    // stale grid (Opus review finding 4). Small drift corrections SHIFT the
+    // cursor (keeps burst continuity, no overlap with already-queued times);
+    // a large apply / escalation re-anchor RESETS it (the old queue is stale).
+    pilot_cursor += houdini_pilot_cursor_shift_.exchange(0);
+    if (houdini_pilot_cursor_reset_.exchange(false)) pilot_cursor = 0;
     const long long end = txTime + static_cast<long long>(horizon) * frame;
     long long cur = std::max(pilot_cursor + frame, txTime);
     int nsched = 0;
@@ -1215,6 +1222,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
     if (houdiniAcquireAnchor(tid, beacon_detect_window_esc, fresh)) {
       houdini_pilot_ref = fresh;
       houdini_pilot_ref_valid = true;
+      houdini_pilot_cursor_reset_.store(true);
       MLPD_INFO("Re-sync ESCALATION: re-anchored at %lld, tid %d\n", fresh,
                 tid);
     } else if (config_->running()) {
@@ -1288,6 +1296,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
           const long long resid = abs_end - (pred0 + kf * fr);
           if (std::llabs(resid) <= kResyncDriftTol) {
             houdini_pilot_ref += resid;
+            if (resid != 0) houdini_pilot_cursor_shift_.fetch_add(resid);
             resync_hold_pending = false;
             resync_exhausted_streak = 0;
             resync_hold_churn = 0;
@@ -1302,6 +1311,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
                      std::llabs(resid - resync_held_resid) <=
                          kResyncHoldMatch) {
             houdini_pilot_ref += resid;
+            houdini_pilot_cursor_reset_.store(true);
             resync_hold_pending = false;
             resync_exhausted_streak = 0;
             resync_hold_churn = 0;
@@ -1323,6 +1333,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
             // stay in resync; a real shift will repeat, an artifact will not
             if (++resync_hold_churn >= kEscalateHoldChurn) {
               houdiniEscalate("incoherent detections");
+              continue;  // rx_beacon_time is pre-hunt; restart the frame loop
             }
           }
         }
@@ -1379,6 +1390,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
             resync_retry_cnt = 0;
             if (++resync_exhausted_streak >= kEscalateExhaustedEpisodes) {
               houdiniEscalate("episodes exhausted");
+              continue;  // rx_beacon_time is pre-hunt; restart the frame loop
             }
           } else {
             MLPD_WARN(
@@ -1573,7 +1585,7 @@ ssize_t Receiver::clientSyncBeacon(size_t radio_id, size_t sample_window,
       const size_t new_samples = static_cast<size_t>(rx_status);
       if (new_samples == sample_window) {
         MLPD_TRACE(
-            "clientSyncBeacon - Samples %zu - Window %zu - Check Beacon %ld\n",
+            "clientSyncBeacon - Samples %zu - Window %zu\n",
             new_samples, sample_window);
 
         // Acquisition: the strict threshold, and the earliest beacon copy refined

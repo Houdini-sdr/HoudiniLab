@@ -76,7 +76,11 @@ def one_run(i, args):
     z = np.concatenate(pts)
     z = z[np.abs(z) > 1e-9]
     np.save("logs/ap15_run%d_cns.npy" % i, z)
-    score = float(np.abs(np.mean(z ** 4)) / (np.mean(np.abs(z) ** 4) + 1e-30))
+    # PHASE-ONLY 4th-power concentration: the amplitude-weighted form lets a
+    # few near-fade tones (|z| up to ~2.5 after ZF) dominate at 39x weight and
+    # can manufacture ring-ish scores (Opus review finding 5)
+    u = z / np.abs(z)
+    score = float(np.abs(np.mean(u ** 4)))
     verdict = "CLUSTERS" if score > 0.8 else ("ring" if score < 0.3
                                               else "partial")
     return "run %2d: score=%.3f %-8s pts=%d pgo=%s pu=%s" % (

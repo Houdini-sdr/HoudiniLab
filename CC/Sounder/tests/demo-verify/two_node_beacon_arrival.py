@@ -126,7 +126,7 @@ class Ue:
                       % (self.reads, sr.ret, sr.flags, self.fails))
             return None, None
         w = self.buf[:2 * sr.ret]
-        c = (w[0::2].astype(np.float64) + 1j * w[1::2]).astype(np.complex128)
+        c = ((w[0::2].astype(np.float64) + 1j * w[1::2]) / 32767.0).astype(np.complex128)
         return ns_to_ticks(sr.timeNs), c
 
     def close(self):
@@ -368,7 +368,7 @@ def main():
     ap.add_argument("--rearms", type=int, default=2)
     ap.add_argument("--remakes", type=int, default=2)
     ap.add_argument("--corr-scale", type=float, default=10.0)
-    ap.add_argument("--min-ratio", type=float, default=1e4,
+    ap.add_argument("--min-ratio", type=float, default=1e-2,
                     help="absolute detector-ratio floor: the real "
                          "beacon scores >=1e7 on this bench; noise-"
                          "window artifacts score ~500")

@@ -877,12 +877,13 @@ void Config::genPilots() {
     if (this_amp > max_amp) max_amp = this_amp;
   }
   std::printf("Max pilot amplitude = %.2f\n", max_amp);
-  // Amplitude backoff x2 (-6 dB): the pilot peaks at ~1/2 FS [user
-  // 2026-08-30]. The data slot is separately normalized below to the SAME
-  // realized peak, so the old x4 guard against its unnormalized PAPR is no
-  // longer what protects it (and cfloat_to_cint16 now saturates instead of
-  // wrapping in any case).
-  static constexpr float ofdm_pwr_scale_lin = 2;
+  // Amplitude backoff: houdini targets ~1/2 FS [user 2026-08-30] -- its data
+  // slot is separately normalized below to the same realized peak, and
+  // cfloat_to_cint16 saturates. Iris/UHD keep the original x4: their
+  // file-based UL data (data_generator.cc) inherits tx_scale with NO peak
+  // normalization, so halving the backoff there would clip real PAPR
+  // (Opus review finding 1).
+  const float ofdm_pwr_scale_lin = is_houdini() ? 2.0f : 4.0f;
   if (tx_scale_ == 0) {
     tx_scale_ = 1 / (ofdm_pwr_scale_lin * max_amp);
   }
@@ -890,7 +891,13 @@ void Config::genPilots() {
     iq_cf.at(i) *= tx_scale_;
   }
   auto iq_ci16 = Utils::cfloat_to_cint16(iq_cf);
-  iq_ci16.insert(iq_ci16.begin(), iq_ci16.end() - cp_size_, iq_ci16.end());
+  // copy the CP via a temp: inserting a container's own tail into its front
+  // is UB ([sequence.reqmts]); it only worked here by reallocation luck
+  {
+    std::vector<std::complex<int16_t>> cp_tmp(iq_ci16.end() - cp_size_,
+                                              iq_ci16.end());
+    iq_ci16.insert(iq_ci16.begin(), cp_tmp.begin(), cp_tmp.end());
+  }
 
   pilot_ci16_.clear();
   pilot_ci16_.insert(pilot_ci16_.begin(), prefix_zpad.begin(),
@@ -959,15 +966,19 @@ void Config::genPilots() {
   for (auto& data_t : data_syms_t) {
     for (auto& v : data_t) v *= dscale;
     auto data_iq = Utils::cfloat_to_cint16(data_t);
-    data_iq.insert(data_iq.begin(), data_iq.end() - cp_size_, data_iq.end());  // CP
+    {  // CP via a temp (same UB note as the pilot's CP insert above)
+      std::vector<std::complex<int16_t>> cp_tmp(data_iq.end() - cp_size_,
+                                                data_iq.end());
+      data_iq.insert(data_iq.begin(), cp_tmp.begin(), cp_tmp.end());
+    }
     ue_data_ci16_.insert(ue_data_ci16_.end(), data_iq.begin(), data_iq.end());
   }
   ue_data_ci16_.insert(ue_data_ci16_.end(), postfix_zpad.begin(), postfix_zpad.end());
 
   // Report the realized TX peaks in DAC counts (the ONLY level control on
-  // Houdini -- gains are no-ops end to end). The data slot inherits tx_scale
-  // without its own normalization, so its peak differs from the pilot's;
-  // print both so a tx_scale change is chosen against measured numbers.
+  // Houdini -- gains are no-ops end to end). The data slot is normalized to
+  // the pilot's realized peak above; print both so any regression in that
+  // equalization is visible against measured numbers.
   auto peak_counts = [](const std::vector<std::complex<int16_t>>& v) {
     int p = 0;
     for (const auto& s : v)

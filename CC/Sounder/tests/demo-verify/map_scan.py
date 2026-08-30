@@ -122,8 +122,8 @@ def main():
                             continue
                         got += 1
                         w = buf[:2 * sr.ret]
-                        cx = (w[0::2].astype(np.float64) +
-                              1j * w[1::2]).astype(np.complex128)
+                        cx = ((w[0::2].astype(np.float64) +
+                               1j * w[1::2]) / 32767.0).astype(np.complex128)
                         rms = max(rms, float(np.sqrt(np.mean(np.abs(cx)**2))))
                         amax = max(amax, int(np.abs(w).max()))
                         best_r = max(best_r, find_beacon_ratio(cx, gold))

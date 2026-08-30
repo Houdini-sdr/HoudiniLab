@@ -25,8 +25,8 @@ import numpy as np
 import SoapySDR
 from SoapySDR import SOAPY_SDR_CS16, SOAPY_SDR_RX, SOAPY_SDR_TX
 
-SOUNDER_SCHED = "62"
-SOUNDER_STROBE_ON = "ch1:len=2048,loops=forever,offs=384"
+SOUNDER_SCHED = "6" + "2" * 29  # slot-granular (current sounder)
+SOUNDER_STROBE_ON = "ch1:len=1856,loops=1,offs=384"
 SOUNDER_ARM = "symbol_ticks=61440,symbols_per_frame=2,margin=36864000"
 
 
@@ -81,8 +81,8 @@ def main():
                     help="TDD_SCHED nibble string (default: sounder's '62')")
     ap.add_argument("--strobe", default=SOUNDER_STROBE_ON,
                     help="TDD_REPLAY_STROBE on-string")
-    ap.add_argument("--symbol-ticks", type=int, default=61440)
-    ap.add_argument("--spf", type=int, default=2)
+    ap.add_argument("--symbol-ticks", type=int, default=4096)
+    ap.add_argument("--spf", type=int, default=30)
     ap.add_argument("--skip-a2", action="store_true",
                     help="liveness only; skip the abort/re-arm experiments")
     ap.add_argument("--rx-probe", type=int, default=0, metavar="N",

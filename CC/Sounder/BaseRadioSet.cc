@@ -498,11 +498,16 @@ long long BaseRadioSet::houdiniArmTdd(SoapySDR::Device* dev,
   bool accepted = false;
   for (int attempt = 0; attempt < 4 && !accepted; ++attempt) {
     // On the current stack a refused arm THROWS (SH-333) instead of returning
-    // accepted=0; treat both the same and re-ladder before the retry.
+    // accepted=0. A throwing WRITE must never be trusted via the readback:
+    // failures before the device stores its last-arm record leave a STALE
+    // string (possibly a previous run's accepted=1), so a throw always
+    // re-ladders and retries (Opus review finding 3).
     try {
       dev->writeSetting("TDD_ARM", arm);
     } catch (const std::exception& e) {
       MLPD_WARN("TDD_ARM attempt %d refused: %s\n", attempt, e.what());
+      houdiniTddLadder(dev);
+      continue;
     }
     std::stringstream ss(dev->readSetting("TDD_ARM"));
     std::string tok;
@@ -584,7 +589,14 @@ void BaseRadioSet::armHoudiniTdd(void) {
             ", spf=" + std::to_string(spf_tdd) + ")");
       }
       std::string tdd(spf_tdd, '2');    // every slot rx-gates
-      tdd[beacon_slot] = '6';           // + beacon strobe on the B slot
+      // NB the ring's last rx entry abuts the tx-ish '6' across the frame
+      // wrap, so the driver logs the HS-184 warm-return warning twice per
+      // arm. ACCEPTED deliberately: a '0' guard would close the rx gate and
+      // abandon the continuous capture (see the function comment); the
+      // warning is about X-band T/R-switch timing, moot on this cabled
+      // bench. (The guarded probe ring in DEMO_VERIFICATION.md 4.12 avoided
+      // the warning; the shipped ring does not.)
+      tdd.at(beacon_slot) = '6';        // + beacon strobe on the B slot
       htdd_frame_ticks_ = static_cast<long long>(spf_tdd) * htdd_symbol_ticks_;
 
       // PHYSICAL TX channel for the strobe (beacon_channel() is the logical index
@@ -819,10 +831,12 @@ int BaseRadioSet::houdiniTddRx(size_t radio_id, void* const* buffs,
       long long rel_pilot = grid_off -
           static_cast<long long>(htdd_pilot_slot_) * n;
       if (rel_pilot > fr / 2) rel_pilot -= fr;
+      if (rel_pilot < -fr / 2) rel_pilot += fr;
       long long pu_err = -99999;
       if (u_start >= 0) {
-        const long long slots_gap = static_cast<long long>(
-            htdd_rx_slots_.back() - htdd_pilot_slot_);
+        const long long slots_gap =
+            static_cast<long long>(htdd_rx_slots_.back()) -
+            static_cast<long long>(htdd_pilot_slot_);
         pu_err = (u_start - p_start) - slots_gap * n;
       }
       MLPD_INFO("HOUDINI_BS_RX: frame=%lld cg=%d pilot-rms=%.0f selfsim=%.2f "

@@ -86,12 +86,8 @@ class BaseRadioSet {
   double htdd_tick_rate_ = 122.88e6;
   long long htdd_epoch_ = 0;        // TDD_ARM epoch (ticks)
   long long htdd_frame_ticks_ = 0;  // symbols_per_frame * symbol_ticks
-  // kTddSymTicks (61440 = 0.5 ms), NOT samps_per_slot. Measured on the running
-  // demo: samps_per_slot is 4096, so one TDD symbol spans 15 sounder slots and
-  // symbols_per_frame is 2 (TDD_SCHED "62"). The TX gate is therefore 15x coarser
-  // than a slot, which is why the beacon strobe covers slots 0..14 rather than
-  // slot 0 alone. An earlier comment here claimed this equalled samps_per_slot.
-  long long htdd_symbol_ticks_ = 0;
+  long long htdd_symbol_ticks_ = 0;  // one TDD symbol = one sounder slot
+                                     // (= samps_per_slot ticks at 1:1)
   std::vector<size_t> htdd_rx_slots_;  // sounder slots with rx_gate (P/U/N)
   size_t htdd_pilot_slot_ = 0;         // the 'P' sounder slot (CSI reference)
   size_t htdd_rx_cursor_ = 0;
