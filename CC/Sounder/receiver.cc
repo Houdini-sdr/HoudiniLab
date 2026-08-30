@@ -1195,10 +1195,8 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   // Resync hold-off state [user 2026-08-30]: a large offset is applied only
   // after MORE THAN ONE consecutive consistent observation of it; a lone
   // large offset (artifact, scatter) is held, logged, and not applied.
-  constexpr long long kResyncDriftTol = 10;   // apply immediately at/below this
-  constexpr long long kResyncHoldMatch = 32;  // consecutive-large agreement
-  long long resync_held_resid = 0;
-  bool resync_hold_pending = false;
+  bool resync_hold_pending = false;  // one off-grid detection seen (4.18
+                                     // scatter means singles are noise)
   // AP-18 escalation [user]: give up on resync and return to the full
   // sliding-window acquisition when the anchored grid has plausibly lost the
   // beacon. Triggers: 2 CONSECUTIVE exhausted episodes (a single episode of
@@ -1207,9 +1205,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   // each other (incoherent state). Hold-off itself already covers the
   // beacon-MOVED case; this covers beacon-LOST.
   constexpr size_t kEscalateExhaustedEpisodes = 2;
-  constexpr size_t kEscalateHoldChurn = 4;
   size_t resync_exhausted_streak = 0;
-  size_t resync_hold_churn = 0;
   const size_t beacon_detect_window_esc = static_cast<size_t>(
       static_cast<float>(config_->samps_per_slot()) *
       kBeaconDetectWindowScaler);
@@ -1232,7 +1228,6 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
           tid);
     }
     resync_exhausted_streak = 0;
-    resync_hold_churn = 0;
     resync_hold_pending = false;
     resync = false;
     resync_retry_cnt = 0;
