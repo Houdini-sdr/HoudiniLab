@@ -1270,10 +1270,11 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
         // only attempt when it is inside (~3% of frames -- the others count
         // as NO attempt, so an exhausted episode really means "the beacon
         // was absent at its predicted spot ~100 times"), and search only
-        // that neighborhood. A whole-window earliest-crossing search was
-        // measurably MASKED by the UE's own TX self-leakage (~11 dB bursts
-        // elsewhere in the window won the earliest race and ate the
-        // attempt).
+        // that neighborhood. A whole-window earliest-crossing search kept
+        // losing the race to ~11 dB detections at the window edge (best
+        // reading: the beacon itself straddling the edge with partial core
+        // energy -- same-board TX coupling measured cold, ledger 4.40), so
+        // an attempt only counts when the full beacon is predicted inside.
         const long long fr =
             static_cast<long long>(config_->samps_per_frame());
         const long long off =
@@ -1313,6 +1314,35 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
             config_->beacon_size());
         MLPD_INFO("Re-sync frame %zu: detection idx %ld snr %.1f dB, tid %d\n",
                   frame_id, sync_index, snr, tid);
+        // Ledger 4.42 instrument: dump this window + the verdict inputs so the
+        // offline analyzer can place the TRUE core by exact-waveform
+        // correlation and recompute the SNR without the detector-index bias.
+        const char* rwdir = getenv("HOUDINI_DUMP_RESYNC_WIN");
+        if (rwdir != nullptr) {
+          static std::atomic<int> rwn{0};
+          const int wk = rwn.fetch_add(1);
+          if (wk < 6) {
+            char pb[512];
+            snprintf(pb, sizeof(pb), "%s/resyncwin_%02d.bin", rwdir, wk);
+            FILE* fb = fopen(pb, "wb");
+            if (fb != nullptr) {
+              fwrite(rxbuff.at(kSyncDetectChannel), sizeof(int16_t),
+                     static_cast<size_t>(request_samples) * 2, fb);
+              fclose(fb);
+            }
+            snprintf(pb, sizeof(pb), "%s/resyncwin_%02d.txt", rwdir, wk);
+            FILE* fg = fopen(pb, "w");
+            if (fg != nullptr) {
+              fprintf(fg,
+                      "n %d\nsync_index %zd\nsnr %.2f\nframe %zu\n"
+                      "rx_beacon_time %lld\npilot_ref %lld\nbeacon_end %lld\n",
+                      request_samples, sync_index, snr, frame_id,
+                      rx_beacon_time, houdini_pilot_ref,
+                      static_cast<long long>(houdiniBeaconEnd(config_)));
+              fclose(fg);
+            }
+          }
+        }
         if (snr < syncSnrFloorDb()) {
           sync_index = -1;  // fall through to the miss path below
         } else {

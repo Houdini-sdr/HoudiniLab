@@ -846,6 +846,43 @@ int BaseRadioSet::houdiniTddRx(size_t radio_id, void* const* buffs,
                 rel_pilot, pu_err);
     }
   }
+  // Landing-map instrument (phase 5-7 walk): dump the raw continuous read plus
+  // the grid metadata so the offline analyzer can place every burst on the
+  // ABSOLUTE slot grid. Ground truth for zero prefix/postfix sizing -- the CSI
+  // dump stores centroid-ALIGNED slots and cannot serve here.
+  const char* lm_dir = getenv("HOUDINI_BS_DUMP_FRAME");
+  if (lm_dir != nullptr) {
+    static std::atomic<int> lm_dumped{0};
+    static std::atomic<long long> lm_next{200};
+    if (htdd_frame_counter_ >= lm_next.load() && lm_dumped.load() < 8) {
+      lm_next.store(htdd_frame_counter_ + 500);
+      const int dk = lm_dumped.fetch_add(1);
+      char pb[512];
+      snprintf(pb, sizeof(pb), "%s/bsframe_%02d.bin", lm_dir, dk);
+      FILE* fb = fopen(pb, "wb");
+      if (fb != nullptr) {
+        fwrite(s, sizeof(int16_t), static_cast<size_t>(cg) * 2, fb);
+        fclose(fb);
+      }
+      snprintf(pb, sizeof(pb), "%s/bsframe_%02d.txt", lm_dir, dk);
+      FILE* fg = fopen(pb, "w");
+      if (fg != nullptr) {
+        fprintf(fg,
+                "ft_ns %lld\ncg %d\nepoch %lld\ntick_rate %.1f\n"
+                "frame_ticks %lld\npilot_slot %lld\nn %d\np_start %lld\n"
+                "u_start %lld\npad %lld\nframe %lld\nrx_slots",
+                ft, cg, static_cast<long long>(htdd_epoch_), htdd_tick_rate_,
+                static_cast<long long>(htdd_frame_ticks_),
+                static_cast<long long>(htdd_pilot_slot_), n, p_start, u_start,
+                static_cast<long long>(htdd_frame_pad_),
+                static_cast<long long>(htdd_frame_counter_));
+        for (size_t rk = 0; rk < K; ++rk)
+          fprintf(fg, " %lld", static_cast<long long>(htdd_rx_slots_.at(rk)));
+        fprintf(fg, "\n");
+        fclose(fg);
+      }
+    }
+  }
   std::memcpy(buffs[0], htdd_slot_cache_.data(), static_cast<size_t>(n) * 4);
   htdd_cache_frame_ = htdd_frame_counter_;
   ++htdd_frame_counter_;
