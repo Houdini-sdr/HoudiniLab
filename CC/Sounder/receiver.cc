@@ -91,9 +91,13 @@ static double beaconSnrDb(const std::complex<int16_t>* w, size_t n,
 }
 
 static double syncSnrFloorDb() {
+  // [user 2026-08-30]: "keep the sync snr about 30 dB or so". The earlier
+  // default of 20 compensated for the pre-guard-band metric under-reading by
+  // ~14 dB (ledger 4.42); with the metric now reading true link dB (47.6
+  // measured live on the bench wire), 30 is the intended floor with margin.
   static const double v = [] {
     const char* e = getenv("HOUDINI_SYNC_SNR_DB");
-    return e ? atof(e) : 20.0;
+    return e ? atof(e) : 30.0;
   }();
   return v;
 }
