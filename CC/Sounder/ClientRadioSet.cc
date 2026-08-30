@@ -310,6 +310,11 @@ void ClientRadioSet::init(ClientRadioContext* context) {
     rx_stream_args["rx_gap_break"] = "1";
     tx_stream_args["tx_mode"] = "stream";
     if (_cfg->ue_tdd_pilot()) tx_stream_args["tdd"] = "1";
+    // MTS (AP-23), same rationale as the BS side: pin the bring-up latency
+    // and align the ADC/DAC tiles the beacon-anchor -> pilot-TX arithmetic
+    // crosses. Radio.cc opens TX before RX for houdini (first-up rule).
+    rx_stream_args["mts"] = "true";
+    tx_stream_args["mts"] = "true";
   } else if (kUseSoapyUHD == false) {
     args["driver"] = "iris";
     args["serial"] = _cfg->cl_sdr_ids().at(i);

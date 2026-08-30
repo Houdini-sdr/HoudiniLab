@@ -903,6 +903,12 @@ void BaseRadioSet::init(BaseRadioContext* context) {
     // explicitly rather than inheriting a default another repo owns (AP-10).
     rx_stream_args["rx_gap_break"] = "1";
     tx_stream_args["tx_mode"] = "replay";
+    // MTS (AP-23): pin the converter bring-up latency (measured 1-5 samples
+    // per boot without it, ledger 4.23) and align the ADC/DAC tiles that the
+    // RX-stamp -> TX-time arithmetic crosses. Radio.cc opens TX before RX
+    // for houdini so DAC tile 0 (the SYSREF receiver) is up first.
+    rx_stream_args["mts"] = "true";
+    tx_stream_args["mts"] = "true";
   } else if (kUseSoapyUHD == false) {
     args["driver"] = "iris";
     args["serial"] = _cfg->bs_sdr_ids().at(c).at(i);

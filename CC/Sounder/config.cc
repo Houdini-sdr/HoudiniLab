@@ -201,7 +201,9 @@ Config::Config(const std::string& jsonfile, const std::string& directory,
   ue_pilot_horizon_ = tddConf.value("ue_pilot_horizon", 0);
   auto tx_advance = tddConf.value("tx_advance", json::array());
   if (tx_advance.empty() == true) {
-    tx_advance_.resize(num_cl_sdrs_, 250);
+    // Houdini default = the measured wired-bench calibration (AP-19,
+    // DEMO_VERIFICATION.md 4.35); Iris keeps its historical 250.
+    tx_advance_.resize(num_cl_sdrs_, is_houdini() ? 205 : 250);
   } else {
     if (client_present_ && tx_advance.size() != num_cl_sdrs_) {
       MLPD_ERROR("tx_advance size must be same as the number of clients!\n");

@@ -183,8 +183,16 @@ Radio::Radio(const SoapySDR::Kwargs& args, const char soapyFmt[],
   }
   // Houdini SoapyHoudiniSDR needs per-stream args (RX host port, TX replay/stream
   // mode); Iris/UHD ignore an empty Kwargs, so this is backend-agnostic.
-  rxs_ = dev_->setupStream(SOAPY_SDR_RX, soapyFmt, channels, rxStreamArgs);
-  txs_ = dev_->setupStream(SOAPY_SDR_TX, soapyFmt, channels, txStreamArgs);
+  if (args.count("driver") && args.at("driver") == "houdinisdr") {
+    // MTS first-up rule: DAC tile 0 hosts the analog SYSREF receiver, so
+    // the TX stream (whose setup powers the DAC tiles) must exist before
+    // an RX setupStream(mts=true) runs its sync (AP-23).
+    txs_ = dev_->setupStream(SOAPY_SDR_TX, soapyFmt, channels, txStreamArgs);
+    rxs_ = dev_->setupStream(SOAPY_SDR_RX, soapyFmt, channels, rxStreamArgs);
+  } else {
+    rxs_ = dev_->setupStream(SOAPY_SDR_RX, soapyFmt, channels, rxStreamArgs);
+    txs_ = dev_->setupStream(SOAPY_SDR_TX, soapyFmt, channels, txStreamArgs);
+  }
 
   const std::string driver =
       (args.count("driver") != 0u) ? args.at("driver") : std::string();
