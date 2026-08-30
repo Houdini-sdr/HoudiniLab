@@ -864,7 +864,9 @@ void Config::genPilots() {
     if (this_amp > max_amp) max_amp = this_amp;
   }
   std::printf("Max pilot amplitude = %.2f\n", max_amp);
-  // 6dB Power backoff value to avoid clipping in the data due to high PAPR
+  // Amplitude backoff x4 (-12 dB) to avoid clipping in the data due to high
+  // PAPR. (A previous comment called this "6dB Power backoff"; /4 in
+  // amplitude is -12 dB.)
   static constexpr float ofdm_pwr_scale_lin = 4;
   if (tx_scale_ == 0) {
     tx_scale_ = 1 / (ofdm_pwr_scale_lin * max_amp);
