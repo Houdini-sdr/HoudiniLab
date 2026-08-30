@@ -123,10 +123,27 @@ def main():
         H = np.ones(FFT, dtype=np.complex128)
         H[occ] = mean_t
         td = demod(x, us) / H
+        best_r = 0.0
         if ref is not None:
             rr = ref[:NSYM]
             good = np.abs(rr[:, occ]) > 1e-9
-            z = td[:, occ]
+            # The pilot H carries the PILOT's timing; the data burst lands with
+            # its own draw (the AP-15 mechanism). Recover the pilot<->data
+            # timing offset r as a per-tone phase ramp before scoring -- this
+            # is the same job as the live two-stage recovery, and the winning
+            # r is a direct per-frame readout of the offset.
+            kk = np.arange(FFT) - FFT // 2
+
+            def score(r):
+                z = td[:, occ] * np.exp(1j * 2 * np.pi * r * kk[occ] / FFT)
+                num = np.abs(np.sum(z[good] * np.conj(rr[:, occ][good])))
+                den = np.sqrt(np.sum(np.abs(z[good]) ** 2) *
+                              np.sum(np.abs(rr[:, occ][good]) ** 2))
+                return num / (den + 1e-30)
+
+            rs = np.arange(-8, 8.01, 0.05)
+            best_r = float(rs[int(np.argmax([score(r) for r in rs]))])
+            z = td[:, occ] * np.exp(1j * 2 * np.pi * best_r * kk[occ] / FFT)
             # one global complex gain (the reference has its own scale)
             g = np.sum(z[good] * np.conj(rr[:, occ][good])) / \
                 np.sum(np.abs(rr[:, occ][good]) ** 2)
@@ -148,7 +165,7 @@ def main():
         psnrs.append(psnr)
         dsnrs.append(dsnr)
         print(f"\n== {os.path.basename(mp)} pilot@{ps} (coh {pcoh:.3f}) data@{us}"
-              f"  occ tones {len(occ)}")
+              f"  occ tones {len(occ)}  r={best_r:+.2f}")
         print(f"  PILOT SNR {psnr:6.1f} dB   DATA SNR {dsnr:6.1f} dB   "
               f"delta {psnr - dsnr:+.1f} dB")
         print("  pilot per-sym EVM dB: " +
