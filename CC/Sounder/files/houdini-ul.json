@@ -1,13 +1,13 @@
 {
-    "_comment": "Houdini RFSoC single-UE client. Runs the unmodified receiver.cc client-sync path (clientSyncTxRx -> syncSearch -> find_beacon) on the Houdini radio via the ClientRadioSet houdini backend. The BS beacon is armed by the sounder itself (BaseRadioSet::armHoudiniTdd when bs_hw_framer=true, armHoudiniBeacon otherwise); the standalone beacon_tx_gold helper is a pre-sounder test tool and is NOT used by this config. Run procedure: CSI_DEMO_WALKTHROUGH.md. Matched-NCO Zone-1 loopback: TX ch1 -> RX ch1, NCO 500 MHz. slot=4096 samps -> detect window ~9544 > beacon. 30 slots x 4096 = 122880 samps = EXACTLY 1 ms per frame so the UE pilot TX time quantizes onto Houdini's whole-ms TX grid at a constant advance.",
+    "_comment": "Houdini RFSoC single-UE client, slot-granular native-TDD demo. BS arms a 30-symbol TDD ring built from frame_schedule (one 4096-tick symbol per slot, '6' beacon strobe on the B slot, rx on every other slot -- a gate close would abandon the continuous capture, see DEMO_VERIFICATION.md). The beacon is a SINGLE 496-sample core per frame at slot_start+384 (strobe offs), played from the TX replay RAM with explicit zeros to the window close. UE: stamp-based hunt -> confirm(x2) -> anchor acquisition with a 20 dB sync-SNR floor (HOUDINI_SYNC_SNR_DB), resync = gated drift tracking. Run procedure: CSI_DEMO_WALKTHROUGH.md; evidence ledger: DEMO_VERIFICATION.md. Matched-NCO Zone-1: TX ch1 -> RX ch1, NCO 500 MHz. 30 slots x 4096 = 122880 samps = EXACTLY 1 ms per frame = 320 steps of the 384-tick TX grid, so per-frame snap residuals are constant within a run.",
     "serial_file": "files/topology-houdini.json",
     "radio_type": "houdini",
     "remote_port": "55132",
     "bs_hw_framer": true,
     "ue_tdd_pilot": true,
-    "_ue_tdd_pilot_note": "UE streams its pilot with the tdd=1 TX stream arg -> the driver TxTickAnchor accepts the beacon-referenced start on the 3.125us TDD window grid (SH-248/SH-301), not whole-ms, so no 1ms drift-cliff. ue_tx_advance_ticks (ticks) is the fine calibration that seats the pilot in the BS rx_gate; sweep it.",
+    "_ue_tdd_pilot_note": "UE streams its pilot with the tdd=1 TX stream arg -> the driver TxTickAnchor accepts beacon-referenced starts on the 3.125us/384-tick TDD grid (SH-248/SH-301). ue_tx_advance_ticks is the fine calibration seating the pilot in the BS rx window; tx_advance needs re-derivation after the grid-model fix (DEMO_VERIFICATION.md 4.29/4.31: measure pilot_grid_off, set tx_advance to land it).",
     "ue_tx_advance_ticks": 0,
-    "_bs_hw_framer_note": "true selects the BS native-Houdini-TDD framer path: beacon replay strobe + one rx_gate window per sounder pilot slot; loopRecv's HW-framer true-path receives only those, tagged with the sounder slot. The TDD symbol is a fixed 0.5ms (decoupled from the slot) so the capture fits inside the rx_gate window; samps_per_slot just needs to be <= 4096 (FPGA TX_RAM, else genPilots' size_t remain_size underflows). 48*80 + 128+128 = 4096.",
+    "_bs_hw_framer_note": "true selects the BS native-Houdini-TDD framer path. The TDD symbol now EQUALS the sounder slot (4096 ticks; the old 0.5 ms symbol and its multi-copy beacon fill are retired, DEMO_VERIFICATION.md 4.12/4.16). samps_per_slot must stay <= 4096 (FPGA TX_RAM depth).",
     "frequency": 500000000.0,
     "nco_frequency": 500000000.0,
     "sample_rate": 122880000.0,
@@ -44,7 +44,7 @@
     "corr_scale": [
         100
     ],
-    "_corr_scale_init_note": "Acquisition-only detection threshold. The test is corr_scale * peak > local_energy, so a SMALLER value is STRICTER. Measured on this link: windows with no beacon peak at a ratio of 3.4e-07, windows with a beacon at 0.31 to 4.2 (median 2.8). corr_scale 100 puts the bar at 0.01, far below anything real, so sidelobes crossed first and the earliest crossing won. 10 puts it at 0.1, inside the empty gap between the two populations, keeping every real beacon with 3x margin. Re-sync still uses corr_scale and still relaxes per retry. NOTE this did NOT fix the run-to-run constellation split it was investigated for; that fault is downstream, in the U-slot data subcarriers, not in beacon acquisition.",
+    "_corr_scale_init_note": "Acquisition-only detection threshold; SMALLER is STRICTER (test: corr_scale * peak > trailing local energy). The 2026-08 measured populations (no-beacon 3.4e-07, beacon 0.31..4.2) were taken in the multi-copy-beacon era; acquisition now ALSO requires the 20 dB in-window SNR floor and two grid-consistent confirms, which is what actually rejects the noise-artifact class (DEMO_VERIFICATION.md 4.25/4.32). Re-sync uses corr_scale and relaxes per retry, gated by the same floor.",
     "corr_scale_init": [
         10
     ],
