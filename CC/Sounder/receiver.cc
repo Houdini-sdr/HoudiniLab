@@ -36,6 +36,24 @@ static constexpr size_t kSyncDetectChannel = 0;
 static constexpr float kBeaconDetectWindowScaler = 2.33f;
 static constexpr bool kEnableCfo = false;
 
+// Where the beacon END sits relative to the slot-0 start, per the
+// TRANSMITTED layout -- the constant the UE subtracts from sync_index to
+// derive its slot grid. Houdini: the strobe burst is stamped at
+// window_open + 384 ticks (BaseRadioSet kTddGridTicks) with NO prefix, so
+// the core ends at slot_start + 384 + beacon_size. Iris: [prefix][beacon]
+// at the slot head. The old code used the Iris constant on Houdini too,
+// baking a 256-sample model error into the UE grid that tx_advance then had
+// to absorb (DEMO_VERIFICATION.md 4.28/4.29). The residual after this fix is
+// pure pipeline/path latency (~1 us class, measured ~122 samples on-board),
+// which is exactly what tx_advance / ue_tx_advance_ticks calibrate.
+static constexpr ssize_t kHoudiniStrobeOffsTicks = 384;
+static ssize_t houdiniBeaconEnd(Config* cfg) {
+  if (cfg->is_houdini()) {
+    return kHoudiniStrobeOffsTicks + static_cast<ssize_t>(cfg->beacon_size());
+  }
+  return static_cast<ssize_t>(cfg->beacon_size() + cfg->prefix());
+}
+
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
 
@@ -1062,8 +1080,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   while ((sync_count < kTargetSyncCount) && config_->running()) {
     const ssize_t sync_index = clientSyncBeacon(tid, beacon_detect_window);
     if (sync_index >= 0) {
-      const ssize_t adjust =
-          sync_index - (config_->beacon_size() + config_->prefix());
+      const ssize_t adjust = sync_index - houdiniBeaconEnd(config_);
       const size_t alignment_samples =
           config_->samps_per_frame() - beacon_detect_window;
       MLPD_INFO(
@@ -1156,14 +1173,14 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
           request_samples, config_->corr_scale(tid) + resync_retry_cnt);
       if (sync_index >= 0) {
         const int new_rx_offset =
-            sync_index - (config_->beacon_size() + config_->prefix());
+            static_cast<int>(sync_index - houdiniBeaconEnd(config_));
         //Adjust tx time
         rx_beacon_time += new_rx_offset;
-        // Anchor the Houdini pilot reference ONCE, to the first beacon-locked frame
-        // start (read_ts + sync_index - beacon_size - prefix). The dense beacon fills
-        // the whole beacon symbol (slots 0..14), so a later resync can lock to a
-        // DIFFERENT beacon copy (4096 apart) -- re-anchoring would jump the pilot by
-        // whole slots. Anchor once and keep it: with frequency-locked boards the
+        // Anchor the Houdini pilot reference ONCE, to the first beacon-locked
+        // frame start. The single-copy beacon (one strobe burst per frame)
+        // removed the old k x 4096 copy ambiguity, but anchor-once stays: it
+        // also protects against the detector's per-lock scatter class
+        // (DEMO_VERIFICATION.md 4.18). With frequency-locked boards the
         // residual drift is ~0.14 samp/frame (< a slot over a run), and the per-frame
         // grid-snap below tracks real time.
         if (config_->is_houdini() && !houdini_pilot_ref_valid) {
