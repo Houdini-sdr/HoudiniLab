@@ -39,7 +39,7 @@
         "GGGGGGGGGGGGGGGGPGUGGGGGGGGGGG"
     ],
     "tx_advance": [
-        135
+        205
     ],
     "corr_scale": [
         100
@@ -49,5 +49,6 @@
         10
     ],
     "ue_pilot_horizon": 96,
-    "ue_modulation": "QPSK"
+    "ue_modulation": "QPSK",
+    "_tx_advance_note": "BENCH CALIBRATION for the wired setup, not a live mechanism. Derived 2026-08-30 from the BS-side pilot_grid_off measurement (DEMO_VERIFICATION.md 4.31/4.35): with 135 the two 384-tick snap-branch clusters sat at ~+172 and ~-32; 205 centers them on 0 (~+/-102), maximizing slot margin. Re-derive after any cabling/latency change: run with HOUDINI_BS_RX_DEBUG=1 across a few restarts and shift tx_advance by the mean pilot_grid_off."
 }
