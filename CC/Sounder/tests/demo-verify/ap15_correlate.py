@@ -32,7 +32,9 @@ def one_run(i, args):
     env["HOUDINI_CSI_UDP"] = "127.0.0.1:%d" % args.port
     env["HOUDINI_MAX_FRAME"] = str(args.frames)
     env["HOUDINI_BS_RX_DEBUG"] = "1"
-    env["HOUDINI_CSI_DUMP"] = "90"   # settled raw U-slot + H dump per run
+    env["HOUDINI_CSI_DUMP"] = "60"   # settled dump: CNS datagrams are
+    # ~1 per 33 ms (each carries the whole constellation), so 60 sends
+    # = ~2 s after pilots start; needs --frames >= ~2500
     try:
         os.remove("/tmp/cns_dump.bin")
     except OSError:
@@ -84,7 +86,7 @@ def one_run(i, args):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--runs", type=int, default=12)
-    ap.add_argument("--frames", type=int, default=450)
+    ap.add_argument("--frames", type=int, default=3000)
     ap.add_argument("--settle", type=int, default=60)
     ap.add_argument("--port", type=int, default=9911)
     ap.add_argument("--conf", default="files/houdini-ul.json")
