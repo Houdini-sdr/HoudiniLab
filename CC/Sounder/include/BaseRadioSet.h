@@ -104,6 +104,8 @@ class BaseRadioSet {
   // that read taints the whole frame (pilot AND uplink data). Hold its padding count
   // for the frame and hand it to each slot served from the cache. See AP-10.
   size_t htdd_frame_pad_ = 0;
+  size_t htdd_quiet_streak_ = 0;   // consecutive presence-gated (no-pilot) frames
+  bool htdd_quiet_warned_ = false;
 };
 
 #endif  // BASE_RADIO_SET_H_

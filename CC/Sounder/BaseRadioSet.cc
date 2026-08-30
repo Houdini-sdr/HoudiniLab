@@ -707,14 +707,36 @@ int BaseRadioSet::houdiniTddRx(size_t radio_id, void* const* buffs,
   }
   const double pilot_rms = std::sqrt(best / n);
   const double mean_rms = std::sqrt(cse[cg] / cg);
-  // Presence gate: skip frames where no UE signal is on-air yet (don't advance the
-  // frame counter -> the first real frame lands at recorder frame 0).
+  // Presence gate: skip frames where no UE signal is on-air (don't advance the
+  // frame counter -> the first real frame lands at recorder frame 0). A LOSS
+  // of pilots mid-run is reported loudly [user 2026-08-30]: the UE pausing
+  // its schedule (e.g. the AP-18 resync escalation hunting for a lost beacon)
+  // shows up here as a quiet streak, and the BS should say so rather than
+  // skip silently.
   if (pilot_rms < 120.0 || pilot_rms < 4.0 * mean_rms) {
+    ++htdd_quiet_streak_;
+    constexpr size_t kQuietWarnFrames = 200;  // ~0.2 s at 1 kHz frames
+    if (htdd_frame_counter_ > 0 &&
+        (htdd_quiet_streak_ == kQuietWarnFrames ||
+         (htdd_quiet_streak_ > kQuietWarnFrames &&
+          htdd_quiet_streak_ % 2000 == 0))) {
+      htdd_quiet_warned_ = true;
+      MLPD_WARN(
+          "BS: UE PILOT LOST for %zu consecutive frames (last good frame "
+          "%lld) -- UE schedule paused or link down\n",
+          htdd_quiet_streak_, htdd_frame_counter_);
+    }
     std::memcpy(buffs[0], s, static_cast<size_t>(n) * 4);
     frameTime = (htdd_frame_counter_ << 32) |
                 (static_cast<long long>(htdd_rx_slots_.at(0)) << 16);
     return n;
   }
+  if (htdd_quiet_warned_) {
+    MLPD_WARN("BS: UE pilot RETURNED after %zu quiet frames (frame %lld)\n",
+              htdd_quiet_streak_, htdd_frame_counter_);
+    htdd_quiet_warned_ = false;
+  }
+  htdd_quiet_streak_ = 0;
   // The densest slot `at` is a UE slot -- pilot OR data. Identify it: the pilot is
   // identical repeated LTS symbols (high self-similarity at lag cp+fft); data is
   // distinct symbols (low). This keeps P/U tagged correctly so CSI comes from the
