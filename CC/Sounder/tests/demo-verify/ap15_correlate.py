@@ -32,6 +32,11 @@ def one_run(i, args):
     env["HOUDINI_CSI_UDP"] = "127.0.0.1:%d" % args.port
     env["HOUDINI_MAX_FRAME"] = str(args.frames)
     env["HOUDINI_BS_RX_DEBUG"] = "1"
+    env["HOUDINI_CSI_DUMP"] = "90"   # settled raw U-slot + H dump per run
+    try:
+        os.remove("/tmp/cns_dump.bin")
+    except OSError:
+        pass
     logf = open("logs/ap15_run%d.log" % i, "wb")
     p = subprocess.Popen(["./build/sounder", "--view", "--conf_file",
                           args.conf, "--storepath", "logs"],
@@ -57,14 +62,18 @@ def one_run(i, args):
         p.kill()
     sock.close()
     logf.close()
+    if os.path.exists("/tmp/cns_dump.bin"):
+        os.replace("/tmp/cns_dump.bin", "logs/ap15_run%d_dump.bin" % i)
     log = open("logs/ap15_run%d.log" % i, "rb").read().decode(errors="replace")
-    m = re.search(r"pilot_grid_off=(-?\d+) pu_spacing_err=(-?\d+)", log)
+    m = re.search(r"HOUDINI_BS_RX:.*?pilot_grid_off=(-?\d+) pu_spacing_err=(-?\d+)",
+                  log)
     pgo, pu = (m.group(1), m.group(2)) if m else ("?", "?")
     if not pts:
         return "run %2d: NO CNS POINTS (rc=%s) pgo=%s pu=%s" % (
             i, p.returncode, pgo, pu)
     z = np.concatenate(pts)
     z = z[np.abs(z) > 1e-9]
+    np.save("logs/ap15_run%d_cns.npy" % i, z)
     score = float(np.abs(np.mean(z ** 4)) / (np.mean(np.abs(z) ** 4) + 1e-30))
     verdict = "CLUSTERS" if score > 0.8 else ("ring" if score < 0.3
                                               else "partial")
