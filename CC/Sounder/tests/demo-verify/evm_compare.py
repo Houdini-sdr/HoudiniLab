@@ -31,6 +31,17 @@ CP = 16
 SYM = 80
 NSYM = 48
 
+# Consts::lts_seq (constants.h), DC-centered: the +-1 freq-domain LTS. The
+# averaged received pilot tones are H*LTS, so the equalizer must divide the
+# LTS back out -- skipping it leaves per-tone pi flips that destroy the data
+# correlation while every pilot-side metric stays perfect (conjugation- and
+# sign-insensitive), which is exactly how the bug hid.
+LTS_F = np.zeros(FFT)
+LTS_F[6:32] = [1, 1, -1, -1, 1, 1, -1, 1, -1, 1, 1, 1, 1, 1, 1, -1, -1,
+               1, 1, -1, 1, -1, 1, 1, 1, 1]
+LTS_F[33:59] = [1, -1, -1, 1, 1, -1, 1, -1, 1, -1, -1, -1, -1, -1, 1, 1,
+                -1, -1, 1, -1, 1, -1, 1, 1, 1, 1]
+
 
 def demod(slot, start, conj_rx=True):
     """DC-centered per-symbol tones, live-pipeline convention (rx_conj +
@@ -121,7 +132,7 @@ def main():
         # transmitted [128 | 48x80 | 128] layout), H from the pilot mean
         us = u_b + (ps - p_b)
         H = np.ones(FFT, dtype=np.complex128)
-        H[occ] = mean_t
+        H[occ] = mean_t * np.where(LTS_F[occ] != 0, LTS_F[occ], 1.0)
         td = demod(x, us) / H
         best_r = 0.0
         best_du = 0
