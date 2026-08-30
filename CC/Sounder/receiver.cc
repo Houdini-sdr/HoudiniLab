@@ -1262,17 +1262,50 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
       MLPD_TRACE("Enable resyncing at frame %zu\n", frame_id);
     }
     if (resync == true) {
-      ssize_t sync_index = this->syncSearch(
-          reinterpret_cast<std::complex<int16_t>*>(
-              rxbuff.at(kSyncDetectChannel)),
-          request_samples, config_->corr_scale(tid) + resync_retry_cnt);
+      ssize_t sync_index = -1;
+      bool resync_attempted = true;
+      if (config_->is_houdini() && houdini_pilot_ref_valid) {
+        // TARGETED liveness check: the anchored grid predicts exactly where
+        // the beacon END lands in this (drained, random-phase) window, so
+        // only attempt when it is inside (~3% of frames -- the others count
+        // as NO attempt, so an exhausted episode really means "the beacon
+        // was absent at its predicted spot ~100 times"), and search only
+        // that neighborhood. A whole-window earliest-crossing search was
+        // measurably MASKED by the UE's own TX self-leakage (~11 dB bursts
+        // elsewhere in the window won the earliest race and ate the
+        // attempt).
+        const long long fr =
+            static_cast<long long>(config_->samps_per_frame());
+        const long long off =
+            (((houdini_pilot_ref + houdiniBeaconEnd(config_) -
+               rx_beacon_time) %
+              fr) +
+             fr) %
+            fr;
+        constexpr long long kLead = 700;   // STS+gold context before the end
+        constexpr long long kTail = 1088;  // scatter tolerance past it
+        if (off >= kLead && off + kTail <= request_samples) {
+          auto* base = reinterpret_cast<std::complex<int16_t>*>(
+              rxbuff.at(kSyncDetectChannel));
+          const ssize_t s0 = static_cast<ssize_t>(off - kLead);
+          const ssize_t slice_len = kLead + kTail;
+          const ssize_t idx = this->syncSearch(
+              base + s0, static_cast<size_t>(slice_len),
+              config_->corr_scale(tid) + resync_retry_cnt);
+          if (idx >= 0) sync_index = s0 + idx;
+        } else {
+          resync_attempted = false;  // beacon not due in this window
+        }
+      } else {
+        sync_index = this->syncSearch(
+            reinterpret_cast<std::complex<int16_t>*>(
+                rxbuff.at(kSyncDetectChannel)),
+            request_samples, config_->corr_scale(tid) + resync_retry_cnt);
+      }
       if (sync_index >= 0 && config_->is_houdini() &&
           houdini_pilot_ref_valid) {
-        // Houdini resync = drift tracking against the CONFIRMED anchor grid,
-        // never re-anchoring on a single detection. Gate order: (1) SNR
-        // floor kills the noise-artifact class; (2) residual vs the anchored
-        // grid; (3) small residuals apply immediately, large ones only after
-        // more than one consecutive consistent observation [user].
+        // Liveness verdict on the targeted detection: SNR floor first, then
+        // the grid residual (alive within scatter / moved beyond it).
         const double snr = beaconSnrDb(
             reinterpret_cast<std::complex<int16_t>*>(
                 rxbuff.at(kSyncDetectChannel)),
@@ -1357,7 +1390,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
           clientAdjustRx(tid, discard_samples);
         }
       }
-      if (sync_index < 0) {
+      if (sync_index < 0 && resync_attempted) {
         resync_retry_cnt++;
 
         if (resync_retry_cnt > resync_retry_max) {
