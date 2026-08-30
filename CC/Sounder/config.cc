@@ -801,6 +801,19 @@ void Config::genPilots() {
   }
 
   beacon_size_ = beacon_ci16_.size();
+  if (getenv("HOUDINI_DUMP_GOLD") != nullptr) {
+    // The 496-sample STS+gold core (pre-prefix, unconjugated, unit scale) --
+    // what buildHoudiniBeacon conjugates and scales into the replay RAM.
+    // Lets offline tools (tests/demo-verify) construct the exact TX waveform.
+    FILE* f = std::fopen("/tmp/beacon_core.bin", "wb");
+    if (f) {
+      std::fwrite(beacon_ci16_.data(), sizeof(std::complex<int16_t>),
+                  beacon_ci16_.size(), f);
+      std::fclose(f);
+      std::printf("Dumped beacon core (%zu samp ci16) to /tmp/beacon_core.bin\n",
+                  beacon_ci16_.size());
+    }
+  }
 
   if (slot_samp_size_ < beacon_size_) {
     std::string msg = "Minimum supported slot_samp_size is ";
@@ -864,10 +877,12 @@ void Config::genPilots() {
     if (this_amp > max_amp) max_amp = this_amp;
   }
   std::printf("Max pilot amplitude = %.2f\n", max_amp);
-  // Amplitude backoff x4 (-12 dB) to avoid clipping in the data due to high
-  // PAPR. (A previous comment called this "6dB Power backoff"; /4 in
-  // amplitude is -12 dB.)
-  static constexpr float ofdm_pwr_scale_lin = 4;
+  // Amplitude backoff x2 (-6 dB): the pilot peaks at ~1/2 FS [user
+  // 2026-08-30]. The data slot is separately normalized below to the SAME
+  // realized peak, so the old x4 guard against its unnormalized PAPR is no
+  // longer what protects it (and cfloat_to_cint16 now saturates instead of
+  // wrapping in any case).
+  static constexpr float ofdm_pwr_scale_lin = 2;
   if (tx_scale_ == 0) {
     tx_scale_ = 1 / (ofdm_pwr_scale_lin * max_amp);
   }
@@ -917,6 +932,13 @@ void Config::genPilots() {
   ue_data_ci16_.clear();
   ue_data_f_.clear();
   ue_data_ci16_.insert(ue_data_ci16_.end(), prefix_zpad.begin(), prefix_zpad.end());
+  // Two passes: build every symbol's time-domain float first and find the
+  // slot's global peak, then scale the whole slot so its REALIZED peak equals
+  // the pilot's (tx_scale x max_amp). One shared tx_scale used to leave the
+  // data at its raw OFDM PAPR (~2x the pilot peak); both now exercise the
+  // same DAC range [user 2026-08-30].
+  std::vector<std::vector<std::complex<float>>> data_syms_t;
+  float data_gmax = 0.0f;
   for (size_t sym = 0; sym < symbol_per_slot_; ++sym) {
     std::vector<uint8_t> syms_in(n_data);
     for (auto& v : syms_in) v = static_cast<uint8_t>(rng() % mod_alph);
@@ -928,13 +950,37 @@ void Config::genPilots() {
       ofdm_sym[pilot_sc_ind_.at(c)] = pilot_sc_.at(c);
     ue_data_f_.insert(ue_data_f_.end(), ofdm_sym.begin(), ofdm_sym.end());
     auto data_t = CommsLib::IFFT(ofdm_sym, fft_size_, 1.0f / fft_size_, false, true);
-    const float dscale = (tx_scale_ > 0.0f) ? tx_scale_ : 0.5f;
+    for (const auto& v : data_t) data_gmax = std::max(data_gmax, std::abs(v));
+    data_syms_t.push_back(std::move(data_t));
+  }
+  const float pilot_peak_f = tx_scale_ * max_amp;  // the pilot's realized peak
+  const float dscale = (data_gmax > 0.0f) ? pilot_peak_f / data_gmax
+                                          : ((tx_scale_ > 0.0f) ? tx_scale_ : 0.5f);
+  for (auto& data_t : data_syms_t) {
     for (auto& v : data_t) v *= dscale;
     auto data_iq = Utils::cfloat_to_cint16(data_t);
     data_iq.insert(data_iq.begin(), data_iq.end() - cp_size_, data_iq.end());  // CP
     ue_data_ci16_.insert(ue_data_ci16_.end(), data_iq.begin(), data_iq.end());
   }
   ue_data_ci16_.insert(ue_data_ci16_.end(), postfix_zpad.begin(), postfix_zpad.end());
+
+  // Report the realized TX peaks in DAC counts (the ONLY level control on
+  // Houdini -- gains are no-ops end to end). The data slot inherits tx_scale
+  // without its own normalization, so its peak differs from the pilot's;
+  // print both so a tx_scale change is chosen against measured numbers.
+  auto peak_counts = [](const std::vector<std::complex<int16_t>>& v) {
+    int p = 0;
+    for (const auto& s : v)
+      p = std::max({p, std::abs((int)s.real()), std::abs((int)s.imag())});
+    return p;
+  };
+  const int pilot_pk = peak_counts(pilot_ci16_);
+  const int data_pk = peak_counts(ue_data_ci16_);
+  std::printf(
+      "TX peaks (int16 counts): pilot %d (%.1f%% FS), UE data %d (%.1f%% FS), "
+      "tx_scale %.4f\n",
+      pilot_pk, 100.0 * pilot_pk / 32767.0, data_pk,
+      100.0 * data_pk / 32767.0, tx_scale_);
 }
 
 void Config::loadULData() {
