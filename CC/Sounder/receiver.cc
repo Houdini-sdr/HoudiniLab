@@ -876,7 +876,20 @@ void Receiver::clientTxPilots(size_t user_id, long long base_time) {
   const int horizon = he != nullptr ? std::atoi(he) : config_->ue_pilot_horizon();
   if (horizon > 0 && config_->is_houdini() && config_->cl_sdr_ch() == 1) {
     const long long frame = static_cast<long long>(config_->samps_per_frame());
+    // The driver only ACCEPTS burst anchors on the 384-tick / 3125 ns grid
+    // (the finest ns-exact grid, TxTickAnchor SH-248), but a burst's INTERIOR
+    // advances tick-exactly. So compose ONE burst per frame -- [front-pad
+    // zeros | pilot slot | gap zeros | data slot] -- anchored at the grid
+    // point floored below the desired start: the pad places the pilot to the
+    // sample and the data rides at EXACTLY ul_off from it. Both snap draws
+    // measured in ledger 4.44 (the +-192 per-run seat window and the bimodal
+    // -128/+256 P->U differential) die here. [user 2026-08-30: "work around
+    // the TX burst seam by zero padding".] frame == 320*384, so the pad is
+    // constant within a run; recompose only when an anchor change moves it.
+    constexpr long long kTddGridTicks = 384;
     thread_local long long pilot_cursor = 0;  // last-scheduled txTime (samples)
+    thread_local std::vector<std::complex<int16_t>> burst;
+    thread_local long long burst_pad = -1;
     // An anchor change must reach the WIRE: the cursor otherwise keeps
     // winning the max() below for ~horizon frames and the pilots stay on the
     // stale grid (Opus review finding 4). Small drift corrections SHIFT the
@@ -887,28 +900,31 @@ void Receiver::clientTxPilots(size_t user_id, long long base_time) {
     const long long end = txTime + static_cast<long long>(horizon) * frame;
     long long cur = std::max(pilot_cursor + frame, txTime);
     int nsched = 0;
+    const bool ul_fits = ul_present && ul_off >= num_samps;
     for (; cur <= end; cur += frame) {
-      long long tt = cur;  // radioTx adds advance + grid-snaps a copy
-      const int rr = client_radio_set_->radioTx(user_id, pilotbuffA_.data(),
-                                                 num_samps, flags, tt);
-      if (rr < num_samps) {
-        MLPD_WARN("BAD Write (burst @%lld): %d/%d\n", cur, rr, num_samps);
-        break;
-      }
-      if (ul_present) {  // uplink data slot in the same frame
-        long long ut = cur + ul_off;
-        // Checked like the pilot above: this is the slot the live constellation is
-        // built from, so a short write here shows up as a smear with no other
-        // symptom. Warn but keep going, since the pilot for this frame already went
-        // out and the next frame may well succeed (AP-10).
-        const int ur = client_radio_set_->radioTx(
-            user_id, ue_databuffA_.data(), num_samps, flags, ut);
-        // Braces are load-bearing: MLPD_WARN is a multi-statement macro, so an
-        // unbraced guard prints the body on every burst instead of on failure.
-        if (ur < num_samps) {
-          MLPD_WARN("BAD Write, UL data (burst @%lld): %d/%d\n", ut, ur,
-                    num_samps);
+      const long long anchor = (cur / kTddGridTicks) * kTddGridTicks;
+      const long long pad = cur - anchor;
+      if (pad != burst_pad) {
+        const size_t total = static_cast<size_t>(pad) + num_samps +
+                             (ul_fits ? static_cast<size_t>(ul_off) : 0);
+        // total kept even so the burst ends on a whole 2-sample TX unit; the
+        // trailing zero does not move any signal.
+        burst.assign(total + (total & 1), std::complex<int16_t>(0, 0));
+        std::memcpy(burst.data() + pad, pilotbuffA_.at(0),
+                    static_cast<size_t>(num_samps) * 4);
+        if (ul_fits) {
+          std::memcpy(burst.data() + pad + ul_off, ue_databuffA_.at(0),
+                      static_cast<size_t>(num_samps) * 4);
         }
+        burst_pad = pad;
+      }
+      long long tt = anchor;  // grid-exact, so radioTx's snap is a no-op
+      const void* bufs[1] = {burst.data()};
+      const int rr = client_radio_set_->radioTx(
+          user_id, bufs, static_cast<int>(burst.size()), flags, tt);
+      if (rr < static_cast<int>(burst.size())) {
+        MLPD_WARN("BAD Write (burst @%lld): %d/%zu\n", cur, rr, burst.size());
+        break;
       }
       pilot_cursor = cur;
       ++nsched;
@@ -919,8 +935,8 @@ void Receiver::clientTxPilots(size_t user_id, long long base_time) {
     // scheduling, so the cost is once per horizon rather than per burst (AP-10).
     client_radio_set_->drainTxStatus(user_id);
     if (std::getenv("HOUDINI_UE_TX_DEBUG") != nullptr && nsched > 0) {
-      MLPD_INFO("UE pilot burst: scheduled %d frames up to %lld\n", nsched,
-                pilot_cursor);
+      MLPD_INFO("UE pilot burst: scheduled %d frames up to %lld (pad %lld)\n",
+                nsched, pilot_cursor, burst_pad);
     }
     return;
   }
