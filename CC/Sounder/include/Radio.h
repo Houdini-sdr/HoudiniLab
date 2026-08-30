@@ -67,6 +67,10 @@ class Radio {
   SoapySDR::Device* dev_;
   SoapySDR::Stream* rxs_;
   SoapySDR::Stream* txs_;
+  // MTS membership helper: DAC tile 0 must be a GROUP MEMBER (not merely
+  // powered), so a single-channel ch1 stream needs this never-activated
+  // ch0 replay stream opened first (the canonical mts_check group shape).
+  SoapySDR::Stream* aux_mts_txs_ = nullptr;
   bool houdini_ = false;
   size_t num_rx_ch_ = 1;
   // Sample-gap awareness (Houdini UDP RX). recvHoudini() detects a dropped-packet gap

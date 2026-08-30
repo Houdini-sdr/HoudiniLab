@@ -184,9 +184,21 @@ Radio::Radio(const SoapySDR::Kwargs& args, const char soapyFmt[],
   // Houdini SoapyHoudiniSDR needs per-stream args (RX host port, TX replay/stream
   // mode); Iris/UHD ignore an empty Kwargs, so this is backend-agnostic.
   if (args.count("driver") && args.at("driver") == "houdinisdr") {
-    // MTS first-up rule: DAC tile 0 hosts the analog SYSREF receiver, so
-    // the TX stream (whose setup powers the DAC tiles) must exist before
-    // an RX setupStream(mts=true) runs its sync (AP-23).
+    // MTS group order (AP-23, fail-loud contract): DAC tile 0 must be a
+    // MEMBER of the group (PG269 -- it hosts the analog SYSREF receiver and
+    // is the DAC RefTile), so when the data TX channel is not ch0, open a
+    // never-activated ch0 replay stream first purely for membership; then
+    // the data TX stream; then RX (whose setup runs the accumulated sync).
+    const bool want_mts = txStreamArgs.count("mts") != 0u &&
+                          txStreamArgs.at("mts") == "true";
+    const bool has_ch0 =
+        std::find(channels.begin(), channels.end(), 0u) != channels.end();
+    if (want_mts && !has_ch0) {
+      SoapySDR::Kwargs aux;
+      aux["tx_mode"] = "replay";
+      aux["mts"] = "true";
+      aux_mts_txs_ = dev_->setupStream(SOAPY_SDR_TX, soapyFmt, {0}, aux);
+    }
     txs_ = dev_->setupStream(SOAPY_SDR_TX, soapyFmt, channels, txStreamArgs);
     rxs_ = dev_->setupStream(SOAPY_SDR_RX, soapyFmt, channels, rxStreamArgs);
   } else {
@@ -208,6 +220,10 @@ Radio::Radio(const SoapySDR::Kwargs& args, const char soapyFmt[],
 Radio::~Radio(void) {
   deactivateRecv();
   deactivateXmit();
+  if (aux_mts_txs_ != nullptr) {
+    dev_->closeStream(aux_mts_txs_);
+    aux_mts_txs_ = nullptr;
+  }
   dev_->closeStream(rxs_);
   rxs_ = nullptr;
   dev_->closeStream(txs_);
