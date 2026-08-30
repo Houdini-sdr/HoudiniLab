@@ -1116,56 +1116,10 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   long long houdini_anchor = 0;
   bool houdini_anchored = false;
   if (config_->is_houdini()) {
-    // Hunt -> confirm(x2) -> anchor [user 2026-08-30]: find the beacon, use
-    // its stamped absolute time, then require two further detections to land
-    // on that lock's frame grid before trusting it. A false first lock (the
-    // artifact class, or a copy/scatter outlier) gives grid-inconsistent
-    // residuals and restarts the hunt; measured false-anchor odds with two
-    // confirms are ~1e-4 even without the SNR floor.
-    constexpr long long kConfirmTol = 640;  // detector scatter (4.18) + path
-    constexpr int kMaxHunts = 200;
-    const long long fr = static_cast<long long>(config_->samps_per_frame());
-    long long first_abs = 0;
-    bool have_first = false;
-    int confirms = 0;
-    int hunts = 0;
-    while (config_->running() && !houdini_anchored) {
-      if (++hunts > kMaxHunts) {
-        throw std::runtime_error("beacon acquisition: no confirmed lock");
-      }
-      long long wstamp = 0;
-      const ssize_t idx =
-          clientSyncBeacon(tid, beacon_detect_window, &wstamp);
-      if (idx < 0) continue;  // running() went false inside
-      const long long abs_end = wstamp + idx;  // beacon END, UE ticks
-      if (!have_first) {
-        have_first = true;
-        first_abs = abs_end;
-        confirms = 0;
-        MLPD_INFO("clientSyncTxRx [%d]: hunt lock at abs %lld (idx %ld)\n",
-                  tid, abs_end, idx);
-        continue;
-      }
-      const long long k = llround(static_cast<double>(abs_end - first_abs) /
-                                  static_cast<double>(fr));
-      const long long resid = abs_end - (first_abs + k * fr);
-      if (k != 0 && std::llabs(resid) <= kConfirmTol) {
-        if (++confirms >= 2) {
-          houdini_anchor = first_abs - houdiniBeaconEnd(config_);
-          houdini_anchored = true;
-          MLPD_INFO(
-              "clientSyncTxRx [%d]: lock CONFIRMED (resid %lld over %lld "
-              "frames, confirm %d) -> frame anchor %lld\n",
-              tid, resid, k, confirms, houdini_anchor);
-        }
-      } else {
-        MLPD_INFO(
-            "clientSyncTxRx [%d]: confirm failed (resid %lld, k %lld) -> "
-            "hunt restart\n",
-            tid, resid, k);
-        first_abs = abs_end;
-        confirms = 0;
-      }
+    houdini_anchored =
+        houdiniAcquireAnchor(tid, beacon_detect_window, houdini_anchor);
+    if (!houdini_anchored && config_->running()) {
+      throw std::runtime_error("beacon acquisition: no confirmed lock");
     }
   } else {
     while ((sync_count < kTargetSyncCount) && config_->running()) {
@@ -1238,6 +1192,44 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   constexpr long long kResyncHoldMatch = 32;  // consecutive-large agreement
   long long resync_held_resid = 0;
   bool resync_hold_pending = false;
+  // AP-18 escalation [user]: give up on resync and return to the full
+  // sliding-window acquisition when the anchored grid has plausibly lost the
+  // beacon. Triggers: 2 CONSECUTIVE exhausted episodes (a single episode of
+  // 100 misses is ~4.7% by chance at the ~3%/frame slot-0 beacon occupancy;
+  // two are ~0.2%) OR >= 4 SNR-valid detections held without agreeing with
+  // each other (incoherent state). Hold-off itself already covers the
+  // beacon-MOVED case; this covers beacon-LOST.
+  constexpr size_t kEscalateExhaustedEpisodes = 2;
+  constexpr size_t kEscalateHoldChurn = 4;
+  size_t resync_exhausted_streak = 0;
+  size_t resync_hold_churn = 0;
+  const size_t beacon_detect_window_esc = static_cast<size_t>(
+      static_cast<float>(config_->samps_per_slot()) *
+      kBeaconDetectWindowScaler);
+  auto houdiniEscalate = [&](const char* why) {
+    MLPD_WARN(
+        "Re-sync ESCALATION (%s) at frame %zu: returning to the full "
+        "beacon acquisition, tid %d\n",
+        why, frame_id, tid);
+    long long fresh = 0;
+    if (houdiniAcquireAnchor(tid, beacon_detect_window_esc, fresh)) {
+      houdini_pilot_ref = fresh;
+      houdini_pilot_ref_valid = true;
+      MLPD_INFO("Re-sync ESCALATION: re-anchored at %lld, tid %d\n", fresh,
+                tid);
+    } else if (config_->running()) {
+      MLPD_WARN(
+          "Re-sync ESCALATION: re-acquisition did not confirm; keeping the "
+          "previous anchor, tid %d\n",
+          tid);
+    }
+    resync_exhausted_streak = 0;
+    resync_hold_churn = 0;
+    resync_hold_pending = false;
+    resync = false;
+    resync_retry_cnt = 0;
+    last_resync = frame_id;
+  };
 
   while (config_->running() == true) {
     if (config_->max_frame() > 0 && frame_id >= config_->max_frame()) {
@@ -1297,6 +1289,8 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
           if (std::llabs(resid) <= kResyncDriftTol) {
             houdini_pilot_ref += resid;
             resync_hold_pending = false;
+            resync_exhausted_streak = 0;
+            resync_hold_churn = 0;
             resync = false;
             resync_retry_cnt = 0;
             resync_success++;
@@ -1309,6 +1303,8 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
                          kResyncHoldMatch) {
             houdini_pilot_ref += resid;
             resync_hold_pending = false;
+            resync_exhausted_streak = 0;
+            resync_hold_churn = 0;
             resync = false;
             resync_retry_cnt = 0;
             resync_success++;
@@ -1325,6 +1321,9 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
             resync_held_resid = resid;
             resync_hold_pending = true;
             // stay in resync; a real shift will repeat, an artifact will not
+            if (++resync_hold_churn >= kEscalateHoldChurn) {
+              houdiniEscalate("incoherent detections");
+            }
           }
         }
       } else if (sync_index >= 0) {
@@ -1372,10 +1371,15 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
             // the run.
             MLPD_WARN(
                 "Re-sync: %zu misses this period for client %d (successes "
-                "%zu); anchored grid keeps flying, retrying next period\n",
-                resync_retry_max, tid, resync_success);
+                "%zu); anchored grid keeps flying, retrying next period "
+                "(exhausted streak %zu)\n",
+                resync_retry_max, tid, resync_success,
+                resync_exhausted_streak + 1);
             resync = false;
             resync_retry_cnt = 0;
+            if (++resync_exhausted_streak >= kEscalateExhaustedEpisodes) {
+              houdiniEscalate("episodes exhausted");
+            }
           } else {
             MLPD_WARN(
                 "Exceeded resync retry limit (%zu) for client %d reached "
@@ -1480,6 +1484,69 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
 }
 
 //Blocking function for beacon detected or exit()
+// Full acquisition [user 2026-08-30]: hunt in the wide sliding window, take
+// the first detection's stamped absolute time, then require two further
+// detections to land on that lock's frame grid before trusting it. A false
+// first lock (the artifact class, or a scatter outlier) gives
+// grid-inconsistent residuals and restarts the hunt; false-anchor odds with
+// two confirms are ~1e-4 even before the SNR floor. Used at startup and by
+// the AP-18 resync escalation (beacon-lost fallback). Returns false only if
+// running() went false or kMaxHunts detections never produced a confirmed
+// lock; it BLOCKS while no detection at all is available (searching forever
+// is the wanted behavior when the beacon is gone -- pilots pause).
+bool Receiver::houdiniAcquireAnchor(int tid, size_t detect_window,
+                                    long long& anchor_out) {
+  constexpr long long kConfirmTol = 640;  // detector scatter (4.18) + path
+  constexpr int kMaxHunts = 200;
+  const long long fr = static_cast<long long>(config_->samps_per_frame());
+  long long first_abs = 0;
+  bool have_first = false;
+  int confirms = 0;
+  int hunts = 0;
+  while (config_->running()) {
+    if (++hunts > kMaxHunts) {
+      MLPD_WARN(
+          "houdiniAcquireAnchor [%d]: no confirmed lock after %d "
+          "detections\n",
+          tid, kMaxHunts);
+      return false;
+    }
+    long long wstamp = 0;
+    const ssize_t idx = clientSyncBeacon(tid, detect_window, &wstamp);
+    if (idx < 0) continue;  // running() went false inside
+    const long long abs_end = wstamp + idx;  // beacon END, UE ticks
+    if (!have_first) {
+      have_first = true;
+      first_abs = abs_end;
+      confirms = 0;
+      MLPD_INFO("houdiniAcquireAnchor [%d]: hunt lock at abs %lld (idx %ld)\n",
+                tid, abs_end, idx);
+      continue;
+    }
+    const long long k = llround(static_cast<double>(abs_end - first_abs) /
+                                static_cast<double>(fr));
+    const long long resid = abs_end - (first_abs + k * fr);
+    if (k != 0 && std::llabs(resid) <= kConfirmTol) {
+      if (++confirms >= 2) {
+        anchor_out = first_abs - houdiniBeaconEnd(config_);
+        MLPD_INFO(
+            "houdiniAcquireAnchor [%d]: lock CONFIRMED (resid %lld over "
+            "%lld frames, confirm %d) -> frame anchor %lld\n",
+            tid, resid, k, confirms, anchor_out);
+        return true;
+      }
+    } else {
+      MLPD_INFO(
+          "houdiniAcquireAnchor [%d]: confirm failed (resid %lld, k %lld) "
+          "-> hunt restart\n",
+          tid, resid, k);
+      first_abs = abs_end;
+      confirms = 0;
+    }
+  }
+  return false;
+}
+
 ssize_t Receiver::clientSyncBeacon(size_t radio_id, size_t sample_window,
                                    long long* window_time) {
   ssize_t sync_index = -1;
