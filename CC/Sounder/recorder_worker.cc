@@ -463,9 +463,15 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
   // for any square QAM (QPSK/16/64-QAM: E[X^4] real -> arg pi), so gate on mod_ord 2/4/6.
   std::vector<std::complex<float>> Hc(H.begin(), H.end());
   if (csi_timing_fix_ && (mod_ord == 2 || mod_ord == 4 || mod_ord == 6) && !Ys.empty()) {
+    // FRACTIONAL search over +-8 samples. The pilot<->data timing offset is
+    // a per-run constant drawn by the BS's independent per-slot centroid
+    // alignment; measured draws include +3.003 and -1.58 samples
+    // (DEMO_VERIFICATION.md 4.36) -- outside the old INTEGER r in [-2..2],
+    // whose uncorrected ~300 deg/sample ramp across the band was THE AP-15
+    // ring. The ramp correction is exact for any real r.
     double best_score = -1.0;
-    int best_r = 0;
-    for (int r = -2; r <= 2; ++r) {
+    double best_r = 0.0;
+    for (double r = -8.0; r <= 8.0; r += 0.25) {
       std::complex<double> s4(0.0, 0.0);
       double pwr = 0.0;
       for (const auto& Y : Ys)
@@ -484,7 +490,7 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
       const double score = (pwr > 0.0) ? std::abs(s4) / (pwr * pwr) : -1.0;
       if (score > best_score) { best_score = score; best_r = r; }
     }
-    if (best_r != 0)
+    if (best_r != 0.0)
       for (int k = 0; k < N; ++k) {
         const double ang = 2.0 * M_PI * (static_cast<double>(k) - N / 2.0) * best_r / N;
         Hc[k] *= std::complex<float>(static_cast<float>(std::cos(ang)),
