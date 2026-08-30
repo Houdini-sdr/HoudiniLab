@@ -463,15 +463,20 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
   // for any square QAM (QPSK/16/64-QAM: E[X^4] real -> arg pi), so gate on mod_ord 2/4/6.
   std::vector<std::complex<float>> Hc(H.begin(), H.end());
   if (csi_timing_fix_ && (mod_ord == 2 || mod_ord == 4 || mod_ord == 6) && !Ys.empty()) {
-    // FRACTIONAL search over +-8 samples. The pilot<->data timing offset is
-    // a per-run constant drawn by the BS's independent per-slot centroid
-    // alignment; measured draws include +3.003 and -1.58 samples
-    // (DEMO_VERIFICATION.md 4.36) -- outside the old INTEGER r in [-2..2],
-    // whose uncorrected ~300 deg/sample ramp across the band was THE AP-15
-    // ring. The ramp correction is exact for any real r.
+    // Two-stage timing recovery. The pilot<->data timing offset is a per-run
+    // constant drawn by the BS's independent per-slot centroid alignment;
+    // measured draws include +3.003 and -1.58 samples (DEMO_VERIFICATION.md
+    // 4.36) -- outside the original INTEGER r in [-2..2], whose uncorrected
+    // ~300 deg/sample ramp across the band was THE AP-15 ring. Stage 1:
+    // blind 4th-power search at INTEGER steps over +-8 (integer-scale score
+    // margins are large, so the argmax is stable frame to frame -- a purely
+    // fractional blind search measurably FLAPPED between near-tied 0.25
+    // candidates and smeared the aggregate constellation). Stage 2 below
+    // refines the fraction deterministically from the U-slot's own pilot
+    // tones. The ramp correction is exact for any real r.
     double best_score = -1.0;
     double best_r = 0.0;
-    for (double r = -8.0; r <= 8.0; r += 0.25) {
+    for (double r = -8.0; r <= 8.0; r += 1.0) {
       std::complex<double> s4(0.0, 0.0);
       double pwr = 0.0;
       for (const auto& Y : Ys)
@@ -490,12 +495,58 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
       const double score = (pwr > 0.0) ? std::abs(s4) / (pwr * pwr) : -1.0;
       if (score > best_score) { best_score = score; best_r = r; }
     }
+    // Stage 2: deterministic fractional refinement from the U-slot's OWN
+    // pilot tones (4 known-value subcarriers per symbol). After the integer
+    // correction the residual is < 1 sample, well inside the +-2.3-sample
+    // unambiguous range of the 14-bin pilot spacing, and averaging over the
+    // middle symbols makes the estimate stable -- no blind tie-breaking, so
+    // no frame-to-frame flapping.
+    const auto& psc = cfg_->pilot_sc();
+    const auto& pind = cfg_->pilot_sc_ind();
+    if (pind.size() >= 2 && !Ys.empty()) {
+      double sk = 0, sp = 0, skk = 0, skp = 0;
+      int npts = 0;
+      for (size_t c = 0; c < pind.size(); ++c) {
+        const size_t k = pind[c];
+        if (k >= static_cast<size_t>(N)) continue;
+        std::complex<double> acc(0.0, 0.0);
+        for (const auto& Y : Ys) {
+          const double ang0 =
+              2.0 * M_PI * (static_cast<double>(k) - N / 2.0) * best_r / N;
+          const std::complex<double> hr =
+              std::complex<double>(H[k]) *
+              std::complex<double>(std::cos(ang0), std::sin(ang0));
+          if (std::abs(hr) < 1e-9) break;
+          acc += (std::complex<double>(Y[k]) / hr) *
+                 std::conj(std::complex<double>(psc[c]));
+        }
+        if (std::abs(acc) < 1e-12) continue;
+        const double kk = static_cast<double>(k) - N / 2.0;
+        const double ph = std::arg(acc);
+        sk += kk; sp += ph; skk += kk * kk; skp += kk * ph;
+        ++npts;
+      }
+      if (npts >= 2) {
+        const double denom = npts * skk - sk * sk;
+        if (std::abs(denom) > 1e-9) {
+          const double slope = (npts * skp - sk * sp) / denom;  // rad per bin
+          const double frac = slope * N / (2.0 * M_PI);         // samples
+          if (std::abs(frac) < 1.0) best_r += frac;
+        }
+      }
+    }
     if (best_r != 0.0)
       for (int k = 0; k < N; ++k) {
         const double ang = 2.0 * M_PI * (static_cast<double>(k) - N / 2.0) * best_r / N;
         Hc[k] *= std::complex<float>(static_cast<float>(std::cos(ang)),
                                      static_cast<float>(std::sin(ang)));
       }
+    if (std::getenv("HOUDINI_CSI_R_DEBUG") != nullptr) {
+      static std::atomic<int> rc{0};
+      if ((rc.fetch_add(1) % 30) == 0)
+        MLPD_INFO("CSI timing-fix: r=%.3f (blind score %.3g)\n", best_r,
+                  best_score);
+    }
   }
   std::vector<std::complex<float>> pts;
   pts.reserve(kMaxPts);
