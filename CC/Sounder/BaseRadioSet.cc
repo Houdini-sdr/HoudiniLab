@@ -471,9 +471,7 @@ void BaseRadioSet::activateHoudiniRx(void) {
 
 // ---- Houdini native-TDD framer (bs_hw_framer + radio_type=houdini) ----------
 namespace {
-constexpr long long kTddGridTicks = 384;    // 3.125 us grid
-constexpr long long kTddSymTicks = 61440;   // 0.5 ms TDD symbol (comfortable
-                                            // window >> samps_per_slot capture)
+constexpr long long kTddGridTicks = 384;       // 3.125 us grid (strobe offs)
 constexpr long long kTddArmMargin = 36864000;  // ~300 ms of ticks
 }  // namespace
 
@@ -503,11 +501,21 @@ long long BaseRadioSet::houdiniArmTdd(SoapySDR::Device* dev,
 }
 
 void BaseRadioSet::armHoudiniTdd(void) {
-  // Comfortable 0.5 ms TDD symbol so the samps_per_slot (<= 4096) capture fits
-  // well inside one rx_gate window (the pre-open guard would clip a capture that
-  // filled the symbol). Beacon rides the framer's '6' replay-strobe symbol;
-  // symbols 1..N are one rx_gate per sounder pilot slot. The capture is tagged
-  // with the SOUNDER slot index so the recorder places it.
+  // Slot-granular ring: one TDD symbol per sounder slot (symbol_ticks =
+  // samps_per_slot, symbols_per_frame = slot_per_frame), '6' on the beacon
+  // slot, '2' on every other slot. Verified on silicon 2026-08-30
+  // (DEMO_VERIFICATION.md 4.12): the ring arms and the strobe plays exactly
+  // one burst per frame. Every non-beacon entry must keep the rx bit set:
+  // a gate close ABANDONS a running continuous capture (driver contract,
+  // D4 window-pump + overlength-abandon), and per-window host pumping costs
+  // ~100 ms RPC per window, unusable at 1 ms frames. True rx-only-in-P/U
+  // gating therefore needs a driver capability (hardware-chained windowed
+  // RX); until then the wire carries the whole frame and the guards are
+  // silent AIR, not absent DATA (DEMO_VERIFICATION.md section 3/4).
+  //
+  // The strobe plays ONE beacon copy per frame (loops=1, len = beacon core):
+  // the old loops=forever filled a 0.5 ms symbol with ~15 copies, which made
+  // the UE's frame anchor ambiguous by k x 4096 samples per restart.
   //
   // NB (houdini_beacon_ab.py, .21->.22): the SAME beacon RAM scored by the
   // client's gold correlation gives 44.5 dB via the framer strobe vs only 10.2 dB
@@ -516,7 +524,7 @@ void BaseRadioSet::armHoudiniTdd(void) {
   // And a continuous replay can't coexist with the framer anyway: arming the framer
   // silences activateXmit (-33 dB) and any tx_gate schedule is arm-rejected without
   // a strobe. So the strobe is the only way to get beacon + rx_gate on one board.
-  htdd_symbol_ticks_ = kTddSymTicks;
+  htdd_symbol_ticks_ = static_cast<long long>(_cfg->samps_per_slot());
   htdd_tick_rate_ = _cfg->rate();
 
   std::vector<int16_t> iq;
@@ -543,14 +551,21 @@ void BaseRadioSet::armHoudiniTdd(void) {
       // TDD frame must EQUAL the sounder frame: the beacon fires once per TDD
       // frame, so a longer TDD frame makes the beacon period differ from the UE's
       // (sounder) frame and the pilot/data walk relative to the beacon -> noisy CSI.
-      // All symbols gate RX (continuous receive), so use just enough symbols to
-      // span the frame (beacon on symbol 0), NOT one per rx slot -- the rx slots
-      // (pilot P, uplink U, ...) are extracted from the continuous read, not mapped
-      // to separate TDD symbols.
-      const size_t spf_tdd = std::max<size_t>(
-          2, static_cast<size_t>(_cfg->samps_per_frame() / htdd_symbol_ticks_));
-      std::string tdd(spf_tdd, '2');  // every symbol rx-gates
-      tdd[0] = '6';                   // + beacon strobe on symbol 0
+      // One symbol per sounder slot, beacon strobe on the schedule's B slot,
+      // rx bit on EVERY entry (see the function comment: a closed gate kills
+      // the continuous capture; the rx slots are still extracted from the
+      // continuous read in houdiniTddRx).
+      const size_t spf_tdd = _cfg->slot_per_frame();
+      const size_t b_pos = sched.find('B');
+      const size_t beacon_slot = (b_pos == std::string::npos) ? 0 : b_pos;
+      if (htdd_symbol_ticks_ > 0xFFFF || spf_tdd > 0x1FFF) {
+        throw std::runtime_error(
+            "armHoudiniTdd: slot-granular ring out of framer range "
+            "(symbol_ticks=" + std::to_string(htdd_symbol_ticks_) +
+            ", spf=" + std::to_string(spf_tdd) + ")");
+      }
+      std::string tdd(spf_tdd, '2');    // every slot rx-gates
+      tdd[beacon_slot] = '6';           // + beacon strobe on the B slot
       htdd_frame_ticks_ = static_cast<long long>(spf_tdd) * htdd_symbol_ticks_;
 
       // PHYSICAL TX channel for the strobe (beacon_channel() is the logical index
@@ -575,16 +590,18 @@ void BaseRadioSet::armHoudiniTdd(void) {
       }
       r->xmit(buffs, static_cast<int>(n_load), 0, t0);  // load replay RAM
       dev->writeSetting("TDD_SCHED", tdd);
-      // loops=forever replays the full app-rate RAM back-to-back through the
-      // whole beacon symbol (the TDD beacon path, HS-80 §11b). The RAM is one
-      // ISOLATED beacon (beacon_size core + silence to 4096), so the symbol
-      // carries that beacon every 4096 samples (~33 us) -- frequent enough that
-      // the client's single-window find_beacon always catches one, sparse enough
-      // that the trailing-energy threshold stays low (sharp 2-rep peak).
+      // ONE beacon copy per frame: len covers only the beacon core (len is in
+      // 2-sample units, driver contract), loops=1, stamped at window_open +
+      // offs. The burst (offs 384 + core 496 = 880 ticks) ends well inside the
+      // 4096-tick beacon slot. Single-copy removes the k x 4096 anchor
+      // ambiguity the old loops=forever multi-copy fill created; the UE's
+      // acquisition just needs more detect windows to first see it
+      // (~1 in 12.9 windows carries the beacon now).
+      const size_t len_units = (_cfg->beacon_size() + 1) / 2;
       dev->writeSetting("TDD_REPLAY_STROBE",
                         "ch" + std::to_string(tx_ch) +
-                            ":len=" + std::to_string(n_load / 2) +
-                            ",loops=forever,offs=" + std::to_string(kTddGridTicks));
+                            ":len=" + std::to_string(len_units) +
+                            ",loops=1,offs=" + std::to_string(kTddGridTicks));
       htdd_epoch_ = houdiniArmTdd(dev, htdd_symbol_ticks_,
                                   static_cast<long long>(spf_tdd));
       htdd_rx_cursor_ = 0;
