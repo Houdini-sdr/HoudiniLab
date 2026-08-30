@@ -30,7 +30,7 @@ FFT = 64
 CP = 16
 SYM = 80
 NSYM = 48
-PILOT_BINS = [7, 21, 43, 57]  # DC+-7, DC+-21 in fft-shifted-to-0.. indexing?
+PILOT_BINS = [11, 25, 39, 53]  # DC+-21, DC+-7 in the DC-centered indexing
 
 
 def load_dump(path):
@@ -58,17 +58,22 @@ def load_ref(logdir):
 
 
 def tones(d, conj_rx=True):
-    """Equalized per-symbol tones from the raw slot: [nsym][fft]."""
+    """Equalized per-symbol tones, replicating the LIVE pipeline exactly
+    (recorder_worker symbolFft + sendConstellation): Q-negated input
+    (rx_conj), FFT window at es + sym*(cp+N) + cp, DC-CENTERED spectrum
+    (fftshift), zero-forced by the dump's DC-centered H."""
     s = d["slot"].conj() if conj_rx else d["slot"]
     es = d["es"]
+    cp = d["cp"]
     out = np.zeros((d["nsym"], FFT), dtype=np.complex128)
     Hs = d["H"].copy()
     Hs[np.abs(Hs) < 1e-9] = 1.0
     for k in range(d["nsym"]):
-        w = s[es + k * SYM: es + k * SYM + FFT]
+        base = es + k * (cp + FFT) + cp
+        w = s[base: base + FFT]
         if len(w) < FFT:
             break
-        out[k] = np.fft.fft(w, FFT) / Hs
+        out[k] = np.fft.fftshift(np.fft.fft(w, FFT)) / Hs
     return out
 
 
