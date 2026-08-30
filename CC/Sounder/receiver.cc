@@ -1278,6 +1278,8 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
                 rxbuff.at(kSyncDetectChannel)),
             static_cast<size_t>(request_samples), sync_index,
             config_->beacon_size());
+        MLPD_INFO("Re-sync frame %zu: detection idx %ld snr %.1f dB, tid %d\n",
+                  frame_id, sync_index, snr, tid);
         if (snr < syncSnrFloorDb()) {
           sync_index = -1;  // fall through to the miss path below
         } else {
