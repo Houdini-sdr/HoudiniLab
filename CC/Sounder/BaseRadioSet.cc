@@ -590,14 +590,21 @@ void BaseRadioSet::armHoudiniTdd(void) {
       }
       r->xmit(buffs, static_cast<int>(n_load), 0, t0);  // load replay RAM
       dev->writeSetting("TDD_SCHED", tdd);
-      // ONE beacon copy per frame: len covers only the beacon core (len is in
-      // 2-sample units, driver contract), loops=1, stamped at window_open +
-      // offs. The burst (offs 384 + core 496 = 880 ticks) ends well inside the
-      // 4096-tick beacon slot. Single-copy removes the k x 4096 anchor
+      // ONE burst per frame (loops=1) spanning the usable symbol: the RAM is
+      // [beacon core 496][zeros], and len (2-sample units, driver contract)
+      // covers (symbol - offs) samples, so the slot's DAC input is the beacon
+      // followed by OUR zeros up to the window close, not engine-idle output.
+      // (D5 measured post-burst idle as silent on silicon, but explicit zeros
+      // remove the reliance.) Single-copy removes the k x 4096 anchor
       // ambiguity the old loops=forever multi-copy fill created; the UE's
       // acquisition just needs more detect windows to first see it
-      // (~1 in 12.9 windows carries the beacon now).
-      const size_t len_units = (_cfg->beacon_size() + 1) / 2;
+      // (~1 in 12.9 windows carries the beacon now). Samples == ticks at the
+      // one supported rate (122.88 MSPS; the whole layer assumes it).
+      const size_t span_units =
+          static_cast<size_t>((htdd_symbol_ticks_ - kTddGridTicks) / 2);
+      const size_t len_units = std::max<size_t>(
+          (static_cast<size_t>(_cfg->beacon_size()) + 1) / 2,
+          std::min(n_load / 2, span_units));
       dev->writeSetting("TDD_REPLAY_STROBE",
                         "ch" + std::to_string(tx_ch) +
                             ":len=" + std::to_string(len_units) +
