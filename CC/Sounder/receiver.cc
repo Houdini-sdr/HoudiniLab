@@ -65,16 +65,27 @@ static double beaconSnrDb(const std::complex<int16_t>* w, size_t n,
                           ssize_t end_idx, size_t core_len) {
   const ssize_t lo = end_idx - static_cast<ssize_t>(core_len);
   if (lo < 0 || end_idx > static_cast<ssize_t>(n) || core_len == 0) return -99.0;
+  // Guard band around the core: the detector index jitters 1-2 samples about
+  // the true core end (measured -1/-2 on 6/6 dumped windows, ledger 4.42),
+  // and with a slot-length window each core sample leaking into the rest-mean
+  // costs ~8 dB (sweep on a ~46 dB wire: 0/-1/-2 -> 45.8/37.5/31.6 dB), so
+  // the reported SNR tracked detector jitter, not the link. Excluding a few
+  // samples on each side of the core from BOTH sums makes the number read
+  // the link: a bias up to +-8 samples now costs <0.1 dB instead of ~14.
+  constexpr ssize_t kGuard = 8;
   double core = 0, rest = 0;
+  size_t nrest = 0;
   for (size_t i = 0; i < n; ++i) {
     const double re = w[i].real(), im = w[i].imag();
     const double e = re * re + im * im;
-    if (static_cast<ssize_t>(i) >= lo && static_cast<ssize_t>(i) < end_idx)
+    const ssize_t si = static_cast<ssize_t>(i);
+    if (si >= lo && si < end_idx) {
       core += e;
-    else
+    } else if (si < lo - kGuard || si >= end_idx + kGuard) {
       rest += e;
+      ++nrest;
+    }
   }
-  const size_t nrest = n - core_len;
   if (nrest == 0 || rest <= 0.0) return 99.0;
   return 10.0 * std::log10((core / core_len) / (rest / nrest) + 1e-30);
 }
