@@ -475,6 +475,19 @@ constexpr long long kTddGridTicks = 384;       // 3.125 us grid (strobe offs)
 constexpr long long kTddArmMargin = 36864000;  // ~300 ms of ticks
 }  // namespace
 
+// The full teardown ladder. Abort alone is NOT enough, twice over (measured,
+// DEMO_VERIFICATION.md 3.2 + 4.24): aborting a RUNNING framer latches
+// gates_held and every later arm is REFUSED until gate_release; and skipping
+// TX_CLEAR can leave the TX bank in a state where strobe bursts ack and count
+// as played but NO RF leaves the DAC ("a consumed arm parks the source until
+// the arm clears or TX_CLEAR").
+void BaseRadioSet::houdiniTddLadder(SoapySDR::Device* dev) {
+  dev->writeSetting("TDD_CMD", "abort");
+  dev->writeRegister("RFCORE", 0x24, 1);  // TX_CLEAR_ALL pulse
+  dev->writeRegister("RFCORE", 0x24, 0);
+  dev->writeSetting("TDD_CMD", "gate_release");
+}
+
 long long BaseRadioSet::houdiniArmTdd(SoapySDR::Device* dev,
                                       long long symbol_ticks,
                                       long long symbols_per_frame) {
@@ -484,7 +497,13 @@ long long BaseRadioSet::houdiniArmTdd(SoapySDR::Device* dev,
   long long epoch = 0;
   bool accepted = false;
   for (int attempt = 0; attempt < 4 && !accepted; ++attempt) {
-    dev->writeSetting("TDD_ARM", arm);
+    // On the current stack a refused arm THROWS (SH-333) instead of returning
+    // accepted=0; treat both the same and re-ladder before the retry.
+    try {
+      dev->writeSetting("TDD_ARM", arm);
+    } catch (const std::exception& e) {
+      MLPD_WARN("TDD_ARM attempt %d refused: %s\n", attempt, e.what());
+    }
     std::stringstream ss(dev->readSetting("TDD_ARM"));
     std::string tok;
     while (ss >> tok) {
@@ -494,7 +513,7 @@ long long BaseRadioSet::houdiniArmTdd(SoapySDR::Device* dev,
       if (k == "epoch") epoch = std::stoll(v);
       if (k == "accepted") accepted = (v == "1");
     }
-    if (!accepted) dev->writeSetting("TDD_CMD", "abort");
+    if (!accepted) houdiniTddLadder(dev);
   }
   if (!accepted) throw std::runtime_error("Houdini TDD_ARM rejected");
   return epoch;
@@ -537,7 +556,7 @@ void BaseRadioSet::armHoudiniTdd(void) {
       if (i != _cfg->beacon_radio()) continue;
       Radio* r = bsRadios.at(c).at(i);
       auto* dev = r->RawDev();
-      dev->writeSetting("TDD_CMD", "abort");  // tear down any armed framer (E6)
+      houdiniTddLadder(dev);  // full ladder, never abort alone (3.2 + 4.24)
 
       // The sounder pilot/uplink slots to receive (tag with these indices).
       const std::string& sched = _cfg->bs_array_frames().at(c).at(i);
@@ -981,13 +1000,14 @@ void BaseRadioSet::readSensors() {
 
 void BaseRadioSet::radioStop(void) {
   if (_cfg->is_houdini()) {
-    // Native TDD teardown so the next run can re-arm (an armed framer refuses
-    // TDD_SCHED fills, E6). No Iris TDD_CONFIG / RESET_DATA_LOGIC on Houdini.
+    // Native TDD teardown so the next run can re-arm. Full ladder, not abort
+    // alone: abort latches gates_held on a running framer and skips TX_CLEAR
+    // (3.2 + 4.24 in DEMO_VERIFICATION.md).
     for (size_t c = 0; c < bsRadios.size(); c++)
       for (size_t i = 0; i < bsRadios.at(c).size(); i++)
         if (bsRadios.at(c).at(i) != nullptr) {
           try {
-            bsRadios.at(c).at(i)->RawDev()->writeSetting("TDD_CMD", "abort");
+            houdiniTddLadder(bsRadios.at(c).at(i)->RawDev());
           } catch (...) {
           }
         }

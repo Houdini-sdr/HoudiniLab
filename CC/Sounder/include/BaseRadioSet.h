@@ -60,6 +60,7 @@ class BaseRadioSet {
   // framer, so the unmodified loopRecv true-path records the real pilot slot.
   void buildHoudiniBeacon(std::vector<int16_t>& iq);  // -> replay RAM payload
   void armHoudiniTdd(void);
+  static void houdiniTddLadder(SoapySDR::Device* dev);
   int houdiniTddRx(size_t radio_id, void* const* buffs, long long& frameTime);
   long long houdiniArmTdd(SoapySDR::Device* dev, long long symbol_ticks,
                           long long symbols_per_frame);  // returns epoch
