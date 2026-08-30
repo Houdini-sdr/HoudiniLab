@@ -770,20 +770,45 @@ int BaseRadioSet::houdiniTddRx(size_t radio_id, void* const* buffs,
   // ~260 samples off. Aligning each slot lands every slot at [prefix..] so the
   // recorded data lines up with the pilot for offline equalization.
   htdd_slot_cache_.resize(K * static_cast<size_t>(n) * 2);
+  long long u_start = -1;  // aligned start of the uplink-data slot, if present
   for (size_t k = 0; k < K; ++k) {
     const long long guess = p_start +
         (static_cast<long long>(htdd_rx_slots_.at(k)) -
          static_cast<long long>(htdd_pilot_slot_)) * n;
     const long long st = align_slot(guess);
+    if (htdd_rx_slots_.at(k) != htdd_pilot_slot_) u_start = st;
     std::memcpy(htdd_slot_cache_.data() + k * static_cast<size_t>(n) * 2,
                 s + st * 2, static_cast<size_t>(n) * 4);
   }
   if (getenv("HOUDINI_BS_RX_DEBUG") != nullptr) {
     static std::atomic<int> dc{0};
-    if ((dc.fetch_add(1) % 20) == 0)
+    if ((dc.fetch_add(1) % 20) == 0) {
+      // Rederive the UE's realized schedule on the BS grid: the read stamp
+      // (ns) + in-buffer position - epoch, folded into the frame, gives the
+      // pilot slot's absolute offset from its scheduled slot boundary. The
+      // number decomposes as prefix + round-trip latency - tx_advance +
+      // grid/snap residuals; it must be CONSTANT within a run, and it is the
+      // direct input for deriving tx_advance (DEMO_VERIFICATION.md 4.29).
+      const long long stamp_ticks =
+          llround(static_cast<double>(ft) * htdd_tick_rate_ / 1e9);
+      const long long fr = htdd_frame_ticks_;
+      long long grid_off =
+          ((stamp_ticks + p_start - htdd_epoch_) % fr + fr) % fr;
+      long long rel_pilot = grid_off -
+          static_cast<long long>(htdd_pilot_slot_) * n;
+      if (rel_pilot > fr / 2) rel_pilot -= fr;
+      long long pu_err = -99999;
+      if (u_start >= 0) {
+        const long long slots_gap = static_cast<long long>(
+            htdd_rx_slots_.back() - htdd_pilot_slot_);
+        pu_err = (u_start - p_start) - slots_gap * n;
+      }
       MLPD_INFO("HOUDINI_BS_RX: frame=%lld cg=%d pilot-rms=%.0f selfsim=%.2f "
-                "p_start=%lld rx_slots=%zu\n",
-                htdd_frame_counter_, cg, pilot_rms, selfsim(at), p_start, K);
+                "p_start=%lld rx_slots=%zu pilot_grid_off=%lld pu_spacing_err="
+                "%lld\n",
+                htdd_frame_counter_, cg, pilot_rms, selfsim(at), p_start, K,
+                rel_pilot, pu_err);
+    }
   }
   std::memcpy(buffs[0], htdd_slot_cache_.data(), static_cast<size_t>(n) * 4);
   htdd_cache_frame_ = htdd_frame_counter_;
