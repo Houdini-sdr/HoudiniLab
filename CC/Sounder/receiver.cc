@@ -54,6 +54,39 @@ static ssize_t houdiniBeaconEnd(Config* cfg) {
   return static_cast<ssize_t>(cfg->beacon_size() + cfg->prefix());
 }
 
+// In-window SNR of a claimed beacon detection: energy of the presumed core
+// [end_idx - core_len, end_idx) against the rest of the window. On this bench
+// a real beacon measures ~45 dB and the noise-window artifact class that
+// crosses the correlation threshold (DEMO_VERIFICATION.md 4.25) measures
+// ~0 dB, so the floor separates them by orders of magnitude. [user 2026-08-30:
+// "keep the sync snr about 30 dB or so" -- default 20 leaves margin both
+// ways; HOUDINI_SYNC_SNR_DB overrides for bench tuning.]
+static double beaconSnrDb(const std::complex<int16_t>* w, size_t n,
+                          ssize_t end_idx, size_t core_len) {
+  const ssize_t lo = end_idx - static_cast<ssize_t>(core_len);
+  if (lo < 0 || end_idx > static_cast<ssize_t>(n) || core_len == 0) return -99.0;
+  double core = 0, rest = 0;
+  for (size_t i = 0; i < n; ++i) {
+    const double re = w[i].real(), im = w[i].imag();
+    const double e = re * re + im * im;
+    if (static_cast<ssize_t>(i) >= lo && static_cast<ssize_t>(i) < end_idx)
+      core += e;
+    else
+      rest += e;
+  }
+  const size_t nrest = n - core_len;
+  if (nrest == 0 || rest <= 0.0) return 99.0;
+  return 10.0 * std::log10((core / core_len) / (rest / nrest) + 1e-30);
+}
+
+static double syncSnrFloorDb() {
+  static const double v = [] {
+    const char* e = getenv("HOUDINI_SYNC_SNR_DB");
+    return e ? atof(e) : 20.0;
+  }();
+  return v;
+}
+
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
 
@@ -1077,30 +1110,90 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   size_t sync_count = 0;
   constexpr size_t kTargetSyncCount = 2;
   assert(config_->samps_per_frame() >= beacon_detect_window);
-  while ((sync_count < kTargetSyncCount) && config_->running()) {
-    const ssize_t sync_index = clientSyncBeacon(tid, beacon_detect_window);
-    if (sync_index >= 0) {
-      const ssize_t adjust = sync_index - houdiniBeaconEnd(config_);
-      const size_t alignment_samples =
-          config_->samps_per_frame() - beacon_detect_window;
-      MLPD_INFO(
-          "clientSyncTxRx [%d]: Beacon detected sync_index: %ld, rx sample "
-          "offset: %ld, window %zu, samples in frame %zu, alignment removal "
-          "%zu\n",
-          tid, sync_index, adjust, beacon_detect_window,
-          config_->samps_per_frame(), alignment_samples);
-
-      //By definition alignment_samples + adjust must be > 0;
-      if (static_cast<ssize_t>(alignment_samples) + adjust < 0) {
-        throw std::runtime_error("Unexpected alignment");
+  // Houdini acquisition anchor, set by the stamp-based confirm loop below and
+  // consumed by the main loop (counted-sample alignment cannot survive
+  // recvHoudini's drain, so the anchor is pure timestamp arithmetic).
+  long long houdini_anchor = 0;
+  bool houdini_anchored = false;
+  if (config_->is_houdini()) {
+    // Hunt -> confirm(x2) -> anchor [user 2026-08-30]: find the beacon, use
+    // its stamped absolute time, then require two further detections to land
+    // on that lock's frame grid before trusting it. A false first lock (the
+    // artifact class, or a copy/scatter outlier) gives grid-inconsistent
+    // residuals and restarts the hunt; measured false-anchor odds with two
+    // confirms are ~1e-4 even without the SNR floor.
+    constexpr long long kConfirmTol = 640;  // detector scatter (4.18) + path
+    constexpr int kMaxHunts = 200;
+    const long long fr = static_cast<long long>(config_->samps_per_frame());
+    long long first_abs = 0;
+    bool have_first = false;
+    int confirms = 0;
+    int hunts = 0;
+    while (config_->running() && !houdini_anchored) {
+      if (++hunts > kMaxHunts) {
+        throw std::runtime_error("beacon acquisition: no confirmed lock");
       }
-      clientAdjustRx(tid, alignment_samples + adjust);
-      sync_count++;
-    } else if (config_->running()) {
-      MLPD_WARN(
-          "clientSyncTxRx [%d]: Beacon could not be detected sync_index: %ld\n",
-          tid, sync_index);
-      throw std::runtime_error("rx sample offset is less than 0");
+      long long wstamp = 0;
+      const ssize_t idx =
+          clientSyncBeacon(tid, beacon_detect_window, &wstamp);
+      if (idx < 0) continue;  // running() went false inside
+      const long long abs_end = wstamp + idx;  // beacon END, UE ticks
+      if (!have_first) {
+        have_first = true;
+        first_abs = abs_end;
+        confirms = 0;
+        MLPD_INFO("clientSyncTxRx [%d]: hunt lock at abs %lld (idx %ld)\n",
+                  tid, abs_end, idx);
+        continue;
+      }
+      const long long k = llround(static_cast<double>(abs_end - first_abs) /
+                                  static_cast<double>(fr));
+      const long long resid = abs_end - (first_abs + k * fr);
+      if (k != 0 && std::llabs(resid) <= kConfirmTol) {
+        if (++confirms >= 2) {
+          houdini_anchor = first_abs - houdiniBeaconEnd(config_);
+          houdini_anchored = true;
+          MLPD_INFO(
+              "clientSyncTxRx [%d]: lock CONFIRMED (resid %lld over %lld "
+              "frames, confirm %d) -> frame anchor %lld\n",
+              tid, resid, k, confirms, houdini_anchor);
+        }
+      } else {
+        MLPD_INFO(
+            "clientSyncTxRx [%d]: confirm failed (resid %lld, k %lld) -> "
+            "hunt restart\n",
+            tid, resid, k);
+        first_abs = abs_end;
+        confirms = 0;
+      }
+    }
+  } else {
+    while ((sync_count < kTargetSyncCount) && config_->running()) {
+      const ssize_t sync_index = clientSyncBeacon(tid, beacon_detect_window);
+      if (sync_index >= 0) {
+        const ssize_t adjust = sync_index - houdiniBeaconEnd(config_);
+        const size_t alignment_samples =
+            config_->samps_per_frame() - beacon_detect_window;
+        MLPD_INFO(
+            "clientSyncTxRx [%d]: Beacon detected sync_index: %ld, rx sample "
+            "offset: %ld, window %zu, samples in frame %zu, alignment removal "
+            "%zu\n",
+            tid, sync_index, adjust, beacon_detect_window,
+            config_->samps_per_frame(), alignment_samples);
+
+        //By definition alignment_samples + adjust must be > 0;
+        if (static_cast<ssize_t>(alignment_samples) + adjust < 0) {
+          throw std::runtime_error("Unexpected alignment");
+        }
+        clientAdjustRx(tid, alignment_samples + adjust);
+        sync_count++;
+      } else if (config_->running()) {
+        MLPD_WARN(
+            "clientSyncTxRx [%d]: Beacon could not be detected sync_index: "
+            "%ld\n",
+            tid, sync_index);
+        throw std::runtime_error("rx sample offset is less than 0");
+      }
     }
   }
 
@@ -1136,8 +1229,15 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   // (re)sync and, at pilot TX, SNAP the current read timestamp to that grid
   // (anchor + k*frame) -- see the clientTxPilots call below. (Iris keeps the raw
   // per-frame read timestamp -- its HW framer delivers frame-locked reads.)
-  long long houdini_pilot_ref = 0;
-  bool houdini_pilot_ref_valid = false;
+  long long houdini_pilot_ref = houdini_anchor;      // from confirmed acquisition
+  bool houdini_pilot_ref_valid = houdini_anchored;
+  // Resync hold-off state [user 2026-08-30]: a large offset is applied only
+  // after MORE THAN ONE consecutive consistent observation of it; a lone
+  // large offset (artifact, scatter) is held, logged, and not applied.
+  constexpr long long kResyncDriftTol = 10;   // apply immediately at/below this
+  constexpr long long kResyncHoldMatch = 32;  // consecutive-large agreement
+  long long resync_held_resid = 0;
+  bool resync_hold_pending = false;
 
   while (config_->running() == true) {
     if (config_->max_frame() > 0 && frame_id >= config_->max_frame()) {
@@ -1171,18 +1271,67 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
           reinterpret_cast<std::complex<int16_t>*>(
               rxbuff.at(kSyncDetectChannel)),
           request_samples, config_->corr_scale(tid) + resync_retry_cnt);
-      if (sync_index >= 0) {
+      if (sync_index >= 0 && config_->is_houdini() &&
+          houdini_pilot_ref_valid) {
+        // Houdini resync = drift tracking against the CONFIRMED anchor grid,
+        // never re-anchoring on a single detection. Gate order: (1) SNR
+        // floor kills the noise-artifact class; (2) residual vs the anchored
+        // grid; (3) small residuals apply immediately, large ones only after
+        // more than one consecutive consistent observation [user].
+        const double snr = beaconSnrDb(
+            reinterpret_cast<std::complex<int16_t>*>(
+                rxbuff.at(kSyncDetectChannel)),
+            static_cast<size_t>(request_samples), sync_index,
+            config_->beacon_size());
+        if (snr < syncSnrFloorDb()) {
+          sync_index = -1;  // fall through to the miss path below
+        } else {
+          const long long fr =
+              static_cast<long long>(config_->samps_per_frame());
+          const long long abs_end = rx_beacon_time + sync_index;
+          const long long pred0 =
+              houdini_pilot_ref + houdiniBeaconEnd(config_);
+          const long long kf = llround(
+              static_cast<double>(abs_end - pred0) / static_cast<double>(fr));
+          const long long resid = abs_end - (pred0 + kf * fr);
+          if (std::llabs(resid) <= kResyncDriftTol) {
+            houdini_pilot_ref += resid;
+            resync_hold_pending = false;
+            resync = false;
+            resync_retry_cnt = 0;
+            resync_success++;
+            MLPD_INFO(
+                "Re-sync frame %zu: drift %+lld applied (snr %.1f dB, idx "
+                "%ld), tid %d\n",
+                frame_id, resid, snr, sync_index, tid);
+          } else if (resync_hold_pending &&
+                     std::llabs(resid - resync_held_resid) <=
+                         kResyncHoldMatch) {
+            houdini_pilot_ref += resid;
+            resync_hold_pending = false;
+            resync = false;
+            resync_retry_cnt = 0;
+            resync_success++;
+            MLPD_WARN(
+                "Re-sync frame %zu: LARGE offset %+lld applied after "
+                "consecutive confirmation (snr %.1f dB), tid %d\n",
+                frame_id, resid, snr, tid);
+          } else {
+            MLPD_WARN(
+                "Re-sync frame %zu: large offset %+lld HELD (snr %.1f dB, "
+                "pending %+lld), tid %d\n",
+                frame_id, resid, snr,
+                resync_hold_pending ? resync_held_resid : 0, tid);
+            resync_held_resid = resid;
+            resync_hold_pending = true;
+            // stay in resync; a real shift will repeat, an artifact will not
+          }
+        }
+      } else if (sync_index >= 0) {
         const int new_rx_offset =
             static_cast<int>(sync_index - houdiniBeaconEnd(config_));
         //Adjust tx time
         rx_beacon_time += new_rx_offset;
-        // Anchor the Houdini pilot reference ONCE, to the first beacon-locked
-        // frame start. The single-copy beacon (one strobe burst per frame)
-        // removed the old k x 4096 copy ambiguity, but anchor-once stays: it
-        // also protects against the detector's per-lock scatter class
-        // (DEMO_VERIFICATION.md 4.18). With frequency-locked boards the
-        // residual drift is ~0.14 samp/frame (< a slot over a run), and the per-frame
-        // grid-snap below tracks real time.
         if (config_->is_houdini() && !houdini_pilot_ref_valid) {
           houdini_pilot_ref = rx_beacon_time;
           houdini_pilot_ref_valid = true;
@@ -1210,18 +1359,33 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
           //throw away samples to get back in alignment, could combine with the next beacon but would need bigger buffers
           clientAdjustRx(tid, discard_samples);
         }
-      } else {
+      }
+      if (sync_index < 0) {
         resync_retry_cnt++;
 
         if (resync_retry_cnt > resync_retry_max) {
-          MLPD_WARN(
-              "Exceeded resync retry limit (%zu) for client %d reached after "
-              "%zu resync successes at frame: %zu.  Stopping!\n",
-              resync_retry_max, tid, resync_success, frame_id);
-          resync = false;
-          resync_retry_cnt = 0;
-          config_->running(false);
-          break;
+          if (config_->is_houdini() && houdini_pilot_ref_valid) {
+            // Under recvHoudini's drain the per-frame slot-0 window carries
+            // the beacon only a few percent of the time, so long miss runs
+            // are NORMAL. The anchored grid keeps the pilots seated (drift
+            // measured ~0), so log and retry next period instead of killing
+            // the run.
+            MLPD_WARN(
+                "Re-sync: %zu misses this period for client %d (successes "
+                "%zu); anchored grid keeps flying, retrying next period\n",
+                resync_retry_max, tid, resync_success);
+            resync = false;
+            resync_retry_cnt = 0;
+          } else {
+            MLPD_WARN(
+                "Exceeded resync retry limit (%zu) for client %d reached "
+                "after %zu resync successes at frame: %zu.  Stopping!\n",
+                resync_retry_max, tid, resync_success, frame_id);
+            resync = false;
+            resync_retry_cnt = 0;
+            config_->running(false);
+            break;
+          }
         }
       }
     }
@@ -1316,7 +1480,8 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
 }
 
 //Blocking function for beacon detected or exit()
-ssize_t Receiver::clientSyncBeacon(size_t radio_id, size_t sample_window) {
+ssize_t Receiver::clientSyncBeacon(size_t radio_id, size_t sample_window,
+                                   long long* window_time) {
   ssize_t sync_index = -1;
   long long rx_time = 0;
   assert(sample_window <= config_->samps_per_frame());
@@ -1352,6 +1517,29 @@ ssize_t Receiver::clientSyncBeacon(size_t radio_id, size_t sample_window) {
                                 sample_window,
                                 config_->corr_scale_init(radio_id),
                                 /*refine_first_cluster=*/true);
+        // SNR floor: a correlation crossing at noise level is the artifact
+        // class, not the beacon (measured: real ~45 dB, artifacts ~0 dB).
+        // Reject and keep hunting rather than anchor on it.
+        if (config_->is_houdini() && sync_index >= 0) {
+          const double snr =
+              beaconSnrDb(syncbuffmem.at(kSyncDetectChannel).data(),
+                          sample_window, sync_index, config_->beacon_size());
+          if (snr < syncSnrFloorDb()) {
+            static std::atomic<int> rej{0};
+            const int nrej = rej.fetch_add(1);
+            if ((nrej % 16) == 0) {
+              MLPD_INFO(
+                  "clientSyncBeacon [%zu]: rejected low-SNR detection "
+                  "(idx %ld, %.1f dB < %.1f dB floor), count %d\n",
+                  radio_id, sync_index, snr, syncSnrFloorDb(), nrej + 1);
+            }
+            sync_index = -1;
+          } else if (window_time != nullptr) {
+            MLPD_INFO("clientSyncBeacon [%zu]: idx %ld snr %.1f dB\n",
+                      radio_id, sync_index, snr);
+          }
+        }
+        if (sync_index >= 0 && window_time != nullptr) *window_time = rx_time;
       } else {
         MLPD_ERROR(
             "clientSyncBeacon [%zu]: BAD SYNC - Rx samples not requested size "

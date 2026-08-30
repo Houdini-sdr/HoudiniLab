@@ -82,7 +82,8 @@ class Receiver {
   void initBuffers();
   void clientTxPilots(size_t user_id, long long base_time);
   int clientTxData(int tid, int frame_id, long long base_time);
-  ssize_t clientSyncBeacon(size_t radio_id, size_t sample_window);
+  ssize_t clientSyncBeacon(size_t radio_id, size_t sample_window,
+                           long long* window_time = nullptr);
   void clientAdjustRx(size_t radio_id, size_t discard_samples);
 
  private:
