@@ -1,7 +1,0 @@
-/space/vmshare/repos/HoudiniLab/CC/Sounder/build/CMakeFiles/sounder.dir
-/space/vmshare/repos/HoudiniLab/CC/Sounder/build/CMakeFiles/sounder_module.dir
-/space/vmshare/repos/HoudiniLab/CC/Sounder/build/CMakeFiles/beacon_tx_gold.dir
-/space/vmshare/repos/HoudiniLab/CC/Sounder/build/CMakeFiles/houdini_bs_ue_sync.dir
-/space/vmshare/repos/HoudiniLab/CC/Sounder/build/CMakeFiles/houdini_loopback.dir
-/space/vmshare/repos/HoudiniLab/CC/Sounder/build/CMakeFiles/edit_cache.dir
-/space/vmshare/repos/HoudiniLab/CC/Sounder/build/CMakeFiles/rebuild_cache.dir
