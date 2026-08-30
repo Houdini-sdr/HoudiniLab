@@ -124,25 +124,43 @@ def main():
         H[occ] = mean_t
         td = demod(x, us) / H
         best_r = 0.0
+        best_du = 0
+        best_conj = True
         if ref is not None:
             rr = ref[:NSYM]
             good = np.abs(rr[:, occ]) > 1e-9
-            # The pilot H carries the PILOT's timing; the data burst lands with
-            # its own draw (the AP-15 mechanism). Recover the pilot<->data
-            # timing offset r as a per-tone phase ramp before scoring -- this
-            # is the same job as the live two-stage recovery, and the winning
-            # r is a direct per-frame readout of the offset.
+            # The pilot metrics are conjugation- and (within-CP) placement-
+            # insensitive, so neither is validated yet at this point; the data
+            # correlation is sensitive to both. Search them empirically: data
+            # window placement du (coarse, the envelope onset carries ~30
+            # samples of smoothing bias), fractional ramp r (the pilot<->data
+            # timing differential, the AP-15 mechanism), and both conjugation
+            # conventions. The winning (du, r) is a per-frame readout of the
+            # data landing relative to the pilot.
             kk = np.arange(FFT) - FFT // 2
 
-            def score(r):
-                z = td[:, occ] * np.exp(1j * 2 * np.pi * r * kk[occ] / FFT)
+            def score(td_c, r):
+                z = td_c[:, occ] * np.exp(1j * 2 * np.pi * r * kk[occ] / FFT)
                 num = np.abs(np.sum(z[good] * np.conj(rr[:, occ][good])))
                 den = np.sqrt(np.sum(np.abs(z[good]) ** 2) *
                               np.sum(np.abs(rr[:, occ][good]) ** 2))
                 return num / (den + 1e-30)
 
-            rs = np.arange(-8, 8.01, 0.05)
-            best_r = float(rs[int(np.argmax([score(r) for r in rs]))])
+            best_sc = -1.0
+            for cj in (True, False):
+                for du in range(-48, 49, 2):
+                    td_c = demod(x, us + du, conj_rx=cj) / (H if cj else H.conj())
+                    if len(td_c) < NSYM:
+                        continue
+                    for r in np.arange(-2, 2.01, 0.25):
+                        sc = score(td_c, r)
+                        if sc > best_sc:
+                            best_sc, best_du, best_r, best_conj = sc, du, r, cj
+            # refine r finely at the winning placement
+            td = demod(x, us + best_du, conj_rx=best_conj) / \
+                (H if best_conj else H.conj())
+            rs = np.arange(best_r - 0.5, best_r + 0.5, 0.02)
+            best_r = float(rs[int(np.argmax([score(td, r) for r in rs]))])
             z = td[:, occ] * np.exp(1j * 2 * np.pi * best_r * kk[occ] / FFT)
             # one global complex gain (the reference has its own scale)
             g = np.sum(z[good] * np.conj(rr[:, occ][good])) / \
@@ -165,7 +183,8 @@ def main():
         psnrs.append(psnr)
         dsnrs.append(dsnr)
         print(f"\n== {os.path.basename(mp)} pilot@{ps} (coh {pcoh:.3f}) data@{us}"
-              f"  occ tones {len(occ)}  r={best_r:+.2f}")
+              f"  occ tones {len(occ)}  du={best_du:+d} r={best_r:+.2f} "
+              f"conj={best_conj}")
         print(f"  PILOT SNR {psnr:6.1f} dB   DATA SNR {dsnr:6.1f} dB   "
               f"delta {psnr - dsnr:+.1f} dB")
         print("  pilot per-sym EVM dB: " +
