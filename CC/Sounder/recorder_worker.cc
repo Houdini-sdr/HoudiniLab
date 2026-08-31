@@ -421,6 +421,7 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
   const short* d = pkt->data;
   const int es = symStart(d, slot);  // symbol-0 start (fixed prefix by default; sym_start knob)
   const auto& data_ind = cfg_->data_ind();
+  double fix_r = 0.0;  // the timing-fix r this frame, for the low-score autopsy
   // One-shot raw dump for offline analysis: [N cp prefix nsym ndata i32]
   // [H re,im f32]*N [data_ind i32]*ndata [U slot re,im i16]*slot.
   if (std::getenv("HOUDINI_CSI_DUMP") != nullptr) {
@@ -558,6 +559,7 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
         }
       }
     }
+    fix_r = best_r;
     if (best_r != 0.0)
       for (int k = 0; k < N; ++k) {
         const double ang = 2.0 * M_PI * (static_cast<double>(k) - N / 2.0) * best_r / N;
@@ -621,8 +623,34 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
       const unsigned lo = cns_low.fetch_add(1) + 1;
       if ((lo & (lo - 1)) == 0) {
         MLPD_WARN(
-            "CNS score %.3f at frame %u (low occurrence %u of %u datagrams)\n",
-            score, pkt->frame_id, lo, tot);
+            "CNS score %.3f at frame %u, r=%.3f (low occurrence %u of %u "
+            "datagrams)\n",
+            score, pkt->frame_id, fix_r, lo, tot);
+      }
+      // Autopsy dump of the first few low scorers, HOUDINI_CSI_DUMP format
+      // (ap15_diff.py reads it as-is); r rides in the filename.
+      const char* lowdir = std::getenv("HOUDINI_CNS_DUMP_LOW");
+      if (lowdir != nullptr && lo <= 6) {
+        char pb[512];
+        snprintf(pb, sizeof(pb), "%s/cns_low_%02u_f%u_r%+05d.bin", lowdir, lo,
+                 pkt->frame_id, static_cast<int>(std::lround(fix_r * 1000)));
+        FILE* f = std::fopen(pb, "wb");
+        if (f != nullptr) {
+          const int32_t hdr[5] = {N, cp, es, nsym,
+                                  static_cast<int32_t>(data_ind.size())};
+          std::fwrite(hdr, sizeof(int32_t), 5, f);
+          for (int k = 0; k < N; ++k) {
+            const float re = H[k].real(), im = H[k].imag();
+            std::fwrite(&re, 4, 1, f);
+            std::fwrite(&im, 4, 1, f);
+          }
+          for (size_t j = 0; j < data_ind.size(); ++j) {
+            const int32_t di = static_cast<int32_t>(data_ind[j]);
+            std::fwrite(&di, 4, 1, f);
+          }
+          std::fwrite(d, sizeof(short), static_cast<size_t>(slot) * 2, f);
+          std::fclose(f);
+        }
       }
     } else if (tot % 512 == 0) {
       MLPD_INFO("CNS score %.3f at frame %u (%u datagrams, %u low)\n", score,
