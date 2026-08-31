@@ -95,6 +95,11 @@ _sync_t = {}   # tid -> monotonic time of that tid's last SYN1
 _sync_bad = [0]     # datagrams rejected as non-finite
 _bad_payload = [0]  # SSE snapshots dropped because a float would not serialise
 SYNC_REPUSH_CEIL_MS = 120000  # past this a quiet tid stops driving re-pushes
+# tid arrives as a uint32 off the wire, so the map is unbounded by construction.
+# Entries are NOT pruned on age -- the record is what lets the page show
+# NOT SYNCED for a link that stopped -- so cap the count instead. A sounder runs
+# a handful of clients; anything past this is a malformed or hostile datagram.
+MAX_SYNC_TIDS = 8
 
 
 def _parse_csi(payload, with_quality):
@@ -234,6 +239,9 @@ def _udp_loop(bind_host, bind_port):
             if rec is not None:
                 with _lock:
                     t = rec["tid"]
+                    if t not in _sync and len(_sync) >= MAX_SYNC_TIDS:
+                        _sync_bad[0] += 1
+                        continue
                     _sync.setdefault(
                         t, collections.deque(maxlen=SYNC_KEEP)).append(rec)
                     _sync_t[t] = time.monotonic()
