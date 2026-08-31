@@ -805,6 +805,19 @@ void Config::genPilots() {
                         sts_seq_ci16.end());
   }
 
+  // Cyclic guard before the gold field -- the 802.11 GI2 pattern. Copy the LAST
+  // kGoldGuard samples of gold ahead of rep 1 so rep 1 is preceded by gold's own
+  // tail exactly as rep 2 is. Without it the STS->gold transition contaminates
+  // rep 1's first sample and any repetition-based estimator reads a large phase
+  // there: measured +157 deg at i=0 against ~0 for every other sample (AP-34).
+  // Costs 32 samples of beacon length and moves the beacon END, so
+  // houdiniBeaconEnd() and the UE anchor shift with it -- tx_advance must be
+  // re-derived from pilot_grid_off after this change (see files/houdini-ul.json
+  // _tx_advance_note).
+  constexpr int kGoldGuard = 32;
+  beacon_ci16_.insert(beacon_ci16_.end(), gold_ifft_ci16.end() - kGoldGuard,
+                      gold_ifft_ci16.end());
+
   // Populate gold sequence (two reps, 128 each)
   int goldReps = 2;
   for (int i = 0; i < goldReps; i++) {

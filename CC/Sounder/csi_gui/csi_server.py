@@ -31,6 +31,16 @@ Wire formats (little-endian), one datagram per (frame, antenna) per kind:
         the same without [reps] and without the trailing block, and is still
         accepted.
   CNS1  [magic][frame][ant][num_pts][mod_order]      then num_pts * (I f32, Q f32)
+  SYN1  [magic][frame][tid][state][resid i32][cfo_hz f32][snr f32][shift i32]
+        [samps_per_frame u32][carrier_hz f32]
+        One datagram per resync DETECTION from the UE sync thread (not the
+        recording path), so it is NOT per-antenna and carries no payload array.
+        state: 1=LOCKED (beacon alive on the anchored grid), 2=HOLD (one
+        off-grid detection seen, deliberately NOT acted on), 3=ESCALATING (the
+        anchor was re-acquired; `shift` is the correction actually applied, and
+        is the only place the UE moves its schedule). NOT SYNCED is inferred
+        from staleness -- while the acquisition loop hunts there is no detection
+        to hang a datagram on.
   ADC2  [magic][frame][ant][cols][samps][rate f32][peak][clipped][slot][any_peak]
         [any_clipped]  then cols * (I_min, I_max, Q_min, Q_max) as int16.  A min/max
         envelope of the whole slot rather than decimated samples, so a brief clip
@@ -41,6 +51,7 @@ Wire formats (little-endian), one datagram per (frame, antenna) per kind:
         same without the last three fields and is still accepted.
 """
 import argparse
+import collections
 import json
 import math
 import os
@@ -58,17 +69,25 @@ MAGIC_CSI2 = 0x43534932  # "CSI2" -- as CSI1 plus per-subcarrier raw phase
 MAGIC_CNS = 0x434E5331   # "CNS1" -- equalized uplink-data constellation
 MAGIC_ADC = 0x41444331   # "ADC1" -- raw-ADC envelope, any slot (legacy)
 MAGIC_ADC2 = 0x41444332  # "ADC2" -- pilot-slot envelope + an all-slot clip ledger
+MAGIC_SYN = 0x53594E31   # "SYN1" -- UE beacon sync state, resid and CFO
 CSI_HDR = struct.Struct("<IIIIf")   # magic, frame, ant, num_sc, rate
 CSI2_HDR = struct.Struct("<IIIIfI")  # ... plus reps (pilot symbols averaged)
 CNS_HDR = struct.Struct("<IIIII")   # magic, frame, ant, num_pts, mod_order
 ADC_HDR = struct.Struct("<IIIIIfII")   # magic, frame, ant, cols, samps, rate, peak, clipped
 ADC2_HDR = struct.Struct("<IIIIIfIIIII")  # ... plus slot, any_peak, any_clipped
+SYN_HDR = struct.Struct("<IIIIiffiIf")  # ... plus samps_per_frame, carrier_hz
 
 # ---- shared state: latest CSI + constellation per antenna ------------------
 _lock = threading.Lock()
 _latest = {}   # ant_id -> {"csi": {...}, "cns": {...}}
 _seq = 0       # bumps on every new datagram so the SSE loop knows there's fresh data
 _stats = {"pkts": 0, "t0": time.time()}
+# Sync/CFO history is a TIME SERIES, not a latest-value, so it lives beside the
+# per-antenna state rather than in it. maxlen caps memory on a long run; the page
+# shows a shorter window than this.
+SYNC_KEEP = 240
+_sync = collections.deque(maxlen=SYNC_KEEP)
+_sync_t = [0.0]   # monotonic time of the last SYN1, for the NOT-SYNCED inference
 
 
 def _parse_csi(payload, with_quality):
@@ -150,6 +169,16 @@ def _parse_cns(payload):
     return int(ant), {"frame": int(frame), "mod": int(mod), "pts": pts}
 
 
+def _parse_syn(payload):
+    if len(payload) < SYN_HDR.size:
+        return None
+    (_m, frame, tid, state, resid, cfo, snr, shift, sfr,
+     carrier) = SYN_HDR.unpack_from(payload, 0)
+    return {"frame": int(frame), "tid": int(tid), "state": int(state),
+            "resid": int(resid), "cfo": float(cfo), "snr": float(snr),
+            "shift": int(shift), "sfr": int(sfr), "fc": float(carrier)}
+
+
 def _udp_loop(bind_host, bind_port):
     global _seq
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -176,6 +205,15 @@ def _udp_loop(bind_host, bind_port):
             parsed, kind = _parse_adc(data, False), "adc"
         elif magic == MAGIC_ADC2:
             parsed, kind = _parse_adc(data, True), "adc"
+        elif magic == MAGIC_SYN:
+            rec = _parse_syn(data)
+            if rec is not None:
+                with _lock:
+                    _sync.append(rec)
+                    _sync_t[0] = time.monotonic()
+                    _seq += 1
+                    _stats["pkts"] += 1
+            continue
         if parsed is None:
             continue
         ant, rec = parsed
@@ -202,7 +240,9 @@ def _snapshot():
             rec = {k: v for k, v in slot.items() if k != "t"}
             rec["age_ms"] = int(max(0.0, now - slot.get("t", now)) * 1000)
             out[str(a)] = rec
-        return _seq, out
+        age = int(max(0.0, now - _sync_t[0]) * 1000) if _sync_t[0] else None
+        sync = {"hist": list(_sync), "age_ms": age}
+        return _seq, out, sync
 
 
 # ---- HTTP / SSE ------------------------------------------------------------
@@ -273,17 +313,18 @@ class Handler(BaseHTTPRequestHandler):
         last_stale_push = 0.0
         try:
             while True:
-                seq, snap = _snapshot()
+                seq, snap, sync = _snapshot()
                 # While the stream is stalled _seq never moves, so pushing only on
                 # a seq change would freeze the age on screen too and the badge
                 # would never appear. Re-send slowly whenever anything is stale.
                 now = time.monotonic()
                 stale = any(r.get("age_ms", 0) >= stale_ms for r in snap.values())
-                if snap and (seq != last_seq or
+                if (snap or sync["hist"]) and (seq != last_seq or
                              (stale and now - last_stale_push >= 0.5)):
                     last_seq = seq
                     last_stale_push = now
-                    msg = "data: %s\n\n" % json.dumps({"ant": snap})
+                    msg = "data: %s\n\n" % json.dumps({"ant": snap,
+                                                       "sync": sync})
                     self.wfile.write(msg.encode("utf-8"))
                     self.wfile.flush()
                 else:
@@ -525,6 +566,7 @@ PAGE = r"""<!doctype html>
     </div>
   </div>
 </header>
+<div id="sync"></div>
 <div class="csi-cards" id="ants"></div>
 <script>
 // Canvas sizes are MEASURED from the layout every time it changes, not declared
@@ -962,7 +1004,106 @@ const cardObserver=(typeof ResizeObserver!=='undefined') ? new ResizeObserver(()
 }) : null;
 
 let pktCount=0,t0=Date.now();
+// ---- beacon sync / CFO panel (AP-32) --------------------------------------
+// One panel for the link, not one per antenna: this is the UE's sync state, and
+// it arrives on SYN1 from the sync thread rather than the recording path.
+const SYNC_SHOW=120, SCATTER_TOL=1024, SYNC_STALE_MS=2000, SYNC_YR=1300;
+let syncCard=null;
+
+function makeSyncCard(){
+  const wrap=document.createElement('div');
+  wrap.className='card csi-card';
+  wrap.innerHTML='<div class="card-body">'
+    +'<div class="d-flex align-items-center justify-content-between mb-2">'
+      +'<h3 class="card-title mb-0">beacon sync</h3>'
+      +'<span class="badge bg-secondary-lt sync-chip">--</span></div>'
+    +frame('resid vs the anchored grid (samples)','csi-h-line',
+           ['+1300','+650','0','-650','-1300'],['older','frame','now'])
+    +'<div class="text-secondary tnum mt-2 sync-read" style="font-size:.75rem"></div>'
+    +'</div>';
+  document.getElementById('sync').appendChild(wrap);
+  syncCard={cv:wrap.querySelector('canvas'),
+            chip:wrap.querySelector('.sync-chip'),
+            read:wrap.querySelector('.sync-read')};
+}
+
+function fitSync(){
+  const cv=syncCard.cv, r=cv.getBoundingClientRect();
+  const dpr=window.devicePixelRatio||1;
+  const w=Math.max(1,Math.round(r.width*dpr)), h=Math.max(1,Math.round(r.height*dpr));
+  if(cv.width!==w||cv.height!==h){cv.width=w;cv.height=h;}
+  return {w:w,h:h};
+}
+
+function drawSync(sync){
+  if(!syncCard) makeSyncCard();
+  const hist=(sync.hist||[]).slice(-SYNC_SHOW), age=sync.age_ms;
+  // NOT SYNCED is inferred from staleness: while the acquisition loop hunts
+  // there is no detection to hang a datagram on, so silence IS the state.
+  const stale=(age===null||age===undefined||age>SYNC_STALE_MS);
+  const last=hist.length?hist[hist.length-1]:null;
+  let label='NOT SYNCED', cls='bg-red-lt';
+  if(!stale&&last){
+    if(last.state===1){label='LOCKED';cls='bg-green-lt';}
+    else if(last.state===2){label='HOLD PENDING';cls='bg-yellow-lt';}
+    else if(last.state===3){label='ESCALATING';cls='bg-orange-lt';}
+  }
+  syncCard.chip.textContent=label;
+  syncCard.chip.className='badge '+cls;
+  const d=fitSync(), ctx=syncCard.cv.getContext('2d');
+  ctx.clearRect(0,0,d.w,d.h);
+  if(!hist.length){syncCard.read.textContent='no detections yet';return;}
+
+  // x is the FRAME NUMBER, not the point index. Detections are irregularly
+  // spaced (measured 9 to 699 frames apart, median 99) and an evenly spaced
+  // axis would hide the gaps, which are themselves a signal.
+  const f0=hist[0].frame, f1=hist[hist.length-1].frame, span=Math.max(1,f1-f0);
+  const X=f=>((f-f0)/span)*(d.w-1);
+  const Y=v=>d.h/2-(v/SYNC_YR)*(d.h/2-2);
+  ctx.fillStyle='rgba(128,128,128,0.10)';
+  ctx.fillRect(0,Y(SCATTER_TOL),d.w,Y(-SCATTER_TOL)-Y(SCATTER_TOL));
+  ctx.strokeStyle=C.warn;ctx.lineWidth=1;ctx.setLineDash([3,3]);
+  ctx.beginPath();
+  ctx.moveTo(0,Y(SCATTER_TOL));ctx.lineTo(d.w,Y(SCATTER_TOL));
+  ctx.moveTo(0,Y(-SCATTER_TOL));ctx.lineTo(d.w,Y(-SCATTER_TOL));ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.strokeStyle=C.grid;ctx.beginPath();
+  ctx.moveTo(0,Y(0));ctx.lineTo(d.w,Y(0));ctx.stroke();
+  // Escalations first so the detections draw over them.
+  ctx.strokeStyle=C.warn;ctx.lineWidth=1.5;
+  for(const p of hist){ if(p.state===3){
+    ctx.beginPath();ctx.moveTo(X(p.frame),0);ctx.lineTo(X(p.frame),d.h);ctx.stroke(); } }
+  for(const p of hist){
+    if(p.state===3) continue;
+    ctx.fillStyle=(p.state===2)?C.warn:C.mag;
+    ctx.fillRect(X(p.frame)-1.5,Y(p.resid)-1.5,3,3);
+  }
+
+  const loc=hist.filter(p=>p.state===1||p.state===2);
+  if(loc.length<3){syncCard.read.textContent=loc.length+' detection(s)';return;}
+  let sx=0,sy=0; for(const p of loc){sx+=p.frame;sy+=p.resid;}
+  const n=loc.length, mx=sx/n, my=sy/n;
+  let num=0,den=0;
+  for(const p of loc){num+=(p.frame-mx)*(p.resid-my);den+=(p.frame-mx)*(p.frame-mx);}
+  const sfr=loc[n-1].sfr||1, fc=loc[n-1].fc||0;
+  const tppm=(den>0?num/den:0)/sfr*1e6;      // samples/frame -> ppm
+  let cs=0; for(const p of loc)cs+=p.cfo;
+  const cm=cs/n;
+  let cq=0; for(const p of loc)cq+=(p.cfo-cm)*(p.cfo-cm);
+  const csd=Math.sqrt(cq/n), cppm=(fc>0?cm/fc*1e6:0);
+  const esc=hist.filter(p=>p.state===3);
+  // Both ppm figures describe ONE oscillator error, reached two independent
+  // ways. Printing them adjacent is the point of the panel: a disagreement has
+  // to be visible rather than silent.
+  syncCard.read.textContent=
+    'timing '+tppm.toFixed(4)+' ppm (resid slope)  |  carrier '+cppm.toFixed(3)
+    +' ppm ('+cm.toFixed(0)+' \u00b1 '+csd.toFixed(0)+' Hz)  |  '+n+' det over '
+    +span+' frames'+(esc.length?('  |  '+esc.length+' re-anchor, last shift '
+    +esc[esc.length-1].shift+' samp'):'');
+}
+
 function onData(obj){
+  if(obj.sync) drawSync(obj.sync);
   const ant=obj.ant;
   for(const a in ant){
     if(!cards[a]) makeCard(a);

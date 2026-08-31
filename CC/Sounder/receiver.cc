@@ -9,6 +9,9 @@
 
 #include "include/receiver.h"
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #include <atomic>
@@ -16,6 +19,7 @@
 #include <climits>
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <cstdlib>
 #include <random>
 
@@ -42,7 +46,10 @@ static constexpr int kStsLen = 16;
 static constexpr int kStsReps = 15;
 static constexpr int kGoldLen = 128;
 static constexpr int kGoldReps = 2;
-static constexpr int kBeaconCoreLen = kStsLen * kStsReps + kGoldLen * kGoldReps;
+// Cyclic guard ahead of the gold field (AP-34); must match Config::genBeacon.
+static constexpr int kGoldGuard = 32;
+static constexpr int kBeaconCoreLen =
+    kStsLen * kStsReps + kGoldGuard + kGoldLen * kGoldReps;
 // Beacon CFO logs at ~9/s; print 1 in N so a long run does not add millions of
 // lines. The panel gets every sample regardless. HOUDINI_CFO_LOG_EVERY=1 makes
 // it dense, which is what a calibration run wants.
@@ -1076,10 +1083,84 @@ ssize_t Receiver::syncSearch(const std::complex<int16_t>* check_data,
   return sync_index;
 }
 
+// ---- SYN1: sync/CFO telemetry to the dashboard (AP-32) ---------------------
+// The GUI socket in RecorderWorker is fed from the RECORDING path and carries
+// per-antenna CSI; the sync state lives here in the client RX thread and has no
+// route to it. Rather than plumb a queue across threads, this path opens its own
+// connected UDP socket to the SAME destination (HOUDINI_CSI_UDP) and emits one
+// small datagram per resync DETECTION.
+//
+// Per detection, never sampled at display cadence: detections run ~9/s, slower
+// than the 30 fps display throttle, so resampling would alias exactly the thing
+// the panel exists to show (the bug f8ba2b4 fixed on the retired H-stability
+// strip). At ~9/s x 32 bytes this costs nothing.
+static int syncTelemetrySock(void) {
+  static const int fd = [] {
+    const char* dst = std::getenv("HOUDINI_CSI_UDP");
+    if (dst == nullptr) return -1;
+    const std::string s(dst);
+    const auto colon = s.find(':');
+    const std::string host =
+        (colon == std::string::npos) ? "127.0.0.1" : s.substr(0, colon);
+    const int port = (colon == std::string::npos)
+                         ? 9999
+                         : std::atoi(s.substr(colon + 1).c_str());
+    const int f = ::socket(AF_INET, SOCK_DGRAM, 0);
+    if (f < 0) return -1;
+    sockaddr_in a{};
+    a.sin_family = AF_INET;
+    a.sin_port = htons(static_cast<uint16_t>(port));
+    if (::inet_pton(AF_INET, host.c_str(), &a.sin_addr) != 1 ||
+        ::connect(f, reinterpret_cast<sockaddr*>(&a), sizeof(a)) != 0) {
+      ::close(f);
+      return -1;
+    }
+    return f;
+  }();
+  return fd;
+}
+
+// State codes shared with csi_server.py's SYN1 parser. NOT_SYNCED is not sent:
+// the page infers it from datagram staleness, the same idiom the antenna panels
+// already use, because there is no detection to hang a datagram on while the
+// acquisition loop is hunting.
+enum SyncState : uint32_t { kSyncLocked = 1, kSyncHold = 2, kSyncEscalating = 3 };
+
+// [magic 'SYN1'][frame u32][tid u32][state u32][resid i32][cfo_hz f32][snr f32]
+// [shift i32][samps_per_frame u32][carrier_hz f32]  -- 40 bytes. The last two
+// let the panel convert resid-slope and CFO to ppm without hardcoding config
+// values into the page, which is exactly what breaks when a config changes. `shift` is the anchor correction actually APPLIED,
+// nonzero only on an escalation re-anchor, which is the only place the UE moves
+// its schedule today (resync is a liveness detector, not a micro-corrector).
+static void sendSyncTelemetry(size_t frame, int tid, uint32_t state,
+                              long long resid, double cfo_hz, double snr,
+                              long long shift, uint32_t sfr, float carrier) {
+  const int fd = syncTelemetrySock();
+  if (fd < 0) return;
+  uint8_t buf[40];
+  const uint32_t magic = 0x53594E31u, fr = static_cast<uint32_t>(frame),
+                 ti = static_cast<uint32_t>(tid);
+  const int32_t rs = static_cast<int32_t>(resid),
+                sh = static_cast<int32_t>(shift);
+  const float cf = static_cast<float>(cfo_hz), sn = static_cast<float>(snr);
+  std::memcpy(buf + 0, &magic, 4);
+  std::memcpy(buf + 4, &fr, 4);
+  std::memcpy(buf + 8, &ti, 4);
+  std::memcpy(buf + 12, &state, 4);
+  std::memcpy(buf + 16, &rs, 4);
+  std::memcpy(buf + 20, &cf, 4);
+  std::memcpy(buf + 24, &sn, 4);
+  std::memcpy(buf + 28, &sh, 4);
+  std::memcpy(buf + 32, &sfr, 4);
+  std::memcpy(buf + 36, &carrier, 4);
+  (void)::send(fd, buf, sizeof(buf), 0);
+}
+
 // Two-stage beacon CFO estimate, normalized (cycles/sample); multiply by the
 // sample rate for Hz.
 //
-// The beacon core is 15 x STS(16) followed by 2 x gold(128) = 496 samples
+// The beacon core is 15 x STS(16), a 32-sample cyclic guard, then 2 x gold(128)
+// = 528 samples
 // (Config::genBeacon, config.cc), so it carries TWO independent repetition
 // structures and therefore two estimators:
 //
@@ -1092,14 +1173,14 @@ ssize_t Receiver::syncSearch(const std::complex<int16_t>* check_data,
 // repetition correlations: for x[n] = s[n]*exp(j2*pi*f*n) with s[n+N] = s[n],
 // sum conj(x[n])*x[n+N] has argument 2*pi*f*N.
 //
-// The PREVIOUS implementation split the 496-sample core in half and correlated
+// The PREVIOUS implementation split the core in half and correlated
 // half against half. That split falls INSIDE the structure (240 STS + 8 gold
 // against 120 gold + 128 gold), correlating two uncorrelated sequences, so it
 // returned noise. That is why kEnableCfo was false and why no CFO line has
 // ever appeared in a run log.
 //
 // `sync_index` is the beacon END (syncSearch convention), so the core occupies
-// [sync_index - 496, sync_index).
+// [sync_index - 528, sync_index).
 float Receiver::estimateCFO(const std::complex<int16_t>* buf, size_t buf_len,
                             int sync_index) const {
   if (buf == nullptr) return 0.0f;
@@ -1128,8 +1209,9 @@ float Receiver::estimateCFO(const std::complex<int16_t>* buf, size_t buf_len,
                                 static_cast<double>(buf[i].imag()));
   };
 
-  // Fine: gold rep2 against rep1 (lag 128).
-  const int g1 = start + kStsLen * kStsReps;
+  // Fine: gold rep2 against rep1 (lag 128). Skip the cyclic guard -- it is
+  // gold's tail, not a repetition of rep 1.
+  const int g1 = start + kStsLen * kStsReps + kGoldGuard;
   const int g2 = g1 + kGoldLen;
   std::complex<double> r_fine(0.0, 0.0);
   for (int i = 0; i < kGoldLen; ++i) r_fine += std::conj(at(g1 + i)) * at(g2 + i);
@@ -1334,7 +1416,14 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
         "beacon acquisition, tid %d\n",
         why, frame_id, tid);
     long long fresh = 0;
+    const long long prev_ref = houdini_pilot_ref;
     if (houdiniAcquireAnchor(tid, beacon_detect_window_esc, fresh)) {
+      // The ONLY place the UE moves its schedule. Report the applied step so the
+      // panel can mark it against the resid trace.
+      sendSyncTelemetry(frame_id, tid, kSyncEscalating, 0, 0.0, 0.0,
+                        houdini_pilot_ref_valid ? (fresh - prev_ref) : 0,
+                        static_cast<uint32_t>(config_->samps_per_frame()),
+                        static_cast<float>(config_->freq()));
       houdini_pilot_ref = fresh;
       houdini_pilot_ref_valid = true;
       if (static_cast<size_t>(tid) < houdini_pilot_cursor_reset_.size())
@@ -1520,11 +1609,17 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
                 "Re-sync frame %zu: beacon alive on the anchored grid "
                 "(resid %+lld within scatter, snr %.1f dB), tid %d\n",
                 frame_id, resid, snr, tid);
+            sendSyncTelemetry(frame_id, tid, kSyncLocked, resid, cfo_hz, snr, 0,
+                              static_cast<uint32_t>(config_->samps_per_frame()),
+                              static_cast<float>(config_->freq()));
           } else {
             MLPD_WARN(
                 "Re-sync frame %zu: off-grid detection %+lld (snr %.1f dB, "
                 "pending %d) -- beacon possibly moved, tid %d\n",
                 frame_id, resid, snr, resync_hold_pending ? 1 : 0, tid);
+            sendSyncTelemetry(frame_id, tid, kSyncHold, resid, cfo_hz, snr, 0,
+                              static_cast<uint32_t>(config_->samps_per_frame()),
+                              static_cast<float>(config_->freq()));
             if (resync_hold_pending) {
               houdiniEscalate("beacon moved");
               continue;  // rx_beacon_time is pre-hunt; restart the frame loop
