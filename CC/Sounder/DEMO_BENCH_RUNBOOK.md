@@ -43,7 +43,11 @@ own UDP data planes to each board.
   Verify every build by a string only the new code logs, never by the build
   log: `strings build/sounder | grep <a-string-only-the-new-code-logs>`.
 - Dashboard backend: `~/repos/HoudiniLab/CC/Sounder/csi_gui/csi_server.py`
-  (HTTP on 8080, CSI datagrams in on UDP 9999, both localhost).
+  (HTTP on 8080, CSI datagrams in on UDP 9999). Both bind `0.0.0.0`, not
+  localhost (`--http-host` / `--udp-host` defaults), so the dashboard is also
+  reachable directly at `http://168.6.244.64:8080/` if the lab firewall allows
+  it. Prefer the section 4 tunnel anyway: it works regardless of firewall and
+  does not publish the panel on the lab network.
 - SoapySDR host stack: the validated houdini HOST plugin lives ONLY at
   `/home/houdini/houdini_test/lib/SoapySDR/modules0.8-3/`. The system
   SoapySDR at `/usr/local` does NOT have it, so every launch must carry
