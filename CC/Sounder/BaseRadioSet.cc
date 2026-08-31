@@ -719,6 +719,22 @@ int BaseRadioSet::houdiniTddRx(size_t radio_id, void* const* buffs,
     if (e > best) { best = e; at = t; }
     if (worst < 0.0 || e < worst) worst = e;
   }
+  // The read spans ~1.17 frames, so when the pilot lands in the first few
+  // slots of the buffer a SECOND copy (next frame) is also fully contained
+  // near the tail -- and the densest-window search picks between two
+  // equal-energy copies by noise. The tail copy leaves no room for the
+  // frame's later rx slots: u_start ran past cg and align_slot's clamp
+  // served tail junk (noise, partial bursts, or the pilot itself) as the
+  // data slot -- the ~2% garbage-constellation class (measured: frame 5220
+  // p_start=139160 pu_spacing_err=-8088 with the pilot burst in the "U"
+  // dump). Re-map to the earlier copy, which always fits with its whole
+  // rx-slot span.
+  {
+    const int fr_t = static_cast<int>(htdd_frame_ticks_);
+    const int span_n = (static_cast<int>(htdd_rx_slots_.back()) -
+                        static_cast<int>(htdd_rx_slots_.front()) + 2) * n;
+    while (at + span_n > cg && at >= fr_t) at -= fr_t;
+  }
   const double pilot_rms = std::sqrt(best / n);
   // Noise floor from the QUIETEST slot-length window of the same read (27 of
   // 30 slots are guard, so it measures the true floor, ~6 rms on this bench).
