@@ -738,6 +738,20 @@ int BaseRadioSet::houdiniTddRx(size_t radio_id, void* const* buffs,
           "%lld) -- UE schedule paused or link down\n",
           htdd_quiet_streak_, htdd_frame_counter_);
     }
+    // Deliver (the caller's P/U lockstep needs a buffer) but marked FULLY
+    // padded, so the view-mode refusal drops it instead of painting a noise
+    // H: an unmarked quiet frame tagged as the pilot slot rendered as a
+    // 1-2 s garbage blip on every panel [user 2026-08-30]. The pad latch is
+    // rewritten at the next cursor-0 read, so the mark scopes to this frame.
+    htdd_frame_pad_ += static_cast<size_t>(n);
+    static std::atomic<unsigned> quiet_single_count{0};
+    const unsigned qc = quiet_single_count.fetch_add(1) + 1;
+    if ((qc & (qc - 1)) == 0) {  // 1,2,4,8,... then quiet
+      MLPD_WARN(
+          "BS: no UE burst in frame read (rms %.0f vs mean %.0f, occurrence "
+          "%u) -- frame marked untrusted\n",
+          pilot_rms, mean_rms, qc);
+    }
     std::memcpy(buffs[0], s, static_cast<size_t>(n) * 4);
     frameTime = (htdd_frame_counter_ << 32) |
                 (static_cast<long long>(htdd_rx_slots_.at(0)) << 16);
@@ -772,6 +786,24 @@ int BaseRadioSet::houdiniTddRx(size_t radio_id, void* const* buffs,
   if (selfsim(at) < 0.5) {  // `at` is a data slot -> the pilot is `gap` earlier
     if (selfsim(at - gap) >= 0.4) p_at = at - gap;
     else if (selfsim(at + gap) >= 0.4) p_at = at + gap;
+  }
+  // The chosen candidate must actually look like repeated LTS symbols. When
+  // the pilot is damaged and every candidate fails, the old code kept its
+  // best guess and delivered the DATA slot (or worse) as the pilot -- a
+  // poison H rendered as a whole-panel garbage blip [user 2026-08-30]. Keep
+  // the caller's P/U lockstep but mark the frame fully padded so view mode
+  // refuses it, and count occurrences for the mechanism hunt.
+  const double pilot_ss = selfsim(p_at);
+  if (pilot_ss < 0.4) {
+    htdd_frame_pad_ += static_cast<size_t>(n);
+    static std::atomic<unsigned> bad_pilot_count{0};
+    const unsigned bc = bad_pilot_count.fetch_add(1) + 1;
+    if ((bc & (bc - 1)) == 0) {
+      MLPD_WARN(
+          "BS: pilot slot failed the LTS check (selfsim %.2f, occurrence %u) "
+          "-- frame marked untrusted\n",
+          pilot_ss, bc);
+    }
   }
   // Centroid-align a slot's energy near `guess` -> transmitted [prefix][energy]
   // [postfix] layout (energy edge at ~prefix). Window ~1.25 slots so it can't
