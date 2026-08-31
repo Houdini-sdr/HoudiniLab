@@ -582,7 +582,7 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
   // phase-only score per datagram, an INFO baseline every 512th, a WARN on
   // power-of-two occurrences below 0.7 with the frame id so bad frames can
   // be correlated against resync / timing-fix / gate lines in the same log.
-  if (mod_ord == 4) {
+  if (mod_ord == 2 || mod_ord == 4 || mod_ord == 6) {
     std::complex<double> u4(0.0, 0.0);
     for (const auto& x : pts) {
       const double m = std::abs(x);
