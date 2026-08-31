@@ -400,8 +400,10 @@ happening now".
 The threshold is 1.5 seconds by default. If you lower `--csi-fps`, raise it to
 match with `--stale-ms`, or every card will read as stale.
 
-`--stale-ms` governs the ANTENNA cards only. The beacon sync card has its own
-rules, because its data is bursty by nature rather than continuous (section 5.2).
+`--stale-ms` sets the refresh floor for BOTH card types. The sync card decides
+what to display using its own thresholds, but its age can only advance when the
+server pushes an event, and that decision uses `--stale-ms`. So raising it
+delays how quickly the sync card notices a quiet link too (section 5.2).
 
 ### 5.2 The beacon sync card
 
@@ -438,7 +440,11 @@ at a glance that you are looking at held data rather than live data.
 
 The readout line carries two figures in ppm: the **timing** slope, fitted from
 the resid trace, and the **carrier** offset from the beacon CFO estimate. These
-are the same oscillator error reached two independent ways and should agree.
+are the same oscillator error reached two independent ways. They should agree
+when the error is real and large; they need not agree near zero, because a pure
+carrier offset moves the carrier figure and leaves the timing figure untouched,
+and a short-lag carrier reading is dominated by phase noise. Treat a mismatch
+below a few kHz as normal rather than as a fault.
 They are printed next to each other so a disagreement is visible rather than
 silent. The carrier figure carries its own spread, and is annotated when it
 falls inside the phase-noise floor: a short correlation lag turns a tiny phase

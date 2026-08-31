@@ -94,6 +94,7 @@ _sync = {}     # tid -> deque of records
 _sync_t = {}   # tid -> monotonic time of that tid's last SYN1
 _sync_bad = [0]     # datagrams rejected as non-finite
 _bad_payload = [0]  # SSE snapshots dropped because a float would not serialise
+SYNC_REPUSH_CEIL_MS = 120000  # past this a quiet tid stops driving re-pushes
 
 
 def _parse_csi(payload, with_quality):
@@ -176,7 +177,16 @@ def _parse_cns(payload):
 
 
 def _parse_syn(payload):
-    if len(payload) < SYN_HDR.size:
+    if len(payload) != SYN_HDR.size:
+        # Deliberately NOT back-compatible: the wire may change freely, but a
+        # mismatch must be diagnosable from the log rather than from a packet
+        # capture. Silently dropping every datagram looks exactly like "the UE
+        # never locked", which is the most expensive wrong conclusion here.
+        _sync_bad[0] += 1
+        if _sync_bad[0] == 1 or _sync_bad[0] % 1000 == 0:
+            print("[csi] SYN1 is %d bytes, this dashboard expects %d -- the "
+                  "sounder is a DIFFERENT BUILD; rebuild it. %d dropped so far."
+                  % (len(payload), SYN_HDR.size, _sync_bad[0]), flush=True)
         return None
     (_m, frame, tid, state, resid, cfo, snr, shift, sfr, carrier,
      tol) = SYN_HDR.unpack_from(payload, 0)
@@ -344,8 +354,13 @@ class Handler(BaseHTTPRequestHandler):
                 # resync bursts, and after the staleness fix its age is the only
                 # thing that can move the chip off a stale state. Without this
                 # the push stops when SYN1 stops and the age freezes on screen.
+                # Bounded above as well as below: past SYNC_REPUSH_CEIL_MS the
+                # page has long since shown NOT SYNCED, and a tid that never
+                # comes back would otherwise pin this full-payload re-push on
+                # for the life of the process.
                 stale = stale or any(
-                    (v.get("age_ms") or 0) >= stale_ms for v in sync.values())
+                    stale_ms <= (v.get("age_ms") or 0) < SYNC_REPUSH_CEIL_MS
+                    for v in sync.values())
                 body = None
                 if (snap or sync) and (seq != last_seq or
                              (stale and now - last_stale_push >= 0.5)):
@@ -478,7 +493,16 @@ def main():
             with _lock:
                 n = _stats["pkts"]
                 ants = sorted(_latest.keys())
-            print("[csi] %d datagrams, antennas=%s" % (n, ants), flush=True)
+            # Surface the drop counters: both were write-only, so the two
+            # failure modes they represent (a mismatched sounder build, and a
+            # payload that would not serialise) were invisible in the log.
+            extra = ""
+            if _sync_bad[0]:
+                extra += ", SYN1 dropped=%d" % _sync_bad[0]
+            if _bad_payload[0]:
+                extra += ", payloads dropped=%d" % _bad_payload[0]
+            print("[csi] %d datagrams, antennas=%s%s" % (n, ants, extra),
+                  flush=True)
     threading.Thread(target=_stats_loop, daemon=True).start()
 
     srv = ThreadingHTTPServer((args.http_host, args.http_port), Handler)
@@ -1025,6 +1049,9 @@ function drawCons(card,cn){
 // bitmap and cannot be recoloured, so it is cleared to the new background rather
 // than left as a rectangle of the old theme.
 function redrawAll(){
+  for(const t in syncCards){
+    if(syncCards[t].rec) drawSyncCard(t, syncCards[t].rec);
+  }
   for(const a in cards){
     const card=cards[a];
     fitCard(card, themeChanged);       // clears the waterfall only when it must
@@ -1046,12 +1073,12 @@ const cardObserver=(typeof ResizeObserver!=='undefined') ? new ResizeObserver(()
 let pktCount=0,t0=Date.now();
 // ---- beacon sync / CFO panel (AP-32) --------------------------------------
 // One card per client tid, matching how every other stream here is keyed.
-const SYNC_SHOW=120, SYNC_YR=1300, SYNC_QUIET_MS=2500, SYNC_DEAD_MS=60000;
-const SYNC_TOL_FALLBACK=1024;
-// Short-lag CFO is phase-noise limited: the measured run-to-run spread is ~1 kHz
-// even with the clocks locked, so anything under a kHz is instrument noise, not
-// a frequency. The readout carries its own error bar for that reason.
-const CFO_NOISE_HZ=1000;
+const SYNC_SHOW=120, SYNC_QUIET_MS=2500, SYNC_DEAD_MS=60000;
+// The lane MEASURED a 1.9 kHz run-to-run spread with the clocks locked (two
+// zero-injection runs, +756 vs -1147 Hz), because a short correlation lag turns
+// a tiny phase error into a large apparent frequency. Anything under this is an
+// instrument reading, not a carrier offset -- BACKLOG AP-30.
+const CFO_NOISE_HZ=2000;
 const syncCards={};
 
 function makeSyncCard(tid){
@@ -1062,34 +1089,30 @@ function makeSyncCard(tid){
       +'<h3 class="card-title mb-0">beacon sync'+(tid!=='0'?(' [UE '+tid+']'):'')+'</h3>'
       +'<span class="badge bg-secondary-lt sync-chip">--</span></div>'
     +frame('resid vs the anchored grid (samples)','csi-h-line',
-           ['+1300','+650','0','-650','-1300'],['older','frame','now'])
+           ['','','0','',''],['older','frame','now'])
     +'<div class="text-secondary tnum mt-2 sync-read" style="font-size:.75rem"></div>'
     +'</div>';
   document.getElementById('sync').appendChild(wrap);
   syncCards[tid]={cv:wrap.querySelector('canvas'),
                   chip:wrap.querySelector('.sync-chip'),
                   read:wrap.querySelector('.sync-read'),
-                  plot:wrap.querySelector('.csi-plot')};
+                  plot:wrap.querySelector('.csi-plot'),
+                  ylab:[...wrap.querySelectorAll('.csi-y-axis span')],
+                  rec:null};
 }
 
-function fitSyncCanvas(cv){
-  const r=cv.getBoundingClientRect(), dpr=window.devicePixelRatio||1;
-  const w=Math.max(1,Math.round(r.width*dpr)), h=Math.max(1,Math.round(r.height*dpr));
-  if(cv.width!==w||cv.height!==h){cv.width=w;cv.height=h;}
-  return {w:w,h:h};
-}
-
-// A segment is a stretch over which resid is comparable. It ENDS at a re-anchor
-// (afterwards resid is measured against a REPLACED reference, so one fit across
-// it fabricates a slope) and at a frame counter that goes BACKWARDS (the
-// launcher's retry loop restarts the sounder and frame_id resets to 0, which
-// would otherwise collapse the x-axis span to 1).
+// A segment is a stretch over which resid is comparable. It ends ONLY at a
+// re-anchor (state 3), after which resid is measured against a REPLACED
+// reference, and at a frame counter that goes backwards (the launcher's retry
+// loop restarts the sounder). State 5 does NOT end it: that branch keeps the
+// previous anchor, so resid stays comparable straight across it -- truncating
+// there would blank the trace exactly when a failed re-anchor makes it most
+// diagnostic.
 function lastSyncSegment(hist){
   let start=0;
   for(let i=1;i<hist.length;i++){
-    const prev=hist[i-1];
-    if(hist[i].frame < prev.frame) start=i;
-    else if(prev.state===3||prev.state===5) start=i;
+    if(hist[i].frame < hist[i-1].frame) start=i;
+    else if(hist[i-1].state===3) start=i;
   }
   return hist.slice(start);
 }
@@ -1103,7 +1126,7 @@ function syncChip(last, age){
     case 4: return ['WEAK BEACON','bg-yellow-lt'];
     case 5: return ['RE-ANCHOR FAILED','bg-red-lt'];
     // An unknown code means the page is older than the sounder. Say so rather
-    // than defaulting to green, which would report health we cannot vouch for.
+    // than defaulting to green, which would assert health we cannot vouch for.
     default: return ['STATE '+last.state+'?','bg-secondary-lt'];
   }
 }
@@ -1111,30 +1134,40 @@ function syncChip(last, age){
 function drawSyncCard(tid, sync){
   if(!syncCards[tid]) makeSyncCard(tid);
   const card=syncCards[tid];
+  card.rec=sync;
   const hist=(sync.hist||[]).slice(-SYNC_SHOW);
   const age=(sync.age_ms===null||sync.age_ms===undefined)?Infinity:sync.age_ms;
   const last=hist.length?hist[hist.length-1]:null;
   let [label,cls]=syncChip(last,age);
-  // Staleness annotates every state; it never invents one. Silence between
-  // resync bursts is normal (measured: seconds), so it must not demote.
   if(last && age>=SYNC_QUIET_MS && age<SYNC_DEAD_MS){
     label+=' \u00b7 quiet '+(age/1000).toFixed(1)+'s';
   }
   card.chip.textContent=label;
   card.chip.className='badge '+cls;
-  // Match the antenna cards: dim the plot when it is no longer live data.
   if(card.plot) card.plot.style.opacity=(age>=SYNC_QUIET_MS)?'0.4':'1';
 
-  const d=fitSyncCanvas(card.cv), ctx=card.cv.getContext('2d');
+  const d=fitCanvas(card.cv,true), ctx=d.ctx;
   ctx.clearRect(0,0,d.w,d.h);
   if(!hist.length){card.read.textContent='no detections yet';return;}
 
   const seg=lastSyncSegment(hist);
-  const TOL=(last && last.tol)?last.tol:SYNC_TOL_FALLBACK;
+  // tol is a uint32 and 0 is a legal, meaningful value ("reject anything
+  // off-grid"), so test for presence rather than truthiness.
+  const TOL=(last && last.tol!==undefined && last.tol!==null)?last.tol:1024;
+  // The y range FOLLOWS the tolerance. Hardcoding it meant a retune pushed the
+  // limit lines off-canvas while the axis labels kept claiming the old span.
+  const YR=Math.max(64, Math.round(TOL*1.3));
+  if(card.ylab.length===5){
+    const v=[YR, YR/2, 0, -YR/2, -YR];
+    card.ylab.forEach((el,i)=>{el.textContent=(v[i]>0?'+':'')+Math.round(v[i]);});
+  }
   const f0=seg[0].frame, f1=seg[seg.length-1].frame;
   const span=Math.max(1,f1-f0);
   const X=f=>((f-f0)/span)*(d.w-1);
-  const Y=v=>d.h/2-(v/SYNC_YR)*(d.h/2-2);
+  // Clamp so an off-scale HOLD is pinned to the edge instead of drawn off the
+  // canvas, which silently hid the beacon-moved events the panel exists to show.
+  const Y=v=>Math.max(2,Math.min(d.h-2, d.h/2-(v/YR)*(d.h/2-2)));
+
   ctx.fillStyle='rgba(128,128,128,0.10)';
   ctx.fillRect(0,Y(TOL),d.w,Y(-TOL)-Y(TOL));
   ctx.strokeStyle=C.warn;ctx.lineWidth=1;ctx.setLineDash([3,3]);
@@ -1144,19 +1177,35 @@ function drawSyncCard(tid, sync){
   ctx.setLineDash([]);
   ctx.strokeStyle=C.grid;ctx.beginPath();
   ctx.moveTo(0,Y(0));ctx.lineTo(d.w,Y(0));ctx.stroke();
+
+  // Re-anchors as vertical rules, under the data.
+  ctx.strokeStyle=C.warn;ctx.lineWidth=1.5;
+  for(const p of seg){ if(p.state===3){
+    ctx.beginPath();ctx.moveTo(X(p.frame),0);ctx.lineTo(X(p.frame),d.h);ctx.stroke(); } }
   for(const p of seg){
-    if(p.state===3||p.state===5) continue;
+    // States 3/4/5 carry no measured resid -- 4 in particular is emitted with a
+    // hardcoded 0 because the SNR gate runs BEFORE any residual is computed, so
+    // plotting it would paint a fabricated dot dead centre of the accept band:
+    // the exact picture of health the walkthrough teaches operators to trust.
+    if(p.state!==1 && p.state!==2) continue;
     ctx.fillStyle=(p.state===1)?C.mag:C.warn;
     ctx.fillRect(X(p.frame)-1.5,Y(p.resid)-1.5,3,3);
   }
+  // WEAK gets a rug mark along the bottom instead: visible, but never mistaken
+  // for a residual measurement.
+  ctx.fillStyle=C.warn;
+  for(const p of seg){ if(p.state===4) ctx.fillRect(X(p.frame)-1,d.h-4,2,4); }
 
-  // Fit only within the segment, and only over states whose resid is meaningful.
-  const loc=seg.filter(p=>p.state===1||p.state===2);
+  // Fit LOCKED only. A HOLD is by construction |resid| > tol -- the scatter the
+  // hold-off logic exists to reject -- so including it let one outlier move the
+  // slope ~100x past the precision this figure is quoted at.
+  const loc=seg.filter(p=>p.state===1);
   const esc=hist.filter(p=>p.state===3);
   const tail=esc.length?esc[esc.length-1]:null;
-  const anchorNote=tail?('  |  last re-anchor '+tail.shift+' samp'):'';
+  const note=(tail?('  |  last re-anchor '+tail.shift+' samp'):'')
+            +(seg.some(p=>p.state===4)?'  |  weak beacon seen':'');
   if(loc.length<3){
-    card.read.textContent=loc.length+' detection(s) in this segment'+anchorNote;
+    card.read.textContent=loc.length+' locked detection(s) in this segment'+note;
     return;
   }
   let sx=0,sy=0; for(const p of loc){sx+=p.frame;sy+=p.resid;}
@@ -1168,22 +1217,29 @@ function drawSyncCard(tid, sync){
   let cs=0; for(const p of loc)cs+=p.cfo;
   const cm=cs/n;
   let cq=0; for(const p of loc)cq+=(p.cfo-cm)*(p.cfo-cm);
-  const csd=Math.sqrt(cq/n);
-  const cppm=(fc>0?cm/fc*1e6:0), cppmsd=(fc>0?csd/fc*1e6:0);
-  // Both ppm figures describe ONE oscillator error reached two independent
-  // ways; adjacent so a disagreement is visible rather than silent. The carrier
-  // figure carries its spread AND a noise-floor caveat, because a bare number
-  // here invites reading instrument noise as a real offset.
+  // SEM, not the population SD: the figure quoted is the MEAN, so its error bar
+  // shrinks as sqrt(n). Printing the per-sample spread made a resolved offset
+  // look unresolvable.
+  const sem=Math.sqrt(cq/n)/Math.sqrt(n);
+  const cppm=(fc>0?cm/fc*1e6:0), cppmsem=(fc>0?sem/fc*1e6:0);
   const noisy=Math.abs(cm)<CFO_NOISE_HZ;
   card.read.textContent=
     'timing '+tppm.toFixed(4)+' ppm (resid slope)  |  carrier '
-    +cppm.toFixed(3)+' +/- '+cppmsd.toFixed(3)+' ppm ('+cm.toFixed(0)+' +/- '
-    +csd.toFixed(0)+' Hz'+(noisy?', within the ~1 kHz phase-noise floor':'')
-    +')  |  '+n+' det over '+span+' frames'+anchorNote;
+    +cppm.toFixed(3)+' +/- '+cppmsem.toFixed(3)+' ppm ('+cm.toFixed(0)+' +/- '
+    +sem.toFixed(0)+' Hz'+(noisy?', inside the ~2 kHz phase-noise floor':'')
+    +')  |  '+n+' locked over '+span+' frames'+note;
 }
 
 function drawSync(sync){
-  for(const tid in sync) drawSyncCard(tid, sync[tid]);
+  const tids=Object.keys(sync);
+  // With no SYN1 at all the server sends {} and there is no tid to iterate, so
+  // without this the card never appears and the documented NOT SYNCED state is
+  // unreachable -- a link that never locked would read as a broken GUI.
+  if(!tids.length){
+    if(!Object.keys(syncCards).length) drawSyncCard('0',{hist:[],age_ms:null});
+    return;
+  }
+  for(const tid of tids) drawSyncCard(tid, sync[tid]);
 }
 
 function onData(obj){

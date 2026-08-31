@@ -38,6 +38,13 @@ SERVER_PY = os.path.join(SOUNDER, "csi_gui", "csi_server.py")
 
 SFR, FC, TOL = 122880, 500e6, 1024
 
+# The canonical wire order, by the C++ variable names sendSyncTelemetry copies.
+# Types alone cannot catch a reorder: five fields are uint32 and two are int32,
+# so swapping frame and tid -- which would put tid on the panel's frame axis --
+# is invisible to an offset/width/type comparison.
+CC_FIELD_ORDER = ["magic", "fr", "ti", "state", "rs", "cf", "sn", "sh",
+                  "sfr", "carrier", "scatter_tol"]
+
 # frame, tid, state, resid, cfo, snr, shift
 CASES = [
     (1000, 0, 1,    0, -1147.0, 48.0,    0),   # LOCKED
@@ -79,6 +86,9 @@ def cc_layout():
             if nm:
                 types[nm.group(1)] = t
 
+    order = [n for _o, n, _w in re.findall(
+        r"std::memcpy\(buf \+ (\d+),\s*&(\w+),\s*(\d+)\)", body)]
+    magic = re.search(r"magic\s*=\s*(0x[0-9A-Fa-f]+)u?", body)
     fields = []
     for o, name, w in re.findall(
             r"std::memcpy\(buf \+ (\d+),\s*&(\w+),\s*(\d+)\)", body):
@@ -91,7 +101,7 @@ def cc_layout():
                 "%s declared %s but memcpy copies %s bytes" % (name, t, w))
         fields.append((int(o), int(w), code))
     fields.sort()
-    return total, fields
+    return total, fields, order, (int(magic.group(1), 16) if magic else None)
 
 
 def py_layout():
@@ -109,7 +119,7 @@ def py_layout():
 
 
 def check_layout():
-    cc_total, cc_fields = cc_layout()
+    cc_total, cc_fields, cc_order, cc_magic = cc_layout()
     py_total, py_fields, codes = py_layout()
     ok = True
     if cc_total != py_total:
@@ -131,9 +141,21 @@ def check_layout():
             ok = False
             print("FAIL: gap/overlap at offset %d (expected %d)" % (o, exp))
         exp = o + w
-    print("layout: %d bytes, %d fields, format '<%s'  -> %s"
-          % (cc_total, len(cc_fields), codes, "OK" if ok else "MISMATCH"))
-    return ok, codes
+    if cc_order != CC_FIELD_ORDER:
+        ok = False
+        print("FAIL: field ORDER changed in receiver.cc")
+        print("   got     :", cc_order)
+        print("   expected:", CC_FIELD_ORDER)
+    py_magic = re.search(r"MAGIC_SYN\s*=\s*(0x[0-9A-Fa-f]+)", open(SERVER_PY).read())
+    py_magic = int(py_magic.group(1), 16) if py_magic else None
+    if cc_magic is None or py_magic is None or cc_magic != py_magic:
+        ok = False
+        print("FAIL: magic mismatch receiver.cc=%s csi_server.py=%s"
+              % (cc_magic and hex(cc_magic), py_magic and hex(py_magic)))
+    print("layout: %d bytes, %d fields, format '<%s', magic %s  -> %s"
+          % (cc_total, len(cc_fields), codes,
+             cc_magic and hex(cc_magic), "OK" if ok else "MISMATCH"))
+    return ok, codes, cc_magic
 
 
 def free_port():
@@ -157,7 +179,7 @@ def read_one_event(url, budget=6.0):
     return None
 
 
-def check_transport(codes):
+def check_transport(codes, magic):
     hdr = struct.Struct("<" + codes)
     http_port, udp_port = free_port(), free_port()
     srv = subprocess.Popen(
@@ -172,7 +194,7 @@ def check_transport(codes):
             return False
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         for (f, t, st, r, c, n, sh) in CASES:
-            sock.sendto(hdr.pack(0x53594E31, f, t, st, r, c, n, sh, SFR, FC, TOL),
+            sock.sendto(hdr.pack(magic, f, t, st, r, c, n, sh, SFR, FC, TOL),
                         ("127.0.0.1", udp_port))
         time.sleep(1.0)
         rec = read_one_event("http://127.0.0.1:%d/stream" % http_port)
@@ -188,9 +210,14 @@ def check_transport(codes):
         if not ok:
             print("FAIL: got %d points, sent %d" % (len(hist), len(CASES)))
         for got, exp in zip(hist, CASES):
+            # cfo and snr are both f32 at adjacent offsets, so check_layout
+            # cannot see a swap between them -- assert their VALUES here or the
+            # pair is covered by neither half of this test.
             fields = (got["frame"], got["tid"], got["state"], got["resid"],
-                      got["shift"], got["tol"])
-            want = (exp[0], exp[1], exp[2], exp[3], exp[6], TOL)
+                      got["shift"], got["tol"],
+                      round(got["cfo"], 2), round(got["snr"], 2))
+            want = (exp[0], exp[1], exp[2], exp[3], exp[6], TOL,
+                    round(exp[4], 2), round(exp[5], 2))
             if fields != want:
                 ok = False
                 print("FAIL: %s != %s" % (fields, want))
@@ -204,12 +231,21 @@ def check_transport(codes):
                  "OK" if ok else "MISMATCH"))
         return ok
     finally:
-        os.killpg(os.getpgid(srv.pid), signal.SIGTERM)
+        # srv.poll() above reaps the pid, after which getpgid raises
+        # ProcessLookupError and destroys this test's own RESULT line.
+        try:
+            os.killpg(os.getpgid(srv.pid), signal.SIGTERM)
+        except (ProcessLookupError, OSError):
+            pass
+        try:
+            srv.wait(timeout=5)
+        except Exception:
+            pass
 
 
 def main():
-    lay_ok, codes = check_layout()
-    tr_ok = check_transport(codes)
+    lay_ok, codes, magic = check_layout()
+    tr_ok = check_transport(codes, magic)
     print("RESULT:", "PASS" if (lay_ok and tr_ok) else "FAIL")
     return 0 if (lay_ok and tr_ok) else 1
 

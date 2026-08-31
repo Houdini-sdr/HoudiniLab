@@ -1139,9 +1139,9 @@ enum SyncState : uint32_t {
 // `shift` is the schedule step actually applied, NOT fresh-minus-previous: both
 // anchors are ABSOLUTE sample times taken k frames apart, so their difference is
 // dominated by k*samps_per_frame elapsed time and overflows the int32 wire field
-// after ~17.5 s of run. It is reduced modulo the frame period and centred. `shift` is the anchor correction actually APPLIED,
-// nonzero only on an escalation re-anchor, which is the only place the UE moves
-// its schedule today (resync is a liveness detector, not a micro-corrector).
+// after ~17.5 s of run. It is reduced modulo the frame period and centred, and
+// is nonzero only on an escalation re-anchor -- the only place the UE moves its
+// schedule today (resync is a liveness detector, not a micro-corrector).
 static void sendSyncTelemetry(size_t frame, int tid, uint32_t state,
                               long long resid, double cfo_hz, double snr,
                               long long shift, uint32_t sfr, float carrier,
@@ -1380,8 +1380,27 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   constexpr long long kScatterTol = 1024;
   // Single place that knows the wire's fixed fields, so no call site can forget
   // the geometry the page needs to convert to ppm.
+  // WEAK is the only branch that does not clear `resync`, so it repeats at the
+  // in-window ATTEMPT rate rather than once per resync period. Unthrottled it
+  // evicts the whole LOCKED trace from the page's 240-deep history within
+  // seconds of a weak beacon, destroying the context that makes it diagnosable.
+  // Emit on the transition, then at most once a second.
+  uint32_t last_emit_state = 0;
+  long long weak_emit_ns = 0;
   auto emitSync = [&](uint32_t st, long long rs, double cfo_hz, double snr_db,
                       long long shift) {
+    if (st == kSyncWeak) {
+      const long long nowns =
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now().time_since_epoch())
+              .count();
+      if (last_emit_state == kSyncWeak &&
+          (nowns - weak_emit_ns) < 1000000000LL) {
+        return;
+      }
+      weak_emit_ns = nowns;
+    }
+    last_emit_state = st;
     sendSyncTelemetry(frame_id, tid, st, rs, cfo_hz, snr_db, shift,
                       static_cast<uint32_t>(config_->samps_per_frame()),
                       static_cast<float>(config_->freq()),
@@ -1526,8 +1545,13 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
         // gate can accept (+-kScatterTol = 1024) plus ~256 samples of
         // gold context for the correlator; a 700-sample lead left
         // residuals in [-1024,-444] undetectable (Opus review M3).
-        constexpr long long kLead = 1280;  // scatter + correlator context
-        constexpr long long kTail = 1088;  // scatter tolerance past the end
+        // DERIVED from the tolerance rather than hand-tuned: the slice must be
+        // able to PRESENT every residual the gate can accept, so a retune of
+        // kScatterTol (AP-31) has to move these with it, or the panel draws a
+        // band wider than the detector can ever fill.
+        constexpr long long kCorrContext = 256;  // gold correlator run-up
+        constexpr long long kLead = kScatterTol + kCorrContext;
+        constexpr long long kTail = kScatterTol + 64;
         if (off >= kLead && off + kTail <= request_samples) {
           auto* base = reinterpret_cast<std::complex<int16_t>*>(
               rxbuff.at(kSyncDetectChannel));

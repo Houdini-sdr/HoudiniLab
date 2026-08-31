@@ -33,7 +33,11 @@ cd "$SOUNDER_DIR" || { echo "no such directory: $SOUNDER_DIR" >&2; exit 1; }
 # shellcheck disable=SC1091
 [ -f "$VENV/bin/activate" ] && . "$VENV/bin/activate"
 export SOAPY_SDR_PLUGIN_PATH="${SOAPY_SDR_PLUGIN_PATH:-$VENV/lib/SoapySDR/modules0.8-3}"
-export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-$VENV/lib}"
+# PREPEND, do not default-if-unset. `activate` never touches this variable, so
+# on any rig where a Vivado/CUDA/module profile already set it, `:-` would leave
+# $VENV/lib out entirely and the sounder would link the system libSoapySDR --
+# producing evidence gathered against a different Soapy stack.
+export LD_LIBRARY_PATH="$VENV/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 # Refuse to silently destroy evidence a ledger row may cite.
 for i in $RUNS; do
@@ -44,20 +48,38 @@ for i in $RUNS; do
   fi
 done
 
-echo "campaign: runs [$RUNS] x $FRAMES frames, conf $CONF, from $SOUNDER_DIR"
+# The topology the chosen CONF actually points at, with the shipped default as
+# a fallback (teardown_framer.py's own default is the same file).
+TOPO=$(python3 -c "import json,sys
+try:
+    print(json.load(open(sys.argv[1])).get('serial_file') or 'files/topology-houdini.json')
+except Exception:
+    print('files/topology-houdini.json')" "$CONF" 2>/dev/null || echo files/topology-houdini.json)
+
+echo "campaign: runs [$RUNS] x $FRAMES frames, conf $CONF, topology $TOPO, from $SOUNDER_DIR"
 rc_all=0
 for i in $RUNS; do
   d="logs/pad$i"
   mkdir -p "$d" && rm -f "$d"/*
   # Release any framer a previous run left armed, exactly as the demo launcher
   # does; without it the next radio open fails with "a stream is open".
-  timeout 90 python3 csi_gui/teardown_framer.py \
-      --topology files/topology-houdini.json > "$d/teardown.log" 2>&1
-  sleep 5
-  env HOUDINI_MAX_FRAME="$FRAMES" HOUDINI_BS_RX_DEBUG=1 HOUDINI_UE_TX_DEBUG=1 \
-      HOUDINI_BS_DUMP_FRAME="$d" HOUDINI_CSI_R_DEBUG=1 \
-      ./build/sounder --view --conf_file "$CONF" > "$d/run.log" 2>&1
-  rc=$?
+  # Tear down the topology THIS CONF names, not a hardcoded one: CONF is an
+  # advertised knob and the tree ships several topologies, so a hardcoded file
+  # would issue device-touching framer releases against the wrong bench while
+  # the radios actually opened kept their stale state.
+  for attempt in 1 2; do
+    timeout 90 python3 csi_gui/teardown_framer.py --topology "$TOPO" \
+        > "$d/teardown.log" 2>&1
+    sleep 5
+    env HOUDINI_MAX_FRAME="$FRAMES" HOUDINI_BS_RX_DEBUG=1 HOUDINI_UE_TX_DEBUG=1 \
+        HOUDINI_BS_DUMP_FRAME="$d" HOUDINI_CSI_R_DEBUG=1 \
+        ./build/sounder --view --conf_file "$CONF" > "$d/run.log" 2>&1
+    rc=$?
+    # The cold start is known-flaky (the demo launcher retries for the same
+    # reason), so one attempt failing must not condemn a whole campaign.
+    [ "$rc" -eq 0 ] && break
+    echo "run $i attempt $attempt rc=$rc, retrying"
+  done
   echo "run $i rc=$rc"
   [ "$rc" -eq 0 ] || rc_all=1
   sleep 3
