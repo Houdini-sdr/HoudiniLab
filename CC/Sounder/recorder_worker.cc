@@ -577,6 +577,35 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
       for (auto& x : pts) x *= derot;
     }
   }
+  // Quality counter for the occasional-bad-constellation hunt [user
+  // 2026-08-30: rare bad frames with every other panel clean]: the honest
+  // phase-only score per datagram, an INFO baseline every 512th, a WARN on
+  // power-of-two occurrences below 0.7 with the frame id so bad frames can
+  // be correlated against resync / timing-fix / gate lines in the same log.
+  if (mod_ord == 4) {
+    std::complex<double> u4(0.0, 0.0);
+    for (const auto& x : pts) {
+      const double m = std::abs(x);
+      if (m < 1e-12) continue;
+      const std::complex<double> u(x.real() / m, x.imag() / m);
+      u4 += u * u * u * u;
+    }
+    const double score = std::abs(u4) / static_cast<double>(pts.size());
+    static std::atomic<unsigned> cns_total{0};
+    static std::atomic<unsigned> cns_low{0};
+    const unsigned tot = cns_total.fetch_add(1) + 1;
+    if (score < 0.7) {
+      const unsigned lo = cns_low.fetch_add(1) + 1;
+      if ((lo & (lo - 1)) == 0) {
+        MLPD_WARN(
+            "CNS score %.3f at frame %u (low occurrence %u of %u datagrams)\n",
+            score, pkt->frame_id, lo, tot);
+      }
+    } else if (tot % 512 == 0) {
+      MLPD_INFO("CNS score %.3f at frame %u (%u datagrams, %u low)\n", score,
+                pkt->frame_id, tot, cns_low.load());
+    }
+  }
   double psum = 0.0;
   for (const auto& x : pts) psum += std::norm(x);
   // Normalize to unit average power so the ideal alphabet is fixed in the GUI.
