@@ -81,7 +81,7 @@ def main():
     if args.dump:
         env["HOUDINI_CSI_DUMP"] = str(args.dump)
 
-    print("run  conc    verdict    pilot_peak  qual_med%s" % ("  dump" if args.dump else ""))
+    print("run  conc    verdict    pilot_peak%s" % ("  dump" if args.dump else ""))
     results = []
     for run in range(1, args.runs + 1):
         subprocess.run("pkill -f 'csi_serv[e]r.py'", shell=True)   # bracketed: see AP-15 notes
@@ -95,7 +95,7 @@ def main():
             cwd=args.sounder_dir, stdout=open("/tmp/score_run_%d.log" % run, "w"),
             stderr=subprocess.STDOUT, start_new_session=True, env=env)
 
-        cs, peaks, quals = [], [], []
+        cs, peaks = [], []
         if snap(url) is not None:
             for _ in range(args.frames):
                 d = snap(url, 15)
@@ -105,8 +105,6 @@ def main():
                     cs.append(concentration(d["cns"]["pts"]))
                 if "adc" in d:
                     peaks.append(d["adc"]["peak"])
-                if "csi" in d and d["csi"].get("qual_med") is not None:
-                    quals.append(d["csi"]["qual_med"])
                 time.sleep(0.3)
         med = lambda v: sorted(v)[len(v) // 2] if v else float("nan")
         c = med(cs)
@@ -115,8 +113,8 @@ def main():
         if args.dump and os.path.exists("/tmp/cns_dump.bin"):
             kept = "/tmp/dump_%d_%s.bin" % (run, verdict)
             subprocess.run("cp /tmp/cns_dump.bin %s" % kept, shell=True)
-        print("%3d  %-7.3f %-10s %-11.0f %-9.3f %s"
-              % (run, c, verdict, med(peaks), med(quals), kept))
+        print("%3d  %-7.3f %-10s %-11.0f %s"
+              % (run, c, verdict, med(peaks), kept))
         results.append(c)
         try:
             os.killpg(os.getpgid(proc.pid), signal.SIGTERM)

@@ -11,7 +11,6 @@
 
 #include <complex>
 #include <cstdint>
-#include <deque>
 #include <unordered_map>
 #include <vector>
 
@@ -83,6 +82,7 @@ class RecorderWorker {
   // the common phase re-draws per restart; anchoring the display at run
   // start keeps within-run drift visible while every run starts at 0.
   std::unordered_map<uint32_t, std::complex<float>> csi_phase_anchor_;
+  std::unordered_map<uint32_t, int> csi_sent_count_;  // anchor settle gate
   void initCsi(void);
   void streamCsi(Packet* pkt, NodeType node_type);   // routes pilot vs uplink data
   int slotEnergyStart(const short* d, int slot) const;   // opt-in energy-edge auto-detect

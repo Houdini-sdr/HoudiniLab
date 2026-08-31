@@ -51,8 +51,9 @@ std::vector<std::complex<int16_t>> Utils::cfloat_to_cint16(
   std::vector<std::complex<int16_t>> out(len, 0);
   // Saturate: the old bare cast WRAPPED any float at or beyond +-1.0 into a
   // full-scale sign flip (e.g. 1.01 -> -32444), silently corrupting the
-  // waveform. Clamp instead, so an over-unity peak clips by at most 1 LSB
-  // of error per sample and the damage is bounded and visible in a capture.
+  // waveform. Clamp instead: the error equals however far past full scale
+  // the input was, but it is bounded at the rail and visible in a capture
+  // instead of a sign flip.
   auto sat = [](float v) -> int16_t {
     const float s = v * 32768.0f;
     if (s >= 32767.0f) return 32767;

@@ -198,6 +198,16 @@ Config::Config(const std::string& jsonfile, const std::string& directory,
   remote_port_ = tddConf.value("remote_port", "55132");
   ue_tdd_pilot_ = tddConf.value("ue_tdd_pilot", false);
   ue_tx_advance_ticks_ = tddConf.value("ue_tx_advance_ticks", 0);
+  // The driver accepts TX anchors only on the 384-tick grid, so this knob is
+  // quantized: values below 192 vanish in the round-to-nearest, larger ones
+  // jump whole grid steps (Opus review M6). Fine seating comes from the
+  // zero-padded burst composition; leave this at 0 unless you know why not.
+  if (ue_tx_advance_ticks_ != 0 && ue_tx_advance_ticks_ % 384 != 0) {
+    MLPD_WARN(
+        "ue_tx_advance_ticks=%d is not a multiple of 384 ticks and will be "
+        "quantized by the TX anchor grid\n",
+        ue_tx_advance_ticks_);
+  }
   ue_pilot_horizon_ = tddConf.value("ue_pilot_horizon", 0);
   auto tx_advance = tddConf.value("tx_advance", json::array());
   if (tx_advance.empty() == true) {
@@ -992,8 +1002,8 @@ void Config::genPilots() {
   std::printf(
       "TX peaks (int16 counts): pilot %d (%.1f%% FS), UE data %d (%.1f%% FS), "
       "tx_scale %.4f\n",
-      pilot_pk, 100.0 * pilot_pk / 32767.0, data_pk,
-      100.0 * data_pk / 32767.0, tx_scale_);
+      pilot_pk, 100.0 * pilot_pk / 32768.0, data_pk,
+      100.0 * data_pk / 32768.0, tx_scale_);
 }
 
 void Config::loadULData() {

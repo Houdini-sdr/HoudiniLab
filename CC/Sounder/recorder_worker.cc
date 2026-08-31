@@ -30,7 +30,8 @@
 namespace Sounder {
 
 // Raw-ADC envelope panel. kAdcCols columns cover the whole slot however long it is;
-// 250 matches the panel width, so one column is one pixel and nothing is thrown away
+// 250 columns: enough that a burst edge lands within ~16 samples of its
+// true position at any plausible panel width; the page stretches it.
 // that the display could have shown.
 static constexpr int kAdcCols = 250;
 // Full scale for the int16 sample format this code uses everywhere (see utils.cc).
@@ -304,16 +305,13 @@ void RecorderWorker::sendCsi(Packet* pkt) {
   int s0 = nsym / 8, s1 = nsym - nsym / 8;
   if (s1 <= s0) { s0 = 0; s1 = nsym; }
   std::vector<std::complex<float>> hacc(N, {0.0f, 0.0f});
-  std::vector<float> pacc(N, 0.0f);  // incoherent power, for the repeat coherence below
   int used = 0;
   for (int sym = s0; sym < s1; ++sym) {
     const int base = es + sym * (cp + N) + cp;
     if (base + N > slot) break;
     auto F = symbolFft(d, base);
     for (int k = 0; k < N; ++k) {
-      const std::complex<float> g = F[k] * std::conj(pilot_ref_[k]);
-      hacc[k] += g;
-      pacc[k] += std::norm(g);
+      hacc[k] += F[k] * std::conj(pilot_ref_[k]);
     }
     ++used;
   }
@@ -324,7 +322,6 @@ void RecorderWorker::sendCsi(Packet* pkt) {
     const float pw = std::norm(pilot_ref_[k]);
     if (pw > 1e-6f && used > 0) H[k] = hacc[k] / (static_cast<float>(used) * pw);
   }
-  (void)pacc;
   // Throttle the CSI datagram (H is cached above regardless).
   const long long now =
       std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -341,17 +338,16 @@ void RecorderWorker::sendCsi(Packet* pkt) {
   // per-run anchor, i.e. the phase exactly as measured (window back-off
   // ramp, per-run common offset and all). Same wire slot, so the CSI2
   // layout is unchanged; the backend renders it as its own panel.
-  std::vector<float> qual(N, 0.0f);
-  for (int k = 0; k < N; ++k) qual[k] = std::arg(H[k]);
-  const int hn = 1;  // reps field kept for layout, no longer a window depth
-  // [magic 'CSI2'][frame][ant][num_sc][rate][reps][H re,im]*N[quality]*N
+  std::vector<float> raw_ph(N, 0.0f);
+  for (int k = 0; k < N; ++k) raw_ph[k] = std::arg(H[k]);
+  // [magic 'CSI2'][frame][ant][num_sc][rate][reps][H re,im]*N[raw phase]*N
   // 'CSI2' supersedes 'CSI1' (same layout without reps and quality). The dashboard
   // still accepts 'CSI1', so a backend running ahead of an un-rebuilt sounder shows
   // everything but the quality panel rather than showing nothing.
   std::vector<uint8_t> buf(24 + static_cast<size_t>(12) * N);
   const uint32_t magic = 0x43534932u, fr = pkt->frame_id, an = pkt->ant_id,
                  nsc = static_cast<uint32_t>(N),
-                 reps = static_cast<uint32_t>(hn);  // quality window depth
+                 reps = 1u;  // layout compatibility; no longer a window depth
   const float rate = static_cast<float>(cfg_->rate());
   std::memcpy(&buf[0], &magic, 4);
   std::memcpy(&buf[4], &fr, 4);
@@ -380,8 +376,12 @@ void RecorderWorker::sendCsi(Packet* pkt) {
   // (ledger 4.54). Capture the mean phase once at the run's first datagram
   // and rotate it out of the DISPLAY: every run starts at 0 and anything
   // that moves afterwards (CFO residual, re-locks) is real. Display only.
+  // Settle gate (Opus review M11): the very first datagram can carry a
+  // not-yet-settled H (bring-up transients), and the anchor is permanent for
+  // the run -- so draw it from the third sent update instead of the first.
+  const int sent = ++csi_sent_count_[pkt->ant_id];
   auto ait = csi_phase_anchor_.find(pkt->ant_id);
-  if (ait == csi_phase_anchor_.end()) {
+  if (ait == csi_phase_anchor_.end() && sent >= 3) {
     std::complex<float> m(0.0f, 0.0f);
     for (int k = 0; k < N; ++k) {
       const float a = std::abs(hw[k]);
@@ -393,7 +393,9 @@ void RecorderWorker::sendCsi(Packet* pkt) {
                                                : std::complex<float>(1.0f, 0.0f))
               .first;
   }
-  const std::complex<float> unrot = std::conj(ait->second);
+  const std::complex<float> unrot =
+      ait != csi_phase_anchor_.end() ? std::conj(ait->second)
+                                     : std::complex<float>(1.0f, 0.0f);
   for (int k = 0; k < N; ++k) {
     const std::complex<float> h0 = hw[k] * unrot;
     const float re = h0.real(), im = h0.imag();
@@ -401,7 +403,7 @@ void RecorderWorker::sendCsi(Packet* pkt) {
     std::memcpy(&buf[28 + 8 * k], &im, 4);
   }
   for (int k = 0; k < N; ++k)
-    std::memcpy(&buf[24 + 8 * N + 4 * k], &qual[k], 4);
+    std::memcpy(&buf[24 + 8 * N + 4 * k], &raw_ph[k], 4);
   (void)::send(csi_sock_, buf.data(), buf.size(), 0);
 }
 
@@ -428,7 +430,7 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
   const int es = symStart(d, slot);  // symbol-0 start (fixed prefix by default; sym_start knob)
   const auto& data_ind = cfg_->data_ind();
   double fix_r = 0.0;  // the timing-fix r this frame, for the low-score autopsy
-  // One-shot raw dump for offline analysis: [N cp prefix nsym ndata i32]
+  // One-shot raw dump for offline analysis: [N cp es nsym ndata i32]
   // [H re,im f32]*N [data_ind i32]*ndata [U slot re,im i16]*slot.
   if (std::getenv("HOUDINI_CSI_DUMP") != nullptr) {
     // Skip the first N constellation frames before dumping. One-shot on the FIRST
@@ -506,22 +508,30 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
     // tones. The ramp correction is exact for any real r.
     double best_score = -1.0;
     double best_r = 0.0;
+    // |x| is r-invariant (the ramp is phase-only), so pwr and the per-tone
+    // 4th powers at r=0 are computed ONCE; each r step only rotates the
+    // per-tone aggregate by e^{-j4*ang(k)} (Opus review LOW: the old loop
+    // recomputed the full demod for all 17 candidates).
+    std::vector<std::complex<double>> u4k(static_cast<size_t>(N), {0.0, 0.0});
+    double pwr = 0.0;
+    for (const auto& Y : Ys)
+      for (size_t j = 0; j < data_ind.size(); ++j) {
+        const size_t k = data_ind[j];
+        if (std::abs(H[k]) < hmin) continue;
+        const std::complex<double> x =
+            std::complex<double>(Y[k]) / std::complex<double>(H[k]);
+        const std::complex<double> x2 = x * x;
+        u4k[k] += x2 * x2;
+        pwr += std::norm(x);
+      }
     for (double r = -8.0; r <= 8.0; r += 1.0) {
       std::complex<double> s4(0.0, 0.0);
-      double pwr = 0.0;
-      for (const auto& Y : Ys)
-        for (size_t j = 0; j < data_ind.size(); ++j) {
-          const size_t k = data_ind[j];
-          if (std::abs(H[k]) < hmin) continue;
-          const double ang = 2.0 * M_PI * (static_cast<double>(k) - N / 2.0) * r / N;
-          const std::complex<double> hr =
-              std::complex<double>(H[k]) *
-              std::complex<double>(std::cos(ang), std::sin(ang));
-          const std::complex<double> x = std::complex<double>(Y[k]) / hr;
-          const std::complex<double> x2 = x * x;
-          s4 += x2 * x2;
-          pwr += std::norm(x);
-        }
+      for (size_t j = 0; j < data_ind.size(); ++j) {
+        const size_t k = data_ind[j];
+        const double a4 =
+            -4.0 * 2.0 * M_PI * (static_cast<double>(k) - N / 2.0) * r / N;
+        s4 += u4k[k] * std::complex<double>(std::cos(a4), std::sin(a4));
+      }
       const double score = (pwr > 0.0) ? std::abs(s4) / (pwr * pwr) : -1.0;
       if (score > best_score) { best_score = score; best_r = r; }
     }
@@ -539,14 +549,17 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
       for (size_t c = 0; c < pind.size(); ++c) {
         const size_t k = pind[c];
         if (k >= static_cast<size_t>(N)) continue;
+        // Deep-fade gate, same hmin as the data tones: an unweighted 4-point
+        // LS slope is dominated by one faded pilot tone (Opus review M10).
+        if (std::abs(H[k]) < hmin) continue;
+        const double ang0 =
+            2.0 * M_PI * (static_cast<double>(k) - N / 2.0) * best_r / N;
+        const std::complex<double> hr =
+            std::complex<double>(H[k]) *
+            std::complex<double>(std::cos(ang0), std::sin(ang0));
+        if (std::abs(hr) < 1e-9) continue;
         std::complex<double> acc(0.0, 0.0);
         for (const auto& Y : Ys) {
-          const double ang0 =
-              2.0 * M_PI * (static_cast<double>(k) - N / 2.0) * best_r / N;
-          const std::complex<double> hr =
-              std::complex<double>(H[k]) *
-              std::complex<double>(std::cos(ang0), std::sin(ang0));
-          if (std::abs(hr) < 1e-9) break;
           acc += (std::complex<double>(Y[k]) / hr) *
                  std::conj(std::complex<double>(psc[c]));
         }
@@ -613,7 +626,11 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
   // phase-only score per datagram, an INFO baseline every 512th, a WARN on
   // power-of-two occurrences below 0.7 with the frame id so bad frames can
   // be correlated against resync / timing-fix / gate lines in the same log.
-  if (mod_ord == 2 || mod_ord == 4 || mod_ord == 6) {
+  // QPSK only: |mean(u^4)| == 1 for ideal QPSK, but a PERFECT 16/64-QAM
+  // constellation scores well under the 0.7 floor (its points sit off the
+  // +-45 deg axes), so the wider gate would warn and autopsy-dump healthy
+  // frames all run (Opus review M9).
+  if (mod_ord == 2) {
     std::complex<double> u4(0.0, 0.0);
     for (const auto& x : pts) {
       const double m = std::abs(x);
@@ -638,8 +655,9 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
       const char* lowdir = std::getenv("HOUDINI_CNS_DUMP_LOW");
       if (lowdir != nullptr && lo <= 6) {
         char pb[512];
-        snprintf(pb, sizeof(pb), "%s/cns_low_%02u_f%u_r%+05d.bin", lowdir, lo,
-                 pkt->frame_id, static_cast<int>(std::lround(fix_r * 1000)));
+        snprintf(pb, sizeof(pb), "%s/cns_low_%02u_a%u_f%u_r%+05d.bin", lowdir,
+                 lo, pkt->ant_id, pkt->frame_id,
+                 static_cast<int>(std::lround(fix_r * 1000)));
         FILE* f = std::fopen(pb, "wb");
         if (f != nullptr) {
           const int32_t hdr[5] = {N, cp, es, nsym,
@@ -985,7 +1003,7 @@ void RecorderWorker::finalize(void) {
             "GAP_COLUMNS",
             std::string("start_sample,n_samples,start_time_ns,"
                         "cause(0=time_jump,1=host_ring,2=write_error,"
-                        "3=backward,4=resync)"));
+                        "3=backward,4=resync,5=untrusted_pilot)"));
         this->hdf5_->write_attribute("TOTAL_UNTRUSTED_SAMPLES",
                                      static_cast<double>(untrusted));
         MLPD_INFO("Recorder: /Data/Gaps -- %zu gap(s), %lld untrusted samples\n",

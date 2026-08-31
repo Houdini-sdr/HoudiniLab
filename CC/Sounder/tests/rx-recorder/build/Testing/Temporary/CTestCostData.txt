@@ -1,5 +1,0 @@
-grid 5 0.000852424
-pipeline 5 0.0279373
-h5_error 5 0.00401394
-capture_paths 4 0.00142105
----

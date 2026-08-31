@@ -64,24 +64,24 @@ def send_csi(sock, dest, frame, ant, h, rate, reps, noise, legacy):
         body = b"".join(struct.pack("<ff", z.real, z.imag) for z in h)
         sock.sendto(head + body, dest)
         return
-    head = struct.pack("<IIIIfI", MAGIC_CSI2, frame, ant, nsc, rate, reps)
+    head = struct.pack("<IIIIfI", MAGIC_CSI2, frame, ant, nsc, rate, 1)
     body = b"".join(struct.pack("<ff", z.real, z.imag) for z in h)
-    # Coherence the way the sounder derives it: weak subcarriers lose to the noise
-    # first, so the quality trace tracks the nulls in the magnitude panel.
-    qual = []
-    for z in h:
-        m = abs(z)
-        if m == 0.0:
-            qual.append(0.0)          # unused tone; the backend turns this into a gap
-        elif reps < 2:
-            # What the C++ actually emits here: the coherence of a single term is
-            # exactly 1.0 however bad the noise. Sending the honest-looking 0.0
-            # instead would make this feed useless for testing the case.
-            qual.append(1.0)
+    # The CSI2 trailing block is the RAW phase (radians): arg(H) before the
+    # sounder's display de-ramp and per-run anchor. Emulate the instrumental
+    # ramp the real sounder carries there (8 samples of CP back-off -> pi/4
+    # per subcarrier, wrapped), so the "phase (raw)" panel exercises its
+    # sawtooth rendering honestly instead of drawing coherence values on a
+    # phase axis (Opus review H9).
+    del reps, noise
+    raw = []
+    for k, z in enumerate(h):
+        if abs(z) == 0.0:
+            raw.append(0.0)   # unused tone; the magnitude gap hides it anyway
         else:
-            snr = (m * m) / max(1e-9, noise * noise)
-            qual.append(min(1.0, snr / (snr + 1.0 / max(1, reps - 1))))
-    sock.sendto(head + body + struct.pack("<%df" % nsc, *qual), dest)
+            ramp = 2.0 * math.pi * 8.0 * (k - nsc / 2.0) / nsc
+            ph = math.atan2(z.imag, z.real) + ramp
+            raw.append(math.atan2(math.sin(ph), math.cos(ph)))  # wrap to +-pi
+    sock.sendto(head + body + struct.pack("<%df" % nsc, *raw), dest)
 
 
 def send_cns(sock, dest, frame, ant, mod, evm):

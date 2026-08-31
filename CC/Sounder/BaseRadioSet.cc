@@ -8,6 +8,7 @@
   * ----------------------------------------------------------
   */
 #include "include/BaseRadioSet.h"
+#include "include/rx_gap_sink.h"
 
 #include <algorithm>
 #include <cmath>
@@ -471,7 +472,11 @@ void BaseRadioSet::activateHoudiniRx(void) {
 
 // ---- Houdini native-TDD framer (bs_hw_framer + radio_type=houdini) ----------
 namespace {
-constexpr long long kTddGridTicks = 384;       // 3.125 us grid (strobe offs)
+// 3.125 us anchor/strobe grid. NB the same driver constant appears as
+// kHoudiniStrobeOffsTicks (receiver.cc), a local kTddGridTicks in
+// clientTxPilots, and 3125 ns in ClientRadioSet::radioTx -- all four must
+// move together if the driver grid ever changes (Opus review LOW).
+constexpr long long kTddGridTicks = 384;
 constexpr long long kTddArmMargin = 36864000;  // ~300 ms of ticks
 }  // namespace
 
@@ -489,6 +494,7 @@ void BaseRadioSet::houdiniTddLadder(SoapySDR::Device* dev) {
 }
 
 long long BaseRadioSet::houdiniArmTdd(SoapySDR::Device* dev,
+                                      const std::function<void()>& resetup,
                                       long long symbol_ticks,
                                       long long symbols_per_frame) {
   const std::string arm = "symbol_ticks=" + std::to_string(symbol_ticks) +
@@ -507,6 +513,13 @@ long long BaseRadioSet::houdiniArmTdd(SoapySDR::Device* dev,
     } catch (const std::exception& e) {
       MLPD_WARN("TDD_ARM attempt %d refused: %s\n", attempt, e.what());
       houdiniTddLadder(dev);
+      // The ladder's TX_CLEAR invalidates the loaded replay RAM / schedule /
+      // strobe state (the setup path itself runs the ladder BEFORE loading
+      // them, for exactly that reason). Retrying the arm without re-running
+      // the setup could arm a framer with a cleared beacon: counters healthy,
+      // "armed" logged, no RF -- the silent class the ladder exists to
+      // prevent (Opus review H1).
+      if (resetup) resetup();
       continue;
     }
     std::stringstream ss(dev->readSetting("TDD_ARM"));
@@ -518,7 +531,10 @@ long long BaseRadioSet::houdiniArmTdd(SoapySDR::Device* dev,
       if (k == "epoch") epoch = std::stoll(v);
       if (k == "accepted") accepted = (v == "1");
     }
-    if (!accepted) houdiniTddLadder(dev);
+    if (!accepted) {
+      houdiniTddLadder(dev);
+      if (resetup) resetup();  // same reason as the throw path above
+    }
   }
   if (!accepted) throw std::runtime_error("Houdini TDD_ARM rejected");
   return epoch;
@@ -582,6 +598,8 @@ void BaseRadioSet::armHoudiniTdd(void) {
       const size_t spf_tdd = _cfg->slot_per_frame();
       const size_t b_pos = sched.find('B');
       const size_t beacon_slot = (b_pos == std::string::npos) ? 0 : b_pos;
+      // Driver register field widths: symbol_ticks u16, symbols_per_frame
+      // 13 bits (TDD framer contract).
       if (htdd_symbol_ticks_ > 0xFFFF || spf_tdd > 0x1FFF) {
         throw std::runtime_error(
             "armHoudiniTdd: slot-granular ring out of framer range "
@@ -610,17 +628,24 @@ void BaseRadioSet::armHoudiniTdd(void) {
               ? 0
               : bs_chans.at(std::min(static_cast<size_t>(_cfg->beacon_channel()),
                                      bs_chans.size() - 1));
-      long long t0 = 0;
-      // Explicitly disarm any strobe left armed by a previous (e.g. killed) run --
-      // TDD_CMD abort alone doesn't release it, and the replay RAM can't be filled
-      // while strobe mode is enabled ("Disarm first"). Safe when nothing is armed.
-      try {
-        dev->writeSetting("TDD_REPLAY_STROBE",
-                          "ch" + std::to_string(tx_ch) + ":off");
-      } catch (...) {
-      }
-      r->xmit(buffs, static_cast<int>(n_load), 0, t0);  // load replay RAM
-      dev->writeSetting("TDD_SCHED", tdd);
+      // The load/schedule/strobe sequence, re-runnable: the arm retry loop
+      // re-invokes it after every teardown ladder (Opus review H1 -- a
+      // ladder invalidates this state, so a bare arm retry could arm a
+      // beaconless framer).
+      const auto setup_framer = [&]() {
+        long long t0 = 0;
+        // Explicitly disarm any strobe left armed by a previous (e.g. killed)
+        // run -- TDD_CMD abort alone doesn't release it, and the replay RAM
+        // can't be filled while strobe mode is enabled ("Disarm first").
+        // Safe when nothing is armed.
+        try {
+          dev->writeSetting("TDD_REPLAY_STROBE",
+                            "ch" + std::to_string(tx_ch) + ":off");
+        } catch (...) {
+        }
+        r->xmit(const_cast<const void**>(buffs), static_cast<int>(n_load), 0,
+                t0);  // load replay RAM
+        dev->writeSetting("TDD_SCHED", tdd);
       // ONE burst per frame (loops=1) spanning the usable symbol: the RAM is
       // [beacon core 496][zeros], and len (2-sample units, driver contract)
       // covers (symbol - offs) samples, so the slot's DAC input is the beacon
@@ -636,11 +661,13 @@ void BaseRadioSet::armHoudiniTdd(void) {
       const size_t len_units = std::max<size_t>(
           (static_cast<size_t>(_cfg->beacon_size()) + 1) / 2,
           std::min(n_load / 2, span_units));
-      dev->writeSetting("TDD_REPLAY_STROBE",
-                        "ch" + std::to_string(tx_ch) +
-                            ":len=" + std::to_string(len_units) +
-                            ",loops=1,offs=" + std::to_string(kTddGridTicks));
-      htdd_epoch_ = houdiniArmTdd(dev, htdd_symbol_ticks_,
+        dev->writeSetting("TDD_REPLAY_STROBE",
+                          "ch" + std::to_string(tx_ch) +
+                              ":len=" + std::to_string(len_units) +
+                              ",loops=1,offs=" + std::to_string(kTddGridTicks));
+      };
+      setup_framer();
+      htdd_epoch_ = houdiniArmTdd(dev, setup_framer, htdd_symbol_ticks_,
                                   static_cast<long long>(spf_tdd));
       htdd_rx_cursor_ = 0;
       htdd_last_win_tick_ = 0;
@@ -764,24 +791,22 @@ int BaseRadioSet::houdiniTddRx(size_t radio_id, void* const* buffs,
           "%lld) -- UE schedule paused or link down\n",
           htdd_quiet_streak_, htdd_frame_counter_);
     }
-    // Deliver (the caller's P/U lockstep needs a buffer) but marked FULLY
-    // padded, so the view-mode refusal drops it instead of painting a noise
-    // H: an unmarked quiet frame tagged as the pilot slot rendered as a
-    // 1-2 s garbage blip on every panel [user 2026-08-30]. The pad latch is
-    // rewritten at the next cursor-0 read, so the mark scopes to this frame.
-    htdd_frame_pad_ += static_cast<size_t>(n);
+    // Deliver NOTHING: loopRecv's rx_ret==0 path releases the reserved
+    // buffers and continues cleanly (receiver.cc, the no-slot branch), so a
+    // quiet frame no longer has to ship a noise buffer tagged as the pilot
+    // slot -- which both painted garbage (pre-gate-fix) and emitted
+    // duplicate (frame,slot) packets for the whole length of a UE pause
+    // (Opus review M7). htdd_frame_counter_ intentionally does not advance:
+    // the first REAL frame still lands at recorder frame 0.
     static std::atomic<unsigned> quiet_single_count{0};
     const unsigned qc = quiet_single_count.fetch_add(1) + 1;
     if ((qc & (qc - 1)) == 0) {  // 1,2,4,8,... then quiet
       MLPD_WARN(
           "BS: no UE burst in frame read (rms %.0f vs floor %.0f, occurrence "
-          "%u) -- frame marked untrusted\n",
+          "%u) -- frame skipped\n",
           pilot_rms, floor_rms, qc);
     }
-    std::memcpy(buffs[0], s, static_cast<size_t>(n) * 4);
-    frameTime = (htdd_frame_counter_ << 32) |
-                (static_cast<long long>(htdd_rx_slots_.at(0)) << 16);
-    return n;
+    return 0;
   }
   if (htdd_quiet_warned_) {
     MLPD_WARN("BS: UE pilot RETURNED after %zu quiet frames (frame %lld)\n",
@@ -822,6 +847,12 @@ int BaseRadioSet::houdiniTddRx(size_t radio_id, void* const* buffs,
   const double pilot_ss = selfsim(p_at);
   if (pilot_ss < 0.4) {
     htdd_frame_pad_ += static_cast<size_t>(n);
+    // Recording mode ignores rx_pad (only the view refuses on it), so also
+    // push the extent into the gap sink: the HDF5's /Data/Gaps then records
+    // that this frame's slots are untrusted (Opus review M8).
+    Sounder::RxGapSink::instance().push(
+        {r->rxSamplePos() - cg + p_at, static_cast<int64_t>(n),
+         Sounder::kGapUntrustedPilot});
     static std::atomic<unsigned> bad_pilot_count{0};
     const unsigned bc = bad_pilot_count.fetch_add(1) + 1;
     if ((bc & (bc - 1)) == 0) {

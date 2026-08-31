@@ -193,14 +193,25 @@ Radio::Radio(const SoapySDR::Kwargs& args, const char soapyFmt[],
                           txStreamArgs.at("mts") == "true";
     const bool has_ch0 =
         std::find(channels.begin(), channels.end(), 0u) != channels.end();
-    if (want_mts && !has_ch0) {
-      SoapySDR::Kwargs aux;
-      aux["tx_mode"] = "replay";
-      aux["mts"] = "true";
-      aux_mts_txs_ = dev_->setupStream(SOAPY_SDR_TX, soapyFmt, {0}, aux);
+    // A throw from any setup below escapes the constructor, so ~Radio never
+    // runs: release what this ctor already owns (the aux stream, then the
+    // device) before rethrowing, or the in-process radio-open retry finds
+    // the device still held by a half-built attempt (Opus review M12).
+    try {
+      if (want_mts && !has_ch0) {
+        SoapySDR::Kwargs aux;
+        aux["tx_mode"] = "replay";
+        aux["mts"] = "true";
+        aux_mts_txs_ = dev_->setupStream(SOAPY_SDR_TX, soapyFmt, {0}, aux);
+      }
+      txs_ = dev_->setupStream(SOAPY_SDR_TX, soapyFmt, channels, txStreamArgs);
+      rxs_ = dev_->setupStream(SOAPY_SDR_RX, soapyFmt, channels, rxStreamArgs);
+    } catch (...) {
+      if (txs_ != nullptr) dev_->closeStream(txs_);
+      if (aux_mts_txs_ != nullptr) dev_->closeStream(aux_mts_txs_);
+      SoapySDR::Device::unmake(dev_);
+      throw;
     }
-    txs_ = dev_->setupStream(SOAPY_SDR_TX, soapyFmt, channels, txStreamArgs);
-    rxs_ = dev_->setupStream(SOAPY_SDR_RX, soapyFmt, channels, rxStreamArgs);
   } else {
     rxs_ = dev_->setupStream(SOAPY_SDR_RX, soapyFmt, channels, rxStreamArgs);
     txs_ = dev_->setupStream(SOAPY_SDR_TX, soapyFmt, channels, txStreamArgs);

@@ -117,6 +117,10 @@ Receiver::Receiver(
       tx_ptoks_(tx_ptoks),
       cl_tx_queue_(cl_tx_queue),
       cl_tx_ptoks_(cl_tx_ptoks) {
+  houdini_pilot_cursor_reset_.reserve(config_->num_cl_sdrs());
+  for (size_t i = 0; i < config_->num_cl_sdrs(); ++i)
+    houdini_pilot_cursor_reset_.emplace_back(
+        std::make_unique<std::atomic<bool>>(false));
   /* initialize random seed: */
   srand(time(NULL));
 
@@ -872,8 +876,12 @@ void Receiver::clientTxPilots(size_t user_id, long long base_time) {
                     static_cast<long long>(config_->cl_pilot_slots().at(user_id).at(0))) *
                        num_samps
                  : 0;
-  const char* he = std::getenv("HOUDINI_PILOT_HORIZON");
-  const int horizon = he != nullptr ? std::atoi(he) : config_->ue_pilot_horizon();
+  static const int horizon_env = [] {
+    const char* he = std::getenv("HOUDINI_PILOT_HORIZON");
+    return he != nullptr ? std::atoi(he) : -1;
+  }();
+  const int horizon =
+      horizon_env >= 0 ? horizon_env : config_->ue_pilot_horizon();
   if (horizon > 0 && config_->is_houdini() && config_->cl_sdr_ch() == 1) {
     const long long frame = static_cast<long long>(config_->samps_per_frame());
     // The driver only ACCEPTS burst anchors on the 384-tick / 3125 ns grid
@@ -884,21 +892,32 @@ void Receiver::clientTxPilots(size_t user_id, long long base_time) {
     // sample and the data rides at EXACTLY ul_off from it. Both snap draws
     // measured in ledger 4.44 (the +-192 per-run seat window and the bimodal
     // -128/+256 P->U differential) die here. [user 2026-08-30: "work around
-    // the TX burst seam by zero padding".] frame == 320*384, so the pad is
-    // constant within a run; recompose only when an anchor change moves it.
+    // the TX burst seam by zero padding".] with the shipped 1 ms frame
+    // (= 320*384 exactly) the pad is constant within a run and the burst
+    // composes once; a frame that is not a grid multiple would merely
+    // recompose per iteration, still correctly.
     constexpr long long kTddGridTicks = 384;
     thread_local long long pilot_cursor = 0;  // last-scheduled txTime (samples)
     thread_local std::vector<std::complex<int16_t>> burst;
     thread_local long long burst_pad = -1;
     // An anchor change must reach the WIRE: the cursor otherwise keeps
     // winning the max() below for ~horizon frames and the pilots stay on the
-    // stale grid (Opus review finding 4). Small drift corrections SHIFT the
-    // cursor (keeps burst continuity, no overlap with already-queued times);
-    // a large apply / escalation re-anchor RESETS it (the old queue is stale).
-    pilot_cursor += houdini_pilot_cursor_shift_.exchange(0);
-    if (houdini_pilot_cursor_reset_.exchange(false)) pilot_cursor = 0;
+    // stale grid (Opus review finding 4). On an escalation re-anchor, resume
+    // on the NEW grid at the first slot AFTER everything already queued:
+    // jumping back to txTime would command times behind bursts the driver
+    // already accepted (a late-start throw -> BAD Write -> a stalled cursor
+    // retrying the same overlap forever, Opus review M2), and nothing here
+    // can flush the driver's queue -- the stale-grid bursts simply drain
+    // (up to ~horizon frames) while the new grid takes over behind them.
     const long long end = txTime + static_cast<long long>(horizon) * frame;
     long long cur = std::max(pilot_cursor + frame, txTime);
+    if (user_id < houdini_pilot_cursor_reset_.size() &&
+        houdini_pilot_cursor_reset_.at(user_id)->exchange(false) &&
+        pilot_cursor + frame > txTime) {
+      const long long k =
+          (pilot_cursor + frame - txTime + frame - 1) / frame;  // ceil
+      cur = txTime + k * frame;
+    }
     int nsched = 0;
     const bool ul_fits = ul_present && ul_off >= num_samps;
     for (; cur <= end; cur += frame) {
@@ -1230,11 +1249,15 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
                                      // scatter means singles are noise)
   // AP-18 escalation [user]: give up on resync and return to the full
   // sliding-window acquisition when the anchored grid has plausibly lost the
-  // beacon. Triggers: 2 CONSECUTIVE exhausted episodes (a single episode of
-  // 100 misses is ~4.7% by chance at the ~3%/frame slot-0 beacon occupancy;
-  // two are ~0.2%) OR >= 4 SNR-valid detections held without agreeing with
-  // each other (incoherent state). Hold-off itself already covers the
-  // beacon-MOVED case; this covers beacon-LOST.
+  // beacon. Triggers: 2 CONSECUTIVE exhausted episodes OR >= 4 SNR-valid
+  // detections held without agreeing with each other (incoherent state).
+  // Under TARGETED resync an attempt only counts when the grid predicted the
+  // full beacon inside the window (~2% of windows), so one exhausted episode
+  // means ~100 predicted-position windows in a row failed to detect -- at a
+  // healthy SNR that is not chance but a dead or moved beacon; two episodes
+  // are pure confirmation (Opus review M4: the old ~4.7%-by-chance figure
+  // described the pre-targeting whole-window search). Hold-off itself
+  // already covers the beacon-MOVED case; this covers beacon-LOST.
   constexpr size_t kEscalateExhaustedEpisodes = 2;
   size_t resync_exhausted_streak = 0;
   const size_t beacon_detect_window_esc = static_cast<size_t>(
@@ -1249,7 +1272,8 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
     if (houdiniAcquireAnchor(tid, beacon_detect_window_esc, fresh)) {
       houdini_pilot_ref = fresh;
       houdini_pilot_ref_valid = true;
-      houdini_pilot_cursor_reset_.store(true);
+      if (static_cast<size_t>(tid) < houdini_pilot_cursor_reset_.size())
+        houdini_pilot_cursor_reset_.at(tid)->store(true);
       MLPD_INFO("Re-sync ESCALATION: re-anchored at %lld, tid %d\n", fresh,
                 tid);
     } else if (config_->running()) {
@@ -1314,8 +1338,12 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
               fr) +
              fr) %
             fr;
-        constexpr long long kLead = 700;   // STS+gold context before the end
-        constexpr long long kTail = 1088;  // scatter tolerance past it
+        // The slice must be able to PRESENT every residual the liveness
+        // gate can accept (+-kScatterTol = 1024) plus ~256 samples of
+        // gold context for the correlator; a 700-sample lead left
+        // residuals in [-1024,-444] undetectable (Opus review M3).
+        constexpr long long kLead = 1280;  // scatter + correlator context
+        constexpr long long kTail = 1088;  // scatter tolerance past the end
         if (off >= kLead && off + kTail <= request_samples) {
           auto* base = reinterpret_cast<std::complex<int16_t>*>(
               rxbuff.at(kSyncDetectChannel));
@@ -1474,6 +1502,8 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
               continue;  // rx_beacon_time is pre-hunt; restart the frame loop
             }
           } else {
+            // Iris/UHD path (on Houdini the anchor is always valid here:
+            // acquisition either confirms or throws).
             MLPD_WARN(
                 "Exceeded resync retry limit (%zu) for client %d reached "
                 "after %zu resync successes at frame: %zu.  Stopping!\n",

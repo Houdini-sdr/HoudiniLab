@@ -25,11 +25,11 @@ Usage (on the DGX, then browse via SSH port-forward ``-L 8080:localhost:8080``):
 Wire formats (little-endian), one datagram per (frame, antenna) per kind:
 
   CSI2  [magic][frame][ant][num_sc][rate f32][reps]  then num_sc * (H_re f32, H_im f32)
-        then num_sc * (raw phase f32): arg(H) before the display de-ramp and
-        the per-run anchor (this block carried repeat coherence historically)
-        in [0,1] across the `reps` pilot symbols averaged into H, so it is only a
-        measurement when reps >= 2.  CSI1 is the same without [reps] and without the
-        quality block, and is still accepted.
+        then num_sc * (raw phase f32): arg(H) in [-pi, pi] BEFORE the display
+        de-ramp and the per-run anchor. (Historically this block carried the
+        repeat coherence; `reps` is now a constant 1 kept for layout.) CSI1 is
+        the same without [reps] and without the trailing block, and is still
+        accepted.
   CNS1  [magic][frame][ant][num_pts][mod_order]      then num_pts * (I f32, Q f32)
   ADC2  [magic][frame][ant][cols][samps][rate f32][peak][clipped][slot][any_peak]
         [any_clipped]  then cols * (I_min, I_max, Q_min, Q_max) as int16.  A min/max
@@ -54,7 +54,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 MAGIC_CSI = 0x43534931   # "CSI1" -- pilot channel estimate (legacy, no quality)
-MAGIC_CSI2 = 0x43534932  # "CSI2" -- as CSI1 plus per-subcarrier repeat coherence
+MAGIC_CSI2 = 0x43534932  # "CSI2" -- as CSI1 plus per-subcarrier raw phase
 MAGIC_CNS = 0x434E5331   # "CNS1" -- equalized uplink-data constellation
 MAGIC_ADC = 0x41444331   # "ADC1" -- raw-ADC envelope, any slot (legacy)
 MAGIC_ADC2 = 0x41444332  # "ADC2" -- pilot-slot envelope + an all-slot clip ledger
@@ -75,7 +75,7 @@ def _parse_csi(payload, with_quality):
     """CSI1 or CSI2 -> one antenna's channel estimate.
 
     Both layouts are accepted so a dashboard running ahead of an un-rebuilt sounder
-    still draws everything except the quality panel, rather than drawing nothing.
+    still draws everything except the raw-phase panel, rather than drawing nothing.
     """
     if with_quality:
         magic, frame, ant, nsc, rate, reps = CSI2_HDR.unpack_from(payload, 0)
@@ -217,6 +217,8 @@ class Handler(BaseHTTPRequestHandler):
             body = (PAGE.replace("__STALE_MS__", str(self.server.stale_ms))
                         .replace("__MAG_TOP__", str(self.server.mag_top))
                         .replace("__MAG_SPAN__", str(self.server.mag_span))
+                        .replace("__GUARD_PRE__", str(self.server.guard_pre))
+                        .replace("__GUARD_POST__", str(self.server.guard_post))
                         .encode("utf-8"))
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -396,8 +398,23 @@ def main():
     srv = ThreadingHTTPServer((args.http_host, args.http_port), Handler)
     srv.fps = args.fps
     srv.stale_ms = args.stale_ms
+    if not (math.isfinite(args.mag_top) and math.isfinite(args.mag_span)
+            and args.mag_span > 0):
+        raise SystemExit("--mag-top/--mag-span must be finite (span > 0)")
     srv.mag_top = args.mag_top
     srv.mag_span = args.mag_span
+    # Nominal guard seats for the ADC panel's dashed markers, read from the
+    # config when one is given (Opus review M16: 128 was hardcoded but eight
+    # shipped configs use 160); harmless default otherwise.
+    srv.guard_pre, srv.guard_post = 128, 128
+    if getattr(args, "conf", None):
+        try:
+            with open(args.conf) as cf:
+                cj = json.load(cf)
+            srv.guard_pre = int(cj.get("ofdm_tx_zero_prefix", 128))
+            srv.guard_post = int(cj.get("ofdm_tx_zero_postfix", 128))
+        except Exception as exc:  # noqa: BLE001 -- markers are cosmetic
+            print("[csi] conf parse for guard markers failed: %s" % exc)
     srv.daemon_threads = True
     # Serve in a daemon thread so the main thread can wait for Ctrl+C. (Calling
     # srv.shutdown() from a signal handler on the serve_forever thread deadlocks.)
@@ -459,7 +476,6 @@ PAGE = r"""<!doctype html>
    under it, so the two share one subcarrier axis exactly. A strip in its own
    full-width row would be a different pixels-per-subcarrier scale, and a null would
    appear at two different x positions in two panels that describe the same tone. */
-.csi-quality{margin-top:.35rem}
 .csi-adc .csi-plot{grid-column:1 / -1}
 .csi-head{grid-column:1 / -1;margin-top:.5rem}
 .csi-head-lbl{font-size:.7rem;color:var(--tblr-secondary);margin-bottom:.15rem}
@@ -483,7 +499,6 @@ PAGE = r"""<!doctype html>
 .csi-h-wf   canvas{height:190px}
 .csi-h-cons canvas{height:250px}
 .csi-h-adc  canvas{height:220px}
-.csi-quality canvas{height:60px}
 .csi-stage{min-width:0}
 .csi-plot{min-width:0}
 .csi-x-axis{display:flex;justify-content:space-between;margin-left:36px;margin-top:.1rem;
@@ -515,8 +530,12 @@ PAGE = r"""<!doctype html>
 // wrong. Heights come from the .csi-h-* classes. See fitCard().
 // Full scale for the sample container: the 14-bit ADC is MSB-aligned in int16, so
 // the rail really is 32768 and not the converter's 8191 (device/README.md:239,
-// SoapyHoudiniSDR_streaming.cpp: full_scale = (1 << 13) << 2).
+// Full scale of the int16 sample CONTAINER (the absolute converter mapping
+// is unmeasured, DEMO_VERIFICATION.md 2.19). The parser stamps the same
+// value on every record as `full_scale`; drawAdc reads the record so a
+// future sounder-side value wins automatically (Opus review M18).
 const ADC_FS=32767;
+const GUARD_PRE=__GUARD_PRE__, GUARD_POST=__GUARD_POST__;
 const STALE_MS=__STALE_MS__;         // no update for this long -> dim + badge
 // Both top panels are FIXED frame to frame. An axis that re-ranges per frame makes
 // a static channel look alive and hides real drift, so nothing here auto-scales.
@@ -547,10 +566,7 @@ function readTheme(){
   const s=getComputedStyle(document.documentElement), v=n=>s.getPropertyValue(n).trim();
   C={grid:v('--tblr-border-color'), bg:v('--tblr-bg-surface-tertiary'),
      mag:v('--tblr-azure'), phase:v('--tblr-green'), warn:v('--tblr-red'),
-     muted:v('--tblr-secondary'), qual:v('--tblr-yellow'),
-     iCh:v('--tblr-azure'), qCh:v('--tblr-orange'),
-     iFill:'rgba('+v('--tblr-azure-rgb')+',0.35)',
-     qFill:'rgba('+v('--tblr-orange-rgb')+',0.35)',
+     rawph:v('--tblr-yellow'),
      pts:'rgba('+v('--tblr-azure-rgb')+',0.55)'};
 }
 let themeChanged=false;
@@ -683,7 +699,6 @@ function makeCard(ant){
               headPct:wrap.querySelector('.csi-head-pct'),
               headBar:wrap.querySelector('.csi-head-bar'),
               xax:wrap.querySelectorAll('.csi-view[data-view=channel] .csi-x-axis'),
-              adcSpanHeld:0,adcLowRun:0,
               lastCsi:-1,lastCns:-1,lastAdc:-1,
               csiRec:null,cnsRec:null,adcRec:null,frame:0};
   // Tabs are per card so you can watch one antenna's ADC while another shows its
@@ -779,7 +794,11 @@ function setScAxis(card,nsc){
   if(card.nsc===nsc) return;
   card.nsc=nsc;
   const lab=['-'+(nsc>>1),'DC','+'+(nsc>>1)];
-  for(let i=0;i<3;i++){
+  // Gutters in document order: mag, raw phase, corrected phase, waterfall.
+  // The constellation (index 4) keeps its own I/Q labels (Opus review M14:
+  // adding the phase stack shifted these indices and the waterfall lost its
+  // labels).
+  for(let i=0;i<4;i++){
     const sp=card.xax[i].querySelectorAll('span');
     for(let j=0;j<3;j++) sp[j].textContent=lab[j];
   }
@@ -801,7 +820,7 @@ function drawCsi(card,c,advance){
   // de-ramped + run-anchored (the sounder does both transforms).
   const dr=card.dim.rawph;
   grid(card.rawph,dr.w,dr.h);
-  if(c.raw_ph) line(card.rawph,c.raw_ph,-Math.PI,Math.PI,C.qual,dr.w,dr.h);
+  if(c.raw_ph) line(card.rawph,c.raw_ph,-Math.PI,Math.PI,C.rawph,dr.w,dr.h);
   grid(card.phase,dp.w,dp.h);
   line(card.phase,c.phase,-Math.PI,Math.PI,C.phase,dp.w,dp.h);
   // waterfall: scroll up 1px, draw new bottom row coloured by magnitude
@@ -820,55 +839,10 @@ function drawCsi(card,c,advance){
      +(c.rate/1e6).toFixed(2)+' MS/s · peak '+formatScaled(c.peak_db,'db');
 }
 
-// The fitted ADC axis is STICKY, not recomputed per frame.
-//
-// Refitting every update is the auto-ranging failure this dashboard avoids
-// everywhere else: the peak wanders (measured 972..1831 counts on a steady link),
-// so a per-frame fit redraws the same signal at a different size every update and
-// the panel shakes while nothing is actually changing.
-//
-// So the span is quantised to a 1-2-5 ladder and held. It grows the moment the
-// signal needs more room, because clipping the trace to keep the axis still would
-// be a lie. It only shrinks when the signal has dropped well inside the current
-// span (below 35%), so ordinary wander cannot drive it back and forth. The result
-// is an axis that sits still for a steady link and moves once when the level
-// genuinely changes.
-// A 1-2-5 ladder overshoots badly here: the pilot peak ranges 15..2058 counts, so a
-// single 2058 frame pins the axis at 5000 and leaves the usual ~1000 trace occupying a
-// fifth of the panel. A finer ladder still gives round numbers on the axis.
-function niceSpan(v){
-  const e=Math.pow(10,Math.floor(Math.log10(v))), m=v/e;
-  const rungs=[1,1.5,2,3,4,5,7,10];
-  for(const r of rungs) if(m<=r) return r*e;
-  return 10*e;
-}
-function adcSpan(card,need){
-  const cur=card.adcSpanHeld||0;
-  if(need>cur){ card.adcSpanHeld=niceSpan(need); card.adcLowRun=0; }
-  else if(need<cur*0.35){
-    // One dropout frame must not collapse the axis and then bounce it back: the
-    // link really does deliver the occasional near-empty slot (16 counts observed
-    // among 1100s). Shrink only once the level has STAYED low.
-    if(++card.adcLowRun>=10){ card.adcSpanHeld=niceSpan(need); card.adcLowRun=0; }
-  } else card.adcLowRun=0;
-  return card.adcSpanHeld;
-}
-
-// Raw-ADC min/max envelope, FITTED to the slot, with the absolute answer beside it.
-//
-// The first version pinned this axis to full scale, reasoning that the distance to the
-// rail is the point. On real hardware the signal came in at 1% of full scale, which put
-// the whole envelope 0.76 px from the midline: a panel that looked empty precisely when
-// it had the most to say. A fixed axis is right when you compare frames (the magnitude
-// panel) and wrong here, where the slot's own shape is what you are reading.
-//
-// So the trace is fitted and the y labels carry absolute counts, while "how much
-// converter range am I using" is answered by the fixed-scale bar underneath and by the
-// exact numbers below it. Nothing about the fit can flatter the signal: the scale is
-// written next to it, in counts, every frame.
 function drawAdc(card,a){
   card.adcRec=a;
   const ctx=card.adc, d=card.dim.adc, AW=d.w, AH=d.h;
+  const FS=a.full_scale||ADC_FS;
   ctx.clearRect(0,0,AW,AH);
   // Power envelope in dBFS on a FIXED 0..-80 axis [user 2026-08-30: the raw
   // I/Q min/max bands read as a noise block -- "pretty messy"]. One line, the
@@ -885,9 +859,9 @@ function drawAdc(card,a){
   for(let i=0;i<=4;i++){const y=(AH*i/4)|0;
     ctx.beginPath();ctx.moveTo(0,y+.5);ctx.lineTo(AW,y+.5);ctx.stroke();}
   // Nominal guard seats: signal should occupy [128, samps-128) of the slot.
-  if(a.samps>256){
+  if(a.samps>GUARD_PRE+GUARD_POST){
     ctx.strokeStyle=C.warn; ctx.setLineDash([3,3]);
-    for(const fx of [128/a.samps, (a.samps-128)/a.samps]){
+    for(const fx of [GUARD_PRE/a.samps, (a.samps-GUARD_POST)/a.samps]){
       const x=(AW*fx)|0;
       ctx.beginPath();ctx.moveTo(x+.5,0);ctx.lineTo(x+.5,AH);ctx.stroke();
     }
@@ -896,7 +870,7 @@ function drawAdc(card,a){
   ctx.strokeStyle=C.mag; ctx.lineWidth=1.5; ctx.beginPath();
   let started=false;
   for(let k=0;k<n;k++){
-    const db=20*Math.log10(Math.max(amp[k],1)/ADC_FS);
+    const db=20*Math.log10(Math.max(amp[k],1)/FS);
     const y=Math.min(AH-1,(db/DB_BOT)*AH);
     const x=AW*k/(n-1);
     if(!started){ctx.moveTo(x,y);started=true;}else ctx.lineTo(x,y);
@@ -904,8 +878,8 @@ function drawAdc(card,a){
   ctx.stroke();
   for(let i=0;i<=4;i++)
     if(card.adcY[i]) card.adcY[i].textContent=(DB_BOT*i/4).toFixed(0);
-  const pct=100*a.peak/ADC_FS;
-  card.adcTitle.textContent='pilot power envelope (dBFS), nominal guards dashed';
+  const pct=100*a.peak/FS;
+  card.adcTitle.textContent='pilot power envelope (dBFS), slot '+(a.slot>=0?a.slot:'?')+', nominal guards dashed';
   // The fixed-scale half of the panel. Under-driving is the failure we actually have,
   // so it gets a colour of its own rather than sharing "fine" with a healthy level.
   card.headBar.style.width=Math.max(0.5,Math.min(100,pct)).toFixed(2)+'%';
@@ -916,9 +890,9 @@ function drawAdc(card,a){
   // Clipping anywhere in the frame lights the badge, not just on the drawn slot.
   const anyClip=(a.any_clipped===undefined?a.clipped:a.any_clipped);
   card.clip.hidden=(anyClip===0);
-  const anyPct=100*(a.any_peak===undefined?a.peak:a.any_peak)/ADC_FS;
+  const anyPct=100*(a.any_peak===undefined?a.peak:a.any_peak)/FS;
   card.adcStatus.textContent='frame '+a.frame+' \u00b7 '+a.samps+' samples \u00b7 pilot peak '
-    +a.peak+' of '+ADC_FS+' ('+pct.toFixed(1)+'% FS) \u00b7 all slots: peak '
+    +a.peak+' of '+FS+' ('+pct.toFixed(1)+'% FS) \u00b7 all slots: peak '
     +anyPct.toFixed(1)+'% FS, '
     +(anyClip?anyClip+' sample(s) clipped':'no clipping');
 }

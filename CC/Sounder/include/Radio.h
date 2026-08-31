@@ -79,6 +79,13 @@ class Radio {
   // for the recorder's /Data/Gaps table.
   double rx_rate_ = 0.0;        // cached RX sample rate for the grid tracker
   int64_t rx_sample_pos_ = 0;  // absolute samples emitted across recvHoudini calls
+
+ public:
+  // Stream-relative sample position after the last recv, for callers that
+  // record gap extents against the same axis recvHoudini uses.
+  int64_t rxSamplePos() const { return rx_sample_pos_; }
+
+ private:
   size_t last_pad_samples_ = 0;  // zeros inserted into the last window (lastPadSamples)
   bool tx_status_unsupported_ = false;  // stream reported no status surface: stop asking
   size_t tx_status_events_ = 0;         // cumulative problem events seen

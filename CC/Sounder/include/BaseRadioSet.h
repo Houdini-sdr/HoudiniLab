@@ -7,6 +7,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <functional>
 #include <vector>
 
 #include "Radio.h"
@@ -62,7 +63,9 @@ class BaseRadioSet {
   void armHoudiniTdd(void);
   static void houdiniTddLadder(SoapySDR::Device* dev);
   int houdiniTddRx(size_t radio_id, void* const* buffs, long long& frameTime);
-  long long houdiniArmTdd(SoapySDR::Device* dev, long long symbol_ticks,
+  long long houdiniArmTdd(SoapySDR::Device* dev,
+                          const std::function<void()>& resetup,
+                          long long symbol_ticks,
                           long long symbols_per_frame);  // returns epoch
 
  public:

@@ -1,1 +1,0 @@
-/usr/bin/c++ -std=c++17 -Wall -Wextra -O2 CMakeFiles/test_grid.dir/test_grid.cc.o -o test_grid  -lpthread 

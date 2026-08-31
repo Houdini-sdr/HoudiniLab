@@ -15,6 +15,7 @@
 #include <complex>
 #include <stdexcept>
 #include <string>
+#include <memory>
 #include <vector>
 
 #if defined(USE_UHD)
@@ -87,13 +88,14 @@ class Receiver {
                            long long* window_time = nullptr);
   bool houdiniAcquireAnchor(int tid, size_t detect_window,
                             long long& anchor_out);
-  // Anchor-change signals into clientTxPilots' scheduling cursor (Opus
-  // review finding 4): shift = small drift correction; reset = re-anchor.
-  std::atomic<long long> houdini_pilot_cursor_shift_{0};
-  std::atomic<bool> houdini_pilot_cursor_reset_{false};
   void clientAdjustRx(size_t radio_id, size_t discard_samples);
 
  private:
+  // Re-anchor signal into clientTxPilots' scheduling cursor (Opus review
+  // finding 4), one flag per client thread: a single shared flag let one UE
+  // consume another's re-anchor (M5). The unused "shift" half of the old
+  // two-mode contract is removed -- nothing ever wrote it (M1).
+  std::vector<std::unique_ptr<std::atomic<bool>>> houdini_pilot_cursor_reset_;
   Config* config_;
 
 #if defined(USE_UHD)

@@ -26,6 +26,11 @@ documented trigger pattern is not exercised.
 Usage (on the rig host, houdini plugin path set):
     python3 ue_init_walk.py --ip <ue-ip> [--until N] [--out state.jsonl]
 
+NB the rate (122.88e6), NCO (500e6), channel (1 = "B") and local_port
+(10002) are hardcoded to the shipped houdini configs; "the same arguments"
+claim holds for those configs only. Re-derive from the config before citing
+this walk against a different one.
+
 Exit hygiene: closes any streams it opened, never activates or arms anything,
 and reports TDD_STAT at exit.
 """
@@ -69,7 +74,7 @@ def main():
         hi = dict(dev.getHardwareInfo())
         records.append({"_label": "hardware_info", "info": hi})
         print("    hardware_info: %s" % json.dumps(hi, sort_keys=True))
-        cur = snap(dev, "after_make")
+        cur = snap(dev, "after_make", ch=CH)
         records.append(cur)
         print("    baseline snapshot taken; boot TX rate ch%d = %s" %
               (CH, cur.get("tx_rate_ch%d" % CH)))
@@ -108,8 +113,9 @@ def main():
                 err = None
             except Exception as e:  # noqa: BLE001 - the throw IS the datum
                 err = str(e)
+                rc = 1  # a throwing step is a failed walk (Opus review)
                 print("    THREW: %s" % err)
-            nxt = snap(dev, "after_" + label)
+            nxt = snap(dev, "after_" + label, ch=CH)
             nxt["_call_s"] = round(time.time() - t0, 3)
             if err is not None:
                 nxt["_threw"] = err

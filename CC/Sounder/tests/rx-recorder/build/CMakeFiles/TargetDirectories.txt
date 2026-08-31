@@ -1,7 +1,0 @@
-/space/vmshare/repos/HoudiniLab/CC/Sounder/tests/rx-recorder/build/CMakeFiles/test_grid.dir
-/space/vmshare/repos/HoudiniLab/CC/Sounder/tests/rx-recorder/build/CMakeFiles/test_capture_paths.dir
-/space/vmshare/repos/HoudiniLab/CC/Sounder/tests/rx-recorder/build/CMakeFiles/test_rx_pipeline.dir
-/space/vmshare/repos/HoudiniLab/CC/Sounder/tests/rx-recorder/build/CMakeFiles/test_h5_error.dir
-/space/vmshare/repos/HoudiniLab/CC/Sounder/tests/rx-recorder/build/CMakeFiles/test.dir
-/space/vmshare/repos/HoudiniLab/CC/Sounder/tests/rx-recorder/build/CMakeFiles/edit_cache.dir
-/space/vmshare/repos/HoudiniLab/CC/Sounder/tests/rx-recorder/build/CMakeFiles/rebuild_cache.dir

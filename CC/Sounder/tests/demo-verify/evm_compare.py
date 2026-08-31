@@ -92,6 +92,9 @@ def main():
     fs = sorted(glob.glob(os.path.join(refdir, "../ul_data_f_*.bin"))) or \
         sorted(glob.glob(os.path.join(refdir, "ul_data_f_*.bin")))
     if fs:
+        if "QPSK" not in os.path.basename(fs[0]):
+            print(f"WARNING: reference {fs[0]} is not tagged QPSK -- a stale "
+                  f"reference for another modulation scores as garbage")
         r = np.fromfile(fs[0], dtype=np.float32)
         ref = (r[0::2] + 1j * r[1::2]).astype(np.complex128).reshape(-1, FFT)
         print(f"data reference: {fs[0]}")
@@ -104,15 +107,22 @@ def main():
         x = read_iq(mp.replace(".txt", ".bin"))
         bursts, _, _ = find_bursts(x, meta["n"])
         p_b = u_b = None
+        n_p = n_u = 0
         for (b0, b1) in bursts:
             w = x[b0:min(b1, b0 + meta["n"])]
             if selfsim(w) >= 0.5:
                 p_b = b0
+                n_p += 1
             else:
                 u_b = b0
+                n_u += 1
         if p_b is None or u_b is None:
             print(f"{os.path.basename(mp)}: missing burst (P={p_b} U={u_b})")
             continue
+        if n_p != 1 or n_u != 1:
+            print(f"  WARNING: {n_p} pilot / {n_u} data bursts in this read "
+                  f"-- last of each used; the P-U differential may span "
+                  f"frames (the 1.17-frame read can carry two copies)")
 
         ps, pcoh = align(x, p_b)
         tp = demod(x, ps)
@@ -122,7 +132,11 @@ def main():
         # pilot SNR: mean power over across-symbol variance, per occupied tone
         mean_t = tp[:, occ].mean(0)
         var_t = tp[:, occ].var(0)
-        psnr = 10 * np.log10(np.mean(np.abs(mean_t) ** 2 / (var_t + 1e-30)))
+        # Aggregate SNR (total signal power over total error power): the mean
+        # of per-tone ratios lets one quiet-variance tone dominate (Opus
+        # review).
+        psnr = 10 * np.log10(np.sum(np.abs(mean_t) ** 2)
+                             / (np.sum(var_t) + 1e-30))
         # per-symbol pilot EVM vs the across-symbol mean
         pevm = 10 * np.log10(
             np.mean(np.abs(tp[:, occ] - mean_t) ** 2, axis=1)
@@ -137,6 +151,7 @@ def main():
         best_r = 0.0
         best_du = 0
         best_conj = True
+        best_sc = float("nan")
         if ref is not None:
             rr = ref[:NSYM]
             good = np.abs(rr[:, occ]) > 1e-9
@@ -150,40 +165,63 @@ def main():
             # data landing relative to the pilot.
             kk = np.arange(FFT) - FFT // 2
 
+            # Ramp sign matches the sounder (it rotates H by +ang before
+            # dividing, so the data acquires e^{-j ang}): this tool's r now
+            # reads on the SAME convention as the sounder's logged r (Opus
+            # review: the old +j form reported the opposite sign).
             def score(td_c, r):
-                z = td_c[:, occ] * np.exp(1j * 2 * np.pi * r * kk[occ] / FFT)
+                z = td_c[:, occ] * np.exp(-1j * 2 * np.pi * r * kk[occ] / FFT)
                 num = np.abs(np.sum(z[good] * np.conj(rr[:, occ][good])))
                 den = np.sqrt(np.sum(np.abs(z[good]) ** 2) *
                               np.sum(np.abs(rr[:, occ][good]) ** 2))
                 return num / (den + 1e-30)
 
+            # r covers the sounder's own +-8 blind range (Opus review H7:
+            # +-2 saturated on the measured +3-sample draws and reported the
+            # grid edge as the answer).
             best_sc = -1.0
             for cj in (True, False):
                 for du in range(-48, 49, 2):
                     td_c = demod(x, us + du, conj_rx=cj) / (H if cj else H.conj())
                     if len(td_c) < NSYM:
                         continue
-                    for r in np.arange(-2, 2.01, 0.25):
+                    for r in np.arange(-8, 8.01, 0.5):
                         sc = score(td_c, r)
                         if sc > best_sc:
                             best_sc, best_du, best_r, best_conj = sc, du, r, cj
-            # refine r finely at the winning placement
+            if best_sc < 0.5:
+                print(f"== {os.path.basename(mp)}: NO LOCK (best coherence "
+                      f"{best_sc:.3f}) -- skipping frame")
+                continue
             td = demod(x, us + best_du, conj_rx=best_conj) / \
                 (H if best_conj else H.conj())
             rs = np.arange(best_r - 0.5, best_r + 0.5, 0.02)
             best_r = float(rs[int(np.argmax([score(td, r) for r in rs]))])
-            z = td[:, occ] * np.exp(1j * 2 * np.pi * best_r * kk[occ] / FFT)
+            if abs(best_r) >= 7.5:
+                print(f"  WARNING: r={best_r:+.2f} at the search edge -- "
+                      f"treat as unrecovered, not measured")
+            z = td[:, occ] * np.exp(-1j * 2 * np.pi * best_r * kk[occ] / FFT)
             # one global complex gain (the reference has its own scale)
             g = np.sum(z[good] * np.conj(rr[:, occ][good])) / \
                 np.sum(np.abs(rr[:, occ][good]) ** 2)
-            err = z - g * rr[:, occ]
-            sig = np.abs(g * rr[:, occ]) ** 2
-            dsnr = 10 * np.log10(np.mean(sig) / (np.mean(np.abs(err) ** 2) + 1e-30))
-            devm = 10 * np.log10(np.mean(np.abs(err) ** 2, axis=1)
-                                 / np.mean(sig) + 1e-30)
+            # Score only reference-valid cells: one leaked null tone in occ
+            # otherwise collapses the reported SNR (Opus review).
+            err_all = z - g * rr[:, occ]
+            sig_all = np.abs(g * rr[:, occ]) ** 2
+            dsnr = 10 * np.log10(np.mean(sig_all[good])
+                                 / (np.mean(np.abs(err_all[good]) ** 2) + 1e-30))
+            gm = good.astype(float)
+            devm = 10 * np.log10(
+                (np.sum(np.abs(err_all) ** 2 * gm, axis=1)
+                 / np.maximum(gm.sum(axis=1), 1))
+                / np.mean(sig_all[good]) + 1e-30)
         else:
             z = td[:, occ].flatten()
-            rot = np.angle(np.mean((z / np.abs(z)) ** 4)) / 4
+            z = z[np.abs(z) > 1e-12]
+            # (angle - pi)/4, matching recorder_worker's derotation: without
+            # the -pi the decisions sit 45 deg off and the reported SNR pins
+            # at 2-4 dB anti-correlated with the truth (Opus review H6).
+            rot = (np.angle(np.mean((z / np.abs(z)) ** 4)) - np.pi) / 4
             z = z * np.exp(-1j * rot)
             dec = (np.sign(z.real) + 1j * np.sign(z.imag)) / np.sqrt(2)
             scale = np.mean(np.abs(z))
@@ -193,9 +231,10 @@ def main():
 
         psnrs.append(psnr)
         dsnrs.append(dsnr)
-        print(f"\n== {os.path.basename(mp)} pilot@{ps} (coh {pcoh:.3f}) data@{us}"
-              f"  occ tones {len(occ)}  du={best_du:+d} r={best_r:+.2f} "
-              f"conj={best_conj}")
+        print(f"\n== {os.path.basename(mp)} pilot~{ps} (CP-plateau argmax, "
+              f"coh {pcoh:.3f}) data~{us}  occ tones {len(occ)}  "
+              f"du={best_du:+d} r={best_r:+.2f} (sounder convention) "
+              f"conj={best_conj} lock={best_sc:.3f}")
         print(f"  PILOT SNR {psnr:6.1f} dB   DATA SNR {dsnr:6.1f} dB   "
               f"delta {psnr - dsnr:+.1f} dB")
         print("  pilot per-sym EVM dB: " +
