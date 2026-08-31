@@ -44,8 +44,16 @@ static constexpr int kGoldLen = 128;
 static constexpr int kGoldReps = 2;
 static constexpr int kBeaconCoreLen = kStsLen * kStsReps + kGoldLen * kGoldReps;
 // Beacon CFO logs at ~9/s; print 1 in N so a long run does not add millions of
-// lines. The panel gets every sample regardless.
-static constexpr size_t kCfoLogEvery = 10;
+// lines. The panel gets every sample regardless. HOUDINI_CFO_LOG_EVERY=1 makes
+// it dense, which is what a calibration run wants.
+static size_t cfoLogEvery(void) {
+  static const size_t n = [] {
+    const char* e = std::getenv("HOUDINI_CFO_LOG_EVERY");
+    const long v = (e != nullptr) ? std::strtol(e, nullptr, 10) : 10;
+    return static_cast<size_t>(v > 0 ? v : 1);
+  }();
+  return n;
+}
 
 // Where the beacon END sits relative to the slot-0 start, per the
 // TRANSMITTED layout -- the constant the UE subtracts from sync_index to
@@ -1486,7 +1494,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
           const double cfo_ppm = (config_->freq() > 0.0)
                                      ? (cfo_hz / config_->freq()) * 1e6
                                      : 0.0;
-          if ((cfo_log_cnt++ % kCfoLogEvery) == 0) {
+          if ((cfo_log_cnt++ % cfoLogEvery()) == 0) {
             MLPD_INFO(
                 "Beacon CFO frame %zu: %+.1f Hz (%+.3f ppm), resid %+lld, "
                 "snr %.1f dB, tid %d\n",
