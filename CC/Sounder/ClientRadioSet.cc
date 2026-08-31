@@ -35,6 +35,26 @@ static void freeRadios(std::vector<Radio*>& radios) {
   }
 }
 
+// Deliberate UE carrier detune for CFO-estimator validation (AP-33/AP-34).
+// Both boards share a 10 MHz reference, so there is no natural CFO to measure
+// against; HOUDINI_UE_RX_FREQ_OFFSET_HZ imposes a KNOWN one on the UE receive
+// path only -- pure carrier offset, no sample-timing drift, so the beacon
+// estimator can be checked for sign and scale against a truth it cannot infer.
+// HOUDINI_UE_TX_FREQ_OFFSET_HZ detunes the UE transmit path instead, which is
+// what the BS then sees. Both default to 0 = nominal.
+static double envFreqOffsetHz(const char* name) {
+  const char* v = std::getenv(name);
+  return (v != nullptr) ? std::strtod(v, nullptr) : 0.0;
+}
+static double ueRxFreqOffsetHz(void) {
+  static const double v = envFreqOffsetHz("HOUDINI_UE_RX_FREQ_OFFSET_HZ");
+  return v;
+}
+static double ueTxFreqOffsetHz(void) {
+  static const double v = envFreqOffsetHz("HOUDINI_UE_TX_FREQ_OFFSET_HZ");
+  return v;
+}
+
 ClientRadioSet::ClientRadioSet(Config* cfg) : _cfg(cfg) {
   size_t num_radios = _cfg->num_cl_sdrs();
 
@@ -330,7 +350,8 @@ void ClientRadioSet::init(ClientRadioContext* context) {
                              tx_stream_args,
                              _cfg->is_houdini() ? _cfg->rate() : 0.0,
                              _cfg->is_houdini() ? _cfg->rate() : 0.0,
-                             _cfg->is_houdini() ? _cfg->nco() : 0.0);
+                             _cfg->is_houdini() ? _cfg->nco() : 0.0,
+                             ueRxFreqOffsetHz(), ueTxFreqOffsetHz());
   } catch (std::runtime_error& err) {
     has_runtime_error = true;
     MLPD_WARN("ClientRadioSet radio %d (%s) setup failed: %s\n", i,

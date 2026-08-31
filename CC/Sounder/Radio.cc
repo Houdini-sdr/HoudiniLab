@@ -140,7 +140,8 @@ Radio::Radio(const SoapySDR::Kwargs& args, const char soapyFmt[],
              const std::vector<size_t>& channels,
              const SoapySDR::Kwargs& rxStreamArgs,
              const SoapySDR::Kwargs& txStreamArgs, double preStreamRxRate,
-             double preStreamTxRate, double preStreamFreq) {
+             double preStreamTxRate, double preStreamFreq, double rxFreqOffset,
+             double txFreqOffset) {
   dev_ = SoapySDR::Device::make(args);
   if (dev_ == nullptr) {
     throw std::invalid_argument("error making SoapySDR::Device\n");
@@ -176,9 +177,25 @@ Radio::Radio(const SoapySDR::Kwargs& args, const char soapyFmt[],
     }
   }
   if (preStreamFreq > 0.0) {
+    // rx/txFreqOffset DELIBERATELY detune this radio to inject a known carrier
+    // offset (AP-33/AP-34 validation): with both boards on the shared 10 MHz
+    // reference there is no natural CFO, so the only way to confirm the beacon
+    // estimator's SIGN and SCALE is to impose one. Detuning RX alone gives pure
+    // carrier offset on the received beacon with ZERO sample-timing drift,
+    // which is exactly the term estimateCFO() should report and nothing else.
+    // Detuning TX instead moves what the BS sees. Normally both are 0.
+    const double rx_f = preStreamFreq + rxFreqOffset;
+    const double tx_f = preStreamFreq + txFreqOffset;
+    if (rxFreqOffset != 0.0 || txFreqOffset != 0.0) {
+      MLPD_WARN(
+          "Radio: DELIBERATE frequency offset in effect -- RX %+.1f Hz, TX "
+          "%+.1f Hz off the %.6f MHz NCO. This is a test injection; results "
+          "are NOT nominal.\n",
+          rxFreqOffset, txFreqOffset, preStreamFreq / 1e6);
+    }
     for (auto ch : channels) {
-      dev_->setFrequency(SOAPY_SDR_RX, ch, preStreamFreq);
-      dev_->setFrequency(SOAPY_SDR_TX, ch, preStreamFreq);
+      dev_->setFrequency(SOAPY_SDR_RX, ch, rx_f);
+      dev_->setFrequency(SOAPY_SDR_TX, ch, tx_f);
     }
   }
   // Houdini SoapyHoudiniSDR needs per-stream args (RX host port, TX replay/stream

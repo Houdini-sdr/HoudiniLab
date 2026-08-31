@@ -32,7 +32,8 @@ class Radio {
         const SoapySDR::Kwargs& rxStreamArgs = SoapySDR::Kwargs(),
         const SoapySDR::Kwargs& txStreamArgs = SoapySDR::Kwargs(),
         double preStreamRxRate = 0.0, double preStreamTxRate = 0.0,
-        double preStreamFreq = 0.0);
+        double preStreamFreq = 0.0, double rxFreqOffset = 0.0,
+        double txFreqOffset = 0.0);
   ~Radio(void);
   int recv(void* const* buffs, int samples, long long& frameTime);
   int activateRecv(const long long rxTime = 0, const size_t numSamps = 0,
