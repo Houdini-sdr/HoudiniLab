@@ -133,8 +133,12 @@ def main():
                   and meta.get("p_start", -1) >= 0
                   and isinstance(meta.get("u_start"), (int, float))
                   and meta.get("u_start", -1) >= 0)
+        # The C++ starts are SLOT starts; demod() takes the window base
+        # (slot + es, the half-CP back-off): es = prefix - cp/2 = 120 on the
+        # shipped configs.
+        kEs = 120
         if pinned:
-            ps, pcoh = int(meta["p_start"]), float("nan")
+            ps, pcoh = int(meta["p_start"]) + kEs, float("nan")
         else:
             ps, pcoh = align(x, p_b)
         tp = demod(x, ps)
@@ -156,7 +160,7 @@ def main():
 
         # data slot: same in-slot alignment as the pilot (both bursts carry the
         # transmitted [128 | 48x80 | 128] layout), H from the pilot mean
-        us = int(meta["u_start"]) if pinned else u_b + (ps - p_b)
+        us = (int(meta["u_start"]) + kEs) if pinned else u_b + (ps - p_b)
         H = np.ones(FFT, dtype=np.complex128)
         H[occ] = mean_t * np.where(LTS_F[occ] != 0, LTS_F[occ], 1.0)
         td = demod(x, us) / H
