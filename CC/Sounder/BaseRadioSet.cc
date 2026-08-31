@@ -104,26 +104,26 @@ BaseRadioSet::BaseRadioSet(Config* cfg, const bool calibrate_proc) : _cfg(cfg) {
       }
     }
     bsRadios.at(c).shrink_to_fit();
+    const size_t requested_radios = _cfg->n_bs_sdrs().at(c);
     _cfg->n_bs_sdrs().at(c) = num_radios;
-    // Zero radios is never success. The line above writes the surviving count
-    // back into the SHARED Config, and main() builds Config ONCE and reuses it
-    // across its retry loop -- so an attempt that strips the only radio leaves
-    // n_bs_sdrs=0 behind, and the NEXT attempt constructs nothing, finds nothing
-    // to strip, keeps radioNotFound false and reports "BaseRadioSet done". The
-    // run then looks healthy while activateHoudiniRx() iterates an empty vector,
-    // no RX is ever started, and the receive loop spins forever on a dead
-    // stream. Observed twice on the bench: a transient open failure turned into
-    // a permanently silent run that the retry could not recover. Fail loudly
-    // instead, so the caller retries in a fresh process with a clean config.
+    // Zero radios is never success: fail loudly rather than let
+    // activateHoudiniRx() iterate an empty vector and spin on a dead stream
+    // (observed on the bench before this guard existed).
     if (bsRadios.at(c).empty()) {
       radioNotFound = true;
       radio_serial_not_found.push_back(
           "(cell " + std::to_string(c) +
-          ": no base station radios were constructed; if an earlier attempt in "
-          "this process failed, it zeroed n_bs_sdrs in the shared config -- "
-          "retry in a fresh process)");
+          ": no base station radios were constructed)");
     }
     if (radioNotFound == true) {
+      // The count write-back above mutates the SHARED Config, which main()
+      // builds ONCE and reuses across its retry loop. Restore the requested
+      // topology so the in-process retry starts clean instead of constructing
+      // nothing and failing with a misleading zero-radio message (observed
+      // 2026-08-30: a transient server wedge on attempt 1 doomed attempt 2
+      // before it touched a radio). The destructor iterates the vector, not
+      // this count, so the restore cannot over-delete.
+      _cfg->n_bs_sdrs().at(c) = requested_radios;
       break;
     }
 
@@ -897,8 +897,11 @@ BaseRadioSet::~BaseRadioSet(void) {
     for (unsigned int i = 0; i < hubs.size(); i++)
       SoapySDR::Device::unmake(hubs.at(i));
   }
+  // Iterate the vector, not the config count: on a failed attempt the config
+  // count is restored to the REQUESTED topology (see the strip logic in the
+  // ctor) while the vector holds only the radios actually constructed.
   for (unsigned int c = 0; c < _cfg->num_cells(); c++)
-    for (size_t i = 0; i < _cfg->n_bs_sdrs().at(c); i++)
+    for (size_t i = 0; i < bsRadios.at(c).size(); i++)
       delete bsRadios.at(c).at(i);
 }
 
