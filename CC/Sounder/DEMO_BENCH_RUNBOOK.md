@@ -28,15 +28,21 @@ One sounder process drives BOTH radios. There is no per-board host process:
 `.22`) from the same process over the SoapyRemote control plane, and runs its
 own UDP data planes to each board.
 
-- Checkout: `~/repos/HoudiniLab-rx` (a worktree of this repo, branch
-  `feat/csi-gui-tabler`). This is the ONLY checkout the demo should run from.
-  `~/repos/HoudiniLab` also exists on the rig and contains an unrelated
-  workstream with its own stale sounder build. Always pass `--sounder-dir`
-  (section 3) and verify a fresh ship with
-  `strings build/sounder | grep <a-string-only-the-new-code-logs>`.
-- Binary: `~/repos/HoudiniLab-rx/CC/Sounder/build/sounder`, built on the rig
+- Checkout: `~/repos/HoudiniLab`. Since 2026-08-31 the demo runs from this,
+  the main checkout, which is on `feat/csi-gui-tabler`. The `~/repos/HoudiniLab-rx`
+  worktree also sits at the same commit and still works, but it is now detached
+  (a branch cannot be checked out in two worktrees) so it does NOT advance on a
+  pull. Whichever you use, `--sounder-dir` (section 3) is what selects the
+  binary, and a wrong value fails silently by running the other tree's build.
+- Binary: `~/repos/HoudiniLab/CC/Sounder/build/sounder`, built on the rig
   with `/usr/bin/cmake --build build --target sounder -j`.
-- Dashboard backend: `~/repos/HoudiniLab-rx/CC/Sounder/csi_gui/csi_server.py`
+  **Wipe the build directory when switching a checkout between branches.**
+  An incremental build over a cache configured on another branch linked stale
+  objects and produced a binary twice the correct size (916832 bytes clean),
+  while still passing a runtime-string check. `rm -rf build` then reconfigure.
+  Verify every build by a string only the new code logs, never by the build
+  log: `strings build/sounder | grep <a-string-only-the-new-code-logs>`.
+- Dashboard backend: `~/repos/HoudiniLab/CC/Sounder/csi_gui/csi_server.py`
   (HTTP on 8080, CSI datagrams in on UDP 9999, both localhost).
 - SoapySDR host stack: the validated houdini HOST plugin lives ONLY at
   `/home/houdini/houdini_test/lib/SoapySDR/modules0.8-3/`. The system
@@ -47,18 +53,18 @@ own UDP data planes to each board.
   `SoapySDR::Device::make() no match`.
 - Teardown helper: `csi_gui/teardown_framer.py` runs on the rig (it opens the
   boards, so it is device-touching).
-- Logs land under `~/repos/HoudiniLab-rx/CC/Sounder/logs/`.
+- Logs land under `~/repos/HoudiniLab/CC/Sounder/logs/`.
 
 ## 3. The exact launch used for the live demo
 
 On the rig, in one shell:
 
 ```sh
-cd ~/repos/HoudiniLab-rx/CC/Sounder
+cd ~/repos/HoudiniLab/CC/Sounder
 export HOUDINI_BS_RX_DEBUG=1 HOUDINI_UE_TX_DEBUG=1 HOUDINI_CSI_R_DEBUG=1
 export HOUDINI_CNS_DUMP_LOW=logs/cnslow
 python3 csi_gui/csi_server.py --launch --conf files/houdini-ul.json \
-    --sounder-dir ~/repos/HoudiniLab-rx/CC/Sounder \
+    --sounder-dir ~/repos/HoudiniLab/CC/Sounder \
     --mag-top 85 --mag-span 5
 ```
 
@@ -105,7 +111,21 @@ SoapySDRUtil --find="remote=tcp://168.6.244.21:55132,show=1"
 ## 6. Stack identity this runbook was written against
 
 fpga 1.30 `c88e0b5f` (2026-08-28), device 0.2.2 `71bcbc6b`, host 0.2.2
-`c20d7975`, protocol 1.0, SoapySDR 0.8.1, SoapyRemote 0.6.0. Both boards
+`d2861dc1`, protocol 1.0, SoapySDR 0.8.1, SoapyRemote 0.6.0. Both boards
 report `clock_ref: external`. Config: `files/houdini-ul.json`
 (30 slots x 4096 samples = exactly 1 ms per frame, beacon slot 0, pilot slot
 16, uplink data slot 18, `tx_advance` 247).
+
+The host plugin was rebuilt from `d2861dc1` on 2026-08-31, replacing the
+`c20d7975` build that the DEMO_VERIFICATION.md rows were taken against. The
+two are identical as compiled code: every commit between them touches only
+tracker files, `host/tests/bench/README.md`, and `host/tests/hil/test_tdd.py`,
+which is interpreted rather than linked. So the earlier evidence still stands;
+only the stamped build id moved. Read the id back from the installed module,
+never from the build log, because it is stamped at cmake CONFIGURE time and a
+plain rebuild keeps a stale stamp:
+
+```sh
+strings $VIRTUAL_ENV/lib/SoapySDR/modules0.8-3/libHoudiniSDRSupport.so \
+    | grep -E '^[0-9a-f]{8}$'
+```
