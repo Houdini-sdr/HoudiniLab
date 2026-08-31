@@ -124,7 +124,19 @@ def main():
                   f"-- last of each used; the P-U differential may span "
                   f"frames (the 1.17-frame read can carry two copies)")
 
-        ps, pcoh = align(x, p_b)
+        # Pin the demod windows to the dump's own C++ extraction starts when
+        # present (mode A verified them sample-exact): a free (du, r) search
+        # is DEGENERATE -- a window shift and a phase ramp are the same
+        # thing, so the r it prints is not comparable to the sounder's. With
+        # pinned windows the residual r sweep below is small and meaningful.
+        pinned = (isinstance(meta.get("p_start"), (int, float))
+                  and meta.get("p_start", -1) >= 0
+                  and isinstance(meta.get("u_start"), (int, float))
+                  and meta.get("u_start", -1) >= 0)
+        if pinned:
+            ps, pcoh = int(meta["p_start"]), float("nan")
+        else:
+            ps, pcoh = align(x, p_b)
         tp = demod(x, ps)
         pw = np.abs(tp).mean(0)
         occ = np.where(pw > 0.4 * np.median(pw[pw > 0]))[0]
@@ -144,7 +156,7 @@ def main():
 
         # data slot: same in-slot alignment as the pilot (both bursts carry the
         # transmitted [128 | 48x80 | 128] layout), H from the pilot mean
-        us = u_b + (ps - p_b)
+        us = int(meta["u_start"]) if pinned else u_b + (ps - p_b)
         H = np.ones(FFT, dtype=np.complex128)
         H[occ] = mean_t * np.where(LTS_F[occ] != 0, LTS_F[occ], 1.0)
         td = demod(x, us) / H
@@ -180,12 +192,14 @@ def main():
             # +-2 saturated on the measured +3-sample draws and reported the
             # grid edge as the answer).
             best_sc = -1.0
-            for cj in (True, False):
-                for du in range(-48, 49, 2):
+            du_grid = (0,) if pinned else tuple(range(-48, 49, 2))
+            r_span = 3.0 if pinned else 8.0
+            for cj in ((True,) if pinned else (True, False)):
+                for du in du_grid:
                     td_c = demod(x, us + du, conj_rx=cj) / (H if cj else H.conj())
                     if len(td_c) < NSYM:
                         continue
-                    for r in np.arange(-8, 8.01, 0.5):
+                    for r in np.arange(-r_span, r_span + 0.01, 0.5):
                         sc = score(td_c, r)
                         if sc > best_sc:
                             best_sc, best_du, best_r, best_conj = sc, du, r, cj

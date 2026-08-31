@@ -203,8 +203,12 @@ def mode_b(dump_dir, core_path):
         t0 = int(np.argmax(sc))
         # Peak-to-sidelobe gate (Opus review): without it a beacon-free
         # window confidently confirms a noise peak as the real beacon.
+        # The beacon core's 15x STS16 block self-correlates every 16 samples
+        # out to +-240, so the sidelobe exclusion must span the STS block or
+        # the gate cries wolf on every genuine beacon (measured 2.16 on a
+        # 48 dB window with a +-16 mask).
         mask = np.ones(sc.size, bool)
-        mask[max(0, t0 - 16):t0 + 17] = False
+        mask[max(0, t0 - 256):t0 + 257] = False
         psl = float(sc[t0] / (sc[mask].max() + 1e-30)) if mask.any() else 99.0
         true_end = t0 + cl
         print(f"\n== {os.path.basename(mp)} n={len(w)} live snr={meta['snr']:.1f} dB "
