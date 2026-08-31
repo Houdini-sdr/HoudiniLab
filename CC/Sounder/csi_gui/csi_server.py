@@ -25,7 +25,8 @@ Usage (on the DGX, then browse via SSH port-forward ``-L 8080:localhost:8080``):
 Wire formats (little-endian), one datagram per (frame, antenna) per kind:
 
   CSI2  [magic][frame][ant][num_sc][rate f32][reps]  then num_sc * (H_re f32, H_im f32)
-        then num_sc * (quality f32).  quality is the per-subcarrier repeat coherence
+        then num_sc * (raw phase f32): arg(H) before the display de-ramp and
+        the per-run anchor (this block carried repeat coherence historically)
         in [0,1] across the `reps` pilot symbols averaged into H, so it is only a
         measurement when reps >= 2.  CSI1 is the same without [reps] and without the
         quality block, and is still accepted.
@@ -87,9 +88,11 @@ def _parse_csi(payload, with_quality):
     if len(payload) < need:
         return None
     vals = struct.unpack_from("<%df" % (2 * nsc), payload, off)
-    qual_in = (struct.unpack_from("<%df" % nsc, payload, off + 8 * nsc)
-               if with_quality else None)
-    mag_db, phase, mags, qual = [], [], [], []
+    # CSI2's trailing float block carries the RAW per-subcarrier phase
+    # (radians): arg(H) before the display de-ramp and the per-run anchor.
+    rawph_in = (struct.unpack_from("<%df" % nsc, payload, off + 8 * nsc)
+                if with_quality else None)
+    mag_db, phase, mags, rawph = [], [], [], []
     for k in range(nsc):
         re, im = vals[2 * k], vals[2 * k + 1]
         m = math.hypot(re, im)
@@ -97,26 +100,15 @@ def _parse_csi(payload, with_quality):
         if m < 1e-9:               # unused subcarrier (guard band / DC null)
             mag_db.append(None)
             phase.append(None)
-            qual.append(None)      # a gap, not a zero: nothing was measured here
+            rawph.append(None)     # a gap, not a zero: nothing was measured here
         else:
             mag_db.append(20.0 * math.log10(m))
             phase.append(math.atan2(im, re))
-            qual.append(qual_in[k] if qual_in else None)
+            rawph.append(rawph_in[k] if rawph_in else None)
     peak = max((m for m in mags if m > 0), default=0.0)
-    # Below two repetitions there is nothing to compare, and the coherence of a single
-    # term is exactly 1.0 whatever the noise. Publishing that array would draw a
-    # flawless quality trace for a slot that measured nothing, so drop it here rather
-    # than expect every consumer to remember the caveat. None means "no measurement":
-    # reps is None when the sounder predates the field entirely.
-    measurable = with_quality and reps >= 2
-    if not measurable:
-        qual = None
-    meas = [q for q in (qual or []) if q is not None]
     return int(ant), {"frame": int(frame), "sc": int(nsc), "rate": float(rate),
-                      "mag_db": mag_db, "phase": phase, "qual": qual,
-                      "reps": (int(reps) if with_quality else None),
-                      # one number to watch, the median of the measured subcarriers
-                      "qual_med": (sorted(meas)[len(meas) // 2] if meas else None),
+                      "mag_db": mag_db, "phase": phase,
+                      "raw_ph": (rawph if with_quality else None),
                       "peak_db": (20.0 * math.log10(peak) if peak > 0 else 0.0)}
 
 
@@ -461,7 +453,9 @@ PAGE = r"""<!doctype html>
    dimming does not dim along with the thing it is explaining. */
 .csi-card.stale .csi-plots{opacity:.4}
 .csi-plots{display:grid;grid-template-columns:1fr 1fr;gap:.75rem 1rem}
-/* The quality strip sits in the SAME grid cell as the magnitude panel, directly
+.csi-phase-stack{display:flex;flex-direction:column;gap:.35rem}
+.csi-h-half canvas{height:74px}
+/* (retired) The quality strip sat in the SAME grid cell as the magnitude panel, directly
    under it, so the two share one subcarrier axis exactly. A strip in its own
    full-width row would be a different pixels-per-subcarrier scale, and a null would
    appear at two different x positions in two panels that describe the same tone. */
@@ -635,12 +629,7 @@ function makeCard(ant){
   wrap.className='card csi-card';
   const off='<span class="badge bg-red-lt text-red csi-off" hidden>off scale</span>';
   const clip='<span class="badge bg-red-lt text-red csi-clip" hidden>clipping</span>';
-  // The quality strip lives inside the magnitude plot's own frame so the two share
-  // one x scale. It qualifies the phase panel just as much, which the title says.
-  const qual='<div class="csi-quality">'
-    +'<div class="csi-plot-title"><span class="csi-qtitle">H stability</span></div>'
-    +'<div class="csi-stage">'+yAxis(['1.0','0.5','0.0'])
-    +'<canvas></canvas></div></div>';
+
   wrap.innerHTML=
     '<div class="card-header py-2">'
      +'<h3 class="card-title">RX antenna '+ant+'</h3>'
@@ -654,8 +643,13 @@ function makeCard(ant){
        +'<li class="nav-item"><a href="#" class="nav-link" data-view="adc">ADC</a></li>'
      +'</ul>'
      +'<div class="csi-plots csi-view" data-view="channel">'
-      +frame('|H| (dB) vs subcarrier','csi-h-line',magLabels(),['','',''],off,qual)
-      +frame('phase (rad)','csi-h-line',['1.0π','0.5π','0.0π','-0.5π','-1.0π'],['','',''])
+      +frame('|H| (dB) vs subcarrier','csi-h-line',magLabels(),['','',''],off)
+      // Raw above corrected [user]: raw = arg(H) exactly as measured (window
+      // back-off ramp + per-run offset); corrected = de-ramped and run-anchored.
+      +'<div class="csi-phase-stack">'
+      +frame('phase (raw, rad)','csi-h-half',['1.0π','0.0π','-1.0π'],['','',''])
+      +frame('phase (corrected, rad)','csi-h-half',['1.0π','0.0π','-1.0π'],['','',''])
+      +'</div>'
       +frame('waterfall |H| (time down)','csi-h-wf',['older','','now'],['','',''])
       +frame('constellation (equalized U)','csi-h-cons',
              [formatAxisValue(CONS_R),'0.00',formatAxisValue(-CONS_R)],
@@ -676,14 +670,9 @@ function makeCard(ant){
      +'<div class="text-secondary tnum mt-1 csi-adc-status" style="font-size:.75rem"></div>'
     +'</div>';
   document.getElementById('ants').appendChild(wrap);
-  // The quality canvas is nested INSIDE the first plot frame, so index by role
-  // rather than by position: querySelectorAll order would silently shift the moment
-  // a panel is added above it.
-  const q = wrap.querySelector('.csi-quality canvas');
-  const cvs=[...wrap.querySelectorAll('.csi-view canvas')].filter(c=>c!==q);
-  cards[ant]={magCv:cvs[0],phaseCv:cvs[1],wfCv:cvs[2],consCv:cvs[3],adcCv:cvs[4],
-              qualCv:q,dim:null,wfimg:null,
-              qtitle:wrap.querySelector('.csi-qtitle'),
+  const cvs=[...wrap.querySelectorAll('.csi-view canvas')];
+  cards[ant]={magCv:cvs[0],rawPhaseCv:cvs[1],phaseCv:cvs[2],wfCv:cvs[3],
+              consCv:cvs[4],adcCv:cvs[5],dim:null,wfimg:null,
               status:wrap.querySelector('.csi-status'),
               adcStatus:wrap.querySelector('.csi-adc-status'),
               el:wrap,badge:wrap.querySelector('.csi-stale'),
@@ -743,13 +732,13 @@ function fitCanvas(cv, useDpr){
 function fitCard(card, force){
   const d={};
   d.mag  = fitCanvas(card.magCv,  true);
+  d.rawph= fitCanvas(card.rawPhaseCv,true);
   d.phase= fitCanvas(card.phaseCv,true);
-  d.qual = fitCanvas(card.qualCv, true);
   d.cons = fitCanvas(card.consCv, true);
   d.adc  = fitCanvas(card.adcCv,  true);
   d.wf   = fitCanvas(card.wfCv,   false);
   card.dim=d;
-  card.mag=d.mag.ctx; card.phase=d.phase.ctx; card.qual=d.qual.ctx;
+  card.mag=d.mag.ctx; card.rawph=d.rawph.ctx; card.phase=d.phase.ctx;
   card.cons=d.cons.ctx; card.adc=d.adc.ctx; card.wf=d.wf.ctx;
   // Only when the waterfall's device size ACTUALLY changed: its history lives in
   // the bitmap and cannot be resampled honestly, so a real resize has to restart
@@ -808,10 +797,13 @@ function drawCsi(card,c,advance){
   // so rather than showing an innocent-looking empty panel.
   const fin=c.mag_db.filter(v=>v!==null);
   card.off.hidden=!(fin.length&&(Math.max(...fin)>top||Math.min(...fin)<bot));
-  // Phase: fixed -pi..+pi (it always was).
+  // Both phase panels: fixed -pi..+pi. Raw = as measured; corrected =
+  // de-ramped + run-anchored (the sounder does both transforms).
+  const dr=card.dim.rawph;
+  grid(card.rawph,dr.w,dr.h);
+  if(c.raw_ph) line(card.rawph,c.raw_ph,-Math.PI,Math.PI,C.qual,dr.w,dr.h);
   grid(card.phase,dp.w,dp.h);
   line(card.phase,c.phase,-Math.PI,Math.PI,C.phase,dp.w,dp.h);
-  drawQuality(card,c);
   // waterfall: scroll up 1px, draw new bottom row coloured by magnitude
   if(advance!==false){
     card.wf.drawImage(card.wf.canvas,0,-1);
@@ -825,57 +817,7 @@ function drawCsi(card,c,advance){
     card.wf.putImageData(card.wfimg,0,dw.bh-1);
   }
   card.status.textContent='frame '+c.frame+' · '+c.sc+' subcarriers · '
-     +(c.rate/1e6).toFixed(2)+' MS/s · peak '+formatScaled(c.peak_db,'db')
-     +(c.qual_med!==undefined&&c.qual_med!==null
-       ? ' · median quality '+c.qual_med.toFixed(3) : '');
-}
-
-// Per-subcarrier repeat coherence, on a fixed 0..1 axis because the quantity IS a
-// fraction: re-ranging it would turn "everything is fine" into a panel full of
-// dramatic looking noise. Nulls stay gaps, exactly as they do in the panel above.
-//
-// It is only a measurement when the slot carried two or more pilot symbols to
-// compare, so with fewer the panel says so rather than drawing a flat 1.0 that
-// would read as a perfect channel.
-function drawQuality(card,c){
-  const ctx=card.qual, d=card.dim.qual, W=d.w, QH=d.h;
-  ctx.clearRect(0,0,W,QH);
-  // Three states, all decided by the backend: no field at all (old sounder), a field
-  // but too few repetitions to mean anything, or a real measurement.
-  const note=(msg,title)=>{
-    card.qtitle.textContent='repeat quality ('+title+')';
-    ctx.fillStyle=C.muted; ctx.font='10px sans-serif'; ctx.textAlign='center';
-    ctx.fillText(msg, W/2, QH/2+3); ctx.textAlign='left';
-  };
-  if(c.reps===undefined||c.reps===null){
-    note('not reported','sounder predates this panel'); return;
-  }
-  if(c.qual===undefined||c.qual===null){
-    note('not measurable','needs 2+ pilot symbols, slot has '+c.reps); return;
-  }
-  const reps=c.reps;
-  card.qtitle.textContent='H stability (coherence over the last '+reps+' frames, '
-    +'noise floor '+(1/reps).toFixed(2)+')';
-  ctx.strokeStyle=C.grid; ctx.lineWidth=1;
-  for(let i=0;i<=2;i++){const y=(QH*i/2)|0;
-    ctx.beginPath();ctx.moveTo(0,y+.5);ctx.lineTo(W,y+.5);ctx.stroke();}
-  const xz=(W/2)|0; ctx.beginPath();ctx.moveTo(xz+.5,0);ctx.lineTo(xz+.5,QH);ctx.stroke();
-  // Pure noise does not read 0, it reads 1/reps. Without this line a trace sitting at
-  // the floor looks merely mediocre instead of meaning "there is no signal here".
-  const floorY=QH-(1/reps)*QH;
-  ctx.strokeStyle=C.warn; ctx.setLineDash([3,3]);
-  ctx.beginPath();ctx.moveTo(0,floorY);ctx.lineTo(W,floorY);ctx.stroke();
-  ctx.setLineDash([]);
-  const n=c.qual.length;
-  ctx.strokeStyle=C.qual; ctx.lineWidth=1.5; ctx.beginPath();
-  let started=false;
-  for(let k=0;k<n;k++){
-    const v=c.qual[k];
-    if(v===null){started=false;continue;}
-    const x=W*k/(n-1), y=QH-v*QH;
-    if(!started){ctx.moveTo(x,y);started=true;}else ctx.lineTo(x,y);
-  }
-  ctx.stroke();
+     +(c.rate/1e6).toFixed(2)+' MS/s · peak '+formatScaled(c.peak_db,'db');
 }
 
 // The fitted ADC axis is STICKY, not recomputed per frame.
@@ -926,36 +868,44 @@ function adcSpan(card,need){
 // written next to it, in counts, every frame.
 function drawAdc(card,a){
   card.adcRec=a;
-  const ctx=card.adc, d=card.dim.adc, AW=d.w, AH=d.h, mid=AH/2;
+  const ctx=card.adc, d=card.dim.adc, AW=d.w, AH=d.h;
   ctx.clearRect(0,0,AW,AH);
-  let need=0;
-  for(let k=0;k<a.cols;k++)
-    need=Math.max(need,Math.abs(a.i_min[k]),Math.abs(a.i_max[k]),
-                       Math.abs(a.q_min[k]),Math.abs(a.q_max[k]));
-  need=Math.max(1,need);
-  const span=adcSpan(card,need);
-  const sc=(AH/2-2)/span;   // 2 px so a rail-to-rail slot still shows its edges
+  // Power envelope in dBFS on a FIXED 0..-80 axis [user 2026-08-30: the raw
+  // I/Q min/max bands read as a noise block -- "pretty messy"]. One line, the
+  // burst structure visible: where energy starts and ends against the nominal
+  // guard seats (dashed), which is the live landing view. Clip catching is
+  // unchanged: the amplitude per column is still the max over EVERY sample it
+  // covers, so one clipped sample pins its column at 0 dBFS.
+  const n=a.cols, DB_BOT=-80;
+  const amp=new Array(n);
+  for(let k=0;k<n;k++)
+    amp[k]=Math.max(Math.abs(a.i_min[k]),Math.abs(a.i_max[k]),
+                    Math.abs(a.q_min[k]),Math.abs(a.q_max[k]));
   ctx.strokeStyle=C.grid; ctx.lineWidth=1;
   for(let i=0;i<=4;i++){const y=(AH*i/4)|0;
     ctx.beginPath();ctx.moveTo(0,y+.5);ctx.lineTo(AW,y+.5);ctx.stroke();}
-  const n=a.cols;
-  // Envelope as a filled band per channel: the band IS the min-to-max span of every
-  // sample in that column, so nothing brief can fall between two plotted points.
-  const band=(mn,mx,fill)=>{
-    ctx.fillStyle=fill; ctx.beginPath();
-    for(let k=0;k<n;k++){const x=AW*k/(n-1);
-      if(k===0) ctx.moveTo(x,mid-mx[k]*sc); else ctx.lineTo(x,mid-mx[k]*sc);}
-    for(let k=n-1;k>=0;k--) ctx.lineTo(AW*k/(n-1),mid-mn[k]*sc);
-    ctx.closePath(); ctx.fill();
-  };
-  band(a.q_min,a.q_max,C.qFill);
-  band(a.i_min,a.i_max,C.iFill);
-  // Absolute counts on the axis, so a fitted trace can never be mistaken for a big one.
+  // Nominal guard seats: signal should occupy [128, samps-128) of the slot.
+  if(a.samps>256){
+    ctx.strokeStyle=C.warn; ctx.setLineDash([3,3]);
+    for(const fx of [128/a.samps, (a.samps-128)/a.samps]){
+      const x=(AW*fx)|0;
+      ctx.beginPath();ctx.moveTo(x+.5,0);ctx.lineTo(x+.5,AH);ctx.stroke();
+    }
+    ctx.setLineDash([]);
+  }
+  ctx.strokeStyle=C.mag; ctx.lineWidth=1.5; ctx.beginPath();
+  let started=false;
+  for(let k=0;k<n;k++){
+    const db=20*Math.log10(Math.max(amp[k],1)/ADC_FS);
+    const y=Math.min(AH-1,(db/DB_BOT)*AH);
+    const x=AW*k/(n-1);
+    if(!started){ctx.moveTo(x,y);started=true;}else ctx.lineTo(x,y);
+  }
+  ctx.stroke();
   for(let i=0;i<=4;i++)
-    if(card.adcY[i]) card.adcY[i].textContent=formatAxisValue(span-(2*span)*i/4);
+    if(card.adcY[i]) card.adcY[i].textContent=(DB_BOT*i/4).toFixed(0);
   const pct=100*a.peak/ADC_FS;
-  card.adcTitle.textContent='raw ADC envelope, pilot slot'
-    +(a.slot>=0?' '+a.slot:'')+' (axis held at \u00b1'+span+' counts)';
+  card.adcTitle.textContent='pilot power envelope (dBFS), nominal guards dashed';
   // The fixed-scale half of the panel. Under-driving is the failure we actually have,
   // so it gets a colour of its own rather than sharing "fine" with a healthy level.
   card.headBar.style.width=Math.max(0.5,Math.min(100,pct)).toFixed(2)+'%';
@@ -970,8 +920,7 @@ function drawAdc(card,a){
   card.adcStatus.textContent='frame '+a.frame+' \u00b7 '+a.samps+' samples \u00b7 pilot peak '
     +a.peak+' of '+ADC_FS+' ('+pct.toFixed(1)+'% FS) \u00b7 all slots: peak '
     +anyPct.toFixed(1)+'% FS, '
-    +(anyClip?anyClip+' sample(s) clipped':'no clipping')
-    +' \u00b7 I blue, Q orange';
+    +(anyClip?anyClip+' sample(s) clipped':'no clipping');
 }
 
 // ideal alphabet (unit average power), mod = bits/symbol (2=QPSK,4=16QAM,6=64QAM)

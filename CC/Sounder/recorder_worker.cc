@@ -335,33 +335,15 @@ void RecorderWorker::sendCsi(Packet* pkt) {
       (now - it->second) < static_cast<long long>(csi_throttle_ns_))
     return;
   csi_last_ns_[pkt->ant_id] = now;
-  // Per-subcarrier repeat coherence ACROSS DISPLAY FRAMES [user 2026-08-30,
-  // twice]: the within-slot version saturates at 1.0 at bench SNR, and a
-  // first across-frames cut that accumulated per PROCESSED frame spanned
-  // only ~10 ms -- still pegged for any static channel. Accumulating here,
-  // after the throttle, one entry per DISPLAYED update, makes the window
-  // span kQualFrames/fps of wall time (~1/3 s at the shipped 30 fps) --
-  // the raynet-compiler's repeat-quality semantics, where repeats are
-  // successive sweeps. Surfaces extraction jitter (band edges first),
-  // resync events, and slow drift. Same estimator shape, same 1/reps noise
-  // floor, window depth on the wire as `reps`, so the dashboard logic
-  // (floor line, not-measurable-below-2) works unchanged.
-  constexpr size_t kQualFrames = 10;
-  auto& hist = csi_h_hist_[pkt->ant_id];
-  hist.push_back(H);
-  if (hist.size() > kQualFrames) hist.pop_front();
-  const int hn = static_cast<int>(hist.size());
+  // The former quality block now carries the RAW phase (radians) per
+  // subcarrier [user 2026-08-30: drop the H-stability strip, show raw phase
+  // above corrected phase]: arg(H) BEFORE the display de-ramp and the
+  // per-run anchor, i.e. the phase exactly as measured (window back-off
+  // ramp, per-run common offset and all). Same wire slot, so the CSI2
+  // layout is unchanged; the backend renders it as its own panel.
   std::vector<float> qual(N, 0.0f);
-  for (int k = 0; k < N; ++k) {
-    std::complex<float> acc(0.0f, 0.0f);
-    float pw = 0.0f;
-    for (const auto& h : hist) {
-      acc += h[k];
-      pw += std::norm(h[k]);
-    }
-    if (pw > 0.0f && hn > 0)
-      qual[k] = std::min(1.0f, std::norm(acc) / (static_cast<float>(hn) * pw));
-  }
+  for (int k = 0; k < N; ++k) qual[k] = std::arg(H[k]);
+  const int hn = 1;  // reps field kept for layout, no longer a window depth
   // [magic 'CSI2'][frame][ant][num_sc][rate][reps][H re,im]*N[quality]*N
   // 'CSI2' supersedes 'CSI1' (same layout without reps and quality). The dashboard
   // still accepts 'CSI1', so a backend running ahead of an un-rebuilt sounder shows
