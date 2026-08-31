@@ -28,17 +28,23 @@ def estimate(buf):
     amb = 1.0/GOLD_LEN
     m = round((f_coarse - f_fine)/amb)
     f = f_fine + m*amb
-    # receiver.cc ends with `if (config_->is_houdini()) f = -f;` -- the matched-NCO
-    # R2C RX mixer delivers baseband CONJUGATED, so a +f carrier offset reads as
-    # -f. BOTH shipped configs are radio_type houdini, so every production call
-    # takes that branch. Omitting it here would make this model an INVERTED
-    # reference for the one question it exists to answer, and AP-30 cites it as
-    # the offline validation of exactly that sign.
+    # receiver.cc ends with `if (config_->is_houdini()) f = -f;`, undoing the
+    # conjugation apply() models. BOTH shipped configs are radio_type houdini,
+    # so every production call takes that branch; omitting it here would leave
+    # the model unable to fail on the sign at all.
     return -f if HOUDINI else f
 
 def apply(f_hz, snr_db=None):
     fn = f_hz/FS
     out = [beacon[n]*cmath.exp(2j*math.pi*fn*n) for n in range(CORE)]
+    # Model the matched-NCO R2C RX mixer, which delivers baseband CONJUGATED.
+    # receiver.cc's estimateCFO() reads RAW samples, i.e. these, and its final
+    # `f = -f` exists to UNDO this. Without modelling it here the flip has
+    # nothing to undo and merely inverts the model -- and negating BOTH the
+    # measurement and the expectation, as an earlier cut of this file did, is
+    # vacuous: every verdict is then identical with the flip removed.
+    if HOUDINI:
+        out = [x.conjugate() for x in out]
     if snr_db is not None:
         sp = sum(abs(x)**2 for x in out)/CORE
         np_ = sp/(10**(snr_db/10))
@@ -47,10 +53,12 @@ def apply(f_hz, snr_db=None):
     return out
 
 print("=== noiseless sweep: recovered vs injected ===")
-# The expected READING is the production convention: a +f carrier offset reads
-# as -f through the conjugating R2C mixer (see estimate()).
+# With the mixer modelled in apply() and undone in estimate(), a +f carrier
+# offset must READ as +f on both paths. The houdini path exercises
+# conjugate-then-flip; the non-houdini path exercises neither. Same expectation,
+# so a broken flip fails the sweep instead of cancelling out.
 def expected(hz):
-    return -hz if HOUDINI else hz
+    return hz
 
 for hz in [0, 100, 1e3, 1e4, 1e5, 3e5, 4.7e5, 4.79e5, 4.81e5, 6e5, 1e6, 3.8e6]:
     got = estimate(apply(hz))*FS

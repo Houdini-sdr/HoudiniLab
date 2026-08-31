@@ -1650,7 +1650,6 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
             emitSync(kSyncHold, resid, cfo_hz, snr, 0);
             if (resync_hold_pending) {
               houdiniEscalate("beacon moved");
-              frame_id++;  // else the x-axis loses the blocking re-acquisition
               continue;  // rx_beacon_time is pre-hunt; restart the frame loop
             }
             resync_hold_pending = true;
@@ -1711,7 +1710,6 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
             resync_retry_cnt = 0;
             if (++resync_exhausted_streak >= kEscalateExhaustedEpisodes) {
               houdiniEscalate("episodes exhausted");
-              frame_id++;  // else the x-axis loses the blocking re-acquisition
               continue;  // rx_beacon_time is pre-hunt; restart the frame loop
             }
           } else {
