@@ -11,6 +11,7 @@
 
 #include <complex>
 #include <cstdint>
+#include <deque>
 #include <unordered_map>
 #include <vector>
 
@@ -77,6 +78,11 @@ class RecorderWorker {
   // Latest channel estimate H[k] per antenna (DC-centered), cached from the pilot
   // slot and used to equalize that antenna's uplink-data (U) slot.
   std::unordered_map<uint32_t, std::vector<std::complex<float>>> csi_h_;
+  // Last few per-frame H estimates per antenna, for the ACROSS-FRAME repeat
+  // coherence on the wire (the within-slot version saturates at bench SNR).
+  std::unordered_map<uint32_t,
+                     std::deque<std::vector<std::complex<float>>>>
+      csi_h_hist_;
   void initCsi(void);
   void streamCsi(Packet* pkt, NodeType node_type);   // routes pilot vs uplink data
   int slotEnergyStart(const short* d, int slot) const;   // opt-in energy-edge auto-detect

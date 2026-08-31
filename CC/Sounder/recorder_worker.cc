@@ -324,23 +324,34 @@ void RecorderWorker::sendCsi(Packet* pkt) {
     const float pw = std::norm(pilot_ref_[k]);
     if (pw > 1e-6f && used > 0) H[k] = hacc[k] / (static_cast<float>(used) * pw);
   }
-  // Per-subcarrier REPEAT COHERENCE, |mean of the per-symbol estimates|^2 over their
-  // mean power. This slot already carries `used` repetitions of the same pilot and we
-  // were averaging them and throwing the spread away. 1.0 means every repetition
-  // agreed, so H[k] is signal; low means they disagreed, so H[k] is noise wearing a
-  // channel's clothes and the magnitude and phase at that subcarrier mean nothing.
-  //
-  // Cauchy-Schwarz bounds the ratio to [0,1], but the floor for PURE NOISE is 1/used,
-  // not 0 (measured: 8 reps -> 0.128, 32 reps -> 0.030). The dashboard draws that
-  // floor as a reference line, because 0.2 out of 1.0 sounds poor and at 6 reps is
-  // indistinguishable from noise. It is only a measurement at all when used >= 2:
-  // a single term makes the ratio exactly 1.0 however bad the noise, which is why
-  // `used` goes on the wire instead of being assumed.
+  // Per-subcarrier repeat coherence, ACROSS FRAMES [user 2026-08-30]: the
+  // within-slot version (agreement among this slot's own LTS repetitions)
+  // saturates at 1.0 for any healthy link -- a 34 dB pilot pins it -- so the
+  // trace carried no information. Across the last kQualFrames per-frame H
+  // estimates it measures what the operator actually wants: is H STABLE
+  // frame to frame. It surfaces per-frame extraction jitter (band edges
+  // wobble first), resync events, and slow drift. Same estimator shape and
+  // the same 1/reps pure-noise floor, with the window count on the wire as
+  // `reps`, so the dashboard logic (floor line, not-measurable-below-2)
+  // works unchanged. pacc/the within-slot spread still feeds nothing; kept
+  // computed above only because hacc accumulation needs the loop anyway.
+  constexpr size_t kQualFrames = 8;
+  auto& hist = csi_h_hist_[pkt->ant_id];
+  hist.push_back(H);
+  if (hist.size() > kQualFrames) hist.pop_front();
+  const int hn = static_cast<int>(hist.size());
   std::vector<float> qual(N, 0.0f);
-  for (int k = 0; k < N; ++k)
-    if (pacc[k] > 0.0f && used > 0)
-      qual[k] = std::min(
-          1.0f, std::norm(hacc[k]) / (static_cast<float>(used) * pacc[k]));
+  for (int k = 0; k < N; ++k) {
+    std::complex<float> acc(0.0f, 0.0f);
+    float pw = 0.0f;
+    for (const auto& h : hist) {
+      acc += h[k];
+      pw += std::norm(h[k]);
+    }
+    if (pw > 0.0f && hn > 0)
+      qual[k] = std::min(1.0f, std::norm(acc) / (static_cast<float>(hn) * pw));
+  }
+  (void)pacc;
   // Throttle the CSI datagram (H is cached above regardless).
   const long long now =
       std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -358,7 +369,7 @@ void RecorderWorker::sendCsi(Packet* pkt) {
   std::vector<uint8_t> buf(24 + static_cast<size_t>(12) * N);
   const uint32_t magic = 0x43534932u, fr = pkt->frame_id, an = pkt->ant_id,
                  nsc = static_cast<uint32_t>(N),
-                 reps = static_cast<uint32_t>(used);
+                 reps = static_cast<uint32_t>(hn);  // quality window depth
   const float rate = static_cast<float>(cfg_->rate());
   std::memcpy(&buf[0], &magic, 4);
   std::memcpy(&buf[4], &fr, 4);
@@ -366,8 +377,20 @@ void RecorderWorker::sendCsi(Packet* pkt) {
   std::memcpy(&buf[12], &nsc, 4);
   std::memcpy(&buf[16], &rate, 4);
   std::memcpy(&buf[20], &reps, 4);
+  // Display-only de-ramp: the FFT window is deliberately backed off
+  // (prefix - es) samples into the CP (the anti-ISI margin), which rides a
+  // 2*pi*(prefix-es)/N rad-per-subcarrier ramp on H -- at 8 samples that
+  // wraps every 8 tones and the phase panel drew sawtooth jumps [user
+  // 2026-08-30: "why the jump at DC and at DC+ a little"]. Remove the known
+  // intentional shift from the WIRE copy only, so the panel shows the
+  // physical channel phase; the cached H (equalization) is untouched.
+  const float deramp_s = static_cast<float>(cfg_->prefix()) - static_cast<float>(es);
   for (int k = 0; k < N; ++k) {
-    const float re = H[k].real(), im = H[k].imag();
+    const float ang = 2.0f * static_cast<float>(M_PI) * deramp_s *
+                      (static_cast<float>(k) - N / 2.0f) / static_cast<float>(N);
+    const std::complex<float> rot(std::cos(ang), std::sin(ang));
+    const std::complex<float> hw = H[k] * rot;
+    const float re = hw.real(), im = hw.imag();
     std::memcpy(&buf[24 + 8 * k], &re, 4);
     std::memcpy(&buf[28 + 8 * k], &im, 4);
   }

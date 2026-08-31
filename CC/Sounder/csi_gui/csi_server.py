@@ -638,7 +638,7 @@ function makeCard(ant){
   // The quality strip lives inside the magnitude plot's own frame so the two share
   // one x scale. It qualifies the phase panel just as much, which the title says.
   const qual='<div class="csi-quality">'
-    +'<div class="csi-plot-title"><span class="csi-qtitle">repeat quality</span></div>'
+    +'<div class="csi-plot-title"><span class="csi-qtitle">H stability</span></div>'
     +'<div class="csi-stage">'+yAxis(['1.0','0.5','0.0'])
     +'<canvas></canvas></div></div>';
   wrap.innerHTML=
@@ -854,7 +854,7 @@ function drawQuality(card,c){
     note('not measurable','needs 2+ pilot symbols, slot has '+c.reps); return;
   }
   const reps=c.reps;
-  card.qtitle.textContent='repeat quality (coherence over '+reps+' pilot symbols, '
+  card.qtitle.textContent='H stability (coherence over the last '+reps+' frames, '
     +'noise floor '+(1/reps).toFixed(2)+')';
   ctx.strokeStyle=C.grid; ctx.lineWidth=1;
   for(let i=0;i<=2;i++){const y=(QH*i/2)|0;
