@@ -5,6 +5,10 @@ browser: install the dependencies, build the sounder, point it at your own two
 radios, run the base station and client together, and read the four panels the
 dashboard draws. Every step shows the exact command and what you should see.
 
+If you are on the lab bench, `DEMO_BENCH_RUNBOOK.md` next to this file fills
+in every placeholder below with the exact machines, paths, and commands the
+live demo runs with. This walkthrough stays generic so it works on any bench.
+
 Five placeholders appear throughout. Add your own values:
 
 - `<bs-ip>`: the address of the radio node you will run as the base station
