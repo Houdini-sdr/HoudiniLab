@@ -377,6 +377,11 @@ def main():
     ap.add_argument("--dest-host", default="127.0.0.1",
                     help="host the sounder streams CSI to (when --launch)")
     args = ap.parse_args()
+    # Validate BEFORE anything launches: a SystemExit after _launch_sounder
+    # orphaned the sounder group holding the radios (second review 2.5).
+    if not (math.isfinite(args.mag_top) and math.isfinite(args.mag_span)
+            and args.mag_span > 0):
+        raise SystemExit("--mag-top/--mag-span must be finite (span > 0)")
 
     t = threading.Thread(target=_udp_loop, args=(args.udp_host, args.udp_port),
                          daemon=True)
@@ -398,9 +403,6 @@ def main():
     srv = ThreadingHTTPServer((args.http_host, args.http_port), Handler)
     srv.fps = args.fps
     srv.stale_ms = args.stale_ms
-    if not (math.isfinite(args.mag_top) and math.isfinite(args.mag_span)
-            and args.mag_span > 0):
-        raise SystemExit("--mag-top/--mag-span must be finite (span > 0)")
     srv.mag_top = args.mag_top
     srv.mag_span = args.mag_span
     # Nominal guard seats for the ADC panel's dashed markers, read from the
@@ -531,9 +533,10 @@ PAGE = r"""<!doctype html>
 // Full scale for the sample container: the 14-bit ADC is MSB-aligned in int16, so
 // the rail really is 32768 and not the converter's 8191 (device/README.md:239,
 // Full scale of the int16 sample CONTAINER (the absolute converter mapping
-// is unmeasured, DEMO_VERIFICATION.md 2.19). The parser stamps the same
-// value on every record as `full_scale`; drawAdc reads the record so a
-// future sounder-side value wins automatically (Opus review M18).
+// is unmeasured, DEMO_VERIFICATION.md 2.19). The PARSER is the single
+// page-side source: it stamps `full_scale` on every record and drawAdc
+// reads the record. The ADC2 wire does not carry it, so a sounder-side
+// change still means editing the parser constant (second review 2.6).
 const ADC_FS=32767;
 const GUARD_PRE=__GUARD_PRE__, GUARD_POST=__GUARD_POST__;
 const STALE_MS=__STALE_MS__;         // no update for this long -> dim + badge

@@ -587,9 +587,10 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
       }
     if (std::getenv("HOUDINI_CSI_R_DEBUG") != nullptr) {
       static std::atomic<int> rc{0};
-      if ((rc.fetch_add(1) % 30) == 0)
+      if ((rc.fetch_add(1) % 30) == 0) {  // braces load-bearing (macro):
         MLPD_INFO("CSI timing-fix: r=%.3f (blind score %.3g)\n", best_r,
-                  best_score);
+                  best_score);  // unbraced, this flooded at ~1 kHz with
+      }                         // HOUDINI_CSI_R_DEBUG on (second review 3.1)
     }
   }
   std::vector<std::complex<float>> pts;

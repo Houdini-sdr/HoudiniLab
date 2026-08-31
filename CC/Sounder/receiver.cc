@@ -655,9 +655,10 @@ void Receiver::loopRecv(int tid, int core_id, SampleBuffer* rx_buffer) {
           const long long n_noslot = noslot.fetch_add(1);
           if ((n_noslot % 2000) == 0) {
             MLPD_WARN(
-                "BS recv: no slot from radio %zu for %lld consecutive reads. The "
-                "RX stream is delivering nothing; check that the base station "
-                "actually opened and that its data-plane egress was programmed.\n",
+                "BS recv: no slot from radio %zu (%lld slotless reads so "
+                "far). Either the UE is not transmitting (pause, escalation, "
+                "quiet-gate skip) or the RX stream is delivering nothing "
+                "(check the BS opened and its data-plane egress).\n",
                 radio_id, n_noslot + 1);
           }
           for (size_t ch = 0; ch < num_packets; ++ch) {
@@ -1047,10 +1048,11 @@ ssize_t Receiver::syncSearch(const std::complex<int16_t>* check_data,
 #endif
   if (std::getenv("HOUDINI_SYNC_DEBUG") != nullptr) {
     static std::atomic<int> c{0};
-    if ((c.fetch_add(1) % 20) == 0)
+    if ((c.fetch_add(1) % 20) == 0) {  // braces load-bearing (macro)
       MLPD_INFO("syncSearch[%s]: window=%zu corr_scale=%.3f gold=%zu -> idx=%ld\n",
                 kPath, search_window, corr_scale, config_->gold_cf32().size(),
                 sync_index);
+    }
   }
   return sync_index;
 }
@@ -1322,7 +1324,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
       if (config_->is_houdini() && houdini_pilot_ref_valid) {
         // TARGETED liveness check: the anchored grid predicts exactly where
         // the beacon END lands in this (drained, random-phase) window, so
-        // only attempt when it is inside (~3% of frames -- the others count
+        // only attempt when it is inside (~1.4% of frames at kLead=1280 -- the others count
         // as NO attempt, so an exhausted episode really means "the beacon
         // was absent at its predicted spot ~100 times"), and search only
         // that neighborhood. A whole-window earliest-crossing search kept

@@ -65,8 +65,12 @@ class Radio {
   int recvHoudini(void* const* buffs, int samples, long long& frameTime);
 
   SoapySDR::Device* dev_;
-  SoapySDR::Stream* rxs_;
-  SoapySDR::Stream* txs_;
+  // nullptr NSDMI is load-bearing: the ctor's cleanup-and-rethrow reads
+  // these before every setupStream has assigned them (second review 2.1 --
+  // an indeterminate txs_ meant closeStream on a wild pointer on the
+  // transient-board-wedge retry path).
+  SoapySDR::Stream* rxs_ = nullptr;
+  SoapySDR::Stream* txs_ = nullptr;
   // MTS membership helper: DAC tile 0 must be a GROUP MEMBER (not merely
   // powered), so a single-channel ch1 stream needs this never-activated
   // ch0 replay stream opened first (the canonical mts_check group shape).

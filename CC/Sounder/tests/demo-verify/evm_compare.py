@@ -215,9 +215,9 @@ def main():
                 (H if best_conj else H.conj())
             rs = np.arange(best_r - 0.5, best_r + 0.5, 0.02)
             best_r = float(rs[int(np.argmax([score(td, r) for r in rs]))])
-            if abs(best_r) >= 7.5:
-                print(f"  WARNING: r={best_r:+.2f} at the search edge -- "
-                      f"treat as unrecovered, not measured")
+            if abs(best_r) >= r_span - 0.5:
+                print(f"  WARNING: r={best_r:+.2f} at the +-{r_span:.0f} "
+                      f"search edge -- treat as unrecovered, not measured")
             z = td[:, occ] * np.exp(-1j * 2 * np.pi * best_r * kk[occ] / FFT)
             # one global complex gain (the reference has its own scale)
             g = np.sum(z[good] * np.conj(rr[:, occ][good])) / \

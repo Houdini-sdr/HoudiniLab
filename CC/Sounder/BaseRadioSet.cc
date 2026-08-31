@@ -643,8 +643,7 @@ void BaseRadioSet::armHoudiniTdd(void) {
                             "ch" + std::to_string(tx_ch) + ":off");
         } catch (...) {
         }
-        r->xmit(const_cast<const void**>(buffs), static_cast<int>(n_load), 0,
-                t0);  // load replay RAM
+        r->xmit(buffs, static_cast<int>(n_load), 0, t0);  // load replay RAM
         dev->writeSetting("TDD_SCHED", tdd);
       // ONE burst per frame (loops=1) spanning the usable symbol: the RAM is
       // [beacon core 496][zeros], and len (2-sample units, driver contract)

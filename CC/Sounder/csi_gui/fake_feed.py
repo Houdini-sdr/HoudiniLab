@@ -17,9 +17,7 @@ Do not read it as expected hardware behaviour.
 Failure modes worth reproducing on purpose:
 
     python3 fake_feed.py --clip           # ADC hard against the rail, clipping badge
-    python3 fake_feed.py --reps 1         # slot with one pilot symbol, quality panel
                                           #   reports "not measurable" instead of 1.0
-    python3 fake_feed.py --noise 0.5      # low repeat coherence, quality trace drops
     python3 fake_feed.py --legacy         # emit CSI1, as an un-rebuilt sounder would
     python3 fake_feed.py --antennas 4     # more cards
     python3 fake_feed.py --stall-after 60 # stop sending, to watch the stale badges
@@ -79,7 +77,7 @@ def send_csi(sock, dest, frame, ant, h, rate, reps, noise, legacy):
             raw.append(0.0)   # unused tone; the magnitude gap hides it anyway
         else:
             ramp = 2.0 * math.pi * 8.0 * (k - nsc / 2.0) / nsc
-            ph = math.atan2(z.imag, z.real) + ramp
+            ph = math.atan2(z.imag, z.real) - ramp  # raw = de-ramped minus ramp
             raw.append(math.atan2(math.sin(ph), math.cos(ph)))  # wrap to +-pi
     sock.sendto(head + body + struct.pack("<%df" % nsc, *raw), dest)
 

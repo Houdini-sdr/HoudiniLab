@@ -204,9 +204,9 @@ Config::Config(const std::string& jsonfile, const std::string& directory,
   // zero-padded burst composition; leave this at 0 unless you know why not.
   if (ue_tx_advance_ticks_ != 0 && ue_tx_advance_ticks_ % 384 != 0) {
     MLPD_WARN(
-        "ue_tx_advance_ticks=%d is not a multiple of 384 ticks and will be "
+        "ue_tx_advance_ticks=%lld is not a multiple of 384 ticks and will be "
         "quantized by the TX anchor grid\n",
-        ue_tx_advance_ticks_);
+        static_cast<long long>(ue_tx_advance_ticks_));
   }
   ue_pilot_horizon_ = tddConf.value("ue_pilot_horizon", 0);
   auto tx_advance = tddConf.value("tx_advance", json::array());

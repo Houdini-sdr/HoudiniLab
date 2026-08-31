@@ -316,8 +316,8 @@ from before that path existed, and it is not part of this demo.
 | `--udp-port` | 9999 | Port the CSI datagrams arrive on |
 | `--fps` | 30 | How often the page is pushed new data |
 | `--stale-ms` | 1500 | Dim an antenna's plots when its last update is older than this (section 5.1) |
-| `--mag-top` | 0 | Top of the fixed magnitude axis, in dB |
-| `--mag-span` | 60 | Height of the fixed magnitude axis, in dB below `--mag-top` |
+| `--mag-top` | 90 | Top of the fixed magnitude axis, in dB |
+| `--mag-span` | 40 | Height of the fixed magnitude axis, in dB below `--mag-top` |
 | `--csi-fps` | sounder default (30) | Per antenna stream rate out of the sounder |
 | `--dest-host` | 127.0.0.1 | Where the sounder sends datagrams, when using `--launch` |
 
@@ -367,9 +367,9 @@ Each receive antenna gets one card with four panels:
    the shipped 8 sample back-off, expect a tooth every 8 subcarriers, plus or
    minus the run's small extraction draw. The **corrected** panel removes
    that known instrumental ramp and anchors the run's arbitrary common phase
-   to zero at the first update, so what remains is physical: its tilt is the
+   to zero at the third displayed update (the first two settle), so what remains is physical: its tilt is the
    run's residual timing (a fraction of a sample to a sample or two), and any
-   movement after the first update is a real event. The common phase re-draws
+   movement after the anchor lands is a real event. The common phase re-draws
    every restart because the two nodes are frequency locked, not phase
    locked; only the corrected panel hides that lottery, on purpose.
 3. **Waterfall of magnitude**, time running downward. This is the panel that
@@ -409,7 +409,8 @@ The trace is the slot's **power envelope in dBFS** on a fixed 0 to -80 dB
 axis: each plotted column carries the maximum absolute sample over every
 sample it covers, so a single clipped sample pins its column at 0 dBFS and
 cannot be hidden. Two dashed vertical markers show the nominal guard seats,
-128 samples in from each end of the slot: on a healthy run the burst's
+`ofdm_tx_zero_prefix` and `ofdm_tx_zero_postfix` samples in from the slot
+edges (read from your config): on a healthy run the burst's
 rising edge sits on the first marker and its falling edge on the second, so
 this panel doubles as a live landing view for the transmit timing.
 

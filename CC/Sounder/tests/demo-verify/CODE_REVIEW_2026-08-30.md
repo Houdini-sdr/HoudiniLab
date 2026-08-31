@@ -111,3 +111,38 @@ to Consts::lts_seq; csi_h_hist_ removal complete.
 instrument layer is where this branch is weak" -- hence the same-session
 burn-down above and the per-datagram re-basing of the AP-15 closure evidence.
 Counts: 9 HIGH, 32 MED, ~30 LOW.
+
+
+# Second review (verification pass over the burn-down)
+
+Counts: 27 fixes confirmed (several verified mechanically: the r-sweep hoist
+proven algebraically exact, the SNR replica proven at exact parity with the
+live metric, the ceil resume arithmetic checked on every boundary, the wire
+formats byte-for-byte). 4 defective-or-partial and 12 new findings, all
+fixed in the follow-up commit:
+
+- 2.1 HIGH: rxs_/txs_ had no initializer, so M12's cleanup could closeStream
+  a wild pointer on the board-wedge retry path. Fixed: nullptr NSDMI.
+- 3.1: three unbraced multi-statement MLPD_INFO throttles flooded logs at
+  full rate (the CSI timing-fix line at ~1 kHz under the runbook's own demo
+  launch). Fixed: braced.
+- 2.2 long-long format UB in the new config warn; 2.3 evm edge warning now
+  tracks the active search span; 2.4 the no-slot warning no longer
+  misdiagnoses a UE pause; 2.5 axis validation moved before the sounder
+  launch (a late SystemExit orphaned the radio-holding group); 2.6 the
+  full_scale comment no longer overclaims (the parser is the single
+  page-side source; the wire does not carry it); 2.7/3.2/3.3 walkthrough
+  drift (third-update anchor, real --mag defaults, config-driven guard
+  wording); 2.8 fake_feed retired options pruned; 2.9 dead ternary + ramp
+  sign; 2.10 targeted-resync occupancy figure updated for kLead=1280;
+  M6/M13 completed in houdini-1u.json (the "sweep it" advice and the
+  whole-ms claim retracted); the no-op const_cast dropped; the cause-5 enum
+  comment now states the extent is the pilot slot with an approximate start.
+
+Residual accepted items (documented, not changed): the settle-gate's two
+unanchored first updates; ap15's zero-tolerance gate under 200 datagrams
+(conservative, now commented); the k>horizon reset corner the reviewer rated
+effectively unreachable.
+
+Second reviewer's verdict: "the signal-path engineering is sound and
+independently checks out... two one-line fixes away" -- both landed.

@@ -107,6 +107,9 @@ def one_run(i, args):
     worst = float(np.min(dscores))
     low = sum(1 for v in dscores if v < 0.7)
     low_frac = low / len(dscores)
+    # NB with fewer than 200 scorable datagrams the 0.5% gate is
+    # zero-tolerance (1/N > 0.005): a short run reports partial on a single
+    # bad datagram, which is the conservative direction.
     if med > 0.8 and low_frac <= 0.005:
         verdict = "CLUSTERS"
     elif med < 0.3:

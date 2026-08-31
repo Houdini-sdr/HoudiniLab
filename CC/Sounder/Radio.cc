@@ -346,9 +346,10 @@ int Radio::recvHoudini(void* const* buffs, int samples, long long& frameTime) {
     const double rms = std::sqrt(s / (got * 2));
     if (getenv("HOUDINI_CL_RX_DEBUG") != nullptr) {
       static std::atomic<int> cnt{0};
-      if ((cnt.fetch_add(1) % 40) == 0)
+      if ((cnt.fetch_add(1) % 40) == 0) {  // braces load-bearing: MLPD_INFO
         MLPD_INFO("Houdini client RX dbg: got=%d rms=%.2f absmax=%d\n", got,
-                  rms, amax);
+                  rms, amax);                 // is a multi-statement macro
+      }
     }
     // Dump the first strong (beacon-present) window for offline correlation.
     if (getenv("HOUDINI_DUMP_WIN") != nullptr && rms > 100.0) {

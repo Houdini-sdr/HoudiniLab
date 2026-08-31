@@ -69,8 +69,7 @@ def refine_edge(x, approx, rising, thr, span=96):
     p = np.abs(x) ** 2
     lo, hi = max(0, approx - span), min(len(x), approx + span)
     seg = p[lo:hi]
-    above = seg > thr
-    idx = np.nonzero(above)[0] if rising else np.nonzero(above)[0]
+    idx = np.nonzero(seg > thr)[0]
     if idx.size == 0:
         return approx
     return lo + (int(idx[0]) if rising else int(idx[-1]) + 1)
