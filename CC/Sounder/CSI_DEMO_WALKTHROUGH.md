@@ -268,7 +268,11 @@ output prefixed `[teardown]`, and the sounder's prefixed `[sounder]`.
 Two defaults assume one particular layout. If yours differs, override them:
 
 - `--sounder-dir <path-to-HoudiniLab>/CC/Sounder` if the repository is not at
-  `~/repos/HoudiniLab`.
+  `~/repos/HoudiniLab`. Check this one carefully on a host with more than one
+  checkout: the launcher runs whatever `build/sounder` it finds under this
+  directory, and a stale binary from another checkout looks exactly like the
+  current demo until a log line you expect is missing. When in doubt, verify
+  with `strings <dir>/build/sounder | grep <a-string-only-the-new-code-logs>`.
 - `--venv <your-houdini-venv>` if the SoapySDR virtual environment is not at
   `~/houdini_test`.
 
@@ -352,34 +356,27 @@ Each receive antenna gets one card with four panels:
 
 1. **Magnitude of H in dB** across subcarriers. This is the frequency response
    of the channel. Nulls are real multipath fades, not faults.
-2. **Phase in radians** across subcarriers. On a good capture this is a smooth
-   ramp or a flat line. A ramp that changes slope frame to frame means the
-   timing is drifting.
+2. **Phase in radians**, as two stacked panels. The **raw** panel shows the
+   phase exactly as measured: the deliberate FFT window back-off inside the
+   cyclic prefix rides a steep linear ramp on it, which wraps every few
+   subcarriers and draws a sawtooth. The tooth spacing is a delay gauge: with
+   the shipped 8 sample back-off, expect a tooth every 8 subcarriers, plus or
+   minus the run's small extraction draw. The **corrected** panel removes
+   that known instrumental ramp and anchors the run's arbitrary common phase
+   to zero at the first update, so what remains is physical: its tilt is the
+   run's residual timing (a fraction of a sample to a sample or two), and any
+   movement after the first update is a real event. The common phase re-draws
+   every restart because the two nodes are frequency locked, not phase
+   locked; only the corrected panel hides that lottery, on purpose.
 3. **Waterfall of magnitude**, time running downward. This is the panel that
    shows stability: a steady link draws smooth vertical streaks, and a link
    that keeps re-locking draws horizontal tearing.
 4. **Constellation**, equalized uplink data. Only populated when you run
    `houdini-ul.json`. Clean QPSK shows four tight clusters.
 
-Under the magnitude panel, sharing its subcarrier axis, is a fifth trace:
-
-5. **Repeat quality**, the per subcarrier agreement between the pilot symbols
-   inside one slot. The sounder already averages several repetitions of the same
-   pilot to build H. This trace is how much they agreed. 1.0 means every
-   repetition produced the same estimate, so H at that subcarrier is signal.
-   A low value means they disagreed, so H there is noise and both the magnitude
-   and the phase above it are meaningless at that subcarrier.
-
-   Read it against the dashed line, not against zero. Pure noise does not
-   average to 0, it averages to 1 divided by the number of repetitions, and the
-   panel draws that floor for you. With six pilot symbols the floor is 0.17, so a
-   trace sitting at 0.2 has no signal in it at all despite sounding respectable.
-   The panel title states the repetition count and the floor.
-
-   The panel needs at least two repetitions to say anything. With one it reports
-   `not measurable` rather than drawing a trace, because the agreement of a
-   single measurement with itself is always perfect. The status line carries the
-   median across subcarriers as one number to watch.
+Guard band and DC null subcarriers are drawn as gaps in every per-subcarrier
+panel, never as zeros: nothing is transmitted there, so nothing is measured
+there. Expect gaps at the band edges and one at DC.
 
 ### 5.1 When a card dims
 
@@ -399,66 +396,42 @@ match with `--stale-ms`, or every card will read as stale.
 
 ### 5.2 The ADC tab
 
-Each card has two tabs. **Channel** is everything above. **ADC** shows the raw
-converter samples for that antenna, which is where you look when the channel
-panels are strange and you suspect the front end rather than the algorithm.
+Each card has two tabs. **Channel** is everything above. **ADC** shows the
+received pilot slot in the time domain, which is where you look when the
+channel panels are strange and you suspect the front end or the timing
+rather than the algorithm.
 
-The trace is a minimum and maximum envelope of the whole slot, one band per
-component, blue for I and orange for Q. It is an envelope rather than a
-decimated copy of the samples on purpose: decimation keeps every Nth sample, so
-a slot that clips for a handful of samples can produce a trace that never
-touches the rail. With an envelope, one clipped sample pins its column to the
-rail and cannot be hidden.
-
-The vertical scale is fitted to the signal and then held, and the panel title and
-the axis labels both state the held range in converter counts. Held, not refitted
-every frame: the peak wanders by a few percent on a steady link, so an axis that
-re-fitted on every update would redraw the same signal at a different size every
-time and the panel would shake while nothing was changing. It grows at once when
-the signal needs more room, and shrinks only after the level has stayed low for
-several frames, so a single near empty slot cannot collapse it. It is fitted rather than
-pinned to full scale because a signal well below the rail would otherwise draw as
-a flat line on the centre of an apparently empty panel, which is exactly when you
-most need to see it.
+The trace is the slot's **power envelope in dBFS** on a fixed 0 to -80 dB
+axis: each plotted column carries the maximum absolute sample over every
+sample it covers, so a single clipped sample pins its column at 0 dBFS and
+cannot be hidden. Two dashed vertical markers show the nominal guard seats,
+128 samples in from each end of the slot: on a healthy run the burst's
+rising edge sits on the first marker and its falling edge on the second, so
+this panel doubles as a live landing view for the transmit timing.
 
 The absolute question, how much of the converter you are using, is answered
-underneath instead, by a bar that is always on a fixed full scale. The bar turns
-amber below 10 percent, meaning under driven, and red at 95 percent or on any
-clipped sample. The status line under it reports the peak sample, that peak as a
-percentage of full scale, and the exact count of samples at or above 99 percent
-of full scale, counted over every sample in the slot rather than over the plotted
-envelope. A `clipping` badge appears next to the panel title when that count is
-not zero.
+underneath by a bar on a fixed full scale. The bar turns amber below 10
+percent, meaning under driven, and red at 95 percent or on any clipped
+sample. The status line reports the pilot peak in counts and as a percent of
+full scale, plus the peak and clipped count across every slot of the frame,
+not just the plotted one. A `clipping` badge appears next to the title when
+the clipped count is not zero.
 
-Aim for a peak somewhere around half to three quarters of full scale. Much lower
-wastes converter bits and the constellation gets noisy. At the rail the samples
-are simply wrong and every panel downstream inherits it.
+Aim for a peak somewhere around half to three quarters of full scale. Much
+lower wastes converter bits and the constellation gets noisy. At the rail
+the samples are simply wrong and every panel downstream inherits it.
 
 One caveat to know before you trust a reading of zero clipped samples. Full
 scale here means the rail of the 16 bit sample format the sounder uses
-throughout. If the converter ever delivers a narrower sample that is not shifted
-up into the top of those 16 bits, the true rail is lower, the clipped count
-stays at zero, and the peak reads as though there were headroom. The tell is the
-peak itself: a peak that reports the same value on every frame is the rail,
-whatever number it shows.
+throughout. If the converter ever delivers a narrower sample that is not
+shifted up into the top of those 16 bits, the true rail is lower, the
+clipped count stays at zero, and the peak reads as though there were
+headroom. The tell is the peak itself: a peak that reports the same value on
+every frame is the rail, whatever number it shows.
 
-The tabs are per card, so you can watch one antenna's converter while another
-shows its channel. That is how you find the single antenna that is clipping.
-
-Every panel carries its tick labels in the margin beside the plot rather than
-inside it, and both top panels use a fixed axis that never re-ranges. That is
-deliberate. An axis that rescales itself every frame makes a static channel
-look alive and hides slow drift, so the numbers next to a panel mean the same
-thing in every frame you compare.
-
-The magnitude axis runs from `--mag-top` down by `--mag-span` decibels. If the
-trace leaves that window it would vanish off the top or the bottom of an
-otherwise innocent looking empty panel, so an `off scale` badge appears next to
-the panel title instead. If you see it, move the axis with `--mag-top` rather
-than assuming the channel died.
-
-Guard band and DC null subcarriers are drawn as gaps, not as zeros, so the
-empty channel edges are expected.
+The tabs are per card, so you can watch one antenna's converter while
+another shows its channel. That is how you find the single antenna that is
+clipping.
 
 ## 6. Confirming it is actually working
 
