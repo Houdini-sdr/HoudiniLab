@@ -385,12 +385,36 @@ void RecorderWorker::sendCsi(Packet* pkt) {
   // intentional shift from the WIRE copy only, so the panel shows the
   // physical channel phase; the cached H (equalization) is untouched.
   const float deramp_s = static_cast<float>(cfg_->prefix()) - static_cast<float>(es);
+  std::vector<std::complex<float>> hw(N);
   for (int k = 0; k < N; ++k) {
     const float ang = 2.0f * static_cast<float>(M_PI) * deramp_s *
                       (static_cast<float>(k) - N / 2.0f) / static_cast<float>(N);
-    const std::complex<float> rot(std::cos(ang), std::sin(ang));
-    const std::complex<float> hw = H[k] * rot;
-    const float re = hw.real(), im = hw.imag();
+    hw[k] = H[k] * std::complex<float>(std::cos(ang), std::sin(ang));
+  }
+  // Per-run common-phase anchor [user 2026-08-30: the level re-drew -0.5pi,
+  // +0.2pi, -1.0pi across restarts and parked at the wrap edge]: the nodes
+  // share a 10 MHz frequency reference but nothing phase-locks their NCOs,
+  // so the offset is a per-run lottery with no information in its value
+  // (ledger 4.54). Capture the mean phase once at the run's first datagram
+  // and rotate it out of the DISPLAY: every run starts at 0 and anything
+  // that moves afterwards (CFO residual, re-locks) is real. Display only.
+  auto ait = csi_phase_anchor_.find(pkt->ant_id);
+  if (ait == csi_phase_anchor_.end()) {
+    std::complex<float> m(0.0f, 0.0f);
+    for (int k = 0; k < N; ++k) {
+      const float a = std::abs(hw[k]);
+      if (a > 1e-9f) m += hw[k] / a;
+    }
+    const float ma = std::abs(m);
+    ait = csi_phase_anchor_
+              .emplace(pkt->ant_id, ma > 1e-9f ? m / ma
+                                               : std::complex<float>(1.0f, 0.0f))
+              .first;
+  }
+  const std::complex<float> unrot = std::conj(ait->second);
+  for (int k = 0; k < N; ++k) {
+    const std::complex<float> h0 = hw[k] * unrot;
+    const float re = h0.real(), im = h0.imag();
     std::memcpy(&buf[24 + 8 * k], &re, 4);
     std::memcpy(&buf[28 + 8 * k], &im, 4);
   }

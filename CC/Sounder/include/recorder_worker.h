@@ -78,6 +78,11 @@ class RecorderWorker {
   // Latest channel estimate H[k] per antenna (DC-centered), cached from the pilot
   // slot and used to equalize that antenna's uplink-data (U) slot.
   std::unordered_map<uint32_t, std::vector<std::complex<float>>> csi_h_;
+  // Per-run display phase anchor (unit phasor from the first datagram's mean
+  // H phase): the two nodes are frequency-locked but not phase-locked, so
+  // the common phase re-draws per restart; anchoring the display at run
+  // start keeps within-run drift visible while every run starts at 0.
+  std::unordered_map<uint32_t, std::complex<float>> csi_phase_anchor_;
   // Last few per-frame H estimates per antenna, for the ACROSS-FRAME repeat
   // coherence on the wire (the within-slot version saturates at bench SNR).
   std::unordered_map<uint32_t,
