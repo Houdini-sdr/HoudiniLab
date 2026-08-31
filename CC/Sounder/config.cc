@@ -805,19 +805,17 @@ void Config::genPilots() {
                         sts_seq_ci16.end());
   }
 
-  // Cyclic guard before the gold field -- the 802.11 GI2 pattern. Copy the LAST
-  // kGoldGuard samples of gold ahead of rep 1 so rep 1 is preceded by gold's own
-  // tail exactly as rep 2 is. Without it the STS->gold transition contaminates
-  // rep 1's first sample and any repetition-based estimator reads a large phase
-  // there: measured +157 deg at i=0 against ~0 for every other sample (AP-34).
-  // Costs 32 samples of beacon length and moves the beacon END, so
-  // houdiniBeaconEnd() and the UE anchor shift with it -- tx_advance must be
-  // re-derived from pilot_grid_off after this change (see files/houdini-ul.json
-  // _tx_advance_note).
-  constexpr int kGoldGuard = 32;
-  beacon_ci16_.insert(beacon_ci16_.end(), gold_ifft_ci16.end() - kGoldGuard,
-                      gold_ifft_ci16.end());
-
+  // NOTE: a 32-sample cyclic guard was inserted HERE (802.11 GI2 pattern) to
+  // remove the STS->gold channel transient that puts +157 deg on the first term
+  // of conj(rep1)*rep2. REVERTED 2026-08-31: it moves the correlator's returned
+  // index by a measured -274 samples, so the invariant the whole timing chain
+  // rests on -- sync_index == houdiniBeaconEnd() == strobe + beacon_size -- no
+  // longer holds, beaconSnrDb() then measures a window of pre-beacon noise and
+  // reports 10.5 dB against a true 48.3 dB, and the 30 dB floor rejects every
+  // resync detection. Acquisition still worked; only the liveness path died.
+  // The benefit was also unmeasurable: skipping the contaminated head does not
+  // improve the CFO estimate (it worsens it). Any retry must re-derive the
+  // find_beacon index convention and tx_advance TOGETHER. See BACKLOG AP-34.
   // Populate gold sequence (two reps, 128 each)
   int goldReps = 2;
   for (int i = 0; i < goldReps; i++) {

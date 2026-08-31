@@ -46,10 +46,7 @@ static constexpr int kStsLen = 16;
 static constexpr int kStsReps = 15;
 static constexpr int kGoldLen = 128;
 static constexpr int kGoldReps = 2;
-// Cyclic guard ahead of the gold field (AP-34); must match Config::genBeacon.
-static constexpr int kGoldGuard = 32;
-static constexpr int kBeaconCoreLen =
-    kStsLen * kStsReps + kGoldGuard + kGoldLen * kGoldReps;
+static constexpr int kBeaconCoreLen = kStsLen * kStsReps + kGoldLen * kGoldReps;
 // Beacon CFO logs at ~9/s; print 1 in N so a long run does not add millions of
 // lines. The panel gets every sample regardless. HOUDINI_CFO_LOG_EVERY=1 makes
 // it dense, which is what a calibration run wants.
@@ -1159,8 +1156,7 @@ static void sendSyncTelemetry(size_t frame, int tid, uint32_t state,
 // Two-stage beacon CFO estimate, normalized (cycles/sample); multiply by the
 // sample rate for Hz.
 //
-// The beacon core is 15 x STS(16), a 32-sample cyclic guard, then 2 x gold(128)
-// = 528 samples
+// The beacon core is 15 x STS(16) followed by 2 x gold(128) = 496 samples
 // (Config::genBeacon, config.cc), so it carries TWO independent repetition
 // structures and therefore two estimators:
 //
@@ -1180,7 +1176,7 @@ static void sendSyncTelemetry(size_t frame, int tid, uint32_t state,
 // ever appeared in a run log.
 //
 // `sync_index` is the beacon END (syncSearch convention), so the core occupies
-// [sync_index - 528, sync_index).
+// [sync_index - 496, sync_index).
 float Receiver::estimateCFO(const std::complex<int16_t>* buf, size_t buf_len,
                             int sync_index) const {
   if (buf == nullptr) return 0.0f;
@@ -1209,9 +1205,8 @@ float Receiver::estimateCFO(const std::complex<int16_t>* buf, size_t buf_len,
                                 static_cast<double>(buf[i].imag()));
   };
 
-  // Fine: gold rep2 against rep1 (lag 128). Skip the cyclic guard -- it is
-  // gold's tail, not a repetition of rep 1.
-  const int g1 = start + kStsLen * kStsReps + kGoldGuard;
+  // Fine: gold rep2 against rep1 (lag 128).
+  const int g1 = start + kStsLen * kStsReps;
   const int g2 = g1 + kGoldLen;
   std::complex<double> r_fine(0.0, 0.0);
   for (int i = 0; i < kGoldLen; ++i) r_fine += std::conj(at(g1 + i)) * at(g2 + i);
