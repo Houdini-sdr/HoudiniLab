@@ -324,18 +324,29 @@ void RecorderWorker::sendCsi(Packet* pkt) {
     const float pw = std::norm(pilot_ref_[k]);
     if (pw > 1e-6f && used > 0) H[k] = hacc[k] / (static_cast<float>(used) * pw);
   }
-  // Per-subcarrier repeat coherence, ACROSS FRAMES [user 2026-08-30]: the
-  // within-slot version (agreement among this slot's own LTS repetitions)
-  // saturates at 1.0 for any healthy link -- a 34 dB pilot pins it -- so the
-  // trace carried no information. Across the last kQualFrames per-frame H
-  // estimates it measures what the operator actually wants: is H STABLE
-  // frame to frame. It surfaces per-frame extraction jitter (band edges
-  // wobble first), resync events, and slow drift. Same estimator shape and
-  // the same 1/reps pure-noise floor, with the window count on the wire as
-  // `reps`, so the dashboard logic (floor line, not-measurable-below-2)
-  // works unchanged. pacc/the within-slot spread still feeds nothing; kept
-  // computed above only because hacc accumulation needs the loop anyway.
-  constexpr size_t kQualFrames = 8;
+  (void)pacc;
+  // Throttle the CSI datagram (H is cached above regardless).
+  const long long now =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count();
+  auto it = csi_last_ns_.find(pkt->ant_id);
+  if (it != csi_last_ns_.end() &&
+      (now - it->second) < static_cast<long long>(csi_throttle_ns_))
+    return;
+  csi_last_ns_[pkt->ant_id] = now;
+  // Per-subcarrier repeat coherence ACROSS DISPLAY FRAMES [user 2026-08-30,
+  // twice]: the within-slot version saturates at 1.0 at bench SNR, and a
+  // first across-frames cut that accumulated per PROCESSED frame spanned
+  // only ~10 ms -- still pegged for any static channel. Accumulating here,
+  // after the throttle, one entry per DISPLAYED update, makes the window
+  // span kQualFrames/fps of wall time (~1/3 s at the shipped 30 fps) --
+  // the raynet-compiler's repeat-quality semantics, where repeats are
+  // successive sweeps. Surfaces extraction jitter (band edges first),
+  // resync events, and slow drift. Same estimator shape, same 1/reps noise
+  // floor, window depth on the wire as `reps`, so the dashboard logic
+  // (floor line, not-measurable-below-2) works unchanged.
+  constexpr size_t kQualFrames = 10;
   auto& hist = csi_h_hist_[pkt->ant_id];
   hist.push_back(H);
   if (hist.size() > kQualFrames) hist.pop_front();
@@ -351,17 +362,6 @@ void RecorderWorker::sendCsi(Packet* pkt) {
     if (pw > 0.0f && hn > 0)
       qual[k] = std::min(1.0f, std::norm(acc) / (static_cast<float>(hn) * pw));
   }
-  (void)pacc;
-  // Throttle the CSI datagram (H is cached above regardless).
-  const long long now =
-      std::chrono::duration_cast<std::chrono::nanoseconds>(
-          std::chrono::steady_clock::now().time_since_epoch())
-          .count();
-  auto it = csi_last_ns_.find(pkt->ant_id);
-  if (it != csi_last_ns_.end() &&
-      (now - it->second) < static_cast<long long>(csi_throttle_ns_))
-    return;
-  csi_last_ns_[pkt->ant_id] = now;
   // [magic 'CSI2'][frame][ant][num_sc][rate][reps][H re,im]*N[quality]*N
   // 'CSI2' supersedes 'CSI1' (same layout without reps and quality). The dashboard
   // still accepts 'CSI1', so a backend running ahead of an un-rebuilt sounder shows
