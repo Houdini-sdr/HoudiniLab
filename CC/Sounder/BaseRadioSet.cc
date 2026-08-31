@@ -712,20 +712,30 @@ int BaseRadioSet::houdiniTddRx(size_t radio_id, void* const* buffs,
     cse[i + 1] = cse[i] + re * re + im * im;
   }
   double best = 0.0;
+  double worst = -1.0;
   int at = 0;
   for (int t = 0; t + n <= cg; t += 128) {
     const double e = cse[t + n] - cse[t];
     if (e > best) { best = e; at = t; }
+    if (worst < 0.0 || e < worst) worst = e;
   }
   const double pilot_rms = std::sqrt(best / n);
-  const double mean_rms = std::sqrt(cse[cg] / cg);
+  // Noise floor from the QUIETEST slot-length window of the same read (27 of
+  // 30 slots are guard, so it measures the true floor, ~6 rms on this bench).
+  // The old gate compared against 4x the WHOLE-read mean, but that mean
+  // includes the pilot+data burst energy itself, which put the threshold
+  // right on top of a healthy pilot (measured: rms 1392 vs 4x355 = 1420) --
+  // the gate flapped on ~half of all healthy frames, and the quiet path's
+  // delivery painted the 1-2 s garbage blips on the dashboard
+  // [user 2026-08-30]. Densest-vs-quietest separates by ~47 dB instead.
+  const double floor_rms = std::sqrt(std::max(worst, 0.0) / n);
   // Presence gate: skip frames where no UE signal is on-air (don't advance the
   // frame counter -> the first real frame lands at recorder frame 0). A LOSS
   // of pilots mid-run is reported loudly [user 2026-08-30]: the UE pausing
   // its schedule (e.g. the AP-18 resync escalation hunting for a lost beacon)
   // shows up here as a quiet streak, and the BS should say so rather than
   // skip silently.
-  if (pilot_rms < 120.0 || pilot_rms < 4.0 * mean_rms) {
+  if (pilot_rms < 120.0 || pilot_rms < 4.0 * floor_rms) {
     ++htdd_quiet_streak_;
     constexpr size_t kQuietWarnFrames = 200;  // ~0.2 s at 1 kHz frames
     if (htdd_frame_counter_ > 0 &&
@@ -748,9 +758,9 @@ int BaseRadioSet::houdiniTddRx(size_t radio_id, void* const* buffs,
     const unsigned qc = quiet_single_count.fetch_add(1) + 1;
     if ((qc & (qc - 1)) == 0) {  // 1,2,4,8,... then quiet
       MLPD_WARN(
-          "BS: no UE burst in frame read (rms %.0f vs mean %.0f, occurrence "
+          "BS: no UE burst in frame read (rms %.0f vs floor %.0f, occurrence "
           "%u) -- frame marked untrusted\n",
-          pilot_rms, mean_rms, qc);
+          pilot_rms, floor_rms, qc);
     }
     std::memcpy(buffs[0], s, static_cast<size_t>(n) * 4);
     frameTime = (htdd_frame_counter_ << 32) |
