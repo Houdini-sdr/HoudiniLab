@@ -79,8 +79,11 @@ class Receiver {
                      size_t search_window, float corr_scale,
                      bool refine_first_cluster = false);
 
-  float estimateCFO(const std::vector<std::complex<int16_t>>& sync_buff,
-                    int sync_index);
+  // Two-stage beacon CFO estimate, normalized (cycles/sample); multiply by
+  // the sample rate for Hz. Pointer form so both the vector-backed legacy
+  // path and the targeted-resync path (raw rxbuff) can call it.
+  float estimateCFO(const std::complex<int16_t>* buf, size_t buf_len,
+                    int sync_index) const;
   void initBuffers();
   void clientTxPilots(size_t user_id, long long base_time);
   int clientTxData(int tid, int frame_id, long long base_time);

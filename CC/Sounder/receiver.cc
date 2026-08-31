@@ -35,6 +35,17 @@
 static constexpr size_t kSyncDetectChannel = 0;
 static constexpr float kBeaconDetectWindowScaler = 2.33f;
 static constexpr bool kEnableCfo = false;
+// Beacon core geometry, mirrored from Config::genBeacon (config.cc): 15 reps of
+// STS(16) then 2 reps of gold(128). estimateCFO() correlates BOTH structures
+// and guards on the total at runtime.
+static constexpr int kStsLen = 16;
+static constexpr int kStsReps = 15;
+static constexpr int kGoldLen = 128;
+static constexpr int kGoldReps = 2;
+static constexpr int kBeaconCoreLen = kStsLen * kStsReps + kGoldLen * kGoldReps;
+// Beacon CFO logs at ~9/s; print 1 in N so a long run does not add millions of
+// lines. The panel gets every sample regardless.
+static constexpr size_t kCfoLogEvery = 10;
 
 // Where the beacon END sits relative to the slot-0 start, per the
 // TRANSMITTED layout -- the constant the UE subtracts from sync_index to
@@ -1057,44 +1068,87 @@ ssize_t Receiver::syncSearch(const std::complex<int16_t>* check_data,
   return sync_index;
 }
 
-float Receiver::estimateCFO(const std::vector<std::complex<int16_t>>& sync_buff,
-                            int sync_index) {
-  float cfo_phase_est = 0;
-  const int beacon_start = sync_index - config_->beacon_size();
-  const int beacon_half_size = config_->beacon_size() / 2;
-  std::vector<std::complex<float>> beacon0(beacon_half_size, 0.0f);
-  std::vector<std::complex<float>> beacon1(beacon_half_size, 0.0f);
-  for (int i = 0; i < beacon_half_size; i++) {
-    const size_t beacon0_id = i + beacon_start;
-    const size_t beacon1_id = i + beacon_start + beacon_half_size;
-    beacon0.at(i) =
-        std::complex<float>(sync_buff[beacon0_id].real() / SHRT_MAX,
-                            sync_buff[beacon0_id].imag() / SHRT_MAX);
-    beacon1.at(i) =
-        std::complex<float>(sync_buff[beacon1_id].real() / SHRT_MAX,
-                            sync_buff[beacon1_id].imag() / SHRT_MAX);
-  }
-  const auto cfo_mult = CommsLib::complex_mult(beacon1, beacon0, true);
-  float phase = 0.0f;
-  float prev_phase = 0.0f;
-  for (size_t i = 0; i < cfo_mult.size(); i++) {
-    phase = std::arg(cfo_mult.at(i));
-    float unwrapped_phase = 0;
-    if (i == 0) {
-      unwrapped_phase = phase;
-    } else {
-      float diff = phase - prev_phase;
-      if (diff > M_PI)
-        diff = diff - 2 * M_PI;
-      else if (diff < -M_PI)
-        diff = diff + 2 * M_PI;
-      unwrapped_phase = prev_phase + diff;
+// Two-stage beacon CFO estimate, normalized (cycles/sample); multiply by the
+// sample rate for Hz.
+//
+// The beacon core is 15 x STS(16) followed by 2 x gold(128) = 496 samples
+// (Config::genBeacon, config.cc), so it carries TWO independent repetition
+// structures and therefore two estimators:
+//
+//   coarse  consecutive STS blocks, lag 16   -> unambiguous to +-rate/32
+//   fine    gold rep2 against rep1, lag 128  -> unambiguous to +-rate/256,
+//                                               8x finer resolution
+//
+// The coarse stage resolves the fine stage's 1/128 ambiguity, so the result
+// keeps the fine resolution across the coarse range. Both stages are plain
+// repetition correlations: for x[n] = s[n]*exp(j2*pi*f*n) with s[n+N] = s[n],
+// sum conj(x[n])*x[n+N] has argument 2*pi*f*N.
+//
+// The PREVIOUS implementation split the 496-sample core in half and correlated
+// half against half. That split falls INSIDE the structure (240 STS + 8 gold
+// against 120 gold + 128 gold), correlating two uncorrelated sequences, so it
+// returned noise. That is why kEnableCfo was false and why no CFO line has
+// ever appeared in a run log.
+//
+// `sync_index` is the beacon END (syncSearch convention), so the core occupies
+// [sync_index - 496, sync_index).
+float Receiver::estimateCFO(const std::complex<int16_t>* buf, size_t buf_len,
+                            int sync_index) const {
+  if (buf == nullptr) return 0.0f;
+  // Geometry guard: this estimator is tied to the STS+gold layout above. If the
+  // beacon is ever rebuilt to another shape, fail to 0 rather than silently
+  // return a wrong frequency that a correction loop would then act on.
+  if (static_cast<int>(config_->beacon_size()) != kBeaconCoreLen) {
+    static std::atomic<bool> warned{false};
+    if (warned.exchange(true) == false) {
+      MLPD_WARN(
+          "estimateCFO: beacon is %d samples, expected %d (%d x STS(%d) + "
+          "%d x gold(%d)) -- CFO estimation disabled\n",
+          static_cast<int>(config_->beacon_size()), kBeaconCoreLen, kStsReps,
+          kStsLen, kGoldReps, kGoldLen);
     }
-    prev_phase = phase;
-    cfo_phase_est += unwrapped_phase;
+    return 0.0f;
   }
-  cfo_phase_est /= (M_PI * cfo_mult.size() * config_->beacon_size());
-  return cfo_phase_est;
+  const int start = sync_index - kBeaconCoreLen;
+  if (start < 0 || sync_index < 0 ||
+      static_cast<size_t>(sync_index) > buf_len) {
+    return 0.0f;
+  }
+
+  auto at = [buf](int i) {
+    return std::complex<double>(static_cast<double>(buf[i].real()),
+                                static_cast<double>(buf[i].imag()));
+  };
+
+  // Fine: gold rep2 against rep1 (lag 128).
+  const int g1 = start + kStsLen * kStsReps;
+  const int g2 = g1 + kGoldLen;
+  std::complex<double> r_fine(0.0, 0.0);
+  for (int i = 0; i < kGoldLen; ++i) r_fine += std::conj(at(g1 + i)) * at(g2 + i);
+
+  // Coarse: every consecutive STS pair (lag 16), summed coherently.
+  std::complex<double> r_coarse(0.0, 0.0);
+  for (int k = 0; k + 1 < kStsReps; ++k) {
+    for (int i = 0; i < kStsLen; ++i) {
+      r_coarse += std::conj(at(start + k * kStsLen + i)) *
+                  at(start + (k + 1) * kStsLen + i);
+    }
+  }
+  if (std::abs(r_fine) == 0.0 || std::abs(r_coarse) == 0.0) return 0.0f;
+
+  const double f_fine = std::arg(r_fine) / (2.0 * M_PI * kGoldLen);
+  const double f_coarse = std::arg(r_coarse) / (2.0 * M_PI * kStsLen);
+  // Unwrap the fine estimate into the coarse stage's range.
+  const double ambiguity = 1.0 / kGoldLen;
+  const double m = std::round((f_coarse - f_fine) / ambiguity);
+  double f = f_fine + m * ambiguity;
+  // The matched-NCO R2C RX mixer delivers baseband CONJUGATED (the same
+  // inversion recorder_worker undoes via rx_conj_ for CSI). Sync runs on RAW
+  // samples, so a +f carrier offset reads as -f here; undo it so the sign is
+  // physical. UNVERIFIED against a known injected offset -- confirm the sign
+  // before any correction loop consumes it (see BACKLOG AP-30).
+  if (config_->is_houdini()) f = -f;
+  return static_cast<float>(f);
 }
 
 void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
@@ -1219,6 +1273,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   size_t resync_retry_cnt(0);
   size_t resync_retry_max(100);
   size_t resync_success(0);
+  size_t cfo_log_cnt = 0;  // throttles the beacon-CFO line (kCfoLogEvery)
   // TODO: measure CFO from the first beacon and apply here
   const size_t max_cfo = 100;  // in ppb, For Iris
   const size_t resync_period = static_cast<size_t>(
@@ -1415,6 +1470,28 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
           const long long kf = llround(
               static_cast<double>(abs_end - pred0) / static_cast<double>(fr));
           const long long resid = abs_end - (pred0 + kf * fr);
+          // Beacon CFO on the SAME validated detection (~600 flops at ~9/s).
+          // Reported beside resid because they are one oscillator error seen
+          // two ways: the SLOPE of resid is the fractional rate error, and
+          // cfo/carrier is that same fraction read off the carrier. They must
+          // agree -- a disagreement means one instrument is wrong, which is the
+          // whole reason both are measured (BACKLOG AP-30/AP-31).
+          const float cfo_norm =
+              estimateCFO(reinterpret_cast<std::complex<int16_t>*>(
+                              rxbuff.at(kSyncDetectChannel)),
+                          static_cast<size_t>(request_samples),
+                          static_cast<int>(sync_index));
+          const double cfo_hz =
+              static_cast<double>(cfo_norm) * config_->rate();
+          const double cfo_ppm = (config_->freq() > 0.0)
+                                     ? (cfo_hz / config_->freq()) * 1e6
+                                     : 0.0;
+          if ((cfo_log_cnt++ % kCfoLogEvery) == 0) {
+            MLPD_INFO(
+                "Beacon CFO frame %zu: %+.1f Hz (%+.3f ppm), resid %+lld, "
+                "snr %.1f dB, tid %d\n",
+                frame_id, cfo_hz, cfo_ppm, resid, snr, tid);
+          }
           // Liveness model, not micro-correction: with locked clocks + MTS
           // the drift is ~0, while INDEPENDENT detections of the same beacon
           // scatter by +-hundreds of samples (the earliest-crossing/STS
@@ -1466,8 +1543,9 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
             frame_id, new_rx_offset, resync_retry_cnt + 1, sync_index, tid);
 
         if (kEnableCfo && (sync_index >= 0)) {
-          [[maybe_unused]] const auto cfo_phase_est =
-              estimateCFO(samplemem.at(kSyncDetectChannel), sync_index);
+          const auto cfo_phase_est =
+              estimateCFO(samplemem.at(kSyncDetectChannel).data(),
+                          samplemem.at(kSyncDetectChannel).size(), sync_index);
           MLPD_INFO("Client %d Estimated CFO (Hz): %f\n", tid,
                     cfo_phase_est * config_->rate());
         }
