@@ -38,10 +38,23 @@ def snap(url, timeout=45):
     t0 = time.time()
     while time.time() - t0 < timeout:
         try:
-            r = urllib.request.urlopen(url, timeout=8)
+            # Bound the socket to what is LEFT of the deadline, or a read can
+            # block a further 8 s past it on every retry.
+            left = timeout - (time.time() - t0)
+            r = urllib.request.urlopen(url, timeout=max(1.0, min(8.0, left)))
             buf = b""
-            while True:
-                buf += r.read(16384)
+            # BOUNDED: this loop's only exits are `return` and an exception, so
+            # anything that swallows an event without returning must still be
+            # able to leave -- otherwise the outer deadline is unreachable and
+            # snap() hangs forever. Two ways that bites: an event carrying no
+            # antenna 0 (now the NORMAL case, since the server pushes on
+            # sync-only activity), and a closed stream, where read() returns b""
+            # for ever and the loop spins at 100% CPU.
+            while time.time() - t0 < timeout:
+                chunk = r.read(16384)
+                if not chunk:
+                    break          # server closed; fall out and retry
+                buf += chunk
                 if buf.startswith(b"data: ") and b"\n\n" in buf:
                     head, buf = buf.split(b"\n\n", 1)
                     # The stream now also pushes on sync-only activity, so an

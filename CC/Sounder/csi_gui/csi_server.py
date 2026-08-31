@@ -92,7 +92,8 @@ SYNC_KEEP = 240
 # a single global deque would interleave two clients into one unreadable trace.
 _sync = {}     # tid -> deque of records
 _sync_t = {}   # tid -> monotonic time of that tid's last SYN1
-_sync_bad = [0]  # datagrams rejected as non-finite
+_sync_bad = [0]     # datagrams rejected as non-finite
+_bad_payload = [0]  # SSE snapshots dropped because a float would not serialise
 
 
 def _parse_csi(payload, with_quality):
@@ -345,17 +346,24 @@ class Handler(BaseHTTPRequestHandler):
                 # the push stops when SYN1 stops and the age freezes on screen.
                 stale = stale or any(
                     (v.get("age_ms") or 0) >= stale_ms for v in sync.values())
+                body = None
                 if (snap or sync) and (seq != last_seq or
                              (stale and now - last_stale_push >= 0.5)):
-                    last_seq = seq
-                    last_stale_push = now
-                    # allow_nan=False turns a poisoned value into an
-                    # exception here rather than invalid JSON on the wire.
+                    # allow_nan=False turns a poisoned value into an exception
+                    # here rather than invalid JSON on the wire. Serialise
+                    # BEFORE booking the snapshot as delivered, and fall through
+                    # to the keepalive on failure -- an early `continue` here
+                    # skipped the throttle at the bottom of the loop and spun
+                    # the thread at 100% CPU against the UDP receiver.
                     try:
                         body = json.dumps({"ant": snap, "sync": sync},
                                           allow_nan=False)
                     except ValueError:
-                        continue
+                        _bad_payload[0] += 1
+                        body = None
+                if body is not None:
+                    last_seq = seq
+                    last_stale_push = now
                     msg = "data: %s\n\n" % body
                     self.wfile.write(msg.encode("utf-8"))
                     self.wfile.flush()
