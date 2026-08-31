@@ -1007,7 +1007,21 @@ let pktCount=0,t0=Date.now();
 // ---- beacon sync / CFO panel (AP-32) --------------------------------------
 // One panel for the link, not one per antenna: this is the UE's sync state, and
 // it arrives on SYN1 from the sync thread rather than the recording path.
-const SYNC_SHOW=120, SCATTER_TOL=1024, SYNC_STALE_MS=2000, SYNC_YR=1300;
+const SYNC_SHOW=120, SCATTER_TOL=1024, SYNC_YR=1300;
+// Silence is NOT loss of lock. The UE emits only on a resync DETECTION, and
+// resync only attempts when the anchored grid predicts the beacon inside the
+// read window, so detections arrive in bursts (measured: ~100-frame spacing
+// inside a burst) separated by SECONDS of quiet. Measured live on a perfectly
+// healthy link: 240/240 detections LOCKED, resid identically 0, no escalation,
+// and an age of 5.1 s. A threshold sized to the in-burst gaps (the first cut
+// used 2000 ms) therefore paints a healthy link NOT SYNCED most of the time.
+//
+// So staleness alone never demotes the state. It only annotates it with how
+// long ago the last detection was. NOT SYNCED is reported when there is no
+// history at all, when the most recent event was an ESCALATION (the UE really
+// did lose the anchor), or after SYNC_DEAD_MS with no datagram at all, which
+// means the stream itself stopped rather than the beacon being quiet.
+const SYNC_QUIET_MS=2500, SYNC_DEAD_MS=60000;
 let syncCard=null;
 
 function makeSyncCard(){
@@ -1038,15 +1052,19 @@ function fitSync(){
 function drawSync(sync){
   if(!syncCard) makeSyncCard();
   const hist=(sync.hist||[]).slice(-SYNC_SHOW), age=sync.age_ms;
-  // NOT SYNCED is inferred from staleness: while the acquisition loop hunts
-  // there is no detection to hang a datagram on, so silence IS the state.
-  const stale=(age===null||age===undefined||age>SYNC_STALE_MS);
   const last=hist.length?hist[hist.length-1]:null;
+  const a=(age===null||age===undefined)?Infinity:age;
   let label='NOT SYNCED', cls='bg-red-lt';
-  if(!stale&&last){
-    if(last.state===1){label='LOCKED';cls='bg-green-lt';}
+  if(last && a<SYNC_DEAD_MS){
+    if(last.state===3){label='ESCALATING';cls='bg-orange-lt';}
     else if(last.state===2){label='HOLD PENDING';cls='bg-yellow-lt';}
-    else if(last.state===3){label='ESCALATING';cls='bg-orange-lt';}
+    else {label='LOCKED';cls='bg-green-lt';}
+  }
+  // Annotate rather than demote: a quiet stretch is normal and worth showing,
+  // but it is not a state change.
+  if(last && a>=SYNC_QUIET_MS && a<SYNC_DEAD_MS && label==='LOCKED'){
+    label='LOCKED · quiet '+(a/1000).toFixed(1)+'s';
+    cls='bg-green-lt text-secondary';
   }
   syncCard.chip.textContent=label;
   syncCard.chip.className='badge '+cls;
