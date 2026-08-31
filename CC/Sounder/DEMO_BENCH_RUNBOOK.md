@@ -34,14 +34,26 @@ own UDP data planes to each board.
   (a branch cannot be checked out in two worktrees) so it does NOT advance on a
   pull. Whichever you use, `--sounder-dir` (section 3) is what selects the
   binary, and a wrong value fails silently by running the other tree's build.
-- Binary: `~/repos/HoudiniLab/CC/Sounder/build/sounder`, built on the rig
-  with `/usr/bin/cmake --build build --target sounder -j`.
-  **Wipe the build directory when switching a checkout between branches.**
-  An incremental build over a cache configured on another branch linked stale
-  objects and produced a binary twice the correct size (916832 bytes clean),
-  while still passing a runtime-string check. `rm -rf build` then reconfigure.
-  Verify every build by a string only the new code logs, never by the build
-  log: `strings build/sounder | grep <a-string-only-the-new-code-logs>`.
+- Binary: `~/repos/HoudiniLab/CC/Sounder/build/sounder`. **Always wipe the build
+  directory** rather than building incrementally: an incremental build over a
+  cache configured on another branch linked stale objects into a binary TWICE
+  the correct size, and that binary still passed a runtime-string check. So the
+  string check alone does NOT certify a build:
+
+  ```sh
+  rm -rf build                                   # not optional
+  /usr/bin/cmake -B build -DCMAKE_BUILD_TYPE=Release
+  /usr/bin/cmake --build build --target sounder -j
+  ls -l build/sounder                            # STEP 1: size, the check that
+                                                 # actually caught the failure
+  strings build/sounder | grep <a-string-only-the-new-code-logs>   # STEP 2
+  ```
+
+  Step 1 is the one that catches stale objects; step 2 catches a stale binary
+  that was never rebuilt. Both are required, in that order. A clean binary is
+  around 0.9 MB on this rig, so a figure near 1.8 MB means stale objects got
+  linked -- treat the size as an order-of-magnitude sanity check rather than an
+  exact constant, since it moves with every code change.
 - Dashboard backend: `~/repos/HoudiniLab/CC/Sounder/csi_gui/csi_server.py`
   (HTTP on 8080, CSI datagrams in on UDP 9999). Both bind `0.0.0.0`, not
   localhost (`--http-host` / `--udp-host` defaults), so the dashboard is also

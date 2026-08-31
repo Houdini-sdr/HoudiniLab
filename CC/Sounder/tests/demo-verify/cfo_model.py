@@ -8,6 +8,7 @@ STS_LEN, STS_REPS, GOLD_LEN, GOLD_REPS = 16, 15, 128, 2
 CORE = STS_LEN*STS_REPS + GOLD_LEN*GOLD_REPS
 FS = 122.88e6
 random.seed(7)
+HOUDINI = True   # match the shipped configs (radio_type: houdini)
 
 sts  = [complex(random.gauss(0,1), random.gauss(0,1)) for _ in range(STS_LEN)]
 gold = [complex(random.gauss(0,1), random.gauss(0,1)) for _ in range(GOLD_LEN)]
@@ -26,7 +27,14 @@ def estimate(buf):
     f_coarse = cmath.phase(r_coarse)/(2*math.pi*STS_LEN)
     amb = 1.0/GOLD_LEN
     m = round((f_coarse - f_fine)/amb)
-    return f_fine + m*amb
+    f = f_fine + m*amb
+    # receiver.cc ends with `if (config_->is_houdini()) f = -f;` -- the matched-NCO
+    # R2C RX mixer delivers baseband CONJUGATED, so a +f carrier offset reads as
+    # -f. BOTH shipped configs are radio_type houdini, so every production call
+    # takes that branch. Omitting it here would make this model an INVERTED
+    # reference for the one question it exists to answer, and AP-30 cites it as
+    # the offline validation of exactly that sign.
+    return -f if HOUDINI else f
 
 def apply(f_hz, snr_db=None):
     fn = f_hz/FS
@@ -39,10 +47,17 @@ def apply(f_hz, snr_db=None):
     return out
 
 print("=== noiseless sweep: recovered vs injected ===")
+# The expected READING is the production convention: a +f carrier offset reads
+# as -f through the conjugating R2C mixer (see estimate()).
+def expected(hz):
+    return -hz if HOUDINI else hz
+
 for hz in [0, 100, 1e3, 1e4, 1e5, 3e5, 4.7e5, 4.79e5, 4.81e5, 6e5, 1e6, 3.8e6]:
     got = estimate(apply(hz))*FS
-    ok = "ok" if abs(got-hz) < max(1.0, abs(hz)*1e-6) else "** WRAPPED **"
-    print("  inject %+11.1f Hz -> %+11.1f Hz  %s" % (hz, got, ok))
+    exp = expected(hz)
+    ok = "ok" if abs(got-exp) < max(1.0, abs(hz)*1e-6) else "** WRAPPED **"
+    print("  inject %+11.1f Hz -> reads %+11.1f Hz (expect %+11.1f)  %s"
+          % (hz, got, exp, ok))
 
 print()
 print("=== where the COMBINED estimator actually wraps ===")
@@ -52,7 +67,7 @@ print("=== where the COMBINED estimator actually wraps ===")
 lo, hi = 1e5, 8e6
 for _ in range(60):
     mid = (lo+hi)/2
-    if abs(estimate(apply(mid))*FS - mid) < max(1.0, mid*1e-6): lo = mid
+    if abs(estimate(apply(mid))*FS - expected(mid)) < max(1.0, mid*1e-6): lo = mid
     else: hi = mid
 print("  holds to      %.1f Hz" % lo)
 print("  fine  alone   %.1f Hz  (fs/2/%d)" % (FS/2/GOLD_LEN, GOLD_LEN))
@@ -61,6 +76,6 @@ print("  coarse limit  %.1f Hz  (fs/2/%d)" % (FS/2/STS_LEN, STS_LEN))
 print()
 print("=== with noise, at the demo's measured ~48 dB beacon SNR ===")
 for snr in [48, 30, 20, 10]:
-    errs = [abs(estimate(apply(1e4, snr))*FS - 1e4) for _ in range(200)]
+    errs = [abs(estimate(apply(1e4, snr))*FS - expected(1e4)) for _ in range(200)]
     errs.sort()
     print("  snr %2d dB: median err %8.1f Hz   p95 %9.1f Hz" % (snr, errs[100], errs[190]))

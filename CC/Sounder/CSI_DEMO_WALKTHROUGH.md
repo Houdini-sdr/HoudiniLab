@@ -2,7 +2,7 @@
 
 This walkthrough goes from an empty machine to a live channel display in a web
 browser: install the dependencies, build the sounder, point it at your own two
-radios, run the base station and client together, and read the four panels the
+radios, run the base station and client together, and read the panels the
 dashboard draws. Every step shows the exact command and what you should see.
 
 If you are on the lab bench, `DEMO_BENCH_RUNBOOK.md` next to this file fills
@@ -54,7 +54,9 @@ clock).
   domain reference built from your config, so an LTS, a Zadoff Chu, or any
   other `pilot_seq` works without code changes.
 - The dashboard draws one card per receive antenna and scales automatically to
-  however many antennas appear in the stream.
+  however many antennas appear in the stream. Above them sits a single **beacon
+  sync** card per client, which describes the LINK rather than any one antenna
+  (section 5.2).
 
 ## 2. Install everything (from nothing)
 
@@ -398,7 +400,52 @@ happening now".
 The threshold is 1.5 seconds by default. If you lower `--csi-fps`, raise it to
 match with `--stale-ms`, or every card will read as stale.
 
-### 5.2 The ADC tab
+`--stale-ms` governs the ANTENNA cards only. The beacon sync card has its own
+rules, because its data is bursty by nature rather than continuous (section 5.2).
+
+### 5.2 The beacon sync card
+
+One card per client, above the antenna cards. It answers a different question
+from the channel panels: not "what does the channel look like" but "is the UE
+still locked to the base station's beacon, and how far off is it".
+
+The trace is `resid`: how many samples the detected beacon landed from where the
+anchored grid predicted it. The shaded band is the acceptance tolerance the
+sounder actually applies, carried on the wire rather than hardcoded in the page,
+so it always matches the running code. Healthy looks like a flat line on zero
+well inside the band.
+
+The x axis is the FRAME NUMBER, not the point index. Detections are irregularly
+spaced, and a wide gap is itself information, so an evenly spaced axis would
+hide it.
+
+The badge reads one of:
+
+| Badge | Meaning |
+|---|---|
+| `LOCKED` | Beacon found where the anchored grid predicted it. Normal. |
+| `HOLD PENDING` | One off-grid detection seen. Deliberately NOT acted on: single large offsets are scatter, so the sounder waits for a second consistent one. |
+| `RE-ANCHORED` | The UE gave up tracking and re-acquired. The readout names the schedule step applied. This is the only place the UE moves its own schedule. |
+| `WEAK BEACON` | Something was detected but it failed the SNR floor. Different from no beacon at all, and usually means levels or cabling. |
+| `RE-ANCHOR FAILED` | An escalation ran and re-acquisition did not confirm. The previous anchor is being kept. |
+| `NOT SYNCED` | No detections at all, or the stream has been silent for a minute. |
+
+A badge may be suffixed `quiet 4.2s`. That is NOT a fault. The UE reports only
+when it makes a detection, and it only attempts one when the anchored grid
+predicts the beacon inside the read window, so seconds of silence between bursts
+are normal on a perfectly healthy link. The plot dims while quiet so you can see
+at a glance that you are looking at held data rather than live data.
+
+The readout line carries two figures in ppm: the **timing** slope, fitted from
+the resid trace, and the **carrier** offset from the beacon CFO estimate. These
+are the same oscillator error reached two independent ways and should agree.
+They are printed next to each other so a disagreement is visible rather than
+silent. The carrier figure carries its own spread, and is annotated when it
+falls inside the phase-noise floor: a short correlation lag turns a tiny phase
+error into an apparently large frequency, so treat sub-kilohertz carrier
+readings as instrument noise rather than a real offset.
+
+### 5.3 The ADC tab
 
 Each card has two tabs. **Channel** is everything above. **ADC** shows the
 received pilot slot in the time domain, which is where you look when the

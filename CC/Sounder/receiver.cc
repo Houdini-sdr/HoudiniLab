@@ -1090,7 +1090,7 @@ ssize_t Receiver::syncSearch(const std::complex<int16_t>* check_data,
 // Per detection, never sampled at display cadence: detections run ~9/s, slower
 // than the 30 fps display throttle, so resampling would alias exactly the thing
 // the panel exists to show (the bug f8ba2b4 fixed on the retired H-stability
-// strip). At ~9/s x 32 bytes this costs nothing.
+// strip). At ~9/s x 44 bytes this costs nothing.
 static int syncTelemetrySock(void) {
   static const int fd = [] {
     const char* dst = std::getenv("HOUDINI_CSI_UDP");
@@ -1121,20 +1121,34 @@ static int syncTelemetrySock(void) {
 // the page infers it from datagram staleness, the same idiom the antenna panels
 // already use, because there is no detection to hang a datagram on while the
 // acquisition loop is hunting.
-enum SyncState : uint32_t { kSyncLocked = 1, kSyncHold = 2, kSyncEscalating = 3 };
+enum SyncState : uint32_t {
+  kSyncLocked = 1,       // beacon alive on the anchored grid
+  kSyncHold = 2,         // one off-grid detection, deliberately NOT acted on
+  kSyncEscalating = 3,   // anchor re-acquired; `shift` is the step applied
+  kSyncWeak = 4,         // detected but under the SNR floor -- a WEAK beacon,
+                         // which without this is indistinguishable from none
+  kSyncReanchorFailed = 5  // escalation ran and re-acquisition did NOT confirm
+};
 
 // [magic 'SYN1'][frame u32][tid u32][state u32][resid i32][cfo_hz f32][snr f32]
-// [shift i32][samps_per_frame u32][carrier_hz f32]  -- 40 bytes. The last two
-// let the panel convert resid-slope and CFO to ppm without hardcoding config
-// values into the page, which is exactly what breaks when a config changes. `shift` is the anchor correction actually APPLIED,
+// [shift i32][samps_per_frame u32][carrier_hz f32][scatter_tol u32] -- 44 bytes.
+// The trailing three let the panel convert to ppm and draw the accept/reject
+// band without hardcoding config values into the page, which is exactly what
+// breaks when a config changes (AP-31 proposes retuning the gate).
+//
+// `shift` is the schedule step actually applied, NOT fresh-minus-previous: both
+// anchors are ABSOLUTE sample times taken k frames apart, so their difference is
+// dominated by k*samps_per_frame elapsed time and overflows the int32 wire field
+// after ~17.5 s of run. It is reduced modulo the frame period and centred. `shift` is the anchor correction actually APPLIED,
 // nonzero only on an escalation re-anchor, which is the only place the UE moves
 // its schedule today (resync is a liveness detector, not a micro-corrector).
 static void sendSyncTelemetry(size_t frame, int tid, uint32_t state,
                               long long resid, double cfo_hz, double snr,
-                              long long shift, uint32_t sfr, float carrier) {
+                              long long shift, uint32_t sfr, float carrier,
+                              uint32_t scatter_tol) {
   const int fd = syncTelemetrySock();
   if (fd < 0) return;
-  uint8_t buf[40];
+  uint8_t buf[44];
   const uint32_t magic = 0x53594E31u, fr = static_cast<uint32_t>(frame),
                  ti = static_cast<uint32_t>(tid);
   const int32_t rs = static_cast<int32_t>(resid),
@@ -1150,6 +1164,7 @@ static void sendSyncTelemetry(size_t frame, int tid, uint32_t state,
   std::memcpy(buf + 28, &sh, 4);
   std::memcpy(buf + 32, &sfr, 4);
   std::memcpy(buf + 36, &carrier, 4);
+  std::memcpy(buf + 40, &scatter_tol, 4);
   (void)::send(fd, buf, sizeof(buf), 0);
 }
 
@@ -1359,6 +1374,19 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   size_t resync_retry_max(100);
   size_t resync_success(0);
   size_t cfo_log_cnt = 0;  // throttles the beacon-CFO line (kCfoLogEvery)
+  // Liveness accept/reject half-width. Shipped ON THE WIRE so the panel draws
+  // the band it actually illustrates rather than a hardcoded copy (AP-31
+  // proposes retuning this, after which a page-side constant would silently lie).
+  constexpr long long kScatterTol = 1024;
+  // Single place that knows the wire's fixed fields, so no call site can forget
+  // the geometry the page needs to convert to ppm.
+  auto emitSync = [&](uint32_t st, long long rs, double cfo_hz, double snr_db,
+                      long long shift) {
+    sendSyncTelemetry(frame_id, tid, st, rs, cfo_hz, snr_db, shift,
+                      static_cast<uint32_t>(config_->samps_per_frame()),
+                      static_cast<float>(config_->freq()),
+                      static_cast<uint32_t>(kScatterTol));
+  };
   // TODO: measure CFO from the first beacon and apply here
   const size_t max_cfo = 100;  // in ppb, For Iris
   const size_t resync_period = static_cast<size_t>(
@@ -1415,10 +1443,16 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
     if (houdiniAcquireAnchor(tid, beacon_detect_window_esc, fresh)) {
       // The ONLY place the UE moves its schedule. Report the applied step so the
       // panel can mark it against the resid trace.
-      sendSyncTelemetry(frame_id, tid, kSyncEscalating, 0, 0.0, 0.0,
-                        houdini_pilot_ref_valid ? (fresh - prev_ref) : 0,
-                        static_cast<uint32_t>(config_->samps_per_frame()),
-                        static_cast<float>(config_->freq()));
+      // Both anchors are ABSOLUTE sample times k frames apart, so their raw
+      // difference is dominated by elapsed time and overflows int32 in ~17.5 s.
+      // The schedule step is that difference modulo the frame period, centred.
+      long long step = 0;
+      if (houdini_pilot_ref_valid) {
+        const long long fr = static_cast<long long>(config_->samps_per_frame());
+        step = ((fresh - prev_ref) % fr + fr) % fr;
+        if (step > fr / 2) step -= fr;
+      }
+      emitSync(kSyncEscalating, 0, 0.0, 0.0, step);
       houdini_pilot_ref = fresh;
       houdini_pilot_ref_valid = true;
       if (static_cast<size_t>(tid) < houdini_pilot_cursor_reset_.size())
@@ -1430,6 +1464,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
           "Re-sync ESCALATION: re-acquisition did not confirm; keeping the "
           "previous anchor, tid %d\n",
           tid);
+      emitSync(kSyncReanchorFailed, 0, 0.0, 0.0, 0);
     }
     resync_exhausted_streak = 0;
     resync_hold_pending = false;
@@ -1552,6 +1587,9 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
           }
         }
         if (snr < syncSnrFloorDb()) {
+          // Report it: without this a WEAK beacon is indistinguishable from no
+          // beacon on the panel, and they call for different operator actions.
+          emitSync(kSyncWeak, 0, 0.0, snr, 0);
           sync_index = -1;  // fall through to the miss path below
         } else {
           const long long fr =
@@ -1593,7 +1631,6 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
           // grid, touch nothing; two consecutive hits beyond it = beacon
           // MOVED -> escalate straight to re-acquisition, whose confirm
           // loop is immune to the common detector bias.
-          constexpr long long kScatterTol = 1024;
           if (std::llabs(resid) <= kScatterTol) {
             resync_hold_pending = false;
             resync_exhausted_streak = 0;
@@ -1604,19 +1641,16 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
                 "Re-sync frame %zu: beacon alive on the anchored grid "
                 "(resid %+lld within scatter, snr %.1f dB), tid %d\n",
                 frame_id, resid, snr, tid);
-            sendSyncTelemetry(frame_id, tid, kSyncLocked, resid, cfo_hz, snr, 0,
-                              static_cast<uint32_t>(config_->samps_per_frame()),
-                              static_cast<float>(config_->freq()));
+            emitSync(kSyncLocked, resid, cfo_hz, snr, 0);
           } else {
             MLPD_WARN(
                 "Re-sync frame %zu: off-grid detection %+lld (snr %.1f dB, "
                 "pending %d) -- beacon possibly moved, tid %d\n",
                 frame_id, resid, snr, resync_hold_pending ? 1 : 0, tid);
-            sendSyncTelemetry(frame_id, tid, kSyncHold, resid, cfo_hz, snr, 0,
-                              static_cast<uint32_t>(config_->samps_per_frame()),
-                              static_cast<float>(config_->freq()));
+            emitSync(kSyncHold, resid, cfo_hz, snr, 0);
             if (resync_hold_pending) {
               houdiniEscalate("beacon moved");
+              frame_id++;  // else the x-axis loses the blocking re-acquisition
               continue;  // rx_beacon_time is pre-hunt; restart the frame loop
             }
             resync_hold_pending = true;
@@ -1677,6 +1711,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
             resync_retry_cnt = 0;
             if (++resync_exhausted_streak >= kEscalateExhaustedEpisodes) {
               houdiniEscalate("episodes exhausted");
+              frame_id++;  // else the x-axis loses the blocking re-acquisition
               continue;  // rx_beacon_time is pre-hunt; restart the frame loop
             }
           } else {

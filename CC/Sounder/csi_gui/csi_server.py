@@ -32,13 +32,15 @@ Wire formats (little-endian), one datagram per (frame, antenna) per kind:
         accepted.
   CNS1  [magic][frame][ant][num_pts][mod_order]      then num_pts * (I f32, Q f32)
   SYN1  [magic][frame][tid][state][resid i32][cfo_hz f32][snr f32][shift i32]
-        [samps_per_frame u32][carrier_hz f32]
+        [samps_per_frame u32][carrier_hz f32][scatter_tol u32]
         One datagram per resync DETECTION from the UE sync thread (not the
         recording path), so it is NOT per-antenna and carries no payload array.
         state: 1=LOCKED (beacon alive on the anchored grid), 2=HOLD (one
         off-grid detection seen, deliberately NOT acted on), 3=ESCALATING (the
-        anchor was re-acquired; `shift` is the correction actually applied, and
-        is the only place the UE moves its schedule). NOT SYNCED is inferred
+        anchor was re-acquired; `shift` is the schedule step applied, already
+        reduced modulo the frame period and centred), 4=WEAK (detected but under
+        the SNR floor -- distinct from no beacon at all), 5=REANCHOR FAILED (an
+        escalation ran and re-acquisition did not confirm). NOT SYNCED is inferred
         from staleness -- while the acquisition loop hunts there is no detection
         to hang a datagram on.
   ADC2  [magic][frame][ant][cols][samps][rate f32][peak][clipped][slot][any_peak]
@@ -75,7 +77,7 @@ CSI2_HDR = struct.Struct("<IIIIfI")  # ... plus reps (pilot symbols averaged)
 CNS_HDR = struct.Struct("<IIIII")   # magic, frame, ant, num_pts, mod_order
 ADC_HDR = struct.Struct("<IIIIIfII")   # magic, frame, ant, cols, samps, rate, peak, clipped
 ADC2_HDR = struct.Struct("<IIIIIfIIIII")  # ... plus slot, any_peak, any_clipped
-SYN_HDR = struct.Struct("<IIIIiffiIf")  # ... plus samps_per_frame, carrier_hz
+SYN_HDR = struct.Struct("<IIIIiffiIfI")  # ... plus samps_per_frame, carrier_hz, scatter_tol
 
 # ---- shared state: latest CSI + constellation per antenna ------------------
 _lock = threading.Lock()
@@ -86,8 +88,11 @@ _stats = {"pkts": 0, "t0": time.time()}
 # per-antenna state rather than in it. maxlen caps memory on a long run; the page
 # shows a shorter window than this.
 SYNC_KEEP = 240
-_sync = collections.deque(maxlen=SYNC_KEEP)
-_sync_t = [0.0]   # monotonic time of the last SYN1, for the NOT-SYNCED inference
+# Keyed by tid, which the wire format carries precisely to identify the source;
+# a single global deque would interleave two clients into one unreadable trace.
+_sync = {}     # tid -> deque of records
+_sync_t = {}   # tid -> monotonic time of that tid's last SYN1
+_sync_bad = [0]  # datagrams rejected as non-finite
 
 
 def _parse_csi(payload, with_quality):
@@ -172,11 +177,19 @@ def _parse_cns(payload):
 def _parse_syn(payload):
     if len(payload) < SYN_HDR.size:
         return None
-    (_m, frame, tid, state, resid, cfo, snr, shift, sfr,
-     carrier) = SYN_HDR.unpack_from(payload, 0)
+    (_m, frame, tid, state, resid, cfo, snr, shift, sfr, carrier,
+     tol) = SYN_HDR.unpack_from(payload, 0)
+    # A NaN or inf float would serialise as bare NaN/Infinity, which is invalid
+    # JSON: the browser's JSON.parse throws, onData's catch swallows it, and the
+    # dashboard silently stops updating for as long as the record stays in the
+    # history. Drop the datagram instead of admitting it.
+    if not (math.isfinite(cfo) and math.isfinite(snr) and math.isfinite(carrier)):
+        _sync_bad[0] += 1
+        return None
     return {"frame": int(frame), "tid": int(tid), "state": int(state),
             "resid": int(resid), "cfo": float(cfo), "snr": float(snr),
-            "shift": int(shift), "sfr": int(sfr), "fc": float(carrier)}
+            "shift": int(shift), "sfr": int(sfr), "fc": float(carrier),
+            "tol": int(tol)}
 
 
 def _udp_loop(bind_host, bind_port):
@@ -209,8 +222,10 @@ def _udp_loop(bind_host, bind_port):
             rec = _parse_syn(data)
             if rec is not None:
                 with _lock:
-                    _sync.append(rec)
-                    _sync_t[0] = time.monotonic()
+                    t = rec["tid"]
+                    _sync.setdefault(
+                        t, collections.deque(maxlen=SYNC_KEEP)).append(rec)
+                    _sync_t[t] = time.monotonic()
                     _seq += 1
                     _stats["pkts"] += 1
             continue
@@ -240,8 +255,13 @@ def _snapshot():
             rec = {k: v for k, v in slot.items() if k != "t"}
             rec["age_ms"] = int(max(0.0, now - slot.get("t", now)) * 1000)
             out[str(a)] = rec
-        age = int(max(0.0, now - _sync_t[0]) * 1000) if _sync_t[0] else None
-        sync = {"hist": list(_sync), "age_ms": age}
+        sync = {}
+        for t, hist in _sync.items():
+            last = _sync_t.get(t)
+            sync[str(t)] = {
+                "hist": list(hist),
+                "age_ms": int(max(0.0, now - last) * 1000) if last else None,
+            }
         return _seq, out, sync
 
 
@@ -319,12 +339,24 @@ class Handler(BaseHTTPRequestHandler):
                 # would never appear. Re-send slowly whenever anything is stale.
                 now = time.monotonic()
                 stale = any(r.get("age_ms", 0) >= stale_ms for r in snap.values())
-                if (snap or sync["hist"]) and (seq != last_seq or
+                # The sync stream must count too: it is quiet by nature between
+                # resync bursts, and after the staleness fix its age is the only
+                # thing that can move the chip off a stale state. Without this
+                # the push stops when SYN1 stops and the age freezes on screen.
+                stale = stale or any(
+                    (v.get("age_ms") or 0) >= stale_ms for v in sync.values())
+                if (snap or sync) and (seq != last_seq or
                              (stale and now - last_stale_push >= 0.5)):
                     last_seq = seq
                     last_stale_push = now
-                    msg = "data: %s\n\n" % json.dumps({"ant": snap,
-                                                       "sync": sync})
+                    # allow_nan=False turns a poisoned value into an
+                    # exception here rather than invalid JSON on the wire.
+                    try:
+                        body = json.dumps({"ant": snap, "sync": sync},
+                                          allow_nan=False)
+                    except ValueError:
+                        continue
+                    msg = "data: %s\n\n" % body
                     self.wfile.write(msg.encode("utf-8"))
                     self.wfile.flush()
                 else:
@@ -1005,119 +1037,145 @@ const cardObserver=(typeof ResizeObserver!=='undefined') ? new ResizeObserver(()
 
 let pktCount=0,t0=Date.now();
 // ---- beacon sync / CFO panel (AP-32) --------------------------------------
-// One panel for the link, not one per antenna: this is the UE's sync state, and
-// it arrives on SYN1 from the sync thread rather than the recording path.
-const SYNC_SHOW=120, SCATTER_TOL=1024, SYNC_YR=1300;
-// Silence is NOT loss of lock. The UE emits only on a resync DETECTION, and
-// resync only attempts when the anchored grid predicts the beacon inside the
-// read window, so detections arrive in bursts (measured: ~100-frame spacing
-// inside a burst) separated by SECONDS of quiet. Measured live on a perfectly
-// healthy link: 240/240 detections LOCKED, resid identically 0, no escalation,
-// and an age of 5.1 s. A threshold sized to the in-burst gaps (the first cut
-// used 2000 ms) therefore paints a healthy link NOT SYNCED most of the time.
-//
-// So staleness alone never demotes the state. It only annotates it with how
-// long ago the last detection was. NOT SYNCED is reported when there is no
-// history at all, when the most recent event was an ESCALATION (the UE really
-// did lose the anchor), or after SYNC_DEAD_MS with no datagram at all, which
-// means the stream itself stopped rather than the beacon being quiet.
-const SYNC_QUIET_MS=2500, SYNC_DEAD_MS=60000;
-let syncCard=null;
+// One card per client tid, matching how every other stream here is keyed.
+const SYNC_SHOW=120, SYNC_YR=1300, SYNC_QUIET_MS=2500, SYNC_DEAD_MS=60000;
+const SYNC_TOL_FALLBACK=1024;
+// Short-lag CFO is phase-noise limited: the measured run-to-run spread is ~1 kHz
+// even with the clocks locked, so anything under a kHz is instrument noise, not
+// a frequency. The readout carries its own error bar for that reason.
+const CFO_NOISE_HZ=1000;
+const syncCards={};
 
-function makeSyncCard(){
+function makeSyncCard(tid){
   const wrap=document.createElement('div');
   wrap.className='card csi-card';
   wrap.innerHTML='<div class="card-body">'
     +'<div class="d-flex align-items-center justify-content-between mb-2">'
-      +'<h3 class="card-title mb-0">beacon sync</h3>'
+      +'<h3 class="card-title mb-0">beacon sync'+(tid!=='0'?(' [UE '+tid+']'):'')+'</h3>'
       +'<span class="badge bg-secondary-lt sync-chip">--</span></div>'
     +frame('resid vs the anchored grid (samples)','csi-h-line',
            ['+1300','+650','0','-650','-1300'],['older','frame','now'])
     +'<div class="text-secondary tnum mt-2 sync-read" style="font-size:.75rem"></div>'
     +'</div>';
   document.getElementById('sync').appendChild(wrap);
-  syncCard={cv:wrap.querySelector('canvas'),
-            chip:wrap.querySelector('.sync-chip'),
-            read:wrap.querySelector('.sync-read')};
+  syncCards[tid]={cv:wrap.querySelector('canvas'),
+                  chip:wrap.querySelector('.sync-chip'),
+                  read:wrap.querySelector('.sync-read'),
+                  plot:wrap.querySelector('.csi-plot')};
 }
 
-function fitSync(){
-  const cv=syncCard.cv, r=cv.getBoundingClientRect();
-  const dpr=window.devicePixelRatio||1;
+function fitSyncCanvas(cv){
+  const r=cv.getBoundingClientRect(), dpr=window.devicePixelRatio||1;
   const w=Math.max(1,Math.round(r.width*dpr)), h=Math.max(1,Math.round(r.height*dpr));
   if(cv.width!==w||cv.height!==h){cv.width=w;cv.height=h;}
   return {w:w,h:h};
 }
 
-function drawSync(sync){
-  if(!syncCard) makeSyncCard();
-  const hist=(sync.hist||[]).slice(-SYNC_SHOW), age=sync.age_ms;
-  const last=hist.length?hist[hist.length-1]:null;
-  const a=(age===null||age===undefined)?Infinity:age;
-  let label='NOT SYNCED', cls='bg-red-lt';
-  if(last && a<SYNC_DEAD_MS){
-    if(last.state===3){label='ESCALATING';cls='bg-orange-lt';}
-    else if(last.state===2){label='HOLD PENDING';cls='bg-yellow-lt';}
-    else {label='LOCKED';cls='bg-green-lt';}
+// A segment is a stretch over which resid is comparable. It ENDS at a re-anchor
+// (afterwards resid is measured against a REPLACED reference, so one fit across
+// it fabricates a slope) and at a frame counter that goes BACKWARDS (the
+// launcher's retry loop restarts the sounder and frame_id resets to 0, which
+// would otherwise collapse the x-axis span to 1).
+function lastSyncSegment(hist){
+  let start=0;
+  for(let i=1;i<hist.length;i++){
+    const prev=hist[i-1];
+    if(hist[i].frame < prev.frame) start=i;
+    else if(prev.state===3||prev.state===5) start=i;
   }
-  // Annotate rather than demote: a quiet stretch is normal and worth showing,
-  // but it is not a state change.
-  if(last && a>=SYNC_QUIET_MS && a<SYNC_DEAD_MS && label==='LOCKED'){
-    label='LOCKED · quiet '+(a/1000).toFixed(1)+'s';
-    cls='bg-green-lt text-secondary';
-  }
-  syncCard.chip.textContent=label;
-  syncCard.chip.className='badge '+cls;
-  const d=fitSync(), ctx=syncCard.cv.getContext('2d');
-  ctx.clearRect(0,0,d.w,d.h);
-  if(!hist.length){syncCard.read.textContent='no detections yet';return;}
+  return hist.slice(start);
+}
 
-  // x is the FRAME NUMBER, not the point index. Detections are irregularly
-  // spaced (measured 9 to 699 frames apart, median 99) and an evenly spaced
-  // axis would hide the gaps, which are themselves a signal.
-  const f0=hist[0].frame, f1=hist[hist.length-1].frame, span=Math.max(1,f1-f0);
+function syncChip(last, age){
+  if(!last || age>=SYNC_DEAD_MS) return ['NOT SYNCED','bg-red-lt'];
+  switch(last.state){
+    case 1: return ['LOCKED','bg-green-lt'];
+    case 2: return ['HOLD PENDING','bg-yellow-lt'];
+    case 3: return ['RE-ANCHORED','bg-orange-lt'];
+    case 4: return ['WEAK BEACON','bg-yellow-lt'];
+    case 5: return ['RE-ANCHOR FAILED','bg-red-lt'];
+    // An unknown code means the page is older than the sounder. Say so rather
+    // than defaulting to green, which would report health we cannot vouch for.
+    default: return ['STATE '+last.state+'?','bg-secondary-lt'];
+  }
+}
+
+function drawSyncCard(tid, sync){
+  if(!syncCards[tid]) makeSyncCard(tid);
+  const card=syncCards[tid];
+  const hist=(sync.hist||[]).slice(-SYNC_SHOW);
+  const age=(sync.age_ms===null||sync.age_ms===undefined)?Infinity:sync.age_ms;
+  const last=hist.length?hist[hist.length-1]:null;
+  let [label,cls]=syncChip(last,age);
+  // Staleness annotates every state; it never invents one. Silence between
+  // resync bursts is normal (measured: seconds), so it must not demote.
+  if(last && age>=SYNC_QUIET_MS && age<SYNC_DEAD_MS){
+    label+=' \u00b7 quiet '+(age/1000).toFixed(1)+'s';
+  }
+  card.chip.textContent=label;
+  card.chip.className='badge '+cls;
+  // Match the antenna cards: dim the plot when it is no longer live data.
+  if(card.plot) card.plot.style.opacity=(age>=SYNC_QUIET_MS)?'0.4':'1';
+
+  const d=fitSyncCanvas(card.cv), ctx=card.cv.getContext('2d');
+  ctx.clearRect(0,0,d.w,d.h);
+  if(!hist.length){card.read.textContent='no detections yet';return;}
+
+  const seg=lastSyncSegment(hist);
+  const TOL=(last && last.tol)?last.tol:SYNC_TOL_FALLBACK;
+  const f0=seg[0].frame, f1=seg[seg.length-1].frame;
+  const span=Math.max(1,f1-f0);
   const X=f=>((f-f0)/span)*(d.w-1);
   const Y=v=>d.h/2-(v/SYNC_YR)*(d.h/2-2);
   ctx.fillStyle='rgba(128,128,128,0.10)';
-  ctx.fillRect(0,Y(SCATTER_TOL),d.w,Y(-SCATTER_TOL)-Y(SCATTER_TOL));
+  ctx.fillRect(0,Y(TOL),d.w,Y(-TOL)-Y(TOL));
   ctx.strokeStyle=C.warn;ctx.lineWidth=1;ctx.setLineDash([3,3]);
   ctx.beginPath();
-  ctx.moveTo(0,Y(SCATTER_TOL));ctx.lineTo(d.w,Y(SCATTER_TOL));
-  ctx.moveTo(0,Y(-SCATTER_TOL));ctx.lineTo(d.w,Y(-SCATTER_TOL));ctx.stroke();
+  ctx.moveTo(0,Y(TOL));ctx.lineTo(d.w,Y(TOL));
+  ctx.moveTo(0,Y(-TOL));ctx.lineTo(d.w,Y(-TOL));ctx.stroke();
   ctx.setLineDash([]);
   ctx.strokeStyle=C.grid;ctx.beginPath();
   ctx.moveTo(0,Y(0));ctx.lineTo(d.w,Y(0));ctx.stroke();
-  // Escalations first so the detections draw over them.
-  ctx.strokeStyle=C.warn;ctx.lineWidth=1.5;
-  for(const p of hist){ if(p.state===3){
-    ctx.beginPath();ctx.moveTo(X(p.frame),0);ctx.lineTo(X(p.frame),d.h);ctx.stroke(); } }
-  for(const p of hist){
-    if(p.state===3) continue;
-    ctx.fillStyle=(p.state===2)?C.warn:C.mag;
+  for(const p of seg){
+    if(p.state===3||p.state===5) continue;
+    ctx.fillStyle=(p.state===1)?C.mag:C.warn;
     ctx.fillRect(X(p.frame)-1.5,Y(p.resid)-1.5,3,3);
   }
 
-  const loc=hist.filter(p=>p.state===1||p.state===2);
-  if(loc.length<3){syncCard.read.textContent=loc.length+' detection(s)';return;}
+  // Fit only within the segment, and only over states whose resid is meaningful.
+  const loc=seg.filter(p=>p.state===1||p.state===2);
+  const esc=hist.filter(p=>p.state===3);
+  const tail=esc.length?esc[esc.length-1]:null;
+  const anchorNote=tail?('  |  last re-anchor '+tail.shift+' samp'):'';
+  if(loc.length<3){
+    card.read.textContent=loc.length+' detection(s) in this segment'+anchorNote;
+    return;
+  }
   let sx=0,sy=0; for(const p of loc){sx+=p.frame;sy+=p.resid;}
   const n=loc.length, mx=sx/n, my=sy/n;
   let num=0,den=0;
   for(const p of loc){num+=(p.frame-mx)*(p.resid-my);den+=(p.frame-mx)*(p.frame-mx);}
   const sfr=loc[n-1].sfr||1, fc=loc[n-1].fc||0;
-  const tppm=(den>0?num/den:0)/sfr*1e6;      // samples/frame -> ppm
+  const tppm=(den>0?num/den:0)/sfr*1e6;
   let cs=0; for(const p of loc)cs+=p.cfo;
   const cm=cs/n;
   let cq=0; for(const p of loc)cq+=(p.cfo-cm)*(p.cfo-cm);
-  const csd=Math.sqrt(cq/n), cppm=(fc>0?cm/fc*1e6:0);
-  const esc=hist.filter(p=>p.state===3);
-  // Both ppm figures describe ONE oscillator error, reached two independent
-  // ways. Printing them adjacent is the point of the panel: a disagreement has
-  // to be visible rather than silent.
-  syncCard.read.textContent=
-    'timing '+tppm.toFixed(4)+' ppm (resid slope)  |  carrier '+cppm.toFixed(3)
-    +' ppm ('+cm.toFixed(0)+' \u00b1 '+csd.toFixed(0)+' Hz)  |  '+n+' det over '
-    +span+' frames'+(esc.length?('  |  '+esc.length+' re-anchor, last shift '
-    +esc[esc.length-1].shift+' samp'):'');
+  const csd=Math.sqrt(cq/n);
+  const cppm=(fc>0?cm/fc*1e6:0), cppmsd=(fc>0?csd/fc*1e6:0);
+  // Both ppm figures describe ONE oscillator error reached two independent
+  // ways; adjacent so a disagreement is visible rather than silent. The carrier
+  // figure carries its spread AND a noise-floor caveat, because a bare number
+  // here invites reading instrument noise as a real offset.
+  const noisy=Math.abs(cm)<CFO_NOISE_HZ;
+  card.read.textContent=
+    'timing '+tppm.toFixed(4)+' ppm (resid slope)  |  carrier '
+    +cppm.toFixed(3)+' +/- '+cppmsd.toFixed(3)+' ppm ('+cm.toFixed(0)+' +/- '
+    +csd.toFixed(0)+' Hz'+(noisy?', within the ~1 kHz phase-noise floor':'')
+    +')  |  '+n+' det over '+span+' frames'+anchorNote;
+}
+
+function drawSync(sync){
+  for(const tid in sync) drawSyncCard(tid, sync[tid]);
 }
 
 function onData(obj){

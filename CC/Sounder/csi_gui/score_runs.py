@@ -43,8 +43,18 @@ def snap(url, timeout=45):
             while True:
                 buf += r.read(16384)
                 if buf.startswith(b"data: ") and b"\n\n" in buf:
-                    r.close()
-                    return json.loads(buf.split(b"\n\n", 1)[0][6:])["ant"]["0"]
+                    head, buf = buf.split(b"\n\n", 1)
+                    # The stream now also pushes on sync-only activity, so an
+                    # event can carry an EMPTY ant map. Keep reading for one
+                    # that has antenna 0 rather than KeyError-ing on it.
+                    try:
+                        ant = json.loads(head[6:]).get("ant") or {}
+                    except ValueError:
+                        ant = {}
+                    if "0" in ant:
+                        r.close()
+                        return ant["0"]
+                    continue
                 if buf.startswith(b": "):        # keepalive, drop and keep reading
                     i = buf.find(b"\n\n")
                     buf = buf[i + 2:] if i >= 0 else buf
@@ -67,7 +77,8 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("runs", type=int, nargs="?", default=6)
     ap.add_argument("--conf", default="files/houdini-ul.json")
-    ap.add_argument("--sounder-dir", default=os.path.expanduser("~/repos/HoudiniLab-rx/CC/Sounder"))
+    ap.add_argument("--sounder-dir",
+                    default=os.path.expanduser("~/repos/HoudiniLab/CC/Sounder"))
     ap.add_argument("--venv", default=os.path.expanduser("~/houdini_test"))
     ap.add_argument("--http-port", type=int, default=8080)
     ap.add_argument("--frames", type=int, default=14, help="frames scored per run")
