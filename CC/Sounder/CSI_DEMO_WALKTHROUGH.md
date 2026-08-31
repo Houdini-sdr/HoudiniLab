@@ -35,9 +35,17 @@ clock).
   `csi_gui/vendor/tabler.min.css`, and the backend serves it. Nothing is
   fetched from the internet and nothing has to be installed, so the dashboard
   still works on a host with no network access.
-- Two radios take part. One is the base station: it transmits a beacon and
-  opens a receive window on each pilot slot. The other is the client: it locks
-  onto the beacon and transmits a pilot back inside that window.
+- Two radios take part. The base station arms a hardware TDD schedule built
+  from the config frame (one slot per schedule character), transmits a single
+  496 sample beacon once per frame from its replay RAM, and runs one
+  continuous receive covering every receive slot. The client hunts for the
+  beacon, confirms it twice on the frame grid behind a sync SNR floor, anchors
+  its own frame timing to it, and from then on transmits one zero padded burst
+  per frame that seats the pilot and the uplink data in their scheduled slots
+  to the sample. A periodic targeted re-sync checks the beacon is still where
+  the anchor predicts; repeated failure escalates to a full re-acquisition,
+  and both events are logged. The design and its verification live in
+  `DEMO_VERIFICATION.md`.
 - The channel estimate is pilot agnostic. It correlates against the frequency
   domain reference built from your config, so an LTS, a Zadoff Chu, or any
   other `pilot_seq` works without code changes.
@@ -229,6 +237,12 @@ In the schedule strings, `B` is the beacon, `P` is the pilot, `U` is uplink
 data, and `G` is a guard slot. The uplink config places the pilot and data at
 slots 16 and 18 rather than early in the frame, which keeps them clear of
 beacon leakage at the base station.
+
+Pilot and data placement is sample exact: the client pads each burst so its
+start escapes the driver's 3125 ns scheduling grid, and `tx_advance` in the
+config is a bench calibration that seats the burst at its nominal in-slot
+position. If you change cabling or the RF path, re-derive it with the
+procedure in the config's `_tx_advance_note`.
 
 ## 4. Run the demo
 
@@ -464,6 +478,20 @@ Check each field:
   half the 16 sample cyclic prefix. Section 7 explains why.
 - `timing_fix=1`, on by default for Houdini.
 
+Other sounder lines worth recognizing on a healthy run:
+
+```
+UE pilot burst: scheduled 97 frames up to <tick> (pad 148)
+Re-sync frame 1255: beacon alive on the anchored grid (resid +0 within scatter, snr 47.6 dB), tid 0
+```
+
+The first appears with `HOUDINI_UE_TX_DEBUG=1` and shows the client keeping
+its transmit queue topped up. The second appears on every targeted re-sync
+attempt; `resid` near zero and an SNR in the mid 40s dB on a cabled bench mean
+the anchor is holding. If the client loses the link, the base station side
+prints `BS: UE PILOT LOST for N consecutive frames` and, when it returns,
+`BS: UE pilot RETURNED`.
+
 The backend prints a count every five seconds:
 
 ```
@@ -488,6 +516,10 @@ same shell that launches it.
 | `HOUDINI_MAX_FRAME` | from config `max_frame` | Frame count to run. Set large for continuous viewing. |
 | `HOUDINI_CSI_UDP` | `127.0.0.1:9999` with `--view` | Where datagrams go, as `host:port`. |
 | `HOUDINI_CSI_DUMP` | unset | One shot raw slot and H dump for offline analysis. |
+| `HOUDINI_SYNC_SNR_DB` | 30 | Sync SNR floor in dB. Detections below it are rejected during acquisition and re-sync. The metric reads true link SNR; a cabled bench measures the mid 40s. |
+| `HOUDINI_PILOT_HORIZON` | from config `ue_pilot_horizon` (96) | How many frames of client bursts are queued ahead of real time. Larger survives slower host loops; every extra frame delays a timing correction reaching the wire. |
+| `HOUDINI_BS_RX_DEBUG` | unset | Base station prints its rederivation of the client schedule (`pilot_grid_off`, `pu_spacing_err`). Both should sit within one sample of zero. |
+| `HOUDINI_UE_TX_DEBUG` | unset | Client prints its burst scheduling (frames queued, pad). |
 
 `HOUDINI_CSI_SYM_START` is the one worth understanding. The cyclic prefix guard
 is one sided. A window placed early, still inside the prefix, is a valid
@@ -516,10 +548,13 @@ is set.
 
 ### 8.2 Panels appear but the waterfall tears horizontally
 
-The client is losing and re-acquiring the beacon. Usual causes, most likely
-first: the two boards are not on a common reference clock (section 2.1), the RF
-level is wrong so the beacon correlation is marginal, or `corr_scale` needs
-adjusting for your path.
+The client is losing and re-acquiring the beacon. Confirm from the log before
+guessing: escalations print `re-sync escalation` with a reason, and the base
+station prints `UE PILOT LOST` during the outage. Usual causes, most likely
+first: the two boards are not on a common reference clock (section 2.1), the
+RF level is wrong so detections fall under the sync SNR floor (the re-sync
+lines print the measured SNR; compare it against `HOUDINI_SYNC_SNR_DB`), or
+`corr_scale` needs adjusting for your path.
 
 ### 8.3 Channel estimate looks fine but the constellation is a smear
 
@@ -560,17 +595,18 @@ table that makes the damage findable. To confirm the rate, record a capture
 over the same link and compare its gap table against how often the warning
 appears. Tracked as AP-10.
 
-**Cause 3: a failed uplink data transmission at the client.** The constellation
-is built from the client's uplink data slot. Watch the sounder log for
-`BAD Write`, `BAD Write, UL data`, and `unexpected writeStream error`. The
-uplink data burst now checks its own transmit return, so a short write on that
-slot reports itself rather than appearing only as a smear.
+**Cause 3: a failed transmission at the client.** The pilot and the uplink
+data ride one composed burst per frame, and its transmit return is checked:
+watch the sounder log for `BAD Write` and `unexpected writeStream error`. The
+client also drains the driver's asynchronous transmit status once per queue
+top-up, so a burst that was accepted but later reported late or dropped is
+surfaced rather than lost.
 
-One blind spot remains: no code polls the driver's asynchronous transmit
-status, so a burst that was accepted but sent late, or dropped for being late,
-is still never reported. A late pilot on the fine timing grid produces exactly
-the phase jumps you would be chasing, so treat a smear with no logged warning
-as still consistent with this cause. Tracked as AP-10.
+If the constellation is a ring or smears differently from one restart to the
+next with none of the above logged, that class of fault was root caused and
+fixed in the 2026-08-30 campaign (timing offsets between the pilot and data
+paths; `DEMO_VERIFICATION.md` rows 4.36 to 4.48). On current code a persistent
+smear points at RF level, clipping, or receive gaps, not at restart luck.
 
 ### 8.4 The sounder will not start, and discovery looks broken
 
@@ -650,6 +686,14 @@ Check in this order: both boards on a common clock, the RF path is actually
 connected and at a sane level, `frequency` and `nco_frequency` match each other
 in the config, and the beacon board is really the one named under
 `BaseStations` in the topology file.
+
+Acquisition requires more than a correlation peak: the detection must clear
+the sync SNR floor (`HOUDINI_SYNC_SNR_DB`, default 30 dB of true link SNR) and
+then repeat twice at exactly one frame spacing before the client anchors. A
+marginal RF path can therefore correlate occasionally yet never acquire. The
+re-sync and acquisition log lines print the measured SNR; on a cabled bench
+expect the mid 40s dB, and treat much less as an RF level or cabling problem
+rather than a software one.
 
 ## 9. Clean up
 
