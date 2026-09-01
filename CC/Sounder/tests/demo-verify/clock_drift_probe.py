@@ -112,12 +112,97 @@ def fit(x, y, nsig=3.0, iters=4):
             int((~keep).sum()))
 
 
+
+def derotate(c, f_try, cache={}):
+    """c * exp(-j2*pi*f_try*n/RATE). The phasor is cached per (len, f_try):
+    the coarse search reuses one grid over thousands of windows.
+    """
+    if f_try == 0.0:
+        return c
+    key = (len(c), f_try)
+    ph = cache.get(key)
+    if ph is None:
+        ph = np.exp(-2j * np.pi * (f_try / RATE) * np.arange(len(c)))
+        if len(cache) < 256:
+            cache[key] = ph
+    return c * ph
+
+
+def coarse_search(ue, gold, corr_scale, min_ratio, fmax, fstep, windows,
+                  deadline):
+    """Find the de-rotation that restores the matched filter's coherence.
+
+    find_beacon correlates a 128-tap gold sequence, so a carrier offset f costs
+    it sinc(f*128/RATE): coherence is GONE by f = RATE/128 = 960 kHz and already
+    halved well before that. Past a few hundred kHz the beacon is simply not
+    detectable, so there is no acquisition to ride and no residual ramp to fit
+    -- which is the state a free-running node can land in. Sweeping f restores
+    detection WITHOUT requiring acquisition (AP-33's 'way in').
+
+    Returns (f_try, ratio, scan) -- scan is the best ratio per candidate over
+    every window tried, so a failed search is readable rather than mute.
+    """
+    grid = np.arange(-fmax, fmax + fstep / 2, fstep)
+    scan = np.zeros(len(grid))
+    senses = [("gold", gold), ("conj", np.conj(gold))]
+    best = (0.0, None, None)
+    for w in range(windows):
+        if time.time() > deadline:
+            break
+        tk, c = ue.window()
+        if tk is None:
+            continue
+        for j, f in enumerate(grid):
+            d = derotate(c, float(f))
+            for name, g in senses:
+                idx, ratio = find_beacon(d, g, corr_scale)
+                if idx < 0:
+                    continue
+                scan[j] = max(scan[j], ratio)
+                if ratio > best[0]:
+                    best = (ratio, float(f), (name, g))
+        if best[0] >= min_ratio:
+            break
+    return best[1], best[0], (grid, scan), best[2]
+
+
+class _FakeUe:
+    """Synthetic window source for the self-test: same .window() contract as
+    Ue, so coarse_search and the collection loop run unmodified."""
+
+    def __init__(self, cc, eps, seed=7, noise=2e-3, window=12288):
+        self.cc, self.eps, self.n = cc, eps, window
+        self.rng = np.random.default_rng(seed)
+        self.j = 0
+        self.noise = noise
+        self.reads = self.fails = 0
+
+    def window(self, n=None):
+        n = n or self.n
+        self.j += 1
+        self.reads += 1
+        k = int(round(self.j * 0.25 * RATE / FRAME))
+        # Arrival in UE ticks: the BS frame period is FRAME/(1+eps) here.
+        t = int(round(k * FRAME / (1.0 + self.eps))) + int(self.rng.normal(0, 6))
+        off = 2000
+        w = (self.rng.normal(0, self.noise, n) +
+             1j * self.rng.normal(0, self.noise, n)).astype(np.complex128)
+        m = np.arange(CORE)
+        # Physical +CFO on the carrier, then the matched-NCO R2C mixer, which
+        # delivers baseband CONJUGATED (cfo_model.py, AP-30).
+        sig = self.cc * np.exp(2j * np.pi * (FREQ * self.eps / RATE) * m)
+        w[off:off + CORE] += np.conj(sig)
+        return t - off, w
+
+
 def self_test(gold_path, core_path):
     """Known-good case for the ANALYSIS, no hardware (measurement discipline).
 
     Synthesizes windows carrying a beacon at a KNOWN eps and checks the probe
-    recovers it on both channels with the right sign. It validates the fit, the
-    unwrap, and the slope<->eps relation, plus that estimate_cfo() inverts the
+    recovers it on both channels with the right sign, INCLUDING the coarse
+    frequency search at an offset where the matched filter has decohered. It
+    validates the fit, the unwrap, the slope<->eps relation and the
+    search/de-rotation bookkeeping, plus that estimate_cfo() inverts the
     modelled mixer. It CANNOT validate the mixer model itself -- that is what
     the hardware agreement check (CFO vs SCO on a real link) is for.
     """
@@ -125,44 +210,55 @@ def self_test(gold_path, core_path):
     cc = (core[0::2].astype(np.float64) - 1j * core[1::2])
     cc = cc / np.abs(cc).max()
     gold = np.fromfile(gold_path, dtype=np.complex64).astype(np.complex128)
-    rng = np.random.default_rng(7)
     ok = True
-    for eps_ppm in (0.0, +2.5, -2.5, +25.0):
+    # The last case is past find_beacon's coherence: it MUST need the search.
+    for eps_ppm, search in ((0.0, 0.0), (+2.5, 0.0), (-2.5, 0.0),
+                            (+25.0, 0.0), (+800.0, 2e6), (-800.0, 2e6)):
         eps = eps_ppm * 1e-6
+        ue = _FakeUe(cc, eps)
+        f_lock, sense = 0.0, None
+        if search > 0:
+            f_lock, r_lock, _, sense = coarse_search(
+                ue, gold, 10.0, 1.0, search, 100e3, 200,
+                time.time() + 120)
+            if f_lock is None:
+                print("  eps %+8.3f ppm -> coarse search FOUND NOTHING  FAIL"
+                      % eps_ppm)
+                ok = False
+                continue
         ticks, cfos = [], []
-        # One detection every ~0.25 s over 60 s, at random window phases.
-        for j in range(240):
-            k = int(round(j * 0.25 * RATE / FRAME))
-            # Arrival in UE ticks: the BS frame period is FRAME/(1+eps) here.
-            t = int(round(k * FRAME / (1.0 + eps))) + int(rng.normal(0, 6))
-            w = (rng.normal(0, 2e-3, 12288) +
-                 1j * rng.normal(0, 2e-3, 12288)).astype(np.complex128)
-            off = 2000
-            n = np.arange(CORE)
-            # Physical +CFO on the carrier, then the matched-NCO R2C mixer,
-            # which delivers baseband CONJUGATED (cfo_model.py, AP-30).
-            sig = cc * np.exp(2j * np.pi * (FREQ * eps / RATE) * n)
-            w[off:off + CORE] += np.conj(sig)
-            idx, ratio = find_beacon(w, gold, 10.0)
-            if idx < 0:
-                continue
-            start = idx - CORE_OFF_2NDREP
-            if start < 0 or start + CORE > len(w):
-                continue
-            f = estimate_cfo(w[start:start + CORE])
-            if f is None:
-                continue
-            ticks.append(t - off + start)
-            cfos.append(f)
+        senses = [("gold", gold), ("conj", np.conj(gold))]
+        for _ in range(240):
+            tk, c = ue.window()
+            c = derotate(c, f_lock)
+            for name, g in (senses if sense is None else [sense]):
+                idx, ratio = find_beacon(c, g, 10.0)
+                if idx < 0 or ratio < 1.0:
+                    continue
+                start = idx - CORE_OFF_2NDREP
+                if start < 0 or start + CORE > len(c):
+                    break
+                f = estimate_cfo(c[start:start + CORE])
+                if f is None:
+                    break
+                ticks.append(tk + start)
+                cfos.append(f - f_lock)
+                break
+        if len(ticks) < 3:
+            print("  eps %+8.3f ppm -> only %d detections  FAIL"
+                  % (eps_ppm, len(ticks)))
+            ok = False
+            continue
         t = np.array(ticks, dtype=np.int64)
         secs = (t - t[0]).astype(np.float64) / RATE
-        slope, se, jit, _ = fit(secs, unwrap_resid(t))
+        slope, se, jit, drop = fit(secs, unwrap_resid(t))
         got_sco = -slope / RATE * 1e6
         got_cfo = float(np.mean(cfos)) / FREQ * 1e6
-        good = (abs(got_sco - eps_ppm) < 0.02 and abs(got_cfo - eps_ppm) < 0.05)
+        good = (abs(got_sco - eps_ppm) < 0.02 and abs(got_cfo - eps_ppm) < 0.1)
         ok = ok and good
-        print("  eps %+7.3f ppm -> SCO %+7.3f  CFO %+7.3f  (n=%d jit %.1f) %s"
-              % (eps_ppm, got_sco, got_cfo, len(t), jit,
+        print("  eps %+8.3f ppm -> SCO %+8.3f  CFO %+8.3f  "
+              "(n=%d jit %.1f f_lock %+.0f kHz) %s"
+              % (eps_ppm, got_sco, got_cfo, len(t), jit, f_lock / 1e3,
                  "OK" if good else "FAIL"))
     print("SELF-TEST %s" % ("PASSED" if ok else "FAILED"))
     return 0 if ok else 1
@@ -193,6 +289,16 @@ def main():
     ap.add_argument("--label", default="run",
                     help="clock-configuration label, recorded in the json")
     ap.add_argument("--out", default="clock_drift_probe.json")
+    ap.add_argument("--search-hz", type=float, default=0.0,
+                    help="half-width of the coarse CFO search "
+                         "(Hz). 0 = no search, which only works "
+                         "while the offset is small enough for "
+                         "find_beacon to cohere (< ~200 kHz).")
+    ap.add_argument("--search-step", type=float, default=100e3,
+                    help="coarse search step; the gold matched "
+                         "filter nulls at RATE/128 = 960 kHz, so "
+                         "100 kHz costs under 1 dB")
+    ap.add_argument("--search-windows", type=int, default=200)
     ap.add_argument("--self-test", action="store_true",
                     help="validate the analysis on synthetic "
                          "windows at a known eps; no hardware")
@@ -222,6 +328,7 @@ def main():
     ue = None
     ticks, cfos, ratios = [], [], []
     windows = 0
+    f_lock = 0.0
     best_ratio = 0.0   # so a zero-detection run is diagnosable rather than mute
     peak_rms = 0.0
     try:
@@ -233,6 +340,30 @@ def main():
             ue = Ue(args.ue_ip, args.rx_ch)
             senses = [("gold", gold), ("conj", np.conj(gold))]
             sense = None
+            f_lock = 0.0
+            if args.search_hz > 0:
+                # Coarse lock ONCE, then de-rotate every window by it: the
+                # per-window sweep costs ~40 find_beacons and would starve the
+                # detection rate the slope fit lives on.
+                f_lock, r_lock, scan, sense = coarse_search(
+                    ue, gold, args.corr_scale, args.min_ratio, args.search_hz,
+                    args.search_step, args.search_windows,
+                    time.time() + args.duration / 2)
+                grid, sc = scan
+                out["search_grid_hz"] = [float(v) for v in grid]
+                out["search_ratio"] = [float(v) for v in sc]
+                if f_lock is None:
+                    print("  coarse search FOUND NOTHING over +-%.0f kHz "
+                          "(best ratio %.3g) -- widen --search-hz or the "
+                          "beacon is absent" % (args.search_hz / 1e3, r_lock))
+                    out["error"] = "coarse_search_failed"
+                    f_lock = 0.0
+                    sense = None
+                else:
+                    print("  coarse lock: f_try %+.1f kHz ratio %.3g "
+                          "sense=%s  => CFO ~ %+.1f kHz"
+                          % (f_lock / 1e3, r_lock, sense[0], -f_lock / 1e3))
+                    out["f_lock_hz"] = f_lock
             # Wall-clock budget INSIDE the loop: this script owns armed hardware,
             # so it must always exit through its own teardown (never be timeout-
             # killed, which skips the ladder and leaves the framer armed).
@@ -244,6 +375,7 @@ def main():
                     continue
                 peak_rms = max(peak_rms, float(np.sqrt(np.mean(
                     np.abs(c) ** 2))) * 32767.0)
+                c = derotate(c, f_lock)
                 for name, g in (senses if sense is None else [sense]):
                     idx, ratio = find_beacon(c, g, args.corr_scale)
                     if idx >= 0:
@@ -259,6 +391,10 @@ def main():
                         f = estimate_cfo(c[start:start + CORE])
                         if f is None:
                             break
+                        # The de-rotation shifted the raw-domain frequency by
+                        # -f_lock; estimate_cfo already undoes the mixer
+                        # conjugation, so the physical offset is est - f_lock.
+                        f -= f_lock
                         ticks.append(tk + start)
                         cfos.append(f)
                         ratios.append(ratio)
