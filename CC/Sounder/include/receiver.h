@@ -9,11 +9,13 @@
 #ifndef DATARECEIVER_H_
 #define DATARECEIVER_H_
 
+#include <atomic>
 #include <pthread.h>
 
 #include <complex>
 #include <stdexcept>
 #include <string>
+#include <memory>
 #include <vector>
 
 #if defined(USE_UHD)
@@ -71,18 +73,32 @@ class Receiver {
   static void* clientTxRx_launch(void* in_context);
   void clientTxRx(int tid);
   void clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer);
+  // refine_first_cluster: acquisition passes true (one beacon in the window, and the
+  // frame anchor depends on getting the right peak); re-sync leaves it false.
   ssize_t syncSearch(const std::complex<int16_t>* check_data,
-                     size_t search_window, float corr_scale);
+                     size_t search_window, float corr_scale,
+                     bool refine_first_cluster = false);
 
-  float estimateCFO(const std::vector<std::complex<int16_t>>& sync_buff,
-                    int sync_index);
+  // Two-stage beacon CFO estimate, normalized (cycles/sample); multiply by
+  // the sample rate for Hz. Pointer form so both the vector-backed legacy
+  // path and the targeted-resync path (raw rxbuff) can call it.
+  float estimateCFO(const std::complex<int16_t>* buf, size_t buf_len,
+                    int sync_index) const;
   void initBuffers();
   void clientTxPilots(size_t user_id, long long base_time);
   int clientTxData(int tid, int frame_id, long long base_time);
-  ssize_t clientSyncBeacon(size_t radio_id, size_t sample_window);
+  ssize_t clientSyncBeacon(size_t radio_id, size_t sample_window,
+                           long long* window_time = nullptr);
+  bool houdiniAcquireAnchor(int tid, size_t detect_window,
+                            long long& anchor_out);
   void clientAdjustRx(size_t radio_id, size_t discard_samples);
 
  private:
+  // Re-anchor signal into clientTxPilots' scheduling cursor (Opus review
+  // finding 4), one flag per client thread: a single shared flag let one UE
+  // consume another's re-anchor (M5). The unused "shift" half of the old
+  // two-mode contract is removed -- nothing ever wrote it (M1).
+  std::vector<std::unique_ptr<std::atomic<bool>>> houdini_pilot_cursor_reset_;
   Config* config_;
 
 #if defined(USE_UHD)

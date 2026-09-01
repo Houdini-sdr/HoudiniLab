@@ -1,13 +1,13 @@
 {
-    "_comment": "Houdini RFSoC single-UE client. Runs the unmodified receiver.cc client-sync path (clientSyncTxRx -> syncSearch -> find_beacon) on the Houdini radio via the ClientRadioSet houdini backend. Beacon is transmitted separately by beacon_tx_gold from the BS board. Matched-NCO Zone-1 loopback: TX ch1 -> RX ch1, NCO 500 MHz. slot=4096 samps -> detect window ~9544 > beacon. 30 slots x 4096 = 122880 samps = EXACTLY 1 ms per frame so the UE pilot TX time quantizes onto Houdini's whole-ms TX grid at a constant advance.",
+    "_comment": "Houdini RFSoC single-UE client, slot-granular native-TDD demo. BS arms a 30-symbol TDD ring built from frame_schedule (one 4096-tick symbol per slot, '6' beacon strobe on the B slot, rx on every other slot -- a gate close would abandon the continuous capture, see DEMO_VERIFICATION.md). The beacon is a SINGLE 496-sample core per frame at slot_start+384 (strobe offs), played from the TX replay RAM with explicit zeros to the window close. UE: stamp-based hunt -> confirm(x2) -> anchor acquisition with a 30 dB sync-SNR floor (HOUDINI_SYNC_SNR_DB; the metric reads true link dB since the guard-band fix, DEMO_VERIFICATION.md 4.42), resync = gated drift tracking. Run procedure: CSI_DEMO_WALKTHROUGH.md; evidence ledger: DEMO_VERIFICATION.md. Matched-NCO Zone-1: TX ch1 -> RX ch1, NCO 500 MHz. 30 slots x 4096 = 122880 samps = EXACTLY 1 ms per frame = 320 steps of the 384-tick TX grid. The UE composes one zero-padded burst per frame ([front-pad | P | gap zeros | U] anchored at the floored grid point), so pilot/data placement is sample-exact -- the old per-run snap draws are gone (DEMO_VERIFICATION.md 4.48).",
     "serial_file": "files/topology-houdini.json",
     "radio_type": "houdini",
     "remote_port": "55132",
     "bs_hw_framer": true,
     "ue_tdd_pilot": true,
-    "_ue_tdd_pilot_note": "UE streams its pilot with the tdd=1 TX stream arg -> the driver TxTickAnchor accepts the beacon-referenced start on the 3.125us TDD window grid (SH-248/SH-301), not whole-ms, so no 1ms drift-cliff. ue_tx_advance_ticks (ticks) is the fine calibration that seats the pilot in the BS rx_gate; sweep it.",
+    "_ue_tdd_pilot_note": "UE streams its pilot with the tdd=1 TX stream arg -> the driver TxTickAnchor accepts beacon-referenced starts on the 3.125us/384-tick TDD grid (SH-248/SH-301). ue_tx_advance_ticks is QUANTIZED to the 384-tick anchor grid (values under 192 vanish; leave 0); the 3125 ns anchor grid only constrains the BURST anchor; the burst interior is tick-exact, which the zero-padded composition exploits (DEMO_VERIFICATION.md 4.48).",
     "ue_tx_advance_ticks": 0,
-    "_bs_hw_framer_note": "true selects the BS native-Houdini-TDD framer path: beacon replay strobe + one rx_gate window per sounder pilot slot; loopRecv's HW-framer true-path receives only those, tagged with the sounder slot. The TDD symbol is a fixed 0.5ms (decoupled from the slot) so the capture fits inside the rx_gate window; samps_per_slot just needs to be <= 4096 (FPGA TX_RAM, else genPilots' size_t remain_size underflows). 48*80 + 128+128 = 4096.",
+    "_bs_hw_framer_note": "true selects the BS native-Houdini-TDD framer path. The TDD symbol now EQUALS the sounder slot (4096 ticks; the old 0.5 ms symbol and its multi-copy beacon fill are retired, DEMO_VERIFICATION.md 4.12/4.16). samps_per_slot must stay <= 4096 (FPGA TX_RAM depth).",
     "frequency": 500000000.0,
     "nco_frequency": 500000000.0,
     "sample_rate": 122880000.0,
@@ -39,11 +39,16 @@
         "GGGGGGGGGGGGGGGGPGUGGGGGGGGGGG"
     ],
     "tx_advance": [
-        135
+        247
     ],
     "corr_scale": [
         100
     ],
+    "_corr_scale_init_note": "Acquisition-only detection threshold; SMALLER is STRICTER (test: corr_scale * peak > trailing local energy). The 2026-08 measured populations (no-beacon 3.4e-07, beacon 0.31..4.2) were taken in the multi-copy-beacon era; acquisition now ALSO requires the 30 dB in-window SNR floor and two grid-consistent confirms, which is what actually rejects the noise-artifact class (DEMO_VERIFICATION.md 4.25/4.32). Re-sync uses corr_scale and relaxes per retry, gated by the same floor.",
+    "corr_scale_init": [
+        10
+    ],
     "ue_pilot_horizon": 96,
-    "ue_modulation": "QPSK"
+    "ue_modulation": "QPSK",
+    "_tx_advance_note": "BENCH CALIBRATION for the wired setup, not a live mechanism. Derived 2026-08-30 from the BS-side pilot_grid_off measurement (DEMO_VERIFICATION.md 4.31/4.35): with the zero-padded burst (sample-exact placement, DEMO_VERIFICATION.md 4.48) the seat residual is a CONSTANT; 247 = the 205 snap-era value + the measured +42 residual, landing the pilot at its nominal +128 prefix seat. Re-derive after any cabling/latency change: run with HOUDINI_BS_RX_DEBUG=1 across a few restarts and shift tx_advance by the mean pilot_grid_off."
 }

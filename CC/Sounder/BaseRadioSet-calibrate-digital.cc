@@ -81,7 +81,7 @@ int BaseRadioSet::syncTimeOffset() {
     rxbuff[0] = buff[i].data();
     //rxbuff[1] = ant == 2 ? buff[(i*M+j)*ant+1].data() : dummyBuff.data();
     if (_cfg->bs_sdr_ch() == 2) rxbuff[1] = dummyBuff0.data();
-    int ret = bsRadios.at(0).at(i)->recv(rxbuff.data(), num_samps, rxTime);
+    ret = bsRadios.at(0).at(i)->recv(rxbuff.data(), num_samps, rxTime);
     if (ret < 0) std::cout << "bad read at node " << i << std::endl;
   }
 

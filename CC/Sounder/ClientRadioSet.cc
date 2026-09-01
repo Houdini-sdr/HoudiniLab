@@ -18,6 +18,7 @@
 #include "include/comms-lib.h"
 #include "include/logger.h"
 #include "include/macros.h"
+#include "include/node_version.h"
 #include "include/utils.h"
 #include "nlohmann/json.hpp"
 
@@ -32,6 +33,26 @@ static void freeRadios(std::vector<Radio*>& radios) {
       radios.at(i) = nullptr;
     }
   }
+}
+
+// Deliberate UE carrier detune for CFO-estimator validation (AP-33/AP-34).
+// Both boards share a 10 MHz reference, so there is no natural CFO to measure
+// against; HOUDINI_UE_RX_FREQ_OFFSET_HZ imposes a KNOWN one on the UE receive
+// path only -- pure carrier offset, no sample-timing drift, so the beacon
+// estimator can be checked for sign and scale against a truth it cannot infer.
+// HOUDINI_UE_TX_FREQ_OFFSET_HZ detunes the UE transmit path instead, which is
+// what the BS then sees. Both default to 0 = nominal.
+static double envFreqOffsetHz(const char* name) {
+  const char* v = std::getenv(name);
+  return (v != nullptr) ? std::strtod(v, nullptr) : 0.0;
+}
+static double ueRxFreqOffsetHz(void) {
+  static const double v = envFreqOffsetHz("HOUDINI_UE_RX_FREQ_OFFSET_HZ");
+  return v;
+}
+static double ueTxFreqOffsetHz(void) {
+  static const double v = envFreqOffsetHz("HOUDINI_UE_TX_FREQ_OFFSET_HZ");
+  return v;
 }
 
 ClientRadioSet::ClientRadioSet(Config* cfg) : _cfg(cfg) {
@@ -88,6 +109,8 @@ ClientRadioSet::ClientRadioSet(Config* cfg) : _cfg(cfg) {
       std::cout << _cfg->cl_sdr_ids().at(i) << ": Houdini RFSoC, RX rate "
                 << (dev->getSampleRate(SOAPY_SDR_RX, channels.at(0)) / 1e6)
                 << " MSPS" << std::endl;
+      Sounder::NodeVersions::instance().add(
+          "UE " + _cfg->cl_sdr_ids().at(i), dev->getHardwareInfo());
       continue;
     }
     std::cout << _cfg->cl_sdr_ids().at(i) << ": Front end "
@@ -157,8 +180,11 @@ ClientRadioSet::ClientRadioSet(Config* cfg) : _cfg(cfg) {
     for (auto st = radioSerialNotFound.begin(); st != radioSerialNotFound.end();
          st++)
       std::cout << "\033[1;31m" << *st << "\033[0m" << std::endl;
-    std::cout << "\033[1;31mERROR: the above client serials were not "
-                 "discovered in the network!\033[0m"
+    std::cout << "\033[1;31mERROR: the above client radio(s) could not be "
+                 "opened. The reason is logged above each address; note that "
+                 "a radio can be discoverable (SoapySDRUtil --find) and still "
+                 "fail here, e.g. no route to its data-plane address."
+                 "\033[0m"
               << std::endl;
   } else {
     //beaconSize + 82 (BS FE delay) + 68 (path delay) + 17 (correlator delay) + 82 (Client FE Delay)
@@ -298,8 +324,17 @@ void ClientRadioSet::init(ClientRadioContext* context) {
     // starts on the 3.125 us TDD window grid (SH-248/SH-301) instead of whole-ms,
     // so the pilot places finely with no ms drift-cliff.
     rx_stream_args["local_port"] = std::to_string(10002 + i);
+    // Break-at-gap (SH-253), for the same reason as the BS side: recvHoudini's
+    // continuity check only sees read boundaries, so an intra-buffer splice would
+    // slip past it. Driver-default ON; asked for explicitly (AP-10).
+    rx_stream_args["rx_gap_break"] = "1";
     tx_stream_args["tx_mode"] = "stream";
     if (_cfg->ue_tdd_pilot()) tx_stream_args["tdd"] = "1";
+    // MTS (AP-23), same rationale as the BS side: pin the bring-up latency
+    // and align the ADC/DAC tiles the beacon-anchor -> pilot-TX arithmetic
+    // crosses. Radio.cc opens TX before RX for houdini (first-up rule).
+    rx_stream_args["mts"] = "true";
+    tx_stream_args["mts"] = "true";
   } else if (kUseSoapyUHD == false) {
     args["driver"] = "iris";
     args["serial"] = _cfg->cl_sdr_ids().at(i);
@@ -315,7 +350,8 @@ void ClientRadioSet::init(ClientRadioContext* context) {
                              tx_stream_args,
                              _cfg->is_houdini() ? _cfg->rate() : 0.0,
                              _cfg->is_houdini() ? _cfg->rate() : 0.0,
-                             _cfg->is_houdini() ? _cfg->nco() : 0.0);
+                             _cfg->is_houdini() ? _cfg->nco() : 0.0,
+                             ueRxFreqOffsetHz(), ueTxFreqOffsetHz());
   } catch (std::runtime_error& err) {
     has_runtime_error = true;
     MLPD_WARN("ClientRadioSet radio %d (%s) setup failed: %s\n", i,
@@ -404,6 +440,11 @@ int ClientRadioSet::radioRx(size_t radio_id, void* const* buffs, int numSamps,
   }
   std::cout << "invalid radio id " << radio_id << std::endl;
   return 0;
+}
+
+int ClientRadioSet::drainTxStatus(size_t radio_id) {
+  if (radio_id >= radios.size() || radios.at(radio_id) == nullptr) return 0;
+  return radios.at(radio_id)->drainTxStatus();
 }
 
 int ClientRadioSet::radioTx(size_t radio_id, const void* const* buffs,

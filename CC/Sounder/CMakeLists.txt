@@ -48,7 +48,11 @@ if(${CMAKE_C_COMPILER_ID} STREQUAL "GNU")
   else()
     set(ARCH_FLAGS "-march=native")
   endif()
-  set(CMAKE_CXX_FLAGS "-std=c++17 -Wall -Wextra ${ARCH_FLAGS}")
+  # -Wshadow is in neither -Wall nor -Wextra, so it has to be asked for. It is
+  # on here to keep a shadowed declaration from silently hiding an outer one:
+  # the tree was clean of all 7 when it was turned on, and third_party/ is a
+  # SYSTEM include below, so it contributes no noise.
+  set(CMAKE_CXX_FLAGS "-std=c++17 -Wall -Wextra -Wshadow ${ARCH_FLAGS}")
   set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -O0")
 else()
   message(FATAL_ERROR "Unsupported version of compiler")
@@ -163,7 +167,12 @@ message(STATUS "SoapySDR_INCLUDE_DIRS: ${SoapySDR_INCLUDE_DIRS}")
 message(STATUS "SoapySDR_LIBRARIES: ${SoapySDR_LIBRARIES}")
 message(STATUS "HDF5_INCLUDE_DIRS: ${HDF5_INCLUDE_DIRS}")
 message(STATUS "HDF5_LIBRARIES: ${HDF5_LIBRARIES}")
-include_directories(${SoapySDR_INCLUDE_DIRS} ${HDF5_INCLUDE_DIRS} third_party/ third_party/nlohmann/single_include )
+include_directories(${SoapySDR_INCLUDE_DIRS} ${HDF5_INCLUDE_DIRS})
+# third_party/ is vendored and not ours to patch, so include it as SYSTEM: the
+# compiler then suppresses warnings raised inside those headers (GCC 13 flags
+# -Wpessimizing-move in concurrentqueue.h) while still finding them. Keep our
+# own headers OUT of this call so their warnings stay visible.
+include_directories(SYSTEM third_party/ third_party/nlohmann/single_include)
 
 set(SOUNDER_SOURCES ${PURE_UHD_SOURCES}
     ClientRadioSet.cc

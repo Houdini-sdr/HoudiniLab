@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -27,6 +28,21 @@
 #include "include/utils.h"
 
 namespace Sounder {
+
+// Raw-ADC envelope panel. kAdcCols columns cover the whole slot however long it is;
+// 250 columns: enough that a burst edge lands within ~16 samples of its
+// true position at any plausible panel width; the page stretches it.
+// that the display could have shown.
+static constexpr int kAdcCols = 250;
+// Full scale for the int16 sample format this code uses everywhere (see utils.cc).
+// A sample within 1% of the rail is counted as clipped. NOTE this is the rail of the
+// SAMPLE FORMAT, not necessarily of the converter: if the RFSoC delivers a 14-bit
+// sample that is not left-justified, the true rail is lower and this count stays 0
+// while the input is in fact clipping. The peak is reported alongside for exactly
+// that reason -- a peak that sits on the same value every frame IS the rail,
+// whatever value it reads.
+static constexpr int32_t kAdcFullScale = 32767;
+static constexpr int32_t kAdcClip = (kAdcFullScale * 99) / 100;
 
 // Parse HOUDINI_CSI_UDP ("host:port"), open a connected UDP socket, precompute the
 // DC-centered freq-domain pilot reference + a DC-centered DFT matrix, and set the
@@ -87,8 +103,8 @@ void RecorderWorker::initCsi(void) {
   // manual: HOUDINI_CSI_SYM_START overrides (an int, or "auto" for the energy-edge detector).
   csi_sym_start_ = static_cast<int>(cfg_->prefix()) -
                    static_cast<int>(cfg_->cp_size()) / 2;
-  if (const char* s = std::getenv("HOUDINI_CSI_SYM_START"))
-    csi_sym_start_ = (std::string(s) == "auto") ? -1 : std::atoi(s);
+  if (const char* sym_env = std::getenv("HOUDINI_CSI_SYM_START"))
+    csi_sym_start_ = (std::string(sym_env) == "auto") ? -1 : std::atoi(sym_env);
   // Per-frame pilot-vs-data timing re-align (Houdini framer jitter). Default on for Houdini.
   csi_timing_fix_ = cfg_->is_houdini();
   if (std::getenv("HOUDINI_CSI_NO_TIMING_FIX")) csi_timing_fix_ = false;
@@ -146,17 +162,136 @@ std::vector<std::complex<float>> RecorderWorker::symbolFft(const short* d,
 
 // Route a received slot: pilot -> CSI (+ cache H); uplink data -> constellation.
 void RecorderWorker::streamCsi(Packet* pkt, NodeType node_type) {
+  // A dropped RX packet is covered by inserted zeros so the window keeps its true
+  // timing. Those zeros are not signal: an FFT over them yields a wrong H, and since
+  // H is cached and reused to equalize later data slots, accepting one would smear
+  // the view until the next clean pilot. Recording mode can afford to keep the
+  // samples because it writes the extents to /Data/Gaps; viewing mode has no such
+  // record, so it drops the slot instead of rendering something untrue (AP-10).
+  if (pkt->rx_pad > 0) {
+    csi_slots_dropped_++;
+    const long long now =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count();
+    if (now - csi_drop_log_ns_ > 5000000000LL) {  // at most one line per 5 s
+      csi_drop_log_ns_ = now;
+      MLPD_WARN(
+          "CSI view: dropped %zu slot(s) with RX gaps (latest %u padded samples, "
+          "ant %u). The display is stale, not wrong; the link is losing packets.\n",
+          csi_slots_dropped_, pkt->rx_pad, pkt->ant_id);
+    }
+    return;
+  }
   const size_t num_channels = cfg_->bs_channel().size();
   const size_t radio_id = pkt->ant_id / num_channels;
   const bool is_pilot =
       cfg_->internal_measurement()
           ? (node_type == kBS)
           : cfg_->isPilot(pkt->cell_id, radio_id, pkt->slot_id);
+  // The ADC panel gets the PILOT slot only. A frame carries a beacon, a pilot, an
+  // uplink slot and guards, and their levels differ by orders of magnitude (measured
+  // on the bench: 9% of sends under 50 counts, 73% around 1000, 18% over 1500). Feeding
+  // whichever slot happened to arrive into one panel makes every update a different
+  // signal, so the trace and its axis move constantly while nothing is changing.
+  // Saturation on the OTHER slots still has to be caught, so peak and clip counts are
+  // accumulated over every slot and ride along with the pilot's envelope.
+  sendAdc(pkt, is_pilot);
   if (is_pilot) {
     sendCsi(pkt);
   } else if (cfg_->isUlData(pkt->cell_id, radio_id, pkt->slot_id)) {
     sendConstellation(pkt);
   }
+}
+
+// Any received slot -> raw-ADC min/max envelope, for spotting converter saturation.
+//
+// The envelope, not a decimated copy of the samples: decimation picks every Mth
+// sample, so a slot that clips for a handful of samples can decimate to a trace that
+// never touches full scale, which is the exact failure this panel exists to catch.
+// Column c carries the min and max of every sample it covers, so one clipped sample
+// pins its column to the rail and cannot be missed. The whole slot is covered in
+// kAdcCols columns regardless of how long it is.
+void RecorderWorker::sendAdc(Packet* pkt, bool is_pilot) {
+  const int slot = static_cast<int>(cfg_->samps_per_slot());
+  if (slot <= 0) return;
+  const short* dd = pkt->data;
+  // Every slot contributes to the saturation ledger, whether or not it is drawn.
+  auto& any = adc_any_[pkt->ant_id];
+  for (int n = 0; n < slot; ++n) {
+    const int32_t ai = std::abs(static_cast<int32_t>(dd[2 * n]));
+    const int32_t aq = std::abs(static_cast<int32_t>(dd[2 * n + 1]));
+    any.peak = std::max(any.peak, std::max(ai, aq));
+    if (ai >= kAdcClip || aq >= kAdcClip) ++any.clipped;
+  }
+  if (!is_pilot) return;   // only the pilot slot is drawn
+  const long long now =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count();
+  auto it = adc_last_ns_.find(pkt->ant_id);
+  if (it != adc_last_ns_.end() &&
+      (now - it->second) < static_cast<long long>(csi_throttle_ns_))
+    return;
+  adc_last_ns_[pkt->ant_id] = now;
+
+  const int cols = std::min(kAdcCols, slot);
+  const short* d = pkt->data;
+  std::vector<int16_t> env(static_cast<size_t>(4) * cols);
+  // Full-scale counts are taken over the WHOLE slot, not the plotted envelope, so the
+  // clipped-sample number stays exact however wide the panel is.
+  int32_t peak = 0;
+  uint32_t clipped = 0;
+  for (int c = 0; c < cols; ++c) {
+    const int from = static_cast<int>(static_cast<int64_t>(c) * slot / cols);
+    const int to = static_cast<int>(static_cast<int64_t>(c + 1) * slot / cols);
+    int16_t imin = INT16_MAX, imax = INT16_MIN, qmin = INT16_MAX, qmax = INT16_MIN;
+    for (int n = from; n < to; ++n) {
+      const short si = d[2 * n], sq = d[2 * n + 1];
+      imin = std::min(imin, static_cast<int16_t>(si));
+      imax = std::max(imax, static_cast<int16_t>(si));
+      qmin = std::min(qmin, static_cast<int16_t>(sq));
+      qmax = std::max(qmax, static_cast<int16_t>(sq));
+      const int32_t ai = std::abs(static_cast<int32_t>(si));
+      const int32_t aq = std::abs(static_cast<int32_t>(sq));
+      peak = std::max(peak, std::max(ai, aq));
+      if (ai >= kAdcClip || aq >= kAdcClip) ++clipped;
+    }
+    env[4 * c + 0] = imin;
+    env[4 * c + 1] = imax;
+    env[4 * c + 2] = qmin;
+    env[4 * c + 3] = qmax;
+  }
+
+  // [magic 'ADC2'][frame][ant][cols][samps][rate][peak][clipped][slot][any_peak]
+  // [any_clipped] then [Imin,Imax,Qmin,Qmax]*cols.
+  // peak/clipped describe the PILOT slot that is drawn; any_* cover every slot seen
+  // since the last send, so a converter clipping on the beacon or the uplink slot is
+  // still reported even though its envelope is not the one on screen.
+  std::vector<uint8_t> buf(44 + static_cast<size_t>(8) * cols);
+  const uint32_t magic = 0x41444332u, fr = pkt->frame_id, an = pkt->ant_id,
+                 nc = static_cast<uint32_t>(cols),
+                 ns = static_cast<uint32_t>(slot),
+                 pk = static_cast<uint32_t>(peak),
+                 sl = static_cast<uint32_t>(pkt->slot_id),
+                 apk = static_cast<uint32_t>(any.peak),
+                 acl = any.clipped;
+  const float rate = static_cast<float>(cfg_->rate());
+  std::memcpy(&buf[0], &magic, 4);
+  std::memcpy(&buf[4], &fr, 4);
+  std::memcpy(&buf[8], &an, 4);
+  std::memcpy(&buf[12], &nc, 4);
+  std::memcpy(&buf[16], &ns, 4);
+  std::memcpy(&buf[20], &rate, 4);
+  std::memcpy(&buf[24], &pk, 4);
+  std::memcpy(&buf[28], &clipped, 4);
+  std::memcpy(&buf[32], &sl, 4);
+  std::memcpy(&buf[36], &apk, 4);
+  std::memcpy(&buf[40], &acl, 4);
+  std::memcpy(&buf[44], env.data(), static_cast<size_t>(8) * cols);
+  (void)::send(csi_sock_, buf.data(), buf.size(), 0);
+  any.peak = 0;            // the ledger covers the interval between sends
+  any.clipped = 0;
 }
 
 // Pilot slot -> channel estimate H[k] (DC-centered), cached per antenna + streamed.
@@ -175,7 +310,9 @@ void RecorderWorker::sendCsi(Packet* pkt) {
     const int base = es + sym * (cp + N) + cp;
     if (base + N > slot) break;
     auto F = symbolFft(d, base);
-    for (int k = 0; k < N; ++k) hacc[k] += F[k] * std::conj(pilot_ref_[k]);
+    for (int k = 0; k < N; ++k) {
+      hacc[k] += F[k] * std::conj(pilot_ref_[k]);
+    }
     ++used;
   }
   // Cache H per antenna (always -- keeps it fresh for equalizing this ant's data).
@@ -195,21 +332,78 @@ void RecorderWorker::sendCsi(Packet* pkt) {
       (now - it->second) < static_cast<long long>(csi_throttle_ns_))
     return;
   csi_last_ns_[pkt->ant_id] = now;
-  // [magic 'CSI1'][frame][ant][num_sc][rate][H re,im]*N
-  std::vector<uint8_t> buf(20 + static_cast<size_t>(8) * N);
-  const uint32_t magic = 0x43534931u, fr = pkt->frame_id, an = pkt->ant_id,
-                 nsc = static_cast<uint32_t>(N);
+  // The former quality block now carries the RAW phase (radians) per
+  // subcarrier [user 2026-08-30: drop the H-stability strip, show raw phase
+  // above corrected phase]: arg(H) BEFORE the display de-ramp and the
+  // per-run anchor, i.e. the phase exactly as measured (window back-off
+  // ramp, per-run common offset and all). Same wire slot, so the CSI2
+  // layout is unchanged; the backend renders it as its own panel.
+  std::vector<float> raw_ph(N, 0.0f);
+  for (int k = 0; k < N; ++k) raw_ph[k] = std::arg(H[k]);
+  // [magic 'CSI2'][frame][ant][num_sc][rate][reps][H re,im]*N[raw phase]*N
+  // 'CSI2' supersedes 'CSI1' (same layout without reps and quality). The dashboard
+  // still accepts 'CSI1', so a backend running ahead of an un-rebuilt sounder shows
+  // everything but the quality panel rather than showing nothing.
+  std::vector<uint8_t> buf(24 + static_cast<size_t>(12) * N);
+  const uint32_t magic = 0x43534932u, fr = pkt->frame_id, an = pkt->ant_id,
+                 nsc = static_cast<uint32_t>(N),
+                 reps = 1u;  // layout compatibility; no longer a window depth
   const float rate = static_cast<float>(cfg_->rate());
   std::memcpy(&buf[0], &magic, 4);
   std::memcpy(&buf[4], &fr, 4);
   std::memcpy(&buf[8], &an, 4);
   std::memcpy(&buf[12], &nsc, 4);
   std::memcpy(&buf[16], &rate, 4);
+  std::memcpy(&buf[20], &reps, 4);
+  // Display-only de-ramp: the FFT window is deliberately backed off
+  // (prefix - es) samples into the CP (the anti-ISI margin), which rides a
+  // 2*pi*(prefix-es)/N rad-per-subcarrier ramp on H -- at 8 samples that
+  // wraps every 8 tones and the phase panel drew sawtooth jumps [user
+  // 2026-08-30: "why the jump at DC and at DC+ a little"]. Remove the known
+  // intentional shift from the WIRE copy only, so the panel shows the
+  // physical channel phase; the cached H (equalization) is untouched.
+  const float deramp_s = static_cast<float>(cfg_->prefix()) - static_cast<float>(es);
+  std::vector<std::complex<float>> hw(N);
   for (int k = 0; k < N; ++k) {
-    const float re = H[k].real(), im = H[k].imag();
-    std::memcpy(&buf[20 + 8 * k], &re, 4);
-    std::memcpy(&buf[24 + 8 * k], &im, 4);
+    const float ang = 2.0f * static_cast<float>(M_PI) * deramp_s *
+                      (static_cast<float>(k) - N / 2.0f) / static_cast<float>(N);
+    hw[k] = H[k] * std::complex<float>(std::cos(ang), std::sin(ang));
   }
+  // Per-run common-phase anchor [user 2026-08-30: the level re-drew -0.5pi,
+  // +0.2pi, -1.0pi across restarts and parked at the wrap edge]: the nodes
+  // share a 10 MHz frequency reference but nothing phase-locks their NCOs,
+  // so the offset is a per-run lottery with no information in its value
+  // (ledger 4.54). Capture the mean phase once at the run's first datagram
+  // and rotate it out of the DISPLAY: every run starts at 0 and anything
+  // that moves afterwards (CFO residual, re-locks) is real. Display only.
+  // Settle gate (Opus review M11): the very first datagram can carry a
+  // not-yet-settled H (bring-up transients), and the anchor is permanent for
+  // the run -- so draw it from the third sent update instead of the first.
+  const int sent = ++csi_sent_count_[pkt->ant_id];
+  auto ait = csi_phase_anchor_.find(pkt->ant_id);
+  if (ait == csi_phase_anchor_.end() && sent >= 3) {
+    std::complex<float> m(0.0f, 0.0f);
+    for (int k = 0; k < N; ++k) {
+      const float a = std::abs(hw[k]);
+      if (a > 1e-9f) m += hw[k] / a;
+    }
+    const float ma = std::abs(m);
+    ait = csi_phase_anchor_
+              .emplace(pkt->ant_id, ma > 1e-9f ? m / ma
+                                               : std::complex<float>(1.0f, 0.0f))
+              .first;
+  }
+  const std::complex<float> unrot =
+      ait != csi_phase_anchor_.end() ? std::conj(ait->second)
+                                     : std::complex<float>(1.0f, 0.0f);
+  for (int k = 0; k < N; ++k) {
+    const std::complex<float> h0 = hw[k] * unrot;
+    const float re = h0.real(), im = h0.imag();
+    std::memcpy(&buf[24 + 8 * k], &re, 4);
+    std::memcpy(&buf[28 + 8 * k], &im, 4);
+  }
+  for (int k = 0; k < N; ++k)
+    std::memcpy(&buf[24 + 8 * N + 4 * k], &raw_ph[k], 4);
   (void)::send(csi_sock_, buf.data(), buf.size(), 0);
 }
 
@@ -235,12 +429,22 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
   const short* d = pkt->data;
   const int es = symStart(d, slot);  // symbol-0 start (fixed prefix by default; sym_start knob)
   const auto& data_ind = cfg_->data_ind();
-  // One-shot raw dump for offline analysis: [N cp prefix nsym ndata i32]
+  double fix_r = 0.0;  // the timing-fix r this frame, for the low-score autopsy
+  // One-shot raw dump for offline analysis: [N cp es nsym ndata i32]
   // [H re,im f32]*N [data_ind i32]*ndata [U slot re,im i16]*slot.
   if (std::getenv("HOUDINI_CSI_DUMP") != nullptr) {
+    // Skip the first N constellation frames before dumping. One-shot on the FIRST
+    // frame captured the link before it had settled, so every dump looked alike no
+    // matter how its run turned out, and an offline analysis of them said nothing
+    // about the good/bad split it was meant to explain. HOUDINI_CSI_DUMP=<n> skips
+    // n frames (default 30, about a second at the shipped throttle).
+    static std::atomic<int> seen{0};
     static std::atomic<bool> dumped{false};
+    int skip = std::atoi(std::getenv("HOUDINI_CSI_DUMP"));
+    if (skip <= 1) skip = 30;
     bool exp = false;
-    if (dumped.compare_exchange_strong(exp, true)) {
+    if (seen.fetch_add(1) >= skip &&
+        dumped.compare_exchange_strong(exp, true)) {
       FILE* f = std::fopen("/tmp/cns_dump.bin", "wb");
       if (f) {
         const int32_t hdr[5] = {N, cp, es, nsym,
@@ -291,33 +495,103 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
   // for any square QAM (QPSK/16/64-QAM: E[X^4] real -> arg pi), so gate on mod_ord 2/4/6.
   std::vector<std::complex<float>> Hc(H.begin(), H.end());
   if (csi_timing_fix_ && (mod_ord == 2 || mod_ord == 4 || mod_ord == 6) && !Ys.empty()) {
+    // Two-stage timing recovery. The pilot<->data timing offset is a per-run
+    // constant drawn by the BS's independent per-slot centroid alignment;
+    // measured draws include +3.003 and -1.58 samples (DEMO_VERIFICATION.md
+    // 4.36) -- outside the original INTEGER r in [-2..2], whose uncorrected
+    // ~300 deg/sample ramp across the band was THE AP-15 ring. Stage 1:
+    // blind 4th-power search at INTEGER steps over +-8 (integer-scale score
+    // margins are large, so the argmax is stable frame to frame -- a purely
+    // fractional blind search measurably FLAPPED between near-tied 0.25
+    // candidates and smeared the aggregate constellation). Stage 2 below
+    // refines the fraction deterministically from the U-slot's own pilot
+    // tones. The ramp correction is exact for any real r.
     double best_score = -1.0;
-    int best_r = 0;
-    for (int r = -2; r <= 2; ++r) {
+    double best_r = 0.0;
+    // |x| is r-invariant (the ramp is phase-only), so pwr and the per-tone
+    // 4th powers at r=0 are computed ONCE; each r step only rotates the
+    // per-tone aggregate by e^{-j4*ang(k)} (Opus review LOW: the old loop
+    // recomputed the full demod for all 17 candidates).
+    std::vector<std::complex<double>> u4k(static_cast<size_t>(N), {0.0, 0.0});
+    double pwr = 0.0;
+    for (const auto& Y : Ys)
+      for (size_t j = 0; j < data_ind.size(); ++j) {
+        const size_t k = data_ind[j];
+        if (std::abs(H[k]) < hmin) continue;
+        const std::complex<double> x =
+            std::complex<double>(Y[k]) / std::complex<double>(H[k]);
+        const std::complex<double> x2 = x * x;
+        u4k[k] += x2 * x2;
+        pwr += std::norm(x);
+      }
+    for (double r = -8.0; r <= 8.0; r += 1.0) {
       std::complex<double> s4(0.0, 0.0);
-      double pwr = 0.0;
-      for (const auto& Y : Ys)
-        for (size_t j = 0; j < data_ind.size(); ++j) {
-          const size_t k = data_ind[j];
-          if (std::abs(H[k]) < hmin) continue;
-          const double ang = 2.0 * M_PI * (static_cast<double>(k) - N / 2.0) * r / N;
-          const std::complex<double> hr =
-              std::complex<double>(H[k]) *
-              std::complex<double>(std::cos(ang), std::sin(ang));
-          const std::complex<double> x = std::complex<double>(Y[k]) / hr;
-          const std::complex<double> x2 = x * x;
-          s4 += x2 * x2;
-          pwr += std::norm(x);
-        }
+      for (size_t j = 0; j < data_ind.size(); ++j) {
+        const size_t k = data_ind[j];
+        const double a4 =
+            -4.0 * 2.0 * M_PI * (static_cast<double>(k) - N / 2.0) * r / N;
+        s4 += u4k[k] * std::complex<double>(std::cos(a4), std::sin(a4));
+      }
       const double score = (pwr > 0.0) ? std::abs(s4) / (pwr * pwr) : -1.0;
       if (score > best_score) { best_score = score; best_r = r; }
     }
-    if (best_r != 0)
+    // Stage 2: deterministic fractional refinement from the U-slot's OWN
+    // pilot tones (4 known-value subcarriers per symbol). After the integer
+    // correction the residual is < 1 sample, well inside the +-2.3-sample
+    // unambiguous range of the 14-bin pilot spacing, and averaging over the
+    // middle symbols makes the estimate stable -- no blind tie-breaking, so
+    // no frame-to-frame flapping.
+    const auto& psc = cfg_->pilot_sc();
+    const auto& pind = cfg_->pilot_sc_ind();
+    if (pind.size() >= 2 && !Ys.empty()) {
+      double sk = 0, sp = 0, skk = 0, skp = 0;
+      int npts = 0;
+      for (size_t c = 0; c < pind.size(); ++c) {
+        const size_t k = pind[c];
+        if (k >= static_cast<size_t>(N)) continue;
+        // Deep-fade gate, same hmin as the data tones: an unweighted 4-point
+        // LS slope is dominated by one faded pilot tone (Opus review M10).
+        if (std::abs(H[k]) < hmin) continue;
+        const double ang0 =
+            2.0 * M_PI * (static_cast<double>(k) - N / 2.0) * best_r / N;
+        const std::complex<double> hr =
+            std::complex<double>(H[k]) *
+            std::complex<double>(std::cos(ang0), std::sin(ang0));
+        if (std::abs(hr) < 1e-9) continue;
+        std::complex<double> acc(0.0, 0.0);
+        for (const auto& Y : Ys) {
+          acc += (std::complex<double>(Y[k]) / hr) *
+                 std::conj(std::complex<double>(psc[c]));
+        }
+        if (std::abs(acc) < 1e-12) continue;
+        const double kk = static_cast<double>(k) - N / 2.0;
+        const double ph = std::arg(acc);
+        sk += kk; sp += ph; skk += kk * kk; skp += kk * ph;
+        ++npts;
+      }
+      if (npts >= 2) {
+        const double denom = npts * skk - sk * sk;
+        if (std::abs(denom) > 1e-9) {
+          const double slope = (npts * skp - sk * sp) / denom;  // rad per bin
+          const double frac = slope * N / (2.0 * M_PI);         // samples
+          if (std::abs(frac) < 1.0) best_r += frac;
+        }
+      }
+    }
+    fix_r = best_r;
+    if (best_r != 0.0)
       for (int k = 0; k < N; ++k) {
         const double ang = 2.0 * M_PI * (static_cast<double>(k) - N / 2.0) * best_r / N;
         Hc[k] *= std::complex<float>(static_cast<float>(std::cos(ang)),
                                      static_cast<float>(std::sin(ang)));
       }
+    if (std::getenv("HOUDINI_CSI_R_DEBUG") != nullptr) {
+      static std::atomic<int> rc{0};
+      if ((rc.fetch_add(1) % 30) == 0) {  // braces load-bearing (macro):
+        MLPD_INFO("CSI timing-fix: r=%.3f (blind score %.3g)\n", best_r,
+                  best_score);  // unbraced, this flooded at ~1 kHz with
+      }                         // HOUDINI_CSI_R_DEBUG on (second review 3.1)
+    }
   }
   std::vector<std::complex<float>> pts;
   pts.reserve(kMaxPts);
@@ -346,6 +620,66 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
       const double th = (std::arg(acc4) - M_PI) / 4.0;
       const std::complex<float> derot(std::cos(th), -std::sin(th));
       for (auto& x : pts) x *= derot;
+    }
+  }
+  // Quality counter for the occasional-bad-constellation hunt [user
+  // 2026-08-30: rare bad frames with every other panel clean]: the honest
+  // phase-only score per datagram, an INFO baseline every 512th, a WARN on
+  // power-of-two occurrences below 0.7 with the frame id so bad frames can
+  // be correlated against resync / timing-fix / gate lines in the same log.
+  // QPSK only: |mean(u^4)| == 1 for ideal QPSK, but a PERFECT 16/64-QAM
+  // constellation scores well under the 0.7 floor (its points sit off the
+  // +-45 deg axes), so the wider gate would warn and autopsy-dump healthy
+  // frames all run (Opus review M9).
+  if (mod_ord == 2) {
+    std::complex<double> u4(0.0, 0.0);
+    for (const auto& x : pts) {
+      const double m = std::abs(x);
+      if (m < 1e-12) continue;
+      const std::complex<double> u(x.real() / m, x.imag() / m);
+      u4 += u * u * u * u;
+    }
+    const double score = std::abs(u4) / static_cast<double>(pts.size());
+    static std::atomic<unsigned> cns_total{0};
+    static std::atomic<unsigned> cns_low{0};
+    const unsigned tot = cns_total.fetch_add(1) + 1;
+    if (score < 0.7) {
+      const unsigned lo = cns_low.fetch_add(1) + 1;
+      if ((lo & (lo - 1)) == 0) {
+        MLPD_WARN(
+            "CNS score %.3f at frame %u, r=%.3f (low occurrence %u of %u "
+            "datagrams)\n",
+            score, pkt->frame_id, fix_r, lo, tot);
+      }
+      // Autopsy dump of the first few low scorers, HOUDINI_CSI_DUMP format
+      // (ap15_diff.py reads it as-is); r rides in the filename.
+      const char* lowdir = std::getenv("HOUDINI_CNS_DUMP_LOW");
+      if (lowdir != nullptr && lo <= 6) {
+        char pb[512];
+        snprintf(pb, sizeof(pb), "%s/cns_low_%02u_a%u_f%u_r%+05d.bin", lowdir,
+                 lo, pkt->ant_id, pkt->frame_id,
+                 static_cast<int>(std::lround(fix_r * 1000)));
+        FILE* f = std::fopen(pb, "wb");
+        if (f != nullptr) {
+          const int32_t hdr[5] = {N, cp, es, nsym,
+                                  static_cast<int32_t>(data_ind.size())};
+          std::fwrite(hdr, sizeof(int32_t), 5, f);
+          for (int k = 0; k < N; ++k) {
+            const float re = H[k].real(), im = H[k].imag();
+            std::fwrite(&re, 4, 1, f);
+            std::fwrite(&im, 4, 1, f);
+          }
+          for (size_t j = 0; j < data_ind.size(); ++j) {
+            const int32_t di = static_cast<int32_t>(data_ind[j]);
+            std::fwrite(&di, 4, 1, f);
+          }
+          std::fwrite(d, sizeof(short), static_cast<size_t>(slot) * 2, f);
+          std::fclose(f);
+        }
+      }
+    } else if (tot % 512 == 0) {
+      MLPD_INFO("CNS score %.3f at frame %u (%u datagrams, %u low)\n", score,
+                pkt->frame_id, tot, cns_low.load());
     }
   }
   double psum = 0.0;
@@ -670,7 +1004,7 @@ void RecorderWorker::finalize(void) {
             "GAP_COLUMNS",
             std::string("start_sample,n_samples,start_time_ns,"
                         "cause(0=time_jump,1=host_ring,2=write_error,"
-                        "3=backward,4=resync)"));
+                        "3=backward,4=resync,5=untrusted_pilot)"));
         this->hdf5_->write_attribute("TOTAL_UNTRUSTED_SAMPLES",
                                      static_cast<double>(untrusted));
         MLPD_INFO("Recorder: /Data/Gaps -- %zu gap(s), %lld untrusted samples\n",

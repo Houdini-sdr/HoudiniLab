@@ -123,6 +123,10 @@ class Config {
   inline double rate(void) const { return this->rate_; }
   inline int tx_advance(size_t id) const { return this->tx_advance_.at(id); }
   inline float corr_scale(size_t id) const { return this->corr_scale_.at(id); }
+  // Threshold used for INITIAL acquisition only; re-sync keeps corr_scale().
+  inline float corr_scale_init(size_t id) const {
+    return this->corr_scale_init_.at(id);
+  }
   inline size_t cl_sdr_ch(void) const { return this->cl_sdr_ch_; }
   inline size_t bs_sdr_ch(void) const { return this->bs_sdr_ch_; }
 
@@ -365,7 +369,6 @@ class Config {
   size_t guard_mult_;
   std::vector<std::string> bs_sdr_file_;  // No accessor
   std::string hub_file_;                  // No accessor
-  std::string ref_sdr;
   size_t bs_sdr_ch_;
   std::vector<std::vector<std::string>> bs_sdr_ids_;
   std::vector<std::string> hub_ids_;
@@ -429,6 +432,7 @@ class Config {
   int cl_power_ramp_hi_;
   std::vector<int> tx_advance_;
   std::vector<float> corr_scale_;
+  std::vector<float> corr_scale_init_;
   std::vector<size_t> data_ind_;
   std::vector<uint32_t> coeffs_;
   std::vector<std::complex<int16_t>> pilot_ci16_;

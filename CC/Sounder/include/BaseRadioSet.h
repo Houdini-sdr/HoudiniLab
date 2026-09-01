@@ -7,6 +7,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <functional>
 #include <vector>
 
 #include "Radio.h"
@@ -25,6 +26,10 @@ class BaseRadioSet {
               long long& frameTime);
   int radioRx(size_t radio_id, size_t cell_id, void* const* buffs, int numSamps,
               long long& frameTime);
+  // Samples zero-padded into the window backing the LAST radioRx (0 = clean). The
+  // caller stamps it onto the Packet so downstream (notably the CSI/view path) can
+  // tell a slot carrying inserted zeros from an all-real one. See AP-10.
+  size_t lastRxPadSamples(size_t radio_id, size_t cell_id) const;
   void radioStart(void);
   void radioStop(void);
   bool getRadioNotFound() { return radioNotFound; }
@@ -56,8 +61,11 @@ class BaseRadioSet {
   // framer, so the unmodified loopRecv true-path records the real pilot slot.
   void buildHoudiniBeacon(std::vector<int16_t>& iq);  // -> replay RAM payload
   void armHoudiniTdd(void);
+  static void houdiniTddLadder(SoapySDR::Device* dev);
   int houdiniTddRx(size_t radio_id, void* const* buffs, long long& frameTime);
-  long long houdiniArmTdd(SoapySDR::Device* dev, long long symbol_ticks,
+  long long houdiniArmTdd(SoapySDR::Device* dev,
+                          const std::function<void()>& resetup,
+                          long long symbol_ticks,
                           long long symbols_per_frame);  // returns epoch
 
  public:
@@ -81,7 +89,8 @@ class BaseRadioSet {
   double htdd_tick_rate_ = 122.88e6;
   long long htdd_epoch_ = 0;        // TDD_ARM epoch (ticks)
   long long htdd_frame_ticks_ = 0;  // symbols_per_frame * symbol_ticks
-  long long htdd_symbol_ticks_ = 0;   // == samps_per_slot (grid-aligned)
+  long long htdd_symbol_ticks_ = 0;  // one TDD symbol = one sounder slot
+                                     // (= samps_per_slot ticks at 1:1)
   std::vector<size_t> htdd_rx_slots_;  // sounder slots with rx_gate (P/U/N)
   size_t htdd_pilot_slot_ = 0;         // the 'P' sounder slot (CSI reference)
   size_t htdd_rx_cursor_ = 0;
@@ -90,6 +99,12 @@ class BaseRadioSet {
   long long htdd_last_win_tick_ = 0;
   long long htdd_frame_counter_ = 0;  // 0,1,2,... like the Iris framer's frame_id
   std::vector<int16_t> htdd_cap_buf_;  // reused generous rx capture (extract 1 slot)
+  // One continuous read at cursor 0 yields EVERY rx slot of the frame, so a gap in
+  // that read taints the whole frame (pilot AND uplink data). Hold its padding count
+  // for the frame and hand it to each slot served from the cache. See AP-10.
+  size_t htdd_frame_pad_ = 0;
+  size_t htdd_quiet_streak_ = 0;   // consecutive presence-gated (no-pilot) frames
+  bool htdd_quiet_warned_ = false;
 };
 
 #endif  // BASE_RADIO_SET_H_

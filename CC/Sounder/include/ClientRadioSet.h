@@ -20,6 +20,8 @@ class ClientRadioSet {
               long long& frameTime);
   int radioTx(size_t radio_id, const void* const* buffs, int numSamps,
               int flags, long long& frameTime);
+  // Drain asynchronous TX status for one client radio; see Radio::drainTxStatus.
+  int drainTxStatus(size_t radio_id);
   void radioStop(void);
   bool getRadioNotFound() { return radioNotFound; }
 

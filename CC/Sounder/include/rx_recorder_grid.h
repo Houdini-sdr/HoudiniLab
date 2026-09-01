@@ -32,6 +32,10 @@ enum GapCause : int64_t {
   kGapWriteError = 2,  // HDF5 write failed for the slot
   kGapBackward = 3,    // timestamp went backward (anomaly marker, n = 0)
   kGapResync = 4,      // time-base jump: grid re-anchored (marker, n = 0)
+  kGapUntrustedPilot = 5,  // BS pilot slot failed the LTS check; the extent
+                           // marks the delivered pilot slot (approximate
+                           // start: pre-alignment estimate), and the frame's
+                           // H must not be trusted
 };
 
 struct GapExtent {

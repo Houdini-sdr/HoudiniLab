@@ -60,9 +60,14 @@ struct Packet {
   uint32_t slot_id;
   uint32_t cell_id;
   uint32_t ant_id;
+  // Samples zero-padded into this slot to cover a dropped-packet gap (0 = clean).
+  // The RX path inserts those zeros so the rest of the window keeps its true timing;
+  // a consumer that computes on the samples (the CSI/view path) must not treat them
+  // as signal. Every buffer stride is sizeof(Packet)-derived, so widening is safe.
+  uint32_t rx_pad;
   short data[];
-  Packet(int f, int s, int c, int a)
-      : frame_id(f), slot_id(s), cell_id(c), ant_id(a) {}
+  Packet(int f, int s, int c, int a, uint32_t pad = 0)
+      : frame_id(f), slot_id(s), cell_id(c), ant_id(a), rx_pad(pad) {}
 };
 
 struct Event_data {

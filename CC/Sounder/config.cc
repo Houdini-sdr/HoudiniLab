@@ -198,10 +198,22 @@ Config::Config(const std::string& jsonfile, const std::string& directory,
   remote_port_ = tddConf.value("remote_port", "55132");
   ue_tdd_pilot_ = tddConf.value("ue_tdd_pilot", false);
   ue_tx_advance_ticks_ = tddConf.value("ue_tx_advance_ticks", 0);
+  // The driver accepts TX anchors only on the 384-tick grid, so this knob is
+  // quantized: values below 192 vanish in the round-to-nearest, larger ones
+  // jump whole grid steps (Opus review M6). Fine seating comes from the
+  // zero-padded burst composition; leave this at 0 unless you know why not.
+  if (ue_tx_advance_ticks_ != 0 && ue_tx_advance_ticks_ % 384 != 0) {
+    MLPD_WARN(
+        "ue_tx_advance_ticks=%lld is not a multiple of 384 ticks and will be "
+        "quantized by the TX anchor grid\n",
+        static_cast<long long>(ue_tx_advance_ticks_));
+  }
   ue_pilot_horizon_ = tddConf.value("ue_pilot_horizon", 0);
   auto tx_advance = tddConf.value("tx_advance", json::array());
   if (tx_advance.empty() == true) {
-    tx_advance_.resize(num_cl_sdrs_, 250);
+    // Houdini default = the measured wired-bench calibration (AP-19,
+    // DEMO_VERIFICATION.md 4.35); Iris keeps its historical 250.
+    tx_advance_.resize(num_cl_sdrs_, is_houdini() ? 247 : 250);
   } else {
     if (client_present_ && tx_advance.size() != num_cl_sdrs_) {
       MLPD_ERROR("tx_advance size must be same as the number of clients!\n");
@@ -218,6 +230,33 @@ Config::Config(const std::string& jsonfile, const std::string& directory,
       exit(1);
     }
     corr_scale_.assign(corr_scale.begin(), corr_scale.end());
+  }
+  // Acquisition gets its own threshold. The re-sync path deliberately RELAXES on
+  // every retry (corr_scale + resync_retry_cnt) because there getting a lock back
+  // beats stalling; acquisition is the opposite case, because the frame anchor it
+  // produces is what every slot boundary in the frame is measured from. Measured on
+  // the bench the two populations are cleanly separated: windows with no beacon peak
+  // at a ratio of 3.4e-07, windows with one peak at 0.31 to 4.2 (median 2.8), and the
+  // shipped corr_scale of 100 puts the bar at 0.01 -- far below anything real, which
+  // is what let sidelobes cross first. Defaults to corr_scale when unset, so this is
+  // inert until a config asks for it.
+  //
+  // WHAT THIS DID NOT FIX: it was investigated as the cause of the run-to-run
+  // constellation split (some restarts give clean QPSK, others a ring) and it is NOT
+  // that cause. With this in place the split persists. Measured afterwards: SNR is
+  // 27..31 dB in good and bad runs alike, the pilot slot is captured every run, and
+  // the fault is that each DATA subcarrier goes incoherent across the symbols of the
+  // U slot (per-tone coherence 0.63 vs 0.997) while the pilot tones in those same
+  // symbols stay perfect. The change here is still correct on its own terms.
+  auto corr_scale_init = tddConf.value("corr_scale_init", json::array());
+  if (corr_scale_init.empty() == true) {
+    corr_scale_init_ = corr_scale_;
+  } else {
+    if (client_present_ && corr_scale_init.size() != num_cl_sdrs_) {
+      MLPD_ERROR("corr_scale_init size must match the number of clients!\n");
+      exit(1);
+    }
+    corr_scale_init_.assign(corr_scale_init.begin(), corr_scale_init.end());
   }
   ul_data_frame_num_ = tddConf.value("ul_data_frame_num", 1);
   dl_data_frame_num_ = tddConf.value("dl_data_frame_num", 1);
@@ -411,7 +450,6 @@ void Config::loadTopology(std::string serials_file, const bool bs_only,
       n_bs_antennas_.resize(num_cells_);
 
       for (size_t i = 0; i < num_cells_; i++) {
-        const auto j_serials = json::parse(serials_str, nullptr, true, true);
         json serials_conf;
         std::string cell_str = "BS" + std::to_string(i);
         ss << j_bs_serials.value(cell_str, serials_conf);
@@ -671,8 +709,8 @@ void Config::genClientSchedule(BsSchedType type) {
         }
       }
       //Include all the U's
-      const size_t ref_sdr = 0;
-      for (const auto& ul_ind : ul_slots_.at(ref_sdr)) {
+      const size_t ref_sdr_idx = 0;
+      for (const auto& ul_ind : ul_slots_.at(ref_sdr_idx)) {
         empty_frame.at(ul_ind) = 'U';
       }
 
@@ -680,7 +718,7 @@ void Config::genClientSchedule(BsSchedType type) {
       for (size_t i = 0; i < num_cl_sdrs_; i++) {
         cl_frames_.at(i) = empty_frame;
         //Look at the P index array.
-        const auto& ul_pilots = pilot_slots_.at(ref_sdr);
+        const auto& ul_pilots = pilot_slots_.at(ref_sdr_idx);
         size_t cl_ant_num = cl_sdr_ch_ * i;
         size_t ul_pilot_idx = 0;
         for (const auto& ul_pilot : ul_pilots) {
@@ -766,6 +804,17 @@ void Config::genPilots() {
                         sts_seq_ci16.end());
   }
 
+  // NOTE: a 32-sample cyclic guard was inserted HERE (802.11 GI2 pattern) to
+  // remove the STS->gold channel transient that puts +157 deg on the first term
+  // of conj(rep1)*rep2. REVERTED 2026-08-31: it moves the correlator's returned
+  // index by a measured -274 samples, so the invariant the whole timing chain
+  // rests on -- sync_index == houdiniBeaconEnd() == strobe + beacon_size -- no
+  // longer holds, beaconSnrDb() then measures a window of pre-beacon noise and
+  // reports 10.5 dB against a true 48.3 dB, and the 30 dB floor rejects every
+  // resync detection. Acquisition still worked; only the liveness path died.
+  // The benefit was also unmeasurable: skipping the contaminated head does not
+  // improve the CFO estimate (it worsens it). Any retry must re-derive the
+  // find_beacon index convention and tx_advance TOGETHER. See BACKLOG AP-34.
   // Populate gold sequence (two reps, 128 each)
   int goldReps = 2;
   for (int i = 0; i < goldReps; i++) {
@@ -774,6 +823,19 @@ void Config::genPilots() {
   }
 
   beacon_size_ = beacon_ci16_.size();
+  if (getenv("HOUDINI_DUMP_GOLD") != nullptr) {
+    // The 496-sample STS+gold core (pre-prefix, unconjugated, unit scale) --
+    // what buildHoudiniBeacon conjugates and scales into the replay RAM.
+    // Lets offline tools (tests/demo-verify) construct the exact TX waveform.
+    FILE* f = std::fopen("/tmp/beacon_core.bin", "wb");
+    if (f) {
+      std::fwrite(beacon_ci16_.data(), sizeof(std::complex<int16_t>),
+                  beacon_ci16_.size(), f);
+      std::fclose(f);
+      std::printf("Dumped beacon core (%zu samp ci16) to /tmp/beacon_core.bin\n",
+                  beacon_ci16_.size());
+    }
+  }
 
   if (slot_samp_size_ < beacon_size_) {
     std::string msg = "Minimum supported slot_samp_size is ";
@@ -837,8 +899,13 @@ void Config::genPilots() {
     if (this_amp > max_amp) max_amp = this_amp;
   }
   std::printf("Max pilot amplitude = %.2f\n", max_amp);
-  // 6dB Power backoff value to avoid clipping in the data due to high PAPR
-  static constexpr float ofdm_pwr_scale_lin = 4;
+  // Amplitude backoff: houdini targets ~1/2 FS [user 2026-08-30] -- its data
+  // slot is separately normalized below to the same realized peak, and
+  // cfloat_to_cint16 saturates. Iris/UHD keep the original x4: their
+  // file-based UL data (data_generator.cc) inherits tx_scale with NO peak
+  // normalization, so halving the backoff there would clip real PAPR
+  // (Opus review finding 1).
+  const float ofdm_pwr_scale_lin = is_houdini() ? 2.0f : 4.0f;
   if (tx_scale_ == 0) {
     tx_scale_ = 1 / (ofdm_pwr_scale_lin * max_amp);
   }
@@ -846,7 +913,13 @@ void Config::genPilots() {
     iq_cf.at(i) *= tx_scale_;
   }
   auto iq_ci16 = Utils::cfloat_to_cint16(iq_cf);
-  iq_ci16.insert(iq_ci16.begin(), iq_ci16.end() - cp_size_, iq_ci16.end());
+  // copy the CP via a temp: inserting a container's own tail into its front
+  // is UB ([sequence.reqmts]); it only worked here by reallocation luck
+  {
+    std::vector<std::complex<int16_t>> cp_tmp(iq_ci16.end() - cp_size_,
+                                              iq_ci16.end());
+    iq_ci16.insert(iq_ci16.begin(), cp_tmp.begin(), cp_tmp.end());
+  }
 
   pilot_ci16_.clear();
   pilot_ci16_.insert(pilot_ci16_.begin(), prefix_zpad.begin(),
@@ -888,6 +961,13 @@ void Config::genPilots() {
   ue_data_ci16_.clear();
   ue_data_f_.clear();
   ue_data_ci16_.insert(ue_data_ci16_.end(), prefix_zpad.begin(), prefix_zpad.end());
+  // Two passes: build every symbol's time-domain float first and find the
+  // slot's global peak, then scale the whole slot so its REALIZED peak equals
+  // the pilot's (tx_scale x max_amp). One shared tx_scale used to leave the
+  // data at its raw OFDM PAPR (~2x the pilot peak); both now exercise the
+  // same DAC range [user 2026-08-30].
+  std::vector<std::vector<std::complex<float>>> data_syms_t;
+  float data_gmax = 0.0f;
   for (size_t sym = 0; sym < symbol_per_slot_; ++sym) {
     std::vector<uint8_t> syms_in(n_data);
     for (auto& v : syms_in) v = static_cast<uint8_t>(rng() % mod_alph);
@@ -899,13 +979,41 @@ void Config::genPilots() {
       ofdm_sym[pilot_sc_ind_.at(c)] = pilot_sc_.at(c);
     ue_data_f_.insert(ue_data_f_.end(), ofdm_sym.begin(), ofdm_sym.end());
     auto data_t = CommsLib::IFFT(ofdm_sym, fft_size_, 1.0f / fft_size_, false, true);
-    const float dscale = (tx_scale_ > 0.0f) ? tx_scale_ : 0.5f;
+    for (const auto& v : data_t) data_gmax = std::max(data_gmax, std::abs(v));
+    data_syms_t.push_back(std::move(data_t));
+  }
+  const float pilot_peak_f = tx_scale_ * max_amp;  // the pilot's realized peak
+  const float dscale = (data_gmax > 0.0f) ? pilot_peak_f / data_gmax
+                                          : ((tx_scale_ > 0.0f) ? tx_scale_ : 0.5f);
+  for (auto& data_t : data_syms_t) {
     for (auto& v : data_t) v *= dscale;
     auto data_iq = Utils::cfloat_to_cint16(data_t);
-    data_iq.insert(data_iq.begin(), data_iq.end() - cp_size_, data_iq.end());  // CP
+    {  // CP via a temp (same UB note as the pilot's CP insert above)
+      std::vector<std::complex<int16_t>> cp_tmp(data_iq.end() - cp_size_,
+                                                data_iq.end());
+      data_iq.insert(data_iq.begin(), cp_tmp.begin(), cp_tmp.end());
+    }
     ue_data_ci16_.insert(ue_data_ci16_.end(), data_iq.begin(), data_iq.end());
   }
   ue_data_ci16_.insert(ue_data_ci16_.end(), postfix_zpad.begin(), postfix_zpad.end());
+
+  // Report the realized TX peaks in DAC counts (the ONLY level control on
+  // Houdini -- gains are no-ops end to end). The data slot is normalized to
+  // the pilot's realized peak above; print both so any regression in that
+  // equalization is visible against measured numbers.
+  auto peak_counts = [](const std::vector<std::complex<int16_t>>& v) {
+    int p = 0;
+    for (const auto& s : v)
+      p = std::max({p, std::abs((int)s.real()), std::abs((int)s.imag())});
+    return p;
+  };
+  const int pilot_pk = peak_counts(pilot_ci16_);
+  const int data_pk = peak_counts(ue_data_ci16_);
+  std::printf(
+      "TX peaks (int16 counts): pilot %d (%.1f%% FS), UE data %d (%.1f%% FS), "
+      "tx_scale %.4f\n",
+      pilot_pk, 100.0 * pilot_pk / 32768.0, data_pk,
+      100.0 * data_pk / 32768.0, tx_scale_);
 }
 
 void Config::loadULData() {

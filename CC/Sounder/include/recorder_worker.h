@@ -69,9 +69,20 @@ class RecorderWorker {
   bool csi_timing_fix_ = false;
   std::unordered_map<uint32_t, long long> csi_last_ns_;   // CSI (pilot) send timer
   std::unordered_map<uint32_t, long long> cns_last_ns_;   // constellation send timer
+  std::unordered_map<uint32_t, long long> adc_last_ns_;   // raw-ADC envelope send timer
+  // Slots refused because the RX path had zero-padded a dropped-packet gap into them
+  // (AP-10), plus a throttle so the warning cannot flood a lossy run.
+  size_t csi_slots_dropped_ = 0;
+  long long csi_drop_log_ns_ = 0;
   // Latest channel estimate H[k] per antenna (DC-centered), cached from the pilot
   // slot and used to equalize that antenna's uplink-data (U) slot.
   std::unordered_map<uint32_t, std::vector<std::complex<float>>> csi_h_;
+  // Per-run display phase anchor (unit phasor from the first datagram's mean
+  // H phase): the two nodes are frequency-locked but not phase-locked, so
+  // the common phase re-draws per restart; anchoring the display at run
+  // start keeps within-run drift visible while every run starts at 0.
+  std::unordered_map<uint32_t, std::complex<float>> csi_phase_anchor_;
+  std::unordered_map<uint32_t, int> csi_sent_count_;  // anchor settle gate
   void initCsi(void);
   void streamCsi(Packet* pkt, NodeType node_type);   // routes pilot vs uplink data
   int slotEnergyStart(const short* d, int slot) const;   // opt-in energy-edge auto-detect
@@ -79,6 +90,11 @@ class RecorderWorker {
   std::vector<std::complex<float>> symbolFft(const short* d, int base) const;
   void sendCsi(Packet* pkt);                          // pilot -> CSI + cache H
   void sendConstellation(Packet* pkt);                // uplink data -> equalize
+  void sendAdc(Packet* pkt, bool is_pilot);           // pilot slot -> raw-ADC envelope
+  // Saturation ledger across ALL slots between two sends: the drawn envelope is the
+  // pilot's, but clipping on any other slot still has to be reported.
+  struct AdcAny { int32_t peak = 0; uint32_t clipped = 0; };
+  std::unordered_map<uint32_t, AdcAny> adc_any_;
 };
 }; /* End namespace Sounder */
 
