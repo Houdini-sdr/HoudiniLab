@@ -22,7 +22,9 @@ class Scheduler {
 
   void do_it();
   int getRecordedFrameNum();
-  std::string getTraceFileName() { return this->cfg_->trace_file(); }
+  const std::string& getTraceFileName() const {
+    return this->cfg_->trace_file();
+  }
 
  private:
   void gc(void);

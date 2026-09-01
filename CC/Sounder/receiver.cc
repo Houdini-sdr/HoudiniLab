@@ -513,6 +513,11 @@ void Receiver::loopRecv(int tid, int core_id, SampleBuffer* rx_buffer) {
   std::vector<void*> samp_buffer(2);
   samp_buffer[0] = samp_buffer0.data();
   if (num_channels == 2) samp_buffer[1] = samp_buffer1.data();
+  // Scratch for the channel the reference antenna does NOT receive on. It has
+  // to outlive the radioRx() call that writes into it: this used to be a
+  // std::vector temporary, so samp[] held a dangling pointer and the radio
+  // wrote into freed memory.
+  std::vector<char> unused_channel_buffer(packetLength);
 
   int cell = 0;
   // for UHD device, the first pilot should not have an END_BURST flag
@@ -596,7 +601,7 @@ void Receiver::loopRecv(int tid, int core_id, SampleBuffer* rx_buffer) {
         samp[ch] = pkt[ch]->data;
       }
       if (num_packets != num_channels)
-        samp[num_channels - 1] = std::vector<char>(packetLength).data();
+        samp[num_channels - 1] = unused_channel_buffer.data();
 
       assert(this->base_radio_set_ != NULL);
 
