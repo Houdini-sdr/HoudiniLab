@@ -1467,6 +1467,19 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
         tid, resync_period, kGridAlpha, kGridBeta, houdini_boot_period,
         houdini_boot_period - static_cast<double>(config_->samps_per_frame()));
   }
+  // AP-31 loop profile. The UE iterates ~5x slower than real time, which is
+  // WHY recvHoudini drains and therefore why the read lands at an arbitrary
+  // frame phase and the beacon is only in the accept band ~1.4% of the time.
+  // The drain is a symptom; this measures where the iteration actually goes so
+  // the cause is traced rather than assumed. Four buckets, mean us per
+  // iteration, logged every HOUDINI_LOOP_PROFILE iterations (0 = off).
+  const size_t loop_profile_every = [] {
+    const char* e = getenv("HOUDINI_LOOP_PROFILE");
+    return e != nullptr ? static_cast<size_t>(atol(e)) : 0;
+  }();
+  using profile_clock = std::chrono::steady_clock;
+  double prof_rx = 0, prof_sync = 0, prof_tx = 0, prof_slot = 0, prof_all = 0;
+  size_t prof_n = 0, prof_sync_searched = 0;
   long long rx_beacon_time(0);
   //Always decreases the requested rx samples
   size_t beacon_adjust = 0;
@@ -1588,10 +1601,12 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
       break;
     }
     //Slot 0 / Beacon...
+    const auto prof_t0 = profile_clock::now();
     const int request_samples = samples_per_slot - beacon_adjust;
     const int rx_status = client_radio_set_->radioRx(
         tid, rxbuff.data(), request_samples, rx_beacon_time);
     beacon_adjust = 0;
+    const auto prof_t1 = profile_clock::now();
     if (rx_status < 0) {
       MLPD_ERROR("Rx status reporting error %d, exiting\n", rx_status);
       config_->running(false);
@@ -1653,6 +1668,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
               rxbuff.at(kSyncDetectChannel));
           const ssize_t s0 = static_cast<ssize_t>(off - kLead);
           const ssize_t slice_len = kLead + kTail;
+          prof_sync_searched++;
           const ssize_t idx = this->syncSearch(
               base + s0, static_cast<size_t>(slice_len),
               config_->corr_scale(tid) + resync_retry_cnt);
@@ -1857,6 +1873,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
         }
       }
     }
+    const auto prof_t2 = profile_clock::now();
     // schedule all TX slot
     // config_->tx_advance() needs calibration based on SDR model and sampling rate
     // Houdini always uses the continuous P(+U) burst below (clientTxPilots now
@@ -1885,6 +1902,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
                              houdini_frame_period);
       }
     }  // end if config_->ul_data_slot_present()
+    const auto prof_t3 = profile_clock::now();
 
     //Beacon + Tx Complete, process the rest of the slots
     for (size_t slot_id = 1; slot_id < config_->slot_per_frame(); slot_id++) {
@@ -1942,6 +1960,29 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
                   rx_data_status, samples_per_slot, rx_data_time, frame_id);
       }
     }  // end for
+    if (loop_profile_every > 0) {
+      const auto prof_t4 = profile_clock::now();
+      auto us = [](profile_clock::time_point a, profile_clock::time_point b) {
+        return std::chrono::duration<double, std::micro>(b - a).count();
+      };
+      prof_rx += us(prof_t0, prof_t1);
+      prof_sync += us(prof_t1, prof_t2);
+      prof_tx += us(prof_t2, prof_t3);
+      prof_slot += us(prof_t3, prof_t4);
+      prof_all += us(prof_t0, prof_t4);
+      if (++prof_n >= loop_profile_every) {
+        MLPD_INFO(
+            "LOOP PROFILE [%d] over %zu iters: total %.0f us/iter = rx %.0f + "
+            "sync %.0f + tx %.0f + slots %.0f (searched %zu, %.1f%%); "
+            "%.1f iter/s vs 1000 frames/s\n",
+            tid, prof_n, prof_all / prof_n, prof_rx / prof_n,
+            prof_sync / prof_n, prof_tx / prof_n, prof_slot / prof_n,
+            prof_sync_searched, 100.0 * prof_sync_searched / prof_n,
+            1e6 / (prof_all / prof_n));
+        prof_rx = prof_sync = prof_tx = prof_slot = prof_all = 0;
+        prof_n = prof_sync_searched = 0;
+      }
+    }
     frame_id++;
   }  // end while
 }
