@@ -690,7 +690,16 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
       // corrects a phase RAMP; its score is magnitude-based). Logging the
       // measured rotation beside the offset predicted from dt turns that from
       // an argument into a reading.
-      const double rot_deg = std::arg(u4) / 4.0 * 180.0 / M_PI;
+      // Referenced to the IDEAL QPSK constellation, not to zero. The ideal
+      // points sit at +-45/+-135 deg, so u^4 = -1 and a RAW arg(u4)/4 reads a
+      // constant +-45 deg on a perfectly aligned constellation -- which is
+      // exactly what the first cut of this line printed. Subtract the ideal's
+      // own 4th-power phase (pi) and wrap, so aligned reads 0 and a rotation
+      // theta reads theta wrapped into (-45, +45] deg.
+      double r4 = std::arg(u4) - M_PI;
+      while (r4 > M_PI) r4 -= 2.0 * M_PI;
+      while (r4 <= -M_PI) r4 += 2.0 * M_PI;
+      const double rot_deg = r4 / 4.0 * 180.0 / M_PI;
       const int pslot = cfg_->cl_pilot_slots().at(0).empty()
                             ? -1
                             : static_cast<int>(cfg_->cl_pilot_slots().at(0).at(0));
