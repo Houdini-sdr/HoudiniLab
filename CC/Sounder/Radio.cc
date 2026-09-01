@@ -128,7 +128,8 @@ void Radio::drain_buffers(std::vector<void*> buffs, int symSamp) {
      *      None
      */
   long long frameTime = 0;
-  int flags = 0, r = 0, i = 0;
+  int flags = 0, r = 0;
+  [[maybe_unused]] int i = 0;
   while (r != -1) {
     r = dev_->readStream(rxs_, buffs.data(), symSamp, flags, frameTime, 0);
     i++;

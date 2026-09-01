@@ -163,7 +163,12 @@ message(STATUS "SoapySDR_INCLUDE_DIRS: ${SoapySDR_INCLUDE_DIRS}")
 message(STATUS "SoapySDR_LIBRARIES: ${SoapySDR_LIBRARIES}")
 message(STATUS "HDF5_INCLUDE_DIRS: ${HDF5_INCLUDE_DIRS}")
 message(STATUS "HDF5_LIBRARIES: ${HDF5_LIBRARIES}")
-include_directories(${SoapySDR_INCLUDE_DIRS} ${HDF5_INCLUDE_DIRS} third_party/ third_party/nlohmann/single_include )
+include_directories(${SoapySDR_INCLUDE_DIRS} ${HDF5_INCLUDE_DIRS})
+# third_party/ is vendored and not ours to patch, so include it as SYSTEM: the
+# compiler then suppresses warnings raised inside those headers (GCC 13 flags
+# -Wpessimizing-move in concurrentqueue.h) while still finding them. Keep our
+# own headers OUT of this call so their warnings stay visible.
+include_directories(SYSTEM third_party/ third_party/nlohmann/single_include)
 
 set(SOUNDER_SOURCES ${PURE_UHD_SOURCES}
     ClientRadioSet.cc

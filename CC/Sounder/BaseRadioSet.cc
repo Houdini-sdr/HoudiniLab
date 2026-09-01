@@ -33,7 +33,6 @@
 #include "nlohmann/json.hpp"
 
 using json = nlohmann::json;
-static constexpr int kMaxTOSyncRetry = 10;
 
 BaseRadioSet::BaseRadioSet(Config* cfg, const bool calibrate_proc) : _cfg(cfg) {
   std::vector<size_t> num_bs_antenntas(_cfg->num_cells());
@@ -686,8 +685,8 @@ int BaseRadioSet::houdiniTddRx(size_t radio_id, void* const* buffs,
   // max_frame, and an unbounded frame_id would grow the recorder's HDF5 dataset
   // without limit (-> extend crash at close). Returning <0 makes loopRecv set
   // running(false) and shut down cleanly.
-  if (_cfg->max_frame() > 0 && htdd_frame_counter_ >= _cfg->max_frame())
-    return -1;
+  const long long max_frame = static_cast<long long>(_cfg->max_frame());
+  if (max_frame > 0 && htdd_frame_counter_ >= max_frame) return -1;
   Radio* r = bsRadios.at(0).at(radio_id);
   const int n = static_cast<int>(_cfg->samps_per_slot());
   const size_t K = htdd_rx_slots_.size();  // rx slots/frame (pilot P + uplink U...)
