@@ -1480,6 +1480,10 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   using profile_clock = std::chrono::steady_clock;
   double prof_rx = 0, prof_sync = 0, prof_tx = 0, prof_slot = 0, prof_all = 0;
   size_t prof_n = 0, prof_sync_searched = 0;
+  // Measurement scaffold for the per-call vs per-byte question (see the slot
+  // loop). Off unless HOUDINI_COALESCE_SLOTS=1.
+  const bool coalesce_throwaway = (getenv("HOUDINI_COALESCE_SLOTS") != nullptr);
+  std::vector<std::complex<int16_t>> throwaway;
   long long rx_beacon_time(0);
   //Always decreases the requested rx samples
   size_t beacon_adjust = 0;
@@ -1942,6 +1946,29 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
                              buffer_offset + buffer_id * buffer_chunk_size);
           buffer_offset++;
           buffer_offset %= buffer_chunk_size;
+        }
+      } else if (coalesce_throwaway) {
+        // MEASUREMENT ONLY (HOUDINI_COALESCE_SLOTS=1), no default change.
+        // Discriminates the two live explanations for the ~870 us cost of a
+        // 4096-sample read: per-CALL overhead, or per-BYTE host ingest. Same
+        // fronthaul either way (the FPGA still streams continuously and the
+        // NIC still carries 495 MB/s), same samples consumed -- only the call
+        // count changes, 29 -> 1. If the slots bucket collapses it is per-call
+        // and can be fixed without touching stream activation; if it holds at
+        // ~25 ms the cost is moving the data, and only FPGA-side discard
+        // (timed burst RX) helps [user].
+        if (slot_id == 1) {
+          const size_t rest = config_->slot_per_frame() - 1;
+          if (throwaway.size() < rest * samples_per_slot * 2)
+            throwaway.resize(rest * samples_per_slot * 2);
+          void* tb[1] = {throwaway.data()};
+          rx_data_status = this->client_radio_set_->radioRx(
+              tid, tb, static_cast<int>(rest * samples_per_slot),
+              rx_data_time);
+          if (rx_data_status > 0)
+            rx_data_status = static_cast<int>(samples_per_slot);
+        } else {
+          rx_data_status = static_cast<int>(samples_per_slot);
         }
       } else {
         //Not dl data so we throw it away
