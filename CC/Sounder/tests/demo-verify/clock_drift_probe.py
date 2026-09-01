@@ -86,16 +86,30 @@ def unwrap_resid(t):
     return out
 
 
-def fit(x, y):
-    """Least-squares slope + its standard error (needs >= 3 points)."""
-    n = len(x)
-    if n < 3:
-        return None, None, None
-    a, b = np.polyfit(x, y, 1)
-    resid = y - (a * x + b)
-    sy = float(np.sqrt(np.sum(resid ** 2) / (n - 2)))
-    sxx = float(np.sum((x - x.mean()) ** 2))
-    return float(a), (sy / math.sqrt(sxx) if sxx > 0 else None), sy
+def fit(x, y, nsig=3.0, iters=4):
+    """Least-squares slope + standard error, with a 3-sigma iterative reject.
+
+    A single spurious detection (noise peak beating the beacon in one window)
+    would otherwise lever the slope, and the slope IS the measurement. The drop
+    count is returned and reported, never applied silently.
+    """
+    keep = np.ones(len(x), dtype=bool)
+    a = b = sy = None
+    for _ in range(iters):
+        if keep.sum() < 3:
+            return None, None, None, int((~keep).sum())
+        a, b = np.polyfit(x[keep], y[keep], 1)
+        r = y - (a * x + b)
+        sy = float(np.sqrt(np.sum(r[keep] ** 2) / max(1, keep.sum() - 2)))
+        if sy == 0.0:
+            break
+        nk = np.abs(r) <= nsig * sy
+        if (nk == keep).all():
+            break
+        keep = nk
+    sxx = float(np.sum((x[keep] - x[keep].mean()) ** 2))
+    return (float(a), (sy / math.sqrt(sxx) if sxx > 0 else None), sy,
+            int((~keep).sum()))
 
 
 def self_test(gold_path, core_path):
@@ -142,7 +156,7 @@ def self_test(gold_path, core_path):
             cfos.append(f)
         t = np.array(ticks, dtype=np.int64)
         secs = (t - t[0]).astype(np.float64) / RATE
-        slope, se, jit = fit(secs, unwrap_resid(t))
+        slope, se, jit, _ = fit(secs, unwrap_resid(t))
         got_sco = -slope / RATE * 1e6
         got_cfo = float(np.mean(cfos)) / FREQ * 1e6
         good = (abs(got_sco - eps_ppm) < 0.02 and abs(got_cfo - eps_ppm) < 0.05)
@@ -166,10 +180,14 @@ def main():
                     help="UE read window in samples; the beacon lands in "
                          "~window/FRAME of them")
     ap.add_argument("--corr-scale", type=float, default=10.0)
-    ap.add_argument("--min-ratio", type=float, default=1e4,
-                    help="detector-ratio floor: the real beacon "
-                         "scores >=1e7 on this bench, noise-window "
-                         "artifacts ~500")
+    ap.add_argument("--min-ratio", type=float, default=1.0,
+                    help="detector-ratio floor. find_beacon's ratio is "
+                         "peak/thresh and its own crossing rule is "
+                         "ratio > 1/corr_scale = 0.1, so the scale here is "
+                         "ORDER ONE: the live beacon on this bench measured "
+                         "5.76 (two_node_beacon_arrival, 2026-09-01). "
+                         "two_node's '>=1e7' help text is from another "
+                         "scaling and cost this probe one null run.")
     ap.add_argument("--tx-ch", type=int, default=1)
     ap.add_argument("--rx-ch", type=int, default=1)
     ap.add_argument("--label", default="run",
@@ -204,6 +222,8 @@ def main():
     ue = None
     ticks, cfos, ratios = [], [], []
     windows = 0
+    best_ratio = 0.0   # so a zero-detection run is diagnosable rather than mute
+    peak_rms = 0.0
     try:
         bs.open_and_arm()
         if not bs.liveness():
@@ -222,8 +242,12 @@ def main():
                 tk, c = ue.window(args.window)
                 if tk is None:
                     continue
+                peak_rms = max(peak_rms, float(np.sqrt(np.mean(
+                    np.abs(c) ** 2))) * 32767.0)
                 for name, g in (senses if sense is None else [sense]):
                     idx, ratio = find_beacon(c, g, args.corr_scale)
+                    if idx >= 0:
+                        best_ratio = max(best_ratio, ratio)
                     if idx >= 0 and ratio >= args.min_ratio:
                         start = idx - CORE_OFF_2NDREP
                         if start < 0 or start + CORE > len(c):
@@ -247,7 +271,10 @@ def main():
     n = len(ticks)
     print("detections %d over %d windows (%.1f%% hit rate)"
           % (n, windows, 100.0 * n / max(1, windows)))
-    out.update(windows=windows, detections=n,
+    print("best detector ratio seen %.3g, loudest window rms %.1f"
+          % (best_ratio, peak_rms))
+    out.update(windows=windows, detections=n, best_ratio=best_ratio,
+               peak_rms=peak_rms,
                ue_reads=(ue.reads if ue else 0),
                ue_fails=(ue.fails if ue else 0))
     if n >= 3:
@@ -257,7 +284,7 @@ def main():
         cf = np.array(cfos, dtype=np.float64)[order]
         secs = (t - t[0]).astype(np.float64) / RATE
         r = unwrap_resid(t)
-        slope, slope_se, jitter = fit(secs, r)
+        slope, slope_se, jitter, dropped = fit(secs, r)
         # eps from timing: resid ramps at -RATE*eps samples per second.
         eps_sco = -slope / RATE
         eps_cfo = float(np.mean(cf)) / FREQ
@@ -265,7 +292,7 @@ def main():
             span_s=float(secs[-1]),
             resid_slope_samp_per_s=slope,
             resid_slope_se=slope_se,
-            resid_jitter_samp=jitter,
+            resid_jitter_samp=jitter, outliers_dropped=dropped,
             cfo_hz_mean=float(np.mean(cf)),
             cfo_hz_sd=float(np.std(cf)),
             eps_ppm_sco=eps_sco * 1e6,
@@ -273,7 +300,8 @@ def main():
             ratio_min=float(np.min(ratios)), ratio_max=float(np.max(ratios)),
             ticks=[int(v) for v in t], resid=[float(v) for v in r],
             cfo_hz=[float(v) for v in cf])
-        print("span %.1f s, arrival jitter %.1f samp rms" % (secs[-1], jitter))
+        print("span %.1f s, arrival jitter %.1f samp rms, %d outlier(s) dropped"
+              % (secs[-1], jitter, dropped))
         print("SCO: resid slope %+.4f samp/s (se %.4f)  -> eps %+.4f ppm"
               % (slope, slope_se if slope_se else float("nan"),
                  eps_sco * 1e6))
