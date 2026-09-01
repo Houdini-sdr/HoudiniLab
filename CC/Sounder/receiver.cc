@@ -890,7 +890,8 @@ void Receiver::clientTxRx(int tid) {
   }
 }
 
-void Receiver::clientTxPilots(size_t user_id, long long base_time) {
+void Receiver::clientTxPilots(size_t user_id, long long base_time,
+                              double frame_period) {
   // for UHD device, the first pilot should not have an END_BURST flag
   int flags = (((kUsePureUHD == true || kUseSoapyUHD == true) &&
                 (config_->cl_sdr_ch() == 2)))
@@ -924,7 +925,21 @@ void Receiver::clientTxPilots(size_t user_id, long long base_time) {
   const int horizon =
       horizon_env >= 0 ? horizon_env : config_->ue_pilot_horizon();
   if (horizon > 0 && config_->is_houdini() && config_->cl_sdr_ch() == 1) {
-    const long long frame = static_cast<long long>(config_->samps_per_frame());
+    // AP-31(c). This ladder used to step by samps_per_frame, on the assumption
+    // stated in the comment above -- "with the boards frequency-locked (CFO ~0,
+    // no drift) the pilot offset is stable". On free-running clocks it is not,
+    // and because `cur` starts at max(pilot_cursor + frame, txTime) the cursor
+    // wins that max for a whole horizon at a time, so a base_time riding the
+    // tracked grid was being ignored for ~96 frames and the pilot walked at the
+    // clock rate even with the UE's own sync loop locked (measured -1.58
+    // samples per frame on 2026-09-01 with the tracker holding resid inside
+    // +-68). Step by the tracked period instead, and index off txTime so the
+    // rounding never accumulates: at 122881.0588 a per-step llround would
+    // shed 0.0588 samples every frame, which is ~59 samples per second.
+    const double frame_d = (frame_period > 0.0)
+                               ? frame_period
+                               : static_cast<double>(config_->samps_per_frame());
+    const long long frame = llround(frame_d);
     // The driver only ACCEPTS burst anchors on the 384-tick / 3125 ns grid
     // (the finest ns-exact grid, TxTickAnchor SH-248), but a burst's INTERIOR
     // advances tick-exactly. So compose ONE burst per frame -- [front-pad
@@ -950,18 +965,26 @@ void Receiver::clientTxPilots(size_t user_id, long long base_time) {
     // retrying the same overlap forever, Opus review M2), and nothing here
     // can flush the driver's queue -- the stale-grid bursts simply drain
     // (up to ~horizon frames) while the new grid takes over behind them.
-    const long long end = txTime + static_cast<long long>(horizon) * frame;
-    long long cur = std::max(pilot_cursor + frame, txTime);
-    if (user_id < houdini_pilot_cursor_reset_.size() &&
-        houdini_pilot_cursor_reset_.at(user_id)->exchange(false) &&
-        pilot_cursor + frame > txTime) {
-      const long long k =
-          (pilot_cursor + frame - txTime + frame - 1) / frame;  // ceil
-      cur = txTime + k * frame;
+    const long long end = txTime + llround(horizon * frame_d);
+    // Every burst is txTime + i * tracked_period for integer i, so the whole
+    // ladder rides the tracked grid and no rounding accumulates along it.
+    long long i0 = 0;
+    if (pilot_cursor + frame > txTime) {
+      i0 = static_cast<long long>(std::ceil(
+          static_cast<double>(pilot_cursor + frame - txTime) / frame_d));
+    }
+    // The re-anchor flag (Opus review finding 4) is now redundant: i0 above
+    // ALWAYS resumes on the current grid at the first index past what is
+    // already queued, which is exactly what the flag used to trigger. Consume
+    // it so it does not linger, and keep the producer side untouched.
+    if (user_id < houdini_pilot_cursor_reset_.size()) {
+      (void)houdini_pilot_cursor_reset_.at(user_id)->exchange(false);
     }
     int nsched = 0;
     const bool ul_fits = ul_present && ul_off >= num_samps;
-    for (; cur <= end; cur += frame) {
+    for (long long i = i0;; ++i) {
+      const long long cur = txTime + llround(static_cast<double>(i) * frame_d);
+      if (cur > end) break;
       const long long anchor = (cur / kTddGridTicks) * kTddGridTicks;
       const long long pad = cur - anchor;
       if (pad != burst_pad) {
@@ -1858,7 +1881,8 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
           // 1.047 samples per frame the beacon does.
           pilot_base = houdiniGridStart(houdiniGridIndex(rx_beacon_time));
         }
-        this->clientTxPilots(tid, pilot_base + txTimeDelta_);
+        this->clientTxPilots(tid, pilot_base + txTimeDelta_,
+                             houdini_frame_period);
       }
     }  // end if config_->ul_data_slot_present()
 

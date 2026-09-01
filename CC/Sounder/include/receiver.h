@@ -85,7 +85,10 @@ class Receiver {
   float estimateCFO(const std::complex<int16_t>* buf, size_t buf_len,
                     int sync_index) const;
   void initBuffers();
-  void clientTxPilots(size_t user_id, long long base_time);
+  // frame_period: the TRACKED BS frame period in UE samples (AP-31c). The
+  // horizon ladder steps by it, not by samps_per_frame; <= 0 means nominal.
+  void clientTxPilots(size_t user_id, long long base_time,
+                      double frame_period = 0.0);
   int clientTxData(int tid, int frame_id, long long base_time);
   ssize_t clientSyncBeacon(size_t radio_id, size_t sample_window,
                            long long* window_time = nullptr);
