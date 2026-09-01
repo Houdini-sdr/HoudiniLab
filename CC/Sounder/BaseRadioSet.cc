@@ -297,9 +297,9 @@ BaseRadioSet::BaseRadioSet(Config* cfg, const bool calibrate_proc) : _cfg(cfg) {
           auto* dev = bsRadios.at(c).at(i)->RawDev();
           tddConf["frames"] = json::array();
           if (_cfg->internal_measurement() == true) {
-            for (char const& c : _cfg->bs_channel()) {
+            for (char const& bs_ch : _cfg->bs_channel()) {
               std::string tx_ram = "TX_RAM_";
-              dev->writeRegisters(tx_ram + c, 0, _cfg->pilot());
+              dev->writeRegisters(tx_ram + bs_ch, 0, _cfg->pilot());
             }
             tddConf["frames"].push_back(_cfg->bs_array_frames().at(c).at(i));
             std::cout << "Cell " << c << ", SDR " << i

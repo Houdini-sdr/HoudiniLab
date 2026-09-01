@@ -48,7 +48,11 @@ if(${CMAKE_C_COMPILER_ID} STREQUAL "GNU")
   else()
     set(ARCH_FLAGS "-march=native")
   endif()
-  set(CMAKE_CXX_FLAGS "-std=c++17 -Wall -Wextra ${ARCH_FLAGS}")
+  # -Wshadow is in neither -Wall nor -Wextra, so it has to be asked for. It is
+  # on here to keep a shadowed declaration from silently hiding an outer one:
+  # the tree was clean of all 7 when it was turned on, and third_party/ is a
+  # SYSTEM include below, so it contributes no noise.
+  set(CMAKE_CXX_FLAGS "-std=c++17 -Wall -Wextra -Wshadow ${ARCH_FLAGS}")
   set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -O0")
 else()
   message(FATAL_ERROR "Unsupported version of compiler")

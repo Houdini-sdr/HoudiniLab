@@ -369,7 +369,6 @@ class Config {
   size_t guard_mult_;
   std::vector<std::string> bs_sdr_file_;  // No accessor
   std::string hub_file_;                  // No accessor
-  std::string ref_sdr;
   size_t bs_sdr_ch_;
   std::vector<std::vector<std::string>> bs_sdr_ids_;
   std::vector<std::string> hub_ids_;

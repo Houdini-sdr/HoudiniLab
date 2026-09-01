@@ -103,13 +103,13 @@ int main(int argc, char** argv) {
   // Baseline: capture BS RX with NO UE TX, at BOTH the loopRecv slot size (4096)
   // and the big window, to tell whether the RX streams real ADC noise (non-zero)
   // or literal zeros (a BS RX streaming bug).
-  auto stats = [](const std::vector<ci16>& b, int n) {
-    double p = 0; int amax = 0;
-    for (int i = 0; i < n; ++i) {
-      p += double(b[i].real()) * b[i].real() + double(b[i].imag()) * b[i].imag();
+  auto stats = [](const std::vector<ci16>& b, int count) {
+    double pwr = 0; int amax = 0;
+    for (int i = 0; i < count; ++i) {
+      pwr += double(b[i].real()) * b[i].real() + double(b[i].imag()) * b[i].imag();
       amax = std::max({amax, std::abs((int)b[i].real()), std::abs((int)b[i].imag())});
     }
-    std::printf("    rms=%.3f absmax=%d\n", std::sqrt(p / n), amax);
+    std::printf("    rms=%.3f absmax=%d\n", std::sqrt(pwr / count), amax);
   };
   std::printf("[baseline] BS RX with NO UE TX (zeros => RX bug, noise => ok):\n");
   for (int it = 0; it < 3; ++it) {

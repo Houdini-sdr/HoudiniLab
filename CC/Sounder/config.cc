@@ -450,7 +450,6 @@ void Config::loadTopology(std::string serials_file, const bool bs_only,
       n_bs_antennas_.resize(num_cells_);
 
       for (size_t i = 0; i < num_cells_; i++) {
-        const auto j_serials = json::parse(serials_str, nullptr, true, true);
         json serials_conf;
         std::string cell_str = "BS" + std::to_string(i);
         ss << j_bs_serials.value(cell_str, serials_conf);
@@ -710,8 +709,8 @@ void Config::genClientSchedule(BsSchedType type) {
         }
       }
       //Include all the U's
-      const size_t ref_sdr = 0;
-      for (const auto& ul_ind : ul_slots_.at(ref_sdr)) {
+      const size_t ref_sdr_idx = 0;
+      for (const auto& ul_ind : ul_slots_.at(ref_sdr_idx)) {
         empty_frame.at(ul_ind) = 'U';
       }
 
@@ -719,7 +718,7 @@ void Config::genClientSchedule(BsSchedType type) {
       for (size_t i = 0; i < num_cl_sdrs_; i++) {
         cl_frames_.at(i) = empty_frame;
         //Look at the P index array.
-        const auto& ul_pilots = pilot_slots_.at(ref_sdr);
+        const auto& ul_pilots = pilot_slots_.at(ref_sdr_idx);
         size_t cl_ant_num = cl_sdr_ch_ * i;
         size_t ul_pilot_idx = 0;
         for (const auto& ul_pilot : ul_pilots) {

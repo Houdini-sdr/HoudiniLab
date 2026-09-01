@@ -103,8 +103,8 @@ void RecorderWorker::initCsi(void) {
   // manual: HOUDINI_CSI_SYM_START overrides (an int, or "auto" for the energy-edge detector).
   csi_sym_start_ = static_cast<int>(cfg_->prefix()) -
                    static_cast<int>(cfg_->cp_size()) / 2;
-  if (const char* s = std::getenv("HOUDINI_CSI_SYM_START"))
-    csi_sym_start_ = (std::string(s) == "auto") ? -1 : std::atoi(s);
+  if (const char* sym_env = std::getenv("HOUDINI_CSI_SYM_START"))
+    csi_sym_start_ = (std::string(sym_env) == "auto") ? -1 : std::atoi(sym_env);
   // Per-frame pilot-vs-data timing re-align (Houdini framer jitter). Default on for Houdini.
   csi_timing_fix_ = cfg_->is_houdini();
   if (std::getenv("HOUDINI_CSI_NO_TIMING_FIX")) csi_timing_fix_ = false;
