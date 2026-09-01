@@ -1361,9 +1361,17 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   }
 
   //-------------------- New sync
-  const size_t beacon_detect_window =
-      static_cast<size_t>(static_cast<float>(config_->samps_per_slot()) *
-                          kBeaconDetectWindowScaler);
+  // ACQUISITION window = one whole frame. The beacon repeats every
+  // samps_per_frame, so a full-frame read contains one with probability 1
+  // (bar the ~0.4% that straddle the boundary, which simply retries at a new
+  // phase) instead of the 7.4% a 2.33-slot window gets. Measured costs put the
+  // optimum exactly here: expected time = F*a_read/W + F*(b_read+b_corr), so it
+  // falls with W until the hit probability saturates at W = F, and reading
+  // beyond a frame buys nothing. 15.5 ms -> 4.5 ms, and deterministic.
+  const size_t beacon_detect_window = config_->is_houdini()
+      ? config_->samps_per_frame()
+      : static_cast<size_t>(static_cast<float>(config_->samps_per_slot()) *
+                            kBeaconDetectWindowScaler);
   size_t sync_count = 0;
   constexpr size_t kTargetSyncCount = 2;
   assert(config_->samps_per_frame() >= beacon_detect_window);
@@ -1455,17 +1463,48 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   // TODO: measure CFO from the first beacon and apply here
   const double kGridAlpha = envDouble("HOUDINI_GRID_ALPHA", 0.5);
   const double kGridBeta = envDouble("HOUDINI_GRID_BETA", 0.1);
-  const size_t max_cfo = 100;  // in ppb, For Iris
-  const size_t resync_period = static_cast<size_t>(
-      std::floor(1e9 / (max_cfo * config_->samps_per_frame())));
+  // How often to LOOK at the beacon, derived rather than hardcoded.
+  //
+  // The old form was `1e9 / (max_cfo_ppb * samps_per_frame)` with max_cfo = 100
+  // ppb "For Iris", which decodes as "resync once the drift reaches ONE
+  // sample". Both halves were wrong for this hardware: the tolerance is not one
+  // sample but the slot's zero padding, and 100 ppb is neither our clock
+  // (8520 ppb measured) nor a crystal spec (a +-25 ppm pair is 50000 ppb).
+  //
+  // The real tolerance is the timing slack built into the slot:
+  //   48 symbols x (fft 64 + cp 16) + prefix 128 + postfix 128 = 4096 = a slot,
+  // so the burst may shift +-ofdm_tx_zero_prefix samples before OFDM content
+  // crosses the slot boundary. Budget a quarter of it to inter-observation
+  // drift and leave the rest for detector jitter, snap quantization and the
+  // tx_advance residual.
+  //
+  // The rate error is the RESIDUAL after tracking, not the raw offset:
+  // measured 0.036 ppm against a raw 8.52 ppm, 240x better. Allan deviation
+  // over a 600 s run puts the two-node stability under 0.04 ppm out to
+  // tau = 10 s, so this period is not accuracy-limited at all -- what actually
+  // bounds it is how long we are willing to not notice the beacon is gone, and
+  // (on the read side) that each radioRx costs ~855 us fixed. Hence a
+  // deliberately conservative default with a large safety factor: eps drifted
+  // 0.23 ppm across one session, this bench is WIRED, and OTA will add more.
+  const double sync_tol_samples =
+      envDouble("HOUDINI_SYNC_TOL_SAMPLES",
+                static_cast<double>(config_->prefix()) / 4.0);
+  const double sync_residual_ppm = envDouble("HOUDINI_SYNC_RESIDUAL_PPM", 1.0);
+  const size_t resync_period = std::max<size_t>(
+      1, static_cast<size_t>(std::floor(
+             sync_tol_samples / (sync_residual_ppm * 1e-6 *
+                                 static_cast<double>(
+                                     config_->samps_per_frame())))));
   size_t last_resync = frame_id;
   if (config_->running() == true) {
     MLPD_INFO(
         "Start main client txrx loop... tid=%d with resync period of %zu, "
         "grid tracker alpha %.3f beta %.3f (0/0 = fixed-period grid), "
-        "bootstrap period %.4f (%+.4f samp/frame vs nominal)\n",
+        "bootstrap period %.4f (%+.4f samp/frame vs nominal); resync period "
+        "derived from tol %.1f samples / %.3f ppm\n",
         tid, resync_period, kGridAlpha, kGridBeta, houdini_boot_period,
-        houdini_boot_period - static_cast<double>(config_->samps_per_frame()));
+        houdini_boot_period - static_cast<double>(config_->samps_per_frame()),
+        sync_tol_samples, sync_residual_ppm);
   }
   // AP-31 loop profile. The UE iterates ~5x slower than real time, which is
   // WHY recvHoudini drains and therefore why the read lands at an arbitrary
@@ -1480,9 +1519,13 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   using profile_clock = std::chrono::steady_clock;
   double prof_rx = 0, prof_sync = 0, prof_tx = 0, prof_slot = 0, prof_all = 0;
   size_t prof_n = 0, prof_sync_searched = 0;
-  // Measurement scaffold for the per-call vs per-byte question (see the slot
-  // loop). Off unless HOUDINI_COALESCE_SLOTS=1.
-  const bool coalesce_throwaway = (getenv("HOUDINI_COALESCE_SLOTS") != nullptr);
+  // Coalesce runs of discarded slots into one read (see the slot loop). ON by
+  // default -- 11.4x on the measured iteration -- with HOUDINI_COALESCE_SLOTS=0
+  // as the escape hatch back to per-slot reads for A/B.
+  const bool coalesce_throwaway = [] {
+    const char* e = getenv("HOUDINI_COALESCE_SLOTS");
+    return (e == nullptr) || (atoi(e) != 0);
+  }();
   std::vector<std::complex<int16_t>> throwaway;
   long long rx_beacon_time(0);
   //Always decreases the requested rx samples
@@ -1754,11 +1797,35 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
           const double cfo_ppm = (config_->freq() > 0.0)
                                      ? (cfo_hz / config_->freq()) * 1e6
                                      : 0.0;
+          // CFO FROM THE TRACKED CLOCK (AP-31d). The sample clock and the RFDC
+          // NCO are both derived from the one LMK PLL1 reference, so the
+          // fractional error the grid tracker measures off TIMING is the same
+          // fraction the carrier carries: eps = samps_per_frame/period - 1, and
+          // the offset is eps * freq. That is the estimate to correct with:
+          //   - the beacon phase estimator is precise but NOT accurate. On a
+          //     link where the arrival ramp measures eps = 0 exactly it reads
+          //     +353 Hz, and across the four campaign legs its error vs the
+          //     timing truth ranged +280 to +1753 Hz with no consistent slope,
+          //     so it is a configuration-dependent bias, not a scale factor to
+          //     divide out (DEMO_VERIFICATION 8.6).
+          //   - the timing channel agrees with a completely independent, RF-free
+          //     hardware-clock ratio on every leg to <= 0.05 ppm, and the
+          //     tracked residual is 0.036 ppm = ~18 Hz at 500 MHz.
+          // Both are logged so the disagreement stays visible rather than
+          // becoming folklore; AP-34(b) is the fix for the estimator itself.
+          const double eps_tracked =
+              (houdini_frame_period > 0.0)
+                  ? (static_cast<double>(config_->samps_per_frame()) /
+                         houdini_frame_period - 1.0)
+                  : 0.0;
+          const double cfo_tracked_hz = eps_tracked * config_->freq();
           if ((cfo_log_cnt++ % cfoLogEvery()) == 0) {
             MLPD_INFO(
-                "Beacon CFO frame %zu: %+.1f Hz (%+.3f ppm), resid %+lld, "
+                "Beacon CFO frame %zu: tracked %+.1f Hz (%+.4f ppm) | beacon "
+                "%+.1f Hz (%+.3f ppm), delta %+.1f Hz, resid %+lld, "
                 "snr %.1f dB, tid %d\n",
-                frame_id, cfo_hz, cfo_ppm, resid, snr, tid);
+                frame_id, cfo_tracked_hz, eps_tracked * 1e6, cfo_hz, cfo_ppm,
+                cfo_hz - cfo_tracked_hz, resid, snr, tid);
           }
           // Liveness model, not micro-correction: with locked clocks + MTS
           // the drift is ~0, while INDEPENDENT detections of the same beacon
@@ -1791,13 +1858,15 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
                 "Re-sync frame %zu: beacon alive on the anchored grid "
                 "(resid %+lld within scatter, snr %.1f dB), tid %d\n",
                 frame_id, resid, snr, tid);
-            emitSync(kSyncLocked, resid, cfo_hz, snr, 0);
+            // The panel gets the TRACKED estimate: same units and field, the
+            // accurate source (see the note above).
+            emitSync(kSyncLocked, resid, cfo_tracked_hz, snr, 0);
           } else {
             MLPD_WARN(
                 "Re-sync frame %zu: off-grid detection %+lld (snr %.1f dB, "
                 "pending %d) -- beacon possibly moved, tid %d\n",
                 frame_id, resid, snr, resync_hold_pending ? 1 : 0, tid);
-            emitSync(kSyncHold, resid, cfo_hz, snr, 0);
+            emitSync(kSyncHold, resid, cfo_tracked_hz, snr, 0);
             if (resync_hold_pending) {
               houdiniEscalate("beacon moved");
               continue;  // rx_beacon_time is pre-hunt; restart the frame loop
@@ -1948,28 +2017,29 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
           buffer_offset %= buffer_chunk_size;
         }
       } else if (coalesce_throwaway) {
-        // MEASUREMENT ONLY (HOUDINI_COALESCE_SLOTS=1), no default change.
-        // Discriminates the two live explanations for the ~870 us cost of a
-        // 4096-sample read: per-CALL overhead, or per-BYTE host ingest. Same
-        // fronthaul either way (the FPGA still streams continuously and the
-        // NIC still carries 495 MB/s), same samples consumed -- only the call
-        // count changes, 29 -> 1. If the slots bucket collapses it is per-call
-        // and can be fixed without touching stream activation; if it holds at
-        // ~25 ms the cost is moving the data, and only FPGA-side discard
-        // (timed burst RX) helps [user].
-        if (slot_id == 1) {
-          const size_t rest = config_->slot_per_frame() - 1;
-          if (throwaway.size() < rest * samples_per_slot * 2)
-            throwaway.resize(rest * samples_per_slot * 2);
-          void* tb[1] = {throwaway.data()};
-          rx_data_status = this->client_radio_set_->radioRx(
-              tid, tb, static_cast<int>(rest * samples_per_slot),
-              rx_data_time);
-          if (rx_data_status > 0)
-            rx_data_status = static_cast<int>(samples_per_slot);
-        } else {
+        // Consume a RUN of consecutive discarded slots in ONE read.
+        //
+        // radioRx costs 855 us fixed + 0.0037 us/sample (measured), so 30 calls
+        // per frame cost 25.4 ms of a 27.5 ms iteration while the samples
+        // themselves cost 0.5 ms. Coalescing the run took the iteration to
+        // 2.4 ms, 36 -> 417 iter/s, with the fronthaul untouched. The run is
+        // computed from isDlData rather than assumed to be "everything after
+        // slot 0", so a schedule that DOES carry DL slots still reads each of
+        // them into its own buffer at its own offset.
+        size_t run = 0;
+        while (slot_id + run < config_->slot_per_frame() &&
+               !config_->isDlData(tid, slot_id + run)) {
+          ++run;
+        }
+        const size_t want = run * samples_per_slot;
+        if (throwaway.size() < want) throwaway.resize(want);
+        void* tb[1] = {throwaway.data()};
+        rx_data_status = this->client_radio_set_->radioRx(
+            tid, tb, static_cast<int>(want), rx_data_time);
+        if (rx_data_status == static_cast<int>(want)) {
           rx_data_status = static_cast<int>(samples_per_slot);
         }
+        slot_id += run - 1;  // the for-loop's ++ consumes the last one
       } else {
         //Not dl data so we throw it away
         rx_data_status = this->client_radio_set_->radioRx(
@@ -2030,11 +2100,21 @@ bool Receiver::houdiniAcquireAnchor(int tid, size_t detect_window,
                                     double* period_out) {
   constexpr long long kConfirmTol = 640;  // detector scatter (4.18) + path
   constexpr int kMaxHunts = 200;
+  // The refine stage wants a LONG baseline, because the rate error is the
+  // detection-pair noise divided by the span and that noise is sub-sample
+  // (measured 0.15-0.94 across four acquisitions). k ~ 20 gives ~4% rate
+  // error; k >= 200 gives ~0.4%. The stage exists because a full-frame
+  // detect window would otherwise SHORTEN the span: today's k of 17-37 is an
+  // accident of the hunt needing ~13.6 windowed reads to find the beacon at
+  // all, and a guaranteed first hit removes exactly that accident.
+  const long long kRefineSpan = static_cast<long long>(
+      envDouble("HOUDINI_ACQ_REFINE_SPAN", 200.0));
   const long long fr = static_cast<long long>(config_->samps_per_frame());
   long long first_abs = 0;
   bool have_first = false;
   int confirms = 0;
   int hunts = 0;
+  double period = static_cast<double>(fr);  // coarse after stage 2, fine after 3
   while (config_->running()) {
     if (++hunts > kMaxHunts) {
       MLPD_WARN(
@@ -2051,46 +2131,39 @@ bool Receiver::houdiniAcquireAnchor(int tid, size_t detect_window,
       have_first = true;
       first_abs = abs_end;
       confirms = 0;
+      period = static_cast<double>(fr);
       MLPD_INFO("houdiniAcquireAnchor [%d]: hunt lock at abs %lld (idx %ld)\n",
                 tid, abs_end, idx);
       continue;
     }
-    const long long k = llround(static_cast<double>(abs_end - first_abs) /
-                                static_cast<double>(fr));
-    const long long resid = abs_end - (first_abs + k * fr);
+    // Predict with the best period we have: nominal before stage 2, the coarse
+    // rate after it. Without that the residual grows as drift*k and the
+    // tolerance would have to be widened until it discriminated nothing.
+    const long long k =
+        llround(static_cast<double>(abs_end - first_abs) / period);
+    const long long resid =
+        abs_end - (first_abs + llround(static_cast<double>(k) * period));
     if (k != 0 && std::llabs(resid) <= kConfirmTol) {
-      if (++confirms >= 2) {
+      ++confirms;
+      // Every accepted detection improves the rate: resid/k is the period
+      // error over a span of k REAL frames.
+      period += static_cast<double>(resid) / static_cast<double>(k);
+      if (confirms >= 2 && k >= kRefineSpan) {
         anchor_out = first_abs - houdiniBeaconEnd(config_);
-        // RATE BOOTSTRAP (AP-31b). resid/k IS the frame-period error: both
-        // stamps are absolute UE sample times, so k counts REAL frames, and
-        // resid is how far the beacon slipped across them. The confirm has
-        // always computed it and always thrown it away.
-        //
-        // Why it decides whether the loop can close at all. The UE loop
-        // iterates at ~205 frame_id/s against 1000 real frames/s (recvHoudini
-        // drains), so resync_period 81 is ~395 ms of real time and the beacon
-        // lands in the targeted window on ~1.4% of iterations -- about 2.8
-        // attempts per second. On free-running clocks (-8.52 ppm, 1.047
-        // samples per real frame) the +-kScatterTol budget is spent in 978 ms,
-        // so the tracker gets ~2.8 chances to collect the >= 2 observations a
-        // rate estimate needs, and normally collects zero. Seeded here to
-        // within 1-5% (measured 1.056 / 1.027 / 1.000 against a true 1.047),
-        // the residual rate error is <= 0.05 samples/frame and the same budget
-        // lasts ~20 s instead of ~1 s, which is ~60 chances to refine.
-        if (period_out != nullptr && k != 0) {
-          *period_out = static_cast<double>(fr) +
-                        static_cast<double>(resid) / static_cast<double>(k);
-        }
+        if (period_out != nullptr) *period_out = period;
         MLPD_INFO(
             "houdiniAcquireAnchor [%d]: lock CONFIRMED (resid %lld over "
             "%lld frames, confirm %d) -> frame anchor %lld, bootstrap period "
             "%.4f (%+.4f samp/frame)\n",
-            tid, resid, k, confirms, anchor_out,
-            static_cast<double>(fr) +
-                static_cast<double>(resid) / static_cast<double>(k),
-            static_cast<double>(resid) / static_cast<double>(k));
+            tid, resid, k, confirms, anchor_out, period,
+            period - static_cast<double>(fr));
         return true;
       }
+      MLPD_INFO(
+          "houdiniAcquireAnchor [%d]: confirm %d at k=%lld (resid %lld), "
+          "period %.4f -- %s\n",
+          tid, confirms, k, resid, period,
+          (k < kRefineSpan) ? "extending the baseline" : "need 2 confirms");
     } else {
       MLPD_INFO(
           "houdiniAcquireAnchor [%d]: confirm failed (resid %lld, k %lld) "
@@ -2098,6 +2171,7 @@ bool Receiver::houdiniAcquireAnchor(int tid, size_t detect_window,
           tid, resid, k);
       first_abs = abs_end;
       confirms = 0;
+      period = static_cast<double>(fr);
     }
   }
   return false;
