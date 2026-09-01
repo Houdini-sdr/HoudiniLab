@@ -263,6 +263,16 @@ eps is defined throughout as (f_BS - f_UE) / f_UE.
 | 8.17 | **CLOSED, END TO END.** Both nodes free-running at -8.52 ppm: pilot walk **-0.0005 samp/frame** (was -2.234), `pilot_grid_off` seated at median **-39** samples with p5/p95 = -54/-31 and **99.7% of 4947 frames within +-128 of median** -- inside the 128-sample guard. 66 accepted detections, 0 off-grid, 0 escalations over 150 s. The residual 14688-sample excursion is 0.3% of frames (startup transients), not wander | `/tmp/leg_full.log` | VERIFIED-HW |
 
 
+### 8d. Why the UE runs behind the stream (profiled, both hypotheses falsified)
+
+| # | claim | evidence | status |
+| --- | --- | --- | --- |
+| 8.18 | THE BEACON IS IN ITS SLOT EVERY FRAME [user]; the 1.4% is entirely about WHEN THE UE LOOKS. The BS emits one beacon per frame at slot_start+384, so the miss rate is a receiver-side artifact: `recvHoudini` DISCARDS the whole queue (`readStream` with timeout 0, unbounded) and then reads 4096 fresh samples, so the window lands at an uncontrolled frame phase. The UE inspects 4096/122880 = **3.33%** of each frame, and the lead/tail accept band trims that to **1.41%** | `Radio.cc recvHoudini`, traced | VERIFIED-CODE |
+| 8.19 | **93% OF THE ITERATION IS radioRx, AND BOTH STANDING HYPOTHESES WERE WRONG.** Per-iteration profile (`HOUDINI_LOOP_PROFILE`): total **27462 us** = rx 936 + **sync 3** + tx 1088 + **slots 25435**. The correlation math [user's hypothesis] is **3 us**, ~0.01%. The 27 burst writeStream RPCs [mine] are ~1 ms, ~4%. The cost is the slot loop, whose `else` branch reads every non-DL slot purely to throw it away: **30 radioRx calls per frame, 29 of them discarded**, at ~880 us each (25435/29 = 877, matching slot 0's 936) | `/tmp/leg_prof.log` | VERIFIED-HW |
+| 8.20 | AND IT IS THE READ, NOT THE DRAIN. Splitting them inside `recvHoudini`: **drain 14-24 us** (7 chunks, ~110k samples binned) + **read 830-935 us** = ~880 us/call. The drain is ~2%. So a 4096-sample read costs ~870 us against **33 us of airtime -- 26x overhead** -- and the system sits in equilibrium, discarding roughly the ~900 us of backlog that accumulated during the previous read. **WHY a 4096-sample readStream costs 870 us is NOT explained and must not be assumed**; it is the one number that decides how much any fix buys | `/tmp/leg_prof2.log` | VERIFIED-HW |
+| 8.21 | THE BURST/TIMED-RX PATH EXISTS AND IS DRIVER-GATED, BUT THE APP HAS NEVER USED IT [user suggestion]. `Radio::activateRecv(rxTime, numSamps, flags)` already maps flags=2 to `SOAPY_SDR_HAS_TIME \| SOAPY_SDR_END_BURST`; the sounder's client calls it as `activateRecv()` -- flags=0, continuous and untimed -- at every call site in `ClientRadioSet.cc`. On the driver side the contract IS gated on silicon: `host/tests/hil/test_rx_timing.py` arms HAS_TIME\|END_BURST at now+lead and hard-gates timestamp linearity, the timed-start landing (F1 head, SH-148), the exact END_BURST total (F10 tail, SH-110) and the FIFO high-water margin, on all channels. So the foundation is tested and the application layer is not | driver TEST_PLAN T3 + `ClientRadioSet.cc` call sites | VERIFIED-CODE |
+
+
 ## Standing traps (carried from the driver contract, apply to every phase)
 
 1. An unknown or non-writable writeSetting key logs a warning and silently
