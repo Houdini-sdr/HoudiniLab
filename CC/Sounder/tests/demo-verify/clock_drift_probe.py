@@ -276,14 +276,16 @@ def main():
                     help="UE read window in samples; the beacon lands in "
                          "~window/FRAME of them")
     ap.add_argument("--corr-scale", type=float, default=10.0)
-    ap.add_argument("--min-ratio", type=float, default=1.0,
-                    help="detector-ratio floor. find_beacon's ratio is "
-                         "peak/thresh and its own crossing rule is "
-                         "ratio > 1/corr_scale = 0.1, so the scale here is "
-                         "ORDER ONE: the live beacon on this bench measured "
-                         "5.76 (two_node_beacon_arrival, 2026-09-01). "
-                         "two_node's '>=1e7' help text is from another "
-                         "scaling and cost this probe one null run.")
+    ap.add_argument("--min-ratio", type=float, default=0.2,
+                    help="detector-ratio floor, as a MARGIN over find_beacon's "
+                         "own crossing rule (ratio > 1/corr_scale = 0.1). Do "
+                         "not raise this: the live beacon ratio is NOT a stable "
+                         "absolute quantity -- measured 0.36 to 5.8 across one "
+                         "session on this bench, tracking link level over a 16x "
+                         "range. A 1.0 floor silently produced three "
+                         "zero-detection runs on links the known-good "
+                         "instrument locked. Robustness comes from the "
+                         "3-sigma reject in the fit, not from this.")
     ap.add_argument("--tx-ch", type=int, default=1)
     ap.add_argument("--rx-ch", type=int, default=1)
     ap.add_argument("--label", default="run",
@@ -331,6 +333,8 @@ def main():
     f_lock = 0.0
     best_ratio = 0.0   # so a zero-detection run is diagnosable rather than mute
     peak_rms = 0.0
+    short = 0          # readStream truncates (rx_gap_break): ret=2032 seen live
+    wmin = 1 << 30
     try:
         bs.open_and_arm()
         if not bs.liveness():
@@ -373,6 +377,9 @@ def main():
                 tk, c = ue.window(args.window)
                 if tk is None:
                     continue
+                wmin = min(wmin, len(c))
+                if len(c) < args.window:
+                    short += 1
                 peak_rms = max(peak_rms, float(np.sqrt(np.mean(
                     np.abs(c) ** 2))) * 32767.0)
                 c = derotate(c, f_lock)
@@ -407,10 +414,16 @@ def main():
     n = len(ticks)
     print("detections %d over %d windows (%.1f%% hit rate)"
           % (n, windows, 100.0 * n / max(1, windows)))
-    print("best detector ratio seen %.3g, loudest window rms %.1f"
-          % (best_ratio, peak_rms))
+    print("best detector ratio seen %.3g (floor %.3g), loudest window rms %.1f, "
+          "%d/%d short reads (min %d of %d)"
+          % (best_ratio, args.min_ratio, peak_rms, short, windows,
+             wmin if windows else 0, args.window))
+    if n:
+        q = np.percentile(ratios, [5, 50, 95])
+        print("detector ratio p5/p50/p95 = %.2f / %.2f / %.2f" % tuple(q))
     out.update(windows=windows, detections=n, best_ratio=best_ratio,
-               peak_rms=peak_rms,
+               peak_rms=peak_rms, short_reads=short,
+               window_min=(wmin if windows else 0),
                ue_reads=(ue.reads if ue else 0),
                ue_fails=(ue.fails if ue else 0))
     if n >= 3:

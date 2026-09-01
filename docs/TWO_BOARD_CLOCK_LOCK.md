@@ -1,4 +1,4 @@
-# Two RFSoC4x2 boards free-run — frequency-lock needs the external CLK IN mux select
+# Two RFSoC4x2 boards free-run — frequency-lock needs the external CLK IN reference select
 
 **Lane:** application (HoudiniLab) investigation; **root-cause/fix lane:** software
 (SoapyHoudiniSDR device firmware `clock_driver.cpp`), deployed via the os lane
@@ -9,8 +9,9 @@ design.
 
 ## RESOLUTION — both boards locked to a common external 10 MHz on `CLK IN`
 
-**Status: RESOLVED.** The firmware `CLK_SEL0/1` external-mux path (described below)
-landed via the software/os lanes. Verified app-side (`.21` beacon → `.22`, coherent
+**Status: RESOLVED.** The firmware external-reference select landed via the
+software/os lanes as SH-302 — but NOT by the mechanism this document guessed at;
+see the correction below before reading the investigation record. Verified app-side (`.21` beacon → `.22`, coherent
 per-4096-period phase over a 20 ms capture):
 
 - The two-tone scope beat STOPPED, and the beacon folds ISOLATED at period 4096.
@@ -39,6 +40,38 @@ separate later step, not needed for the sounder loop.
 
 Everything below is the ORIGINAL hand-off, kept as the investigation record; read it
 through the resolution above.
+
+## CORRECTION — the mux theory below is WRONG (SH-302)
+
+Everything this document says about `CLK_SEL0/1` driving a board-level clock mux
+is **wrong**, and it is left in place only because it is the record of what we
+believed. The software lane established the real mechanism when it shipped the
+fix:
+
+- There is **no board mux**. `CLK_SEL0/1` go to the LMK04828's own pin-select
+  inputs and are **don't-care** in this manual-mode config — which is why the
+  cable-only test could never have worked, and why nothing we did to those pins
+  would ever have mattered.
+- The reference select is **LMK register `0x147` (CLKin_SEL_MODE)** alone:
+  `CLKin1` = the onboard Si5395 10 MHz, `CLKin0` = the front-panel `CLK IN` SMA.
+- It is an operator setting, not a code change: `sdr.conf clock_ref =
+  internal|external` via `houdini-provision --set-clock-ref`, applied by re-running
+  `houdini-provision` (or a reboot). Observed live on both nodes 2026-09-01:
+
+  ```
+  clock: programming PLL1 reference internal (LMK 0x147=0x1A)
+  clock verify: PLL1 reference confirmed internal (LMK 0x147=0x1A readback)
+  ```
+
+  external programs `0x147=0x0A`. The readback verify matters: PLL1 locks either
+  way, since both CLKin carry 10 MHz at the same R=125 / 80 kHz PFD, so a lock
+  alone cannot tell you which reference is in force.
+
+**Lesson worth keeping:** the mux reading came from `ClaimClockGpios()` requesting
+two lines named "clock mux-select" and holding them at 0,0. The name plus the
+hold looked like mechanism; it was neither. The hand-off did at least mark it as
+the *likely* wiring with an explicit open item rather than a certainty, and the
+owning lane resolved it from the part datasheet — which is the process working.
 
 ## The need
 
@@ -78,7 +111,8 @@ the CFO — the direct "not locked" signature. (After the fix, that beat should 
   reference-frequency change is needed. (Ruled in.)
 - **The LMK takes CLKin1 by register** (`0x147 = 0x1A`, CLKin_SEL_MODE = CLKin1
   manual), so the LMK's own CLKin choice is fixed to CLKin1.
-- **The firmware selects the ONBOARD reference via the mux-select pins.**
+- **(WRONG — see the CORRECTION above.) The firmware selects the ONBOARD
+  reference via the mux-select pins.**
   `ClaimClockGpios()` requests `CLK_SEL0` (MIO 8) and `CLK_SEL1` (MIO 12) — the board's
   **"clock mux-select lines"** (`clock_driver.h`, `clock_driver.cpp:500`) — as outputs
   at initial value **0,0**, and holds them for the process lifetime. Since the LMK
@@ -92,6 +126,8 @@ a cable.
 
 ## Fix direction (options — the software lane owns the design)
 
+> Superseded: the actual fix was `0x147`, not these pins. See the CORRECTION.
+
 - Feed a common 10 MHz into **both** boards' external `CLK IN` (application/hardware
   side; the user has this connected).
 - In `clock_driver.cpp`, drive `CLK_SEL0/CLK_SEL1` to the value that routes the
@@ -103,7 +139,7 @@ a cable.
 - No other register change is expected: CLKin1 / R=125 / PLL1_N=96 already target
   10 MHz. Build + deploy via `deploy-fw`, re-init both boards.
 
-## Open item (the one board-specific unknown)
+## Open item (the one board-specific unknown) — CLOSED, and the premise was wrong
 
 **Which `CLK_SEL0/1` value selects the external `CLK IN`.** This is the RFSoC4x2
 board wiring (RealDigital schematic); it is NOT documented in the firmware, which just
