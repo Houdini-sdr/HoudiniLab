@@ -198,6 +198,20 @@ Radio::Radio(const SoapySDR::Kwargs& args, const char soapyFmt[],
       dev_->setFrequency(SOAPY_SDR_RX, ch, rx_f);
       dev_->setFrequency(SOAPY_SDR_TX, ch, tx_f);
     }
+    // Read the NCO BACK. setFrequency returning is not evidence the hardware
+    // holds it, and a later stream-setup call could quietly restore nominal --
+    // which would make an injection experiment silently measure nothing and
+    // publish the null as a result (the SH-338 class).
+    if (rxFreqOffset != 0.0 || txFreqOffset != 0.0) {
+      for (auto ch : channels) {
+        MLPD_WARN(
+            "Radio: NCO readback ch%zu -- RX %.3f Hz, TX %.3f Hz (wanted "
+            "%.3f / %.3f)\n",
+            ch, dev_->getFrequency(SOAPY_SDR_RX, ch),
+            dev_->getFrequency(SOAPY_SDR_TX, ch), rx_f, tx_f);
+      }
+    }
+
   }
   // Houdini SoapyHoudiniSDR needs per-stream args (RX host port, TX replay/stream
   // mode); Iris/UHD ignore an empty Kwargs, so this is backend-agnostic.
