@@ -278,8 +278,24 @@ int Radio::recvHoudini(void* const* buffs, int samples, long long& frameTime) {
     jb[c] = junk.data() + c * drain_samps * kBytesPerSamp;
   int jf = 0;
   long long jt = 0;
-  while (dev_->readStream(rxs_, jb.data(), drain_samps, jf, jt, 0) > 0) {
+  // Split drain from read: the loop spends 93% of an iteration inside the 30
+  // radioRx calls it makes per frame (29 of them purely to throw the slot
+  // away), at ~880 us each, and the fix differs depending on whether that cost
+  // is the drain loop or the read itself. HOUDINI_LOOP_PROFILE reports both.
+  static const size_t rx_profile_every = [] {
+    const char* e = getenv("HOUDINI_LOOP_PROFILE");
+    return e != nullptr ? static_cast<size_t>(atol(e)) : 0;
+  }();
+  static thread_local double p_drain = 0, p_read = 0;
+  static thread_local size_t p_calls = 0, p_chunks = 0, p_drained = 0;
+  const auto p_t0 = std::chrono::steady_clock::now();
+  int drained_chunks = 0, drained_samps = 0;
+  int dr = 0;
+  while ((dr = dev_->readStream(rxs_, jb.data(), drain_samps, jf, jt, 0)) > 0) {
+    ++drained_chunks;
+    drained_samps += dr;
   }
+  const auto p_t1 = std::chrono::steady_clock::now();
 
   // A dropped UDP packet splices a gap between two reads of THIS window. Detect it
   // from each read's own timestamp (the window used to keep only the first read's
@@ -288,6 +304,11 @@ int Radio::recvHoudini(void* const* buffs, int samples, long long& frameTime) {
   // TimeGridTracker compares where each read's samples land vs. where its stamp says
   // they belong; a gap is zero-padded so post-gap samples stay on their true offset,
   // and the extent is logged (absolute RX sample position) for the /Data/Gaps table.
+  if (rx_profile_every > 0) {
+    p_drain += std::chrono::duration<double, std::micro>(p_t1 - p_t0).count();
+    p_chunks += static_cast<size_t>(drained_chunks);
+    p_drained += static_cast<size_t>(drained_samps);
+  }
   if (rx_rate_ == 0.0) rx_rate_ = dev_->getSampleRate(SOAPY_SDR_RX, 0);
   Sounder::TimeGridTracker grid(rx_rate_);
   std::vector<void*> cur(num_rx_ch_);
@@ -382,6 +403,22 @@ int Radio::recvHoudini(void* const* buffs, int samples, long long& frameTime) {
                     rms, got);
         }
       }
+    }
+  }
+  if (rx_profile_every > 0) {
+    const auto p_t2 = std::chrono::steady_clock::now();
+    p_read += std::chrono::duration<double, std::micro>(p_t2 - p_t1).count() -
+              std::chrono::duration<double, std::micro>(p_t1 - p_t0).count() *
+                  0.0;
+    if (++p_calls >= rx_profile_every) {
+      MLPD_INFO(
+          "RX PROFILE over %zu radioRx calls: drain %.0f us (%.1f chunks, "
+          "%.0f samples) + read %.0f us = %.0f us/call\n",
+          p_calls, p_drain / p_calls, 1.0 * p_chunks / p_calls,
+          1.0 * p_drained / p_calls, p_read / p_calls,
+          (p_drain + p_read) / p_calls);
+      p_drain = p_read = 0;
+      p_calls = p_chunks = p_drained = 0;
     }
   }
   return got;
