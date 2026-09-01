@@ -1428,14 +1428,17 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
                       static_cast<uint32_t>(kScatterTol));
   };
   // TODO: measure CFO from the first beacon and apply here
+  const double kGridAlpha = envDouble("HOUDINI_GRID_ALPHA", 0.5);
+  const double kGridBeta = envDouble("HOUDINI_GRID_BETA", 0.1);
   const size_t max_cfo = 100;  // in ppb, For Iris
   const size_t resync_period = static_cast<size_t>(
       std::floor(1e9 / (max_cfo * config_->samps_per_frame())));
   size_t last_resync = frame_id;
   if (config_->running() == true) {
     MLPD_INFO(
-        "Start main client txrx loop... tid=%d with resync period of %zu\n",
-        tid, resync_period);
+        "Start main client txrx loop... tid=%d with resync period of %zu, "
+        "grid tracker alpha %.3f beta %.3f (0/0 = fixed-period grid)\n",
+        tid, resync_period, kGridAlpha, kGridBeta);
   }
   long long rx_beacon_time(0);
   //Always decreases the requested rx samples
@@ -1469,8 +1472,6 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   // update gap (~115 frames) instead of growing without bound from k = 0.
   double houdini_frame_period =
       static_cast<double>(config_->samps_per_frame());
-  const double kGridAlpha = envDouble("HOUDINI_GRID_ALPHA", 0.5);
-  const double kGridBeta = envDouble("HOUDINI_GRID_BETA", 0.1);
   // Frame-start grid point n frames after the tracked reference.
   auto houdiniGridStart = [&](long long n) {
     return houdini_pilot_ref + llround(static_cast<double>(n) *
