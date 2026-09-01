@@ -575,6 +575,19 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
           const double slope = (npts * skp - sk * sp) / denom;  // rad per bin
           const double frac = slope * N / (2.0 * M_PI);         // samples
           if (std::abs(frac) < 1.0) best_r += frac;
+          // AP-37: the INTERCEPT this fit discards is the U slot's common phase
+          // against the P-slot-derived H -- i.e. exactly the pilot-to-data
+          // rotation an uncorrected carrier offset would leave. Logged so the
+          // question is settled by the quantity itself rather than inferred
+          // from the constellation metric downstream.
+          static std::atomic<unsigned> icn{0};
+          if ((icn.fetch_add(1) % 512) == 0) {
+            const double icept = (sp - slope * sk) / npts;
+            MLPD_INFO(
+                "U-slot pilot common phase %+.2f deg (slope %+.4f samp), "
+                "frame %u\n",
+                icept * 180.0 / M_PI, frac, pkt->frame_id);
+          }
         }
       }
     }
