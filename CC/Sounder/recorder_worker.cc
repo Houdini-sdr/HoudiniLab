@@ -678,8 +678,33 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
         }
       }
     } else if (tot % 512 == 0) {
-      MLPD_INFO("CNS score %.3f at frame %u (%u datagrams, %u low)\n", score,
-                pkt->frame_id, tot, cns_low.load());
+      // AP-37: the CONSTELLATION ROTATION, which the score deliberately throws
+      // away. score = |mean(u^4)| is rotation-invariant by construction, so it
+      // reports a tight constellation whether or not it is correctly oriented.
+      // arg(mean(u^4))/4 is that missing orientation, modulo 90 deg for QPSK.
+      //
+      // Why it matters here: H is estimated in the P slot and applied in the U
+      // slot, (U-P)*samps_per_slot apart, so an uncorrected carrier offset f
+      // leaves a COMMON rotation of 360*f*dt degrees on every data symbol and
+      // nothing in this pipeline removes it (the blind 4th-power search below
+      // corrects a phase RAMP; its score is magnitude-based). Logging the
+      // measured rotation beside the offset predicted from dt turns that from
+      // an argument into a reading.
+      const double rot_deg = std::arg(u4) / 4.0 * 180.0 / M_PI;
+      const int pslot = cfg_->cl_pilot_slots().at(0).empty()
+                            ? -1
+                            : static_cast<int>(cfg_->cl_pilot_slots().at(0).at(0));
+      const int uslot = cfg_->cl_ul_slots().at(0).empty()
+                            ? -1
+                            : static_cast<int>(cfg_->cl_ul_slots().at(0).at(0));
+      const double dt = (pslot >= 0 && uslot >= 0)
+                            ? (uslot - pslot) * slot / cfg_->rate()
+                            : 0.0;
+      MLPD_INFO(
+          "CNS score %.3f rot %+.1f deg at frame %u (%u datagrams, %u low); "
+          "P->U %.1f us, so %+.1f deg per kHz of uncorrected CFO\n",
+          score, rot_deg, pkt->frame_id, tot, cns_low.load(), dt * 1e6,
+          360.0 * 1000.0 * dt);
     }
   }
   double psum = 0.0;
