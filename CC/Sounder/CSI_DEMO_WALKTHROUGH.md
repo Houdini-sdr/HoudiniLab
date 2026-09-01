@@ -69,9 +69,9 @@ clock).
   owned by the SoapyHoudiniSDR and Houdini-Streaming projects and is not
   covered here. If you did not set the boards up yourself, ask whoever did.
 - **Both boards driven from one reference clock.** This is not optional. Two
-  free running boards drift by roughly 894 ppm, which walks the client pilot
-  across the whole base station frame in about a second, and the pilot never
-  stays inside the receive window. Feed both boards a common 10 MHz on `CLK IN`
+  free running boards drift far enough that the client pilot walks across the
+  whole base station frame and never stays inside the receive window. Feed both
+  boards a common 10 MHz on `CLK IN`
   and confirm the firmware selects the external mux. See
   `../../docs/TWO_BOARD_CLOCK_LOCK.md` for the evidence and the verification
   procedure.

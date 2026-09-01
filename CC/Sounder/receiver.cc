@@ -1429,7 +1429,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   // timestamp (rx_beacon_time) is real-time accurate but at an ARBITRARY frame
   // phase -- the pilot TX time (rx_beacon_time + txTimeDelta) then jitters across
   // the whole frame and never seats in the BS rx_gate. With the boards
-  // frequency-locked (shared 10 MHz ref, CFO ~1 ppm) the frame period IS exactly
+  // frequency-locked (shared 10 MHz ref) the frame period IS exactly
   // samps_per_frame, so we ANCHOR a beacon-locked frame start on each successful
   // (re)sync and, at pilot TX, SNAP the current read timestamp to that grid
   // (anchor + k*frame) -- see the clientTxPilots call below. (Iris keeps the raw

@@ -13,10 +13,24 @@ design.
 landed via the software/os lanes. Verified app-side (`.21` beacon → `.22`, coherent
 per-4096-period phase over a 20 ms capture):
 
-- **CFO = +0.1 Hz** (0.0002 ppm at the 500 MHz NCO), was **+447 kHz / 894 ppm**.
-- **Sample-clock drift ~0.0000 samples/frame**, was **~110 samples per 1-ms frame**.
-- The gold-corr DDC offset moved **+447 kHz → +0.0 MHz**, and the beacon folds
-  ISOLATED at period 4096.
+- The two-tone scope beat STOPPED, and the beacon folds ISOLATED at period 4096.
+- The UE pilot stopped walking the BS frame: frame-offsets that had jumped tens of
+  thousands of samples between scans went stable.
+
+> **The absolute CFO figures this doc used to quote (+447 kHz / 894 ppm before,
+> +0.1 Hz after) have been REMOVED as untrustworthy, not merely old.** They came
+> from a lag-128 self-correlation with no coarse stage. At lag 128 and
+> fs = 122.88 MHz the unambiguous range is only ±480 kHz, so a 447 kHz reading
+> sits at 93 % of the fold limit and is one of a family of aliases spaced
+> fs/128 = 960 kHz apart, with nothing in that measurement able to say which.
+> The beacon's STS also repeats every 16 samples and 128 = 8×16, so a misaligned
+> window makes the STS self-correlate at that same lag (seen directly on
+> 2026-08-31 as a spurious peak at δ = −255). And 894 ppm is far outside any
+> crystal spec, which the original text noticed and explained away rather than
+> distrusted. The estimator was rewritten on 2026-08-31 (two-stage Schmidl-Cox,
+> coarse STS lag 16 resolving the fine lag-128 ambiguity) and validated against
+> injected offsets; **any absolute CFO number predating that rewrite should be
+> treated as unmeasured.** AP-33 is the row that measures it properly.
 
 Sample clocks are now identical (shared reference), so the beacon-synced UE pilot no
 longer walks the BS frame — the blocker this doc was written about is gone. Residual
@@ -37,14 +51,13 @@ the UE pilot drifts across the BS frame and can't be seated in the rx_gate.
 
 Measured, current:
 
-- **CFO = +447 kHz** between the boards (`.21→.22` beacon, lag-128 self-corr on the
-  two Gold reps; consistent ~440–453 kHz across trials). At the 500 MHz NCO that is
-  **≈894 ppm** — far beyond crystal tolerance, i.e. two fully independent references.
-- **Sample-clock drift = ~110 samples per 1-ms frame** (894 ppm × 122880). The
-  beacon-synced UE pilot therefore walks the entire 122880-sample BS frame in
-  **~1.1 s**; measured pilot frame-offsets jump 10k–90k samples between scans. A
+- **The two boards are not frequency-locked.** Direct observation, independent of
+  any CFO estimate: measured pilot frame-offsets jump 10k–90k samples between
+  scans, so the beacon-synced UE pilot walks the entire 122880-sample BS frame. A
   FIXED `ue_tx_advance_ticks` cannot hold it in the fixed rx_gate → the recorded
-  `Pilot_Samples` stays at the noise floor.
+  `Pilot_Samples` stays at the noise floor. The scope two-tone check below shows
+  the same thing qualitatively (two tones beating). The absolute offset is NOT
+  quoted here on purpose; see the note in the RESOLUTION section.
 - **The rest of the loop is proven good** and is NOT the blocker: beacon sync locks
   (client re-syncs, `corr_scale=100`), the UE pilot emits (`ch1:acked` climbs, no
   underflow), the reverse cable carries it (tone rms ~1000), and a whole-frame BS
@@ -74,8 +87,8 @@ the CFO — the direct "not locked" signature. (After the fix, that beat should 
 
 **Consequence:** connecting a common 10 MHz to the external `CLK IN` SMA does nothing
 on its own — the firmware never switches the mux to the external input. (We tried it:
-CFO stayed 447 kHz, pilot still jittered.) The lock is a *firmware select*, not a
-cable.
+the beat and the pilot jitter both persisted.) The lock is a *firmware select*, not
+a cable.
 
 ## Fix direction (options — the software lane owns the design)
 
