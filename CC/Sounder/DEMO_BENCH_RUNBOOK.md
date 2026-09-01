@@ -89,6 +89,17 @@ teardown, then starts `sounder --view` and retries the flaky cold start. The
 debug exports are optional but cheap, and they are what every verification in
 `DEMO_VERIFICATION.md` greps for.
 
+Without those three exports the run is nearly silent: the teardown, the startup
+banner, and a `[csi]` datagram counter about once a second. That is the walkthrough's
+mode A default and it is normal, not a fault. Add `HOUDINI_CFO_LOG_EVERY=1`
+when you want every beacon CFO estimate rather than the default one in ten.
+
+Measured 2026-09-01, two back to back runs on this bench: 6,189 lines in 60 s
+with the three exports set, 342 lines in 85 s without them, and the `[csi]`
+datagram counter advancing by an identical 443 per reporting interval in both.
+The exports change the printing only. Judge run health by the datagram counter
+and by the `Re-sync ... beacon alive` lines, never by how much scrolls past.
+
 ## 4. Viewing
 
 From your workstation:

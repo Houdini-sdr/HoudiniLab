@@ -282,6 +282,27 @@ Two defaults assume one particular layout. If yours differs, override them:
 - `--venv <your-houdini-venv>` if the SoapySDR virtual environment is not at
   `~/houdini_test`.
 
+That command on its own is deliberately quiet. It prints the teardown, the
+sounder's startup and a `[csi]` datagram counter roughly once a second, and
+almost nothing per frame. That is the normal amount of output, so do not read
+a short log as a sign that something is wrong.
+
+If you want the per frame diagnostics instead, export them in the same shell
+before launching. Section 7 describes each one:
+
+```sh
+export HOUDINI_BS_RX_DEBUG=1 HOUDINI_UE_TX_DEBUG=1 HOUDINI_CSI_R_DEBUG=1
+export HOUDINI_CFO_LOG_EVERY=1
+python3 csi_gui/csi_server.py --launch --conf files/houdini-1u.json
+```
+
+On a healthy cabled bench this is a large difference in output and no
+difference in behaviour. Two back to back runs on the same bench measured 6,189
+lines in 60 seconds with the exports set against 342 lines in 85 seconds
+without them, while the `[csi]` datagram counter advanced by an identical 443
+per reporting interval in both. So a quiet log means the exports are unset, not
+that the demo is running slowly. Check the datagram counter, not the line rate.
+
 ### 4.2 Mode B: run the two pieces yourself
 
 Terminal 1, the dashboard backend:
@@ -551,6 +572,9 @@ same shell that launches it.
 | `HOUDINI_PILOT_HORIZON` | from config `ue_pilot_horizon` (96) | How many frames of client bursts are queued ahead of real time. Larger survives slower host loops; every extra frame delays a timing correction reaching the wire. |
 | `HOUDINI_BS_RX_DEBUG` | unset | Base station prints its rederivation of the client schedule (`pilot_grid_off`, `pu_spacing_err`). Both should sit within one sample of zero. |
 | `HOUDINI_UE_TX_DEBUG` | unset | Client prints its burst scheduling (frames queued, pad). |
+| `HOUDINI_CSI_R_DEBUG` | unset | Recorder prints the per frame pilot re-alignment it chose (`r`, and the blind score behind it), one line per 30 corrections. |
+| `HOUDINI_CFO_LOG_EVERY` | 10 | How many beacon detections pass per `Beacon CFO` line. The default logs one in ten, so a quiet run is expected. Set it to 1 for a calibration run where you want every estimate. |
+| `HOUDINI_CNS_DUMP_LOW` | unset | Directory for autopsy dumps of the first few low scoring constellations. The directory must already exist. |
 
 `HOUDINI_CSI_SYM_START` is the one worth understanding. The cyclic prefix guard
 is one sided. A window placed early, still inside the prefix, is a valid
