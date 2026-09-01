@@ -1349,9 +1349,11 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   // recvHoudini's drain, so the anchor is pure timestamp arithmetic).
   long long houdini_anchor = 0;
   bool houdini_anchored = false;
+  // Seeded by the acquisition confirm (AP-31b bootstrap); nominal until then.
+  double houdini_boot_period = static_cast<double>(config_->samps_per_frame());
   if (config_->is_houdini()) {
-    houdini_anchored =
-        houdiniAcquireAnchor(tid, beacon_detect_window, houdini_anchor);
+    houdini_anchored = houdiniAcquireAnchor(
+        tid, beacon_detect_window, houdini_anchor, &houdini_boot_period);
     if (!houdini_anchored && config_->running()) {
       throw std::runtime_error("beacon acquisition: no confirmed lock");
     }
@@ -1437,8 +1439,10 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   if (config_->running() == true) {
     MLPD_INFO(
         "Start main client txrx loop... tid=%d with resync period of %zu, "
-        "grid tracker alpha %.3f beta %.3f (0/0 = fixed-period grid)\n",
-        tid, resync_period, kGridAlpha, kGridBeta);
+        "grid tracker alpha %.3f beta %.3f (0/0 = fixed-period grid), "
+        "bootstrap period %.4f (%+.4f samp/frame vs nominal)\n",
+        tid, resync_period, kGridAlpha, kGridBeta, houdini_boot_period,
+        houdini_boot_period - static_cast<double>(config_->samps_per_frame()));
   }
   long long rx_beacon_time(0);
   //Always decreases the requested rx samples
@@ -1470,8 +1474,10 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   // jitter straight into the TX schedule. ref is re-anchored to the newest
   // observation on every update, so the extrapolation distance stays one
   // update gap (~115 frames) instead of growing without bound from k = 0.
-  double houdini_frame_period =
-      static_cast<double>(config_->samps_per_frame());
+  double houdini_frame_period = houdini_boot_period;
+  // Count tracker updates so an escalation knows whether its own learned rate
+  // is better than a fresh confirm-derived one (below).
+  size_t houdini_grid_updates = 0;
   // Frame-start grid point n frames after the tracked reference.
   auto houdiniGridStart = [&](long long n) {
     return houdini_pilot_ref + llround(static_cast<double>(n) *
@@ -1509,8 +1515,10 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
         "beacon acquisition, tid %d\n",
         why, frame_id, tid);
     long long fresh = 0;
+    double fresh_period = houdini_frame_period;
     const long long prev_ref = houdini_pilot_ref;
-    if (houdiniAcquireAnchor(tid, beacon_detect_window_esc, fresh)) {
+    if (houdiniAcquireAnchor(tid, beacon_detect_window_esc, fresh,
+                             &fresh_period)) {
       // The ONLY place the UE moves its schedule. Report the applied step so the
       // panel can mark it against the resid trace.
       // Both anchors are ABSOLUTE sample times k frames apart, so their raw
@@ -1523,10 +1531,14 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
         if (step > fr / 2) step -= fr;
       }
       emitSync(kSyncEscalating, 0, 0.0, 0.0, step);
-      // Keep the learned period across a re-anchor: escalation means the OFFSET
-      // was lost (beacon moved or missed), and the two boards' oscillators did
-      // not change when that happened. Re-deriving the rate from scratch every
-      // escalation would throw away the one state that takes seconds to learn.
+      // Escalation means the OFFSET was lost; the two oscillators did not
+      // change when that happened. So keep a rate the tracker actually learned
+      // (many observations, ~0.1%) and take the confirm's fresh one (1-5%)
+      // only while the tracker has learned nothing at all -- which is exactly
+      // the case an escalation-first run lands in.
+      if (houdini_grid_updates == 0) {
+        houdini_frame_period = fresh_period;
+      }
       houdini_pilot_ref = fresh;
       houdini_pilot_ref_valid = true;
       if (static_cast<size_t>(tid) < houdini_pilot_cursor_reset_.size())
@@ -1725,6 +1737,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
               houdini_pilot_ref = houdiniGridStart(kf) +
                                   llround(kGridAlpha * r);
               houdini_frame_period += kGridBeta * r / dk;
+              houdini_grid_updates++;
             }
             resync_hold_pending = false;
             resync_exhausted_streak = 0;
@@ -1921,7 +1934,8 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
 // lock; it BLOCKS while no detection at all is available (searching forever
 // is the wanted behavior when the beacon is gone -- pilots pause).
 bool Receiver::houdiniAcquireAnchor(int tid, size_t detect_window,
-                                    long long& anchor_out) {
+                                    long long& anchor_out,
+                                    double* period_out) {
   constexpr long long kConfirmTol = 640;  // detector scatter (4.18) + path
   constexpr int kMaxHunts = 200;
   const long long fr = static_cast<long long>(config_->samps_per_frame());
@@ -1955,10 +1969,34 @@ bool Receiver::houdiniAcquireAnchor(int tid, size_t detect_window,
     if (k != 0 && std::llabs(resid) <= kConfirmTol) {
       if (++confirms >= 2) {
         anchor_out = first_abs - houdiniBeaconEnd(config_);
+        // RATE BOOTSTRAP (AP-31b). resid/k IS the frame-period error: both
+        // stamps are absolute UE sample times, so k counts REAL frames, and
+        // resid is how far the beacon slipped across them. The confirm has
+        // always computed it and always thrown it away.
+        //
+        // Why it decides whether the loop can close at all. The UE loop
+        // iterates at ~205 frame_id/s against 1000 real frames/s (recvHoudini
+        // drains), so resync_period 81 is ~395 ms of real time and the beacon
+        // lands in the targeted window on ~1.4% of iterations -- about 2.8
+        // attempts per second. On free-running clocks (-8.52 ppm, 1.047
+        // samples per real frame) the +-kScatterTol budget is spent in 978 ms,
+        // so the tracker gets ~2.8 chances to collect the >= 2 observations a
+        // rate estimate needs, and normally collects zero. Seeded here to
+        // within 1-5% (measured 1.056 / 1.027 / 1.000 against a true 1.047),
+        // the residual rate error is <= 0.05 samples/frame and the same budget
+        // lasts ~20 s instead of ~1 s, which is ~60 chances to refine.
+        if (period_out != nullptr && k != 0) {
+          *period_out = static_cast<double>(fr) +
+                        static_cast<double>(resid) / static_cast<double>(k);
+        }
         MLPD_INFO(
             "houdiniAcquireAnchor [%d]: lock CONFIRMED (resid %lld over "
-            "%lld frames, confirm %d) -> frame anchor %lld\n",
-            tid, resid, k, confirms, anchor_out);
+            "%lld frames, confirm %d) -> frame anchor %lld, bootstrap period "
+            "%.4f (%+.4f samp/frame)\n",
+            tid, resid, k, confirms, anchor_out,
+            static_cast<double>(fr) +
+                static_cast<double>(resid) / static_cast<double>(k),
+            static_cast<double>(resid) / static_cast<double>(k));
         return true;
       }
     } else {

@@ -89,8 +89,13 @@ class Receiver {
   int clientTxData(int tid, int frame_id, long long base_time);
   ssize_t clientSyncBeacon(size_t radio_id, size_t sample_window,
                            long long* window_time = nullptr);
+  // period_out, when non-null, receives the BS frame period MEASURED by the
+  // confirm (in UE samples). The confirm already spans k real frames and knows
+  // how far the beacon slipped over them, so the rate costs nothing extra --
+  // see the bootstrap note at the definition.
   bool houdiniAcquireAnchor(int tid, size_t detect_window,
-                            long long& anchor_out);
+                            long long& anchor_out,
+                            double* period_out = nullptr);
   void clientAdjustRx(size_t radio_id, size_t discard_samples);
 
  private:
