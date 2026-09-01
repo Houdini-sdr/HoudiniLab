@@ -90,12 +90,27 @@ def main():
     out = {"label": args.label, "duration_req": args.duration}
     rate = {}
     for k in ("bs", "ue"):
+        # Never lose a completed run to an analysis edge case: too few samples,
+        # or an MAD filter that rejects everything, is a NULL RESULT to report
+        # and write out -- not an exception after the hardware time is spent.
+        if len(rows[k]) < 3:
+            print("%s: only %d samples, cannot fit" % (k.upper(), len(rows[k])))
+            out[k] = {"n": len(rows[k]), "error": "too_few_samples"}
+            rate[k] = float("nan")
+            continue
         a = np.array(rows[k], dtype=np.float64)
         host, ns, width = a[:, 0], a[:, 1], a[:, 2]
         # Drop calls whose RPC bracket is an outlier: those carry a host
         # timestamp uncertainty comparable to the effect being measured.
         keep = width <= np.median(width) + 5 * (np.median(np.abs(
             width - np.median(width))) + 1e-9)
+        if keep.sum() < 3:
+            print("%s: RPC-width filter kept only %d of %d samples"
+                  % (k.upper(), keep.sum(), len(keep)))
+            out[k] = {"n": int(keep.sum()), "n_dropped": int((~keep).sum()),
+                      "error": "all_samples_rejected"}
+            rate[k] = float("nan")
+            continue
         host, ns = host[keep] - host[keep][0], ns[keep] - ns[keep][0]
         slope, se, sy = fit(host, ns * 1e-9)   # board seconds per host second
         rate[k] = slope
@@ -107,6 +122,13 @@ def main():
               "(se %.3f ppm), fit rms %.3f ms, rpc %.1f ms"
               % (k.upper(), keep.sum(), host[-1], (slope - 1) * 1e6,
                  (se or 0) * 1e6, sy * 1e3, np.median(width) * 1e3))
+    if not all(np.isfinite(v) for v in rate.values()):
+        print("eps NOT COMPUTED -- see the per-board errors above")
+        out["eps_ppm"] = None
+        with open(args.out, "w") as f:
+            json.dump(out, f, indent=1, sort_keys=True)
+        print("wrote %s" % args.out)
+        return 2
     eps = rate["bs"] / rate["ue"] - 1.0
     out["eps_ppm"] = eps * 1e6
     print("eps = (f_BS - f_UE)/f_UE = %+.3f ppm  "

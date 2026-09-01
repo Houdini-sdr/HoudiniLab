@@ -1486,15 +1486,32 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   // (on the read side) that each radioRx costs ~855 us fixed. Hence a
   // deliberately conservative default with a large safety factor: eps drifted
   // 0.23 ppm across one session, this bench is WIRED, and OTA will add more.
-  const double sync_tol_samples =
+  // Both inputs are validated: a zero or negative ppm makes the quotient
+  // infinite and the size_t cast UB (on x86-64 it lands on a huge value that
+  // survives the max() and disables beacon checking ENTIRELY, silently), and a
+  // config without `ofdm_tx_zero_prefix` gives a zero tolerance and a resync
+  // attempt every single frame. Neither should degrade quietly.
+  double sync_tol_samples =
       envDouble("HOUDINI_SYNC_TOL_SAMPLES",
                 static_cast<double>(config_->prefix()) / 4.0);
-  const double sync_residual_ppm = envDouble("HOUDINI_SYNC_RESIDUAL_PPM", 1.0);
-  const size_t resync_period = std::max<size_t>(
-      1, static_cast<size_t>(std::floor(
-             sync_tol_samples / (sync_residual_ppm * 1e-6 *
-                                 static_cast<double>(
-                                     config_->samps_per_frame())))));
+  double sync_residual_ppm = envDouble("HOUDINI_SYNC_RESIDUAL_PPM", 1.0);
+  if (!(sync_tol_samples > 0.0) || !std::isfinite(sync_tol_samples)) {
+    MLPD_WARN(
+        "sync tolerance %.3f is not a positive finite sample count (config "
+        "ofdm_tx_zero_prefix = %d?) -- falling back to 32\n",
+        sync_tol_samples, config_->prefix());
+    sync_tol_samples = 32.0;
+  }
+  if (!(sync_residual_ppm > 0.0) || !std::isfinite(sync_residual_ppm)) {
+    MLPD_WARN("sync residual %.4f ppm is not positive finite -- using 1.0\n",
+              sync_residual_ppm);
+    sync_residual_ppm = 1.0;
+  }
+  const double resync_frames =
+      sync_tol_samples /
+      (sync_residual_ppm * 1e-6 * static_cast<double>(config_->samps_per_frame()));
+  const size_t resync_period = static_cast<size_t>(
+      std::min(1e6, std::max(1.0, std::floor(resync_frames))));
   size_t last_resync = frame_id;
   if (config_->running() == true) {
     MLPD_INFO(
@@ -1558,6 +1575,16 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   // observation on every update, so the extrapolation distance stays one
   // update gap (~115 frames) instead of growing without bound from k = 0.
   double houdini_frame_period = houdini_boot_period;
+  // Physically plausible band for the BS frame period seen in UE samples. A
+  // +-100 ppm bound is generous against any crystal pair (our measured pair is
+  // 8.5 ppm) and exists only to stop a single bad observation from parking the
+  // rate somewhere it can never recover from.
+  const double kGridMaxPpm = envDouble("HOUDINI_GRID_MAX_PPM", 100.0);
+  const double kGridTrustPpm = envDouble("HOUDINI_GRID_TRUST_PPM", 1.0);
+  const double kGridPeriodLo =
+      static_cast<double>(config_->samps_per_frame()) * (1.0 - kGridMaxPpm * 1e-6);
+  const double kGridPeriodHi =
+      static_cast<double>(config_->samps_per_frame()) * (1.0 + kGridMaxPpm * 1e-6);
   // Count tracker updates so an escalation knows whether its own learned rate
   // is better than a fresh confirm-derived one (below).
   size_t houdini_grid_updates = 0;
@@ -1619,8 +1646,25 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
       // (many observations, ~0.1%) and take the confirm's fresh one (1-5%)
       // only while the tracker has learned nothing at all -- which is exactly
       // the case an escalation-first run lands in.
-      if (houdini_grid_updates == 0) {
+      // Take the confirm's fresh rate when the tracker has learned nothing OR
+      // when the two materially disagree. The confirm spans >= kRefineSpan real
+      // frames and is good to ~0.04 ppm, comparable to the tracker's own
+      // steady-state residual, so a disagreement beyond kGridTrustPpm means the
+      // TRACKED value is the suspect one. Without this, a single bad kick is
+      // permanent: escalation re-anchors the offset, keeps the bad period, and
+      // the grid walks out again forever.
+      const double disagree_ppm =
+          std::fabs(fresh_period - houdini_frame_period) /
+          static_cast<double>(config_->samps_per_frame()) * 1e6;
+      if (houdini_grid_updates == 0 || disagree_ppm > kGridTrustPpm) {
+        if (houdini_grid_updates != 0) {
+          MLPD_WARN(
+              "Re-sync ESCALATION: tracked period %.4f disagrees with the "
+              "fresh confirm %.4f by %.3f ppm -- taking the confirm, tid %d\n",
+              houdini_frame_period, fresh_period, disagree_ppm, tid);
+        }
         houdini_frame_period = fresh_period;
+        houdini_grid_updates = 0;
       }
       houdini_pilot_ref = fresh;
       houdini_pilot_ref_valid = true;
@@ -1847,6 +1891,17 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
               houdini_pilot_ref = houdiniGridStart(kf) +
                                   llround(kGridAlpha * r);
               houdini_frame_period += kGridBeta * r / dk;
+              // Clamp to a plausible oscillator band. The gate that feeds this
+              // accepts |resid| <= kScatterTol = 1024, and the soonest an
+              // update follows the previous is resync_period frames, so ONE
+              // edge-of-gate detection can kick the rate by
+              // beta*1024/260 = 0.39 samp/frame ~ 3.2 ppm -- a third again the
+              // real 8.5 ppm offset, and enough to walk the grid back out of
+              // the gate. kScatterTol is far too wide to serve as the outlier
+              // reject on its own at these spacings.
+              houdini_frame_period =
+                  std::min(kGridPeriodHi, std::max(kGridPeriodLo,
+                                                   houdini_frame_period));
               houdini_grid_updates++;
             }
             resync_hold_pending = false;
@@ -2016,7 +2071,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
           buffer_offset++;
           buffer_offset %= buffer_chunk_size;
         }
-      } else if (coalesce_throwaway) {
+      } else if (coalesce_throwaway && config_->is_houdini()) {
         // Consume a RUN of consecutive discarded slots in ONE read.
         //
         // radioRx costs 855 us fixed + 0.0037 us/sample (measured), so 30 calls
@@ -2032,14 +2087,27 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
           ++run;
         }
         const size_t want = run * samples_per_slot;
-        if (throwaway.size() < want) throwaway.resize(want);
-        void* tb[1] = {throwaway.data()};
-        rx_data_status = this->client_radio_set_->radioRx(
-            tid, tb, static_cast<int>(want), rx_data_time);
-        if (rx_data_status == static_cast<int>(want)) {
-          rx_data_status = static_cast<int>(samples_per_slot);
+        // ONE buffer PER CHANNEL: radioRx writes cl_sdr_ch() destinations, so a
+        // 1-element array is an out-of-bounds write on any 2-channel client.
+        if (throwaway.size() < want * num_rx_buffs) {
+          throwaway.resize(want * num_rx_buffs);
         }
-        slot_id += run - 1;  // the for-loop's ++ consumes the last one
+        std::vector<void*> tb(num_rx_buffs);
+        for (size_t ch = 0; ch < num_rx_buffs; ++ch) {
+          tb.at(ch) = throwaway.data() + ch * want;
+        }
+        const int got = this->client_radio_set_->radioRx(
+            tid, tb.data(), static_cast<int>(want), rx_data_time);
+        // Advance by the slots ACTUALLY consumed. A short read (rx_gap_break
+        // truncates; ret=2032 against a 12288 request observed live) would
+        // otherwise skip slots whose samples are still in the stream, putting
+        // the slot index and the stream position permanently out of step.
+        size_t whole = (got > 0) ? static_cast<size_t>(got) / samples_per_slot
+                                 : 0;
+        if (whole > run) whole = run;
+        rx_data_status = (whole == run) ? static_cast<int>(samples_per_slot)
+                                        : got;
+        if (whole > 1) slot_id += whole - 1;  // the for-loop's ++ takes one
       } else {
         //Not dl data so we throw it away
         rx_data_status = this->client_radio_set_->radioRx(
@@ -2099,7 +2167,6 @@ bool Receiver::houdiniAcquireAnchor(int tid, size_t detect_window,
                                     long long& anchor_out,
                                     double* period_out) {
   constexpr long long kConfirmTol = 640;  // detector scatter (4.18) + path
-  constexpr int kMaxHunts = 200;
   // The refine stage wants a LONG baseline, because the rate error is the
   // detection-pair noise divided by the span and that noise is sub-sample
   // (measured 0.15-0.94 across four acquisitions). k ~ 20 gives ~4% rate
@@ -2109,6 +2176,13 @@ bool Receiver::houdiniAcquireAnchor(int tid, size_t detect_window,
   // all, and a guaranteed first hit removes exactly that accident.
   const long long kRefineSpan = static_cast<long long>(
       envDouble("HOUDINI_ACQ_REFINE_SPAN", 200.0));
+  // Budget must scale with the span it now has to reach. With a full-frame
+  // window every hunt is a near-certain hit, so k advances only by the wall
+  // time of one read (a few frames) per hunt -- the old flat 200 could expire
+  // before the baseline was met, and exceeding it THROWS at the caller
+  // ("beacon acquisition: no confirmed lock") rather than retrying.
+  const int kMaxHunts =
+      static_cast<int>(std::max<long long>(200, 4 * kRefineSpan));
   const long long fr = static_cast<long long>(config_->samps_per_frame());
   long long first_abs = 0;
   bool have_first = false;
@@ -2171,7 +2245,10 @@ bool Receiver::houdiniAcquireAnchor(int tid, size_t detect_window,
           tid, resid, k);
       first_abs = abs_end;
       confirms = 0;
-      period = static_cast<double>(fr);
+      // KEEP the refined period across a failed confirm. The failure says the
+      // ANCHOR was wrong (false lock or a scatter outlier); the two
+      // oscillators did not change, so throwing the rate away only doubles the
+      // baseline this acquisition has to re-earn.
     }
   }
   return false;

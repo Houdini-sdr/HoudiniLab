@@ -282,8 +282,13 @@ int Radio::recvHoudini(void* const* buffs, int samples, long long& frameTime) {
   // radioRx calls it makes per frame (29 of them purely to throw the slot
   // away), at ~880 us each, and the fix differs depending on whether that cost
   // is the drain loop or the read itself. HOUDINI_LOOP_PROFILE reports both.
+  // Its OWN knob: HOUDINI_LOOP_PROFILE counts loop ITERATIONS while this
+  // counts radioRx CALLS, and coalescing changes the ratio between them from
+  // ~30:1 to ~2:1. One shared setting would silently report two different
+  // scales, which is a hazard given how much of this branch's evidence rests
+  // on those numbers being comparable.
   static const size_t rx_profile_every = [] {
-    const char* e = getenv("HOUDINI_LOOP_PROFILE");
+    const char* e = getenv("HOUDINI_RX_PROFILE");
     return e != nullptr ? static_cast<size_t>(atol(e)) : 0;
   }();
   static thread_local double p_drain = 0, p_read = 0;
@@ -407,9 +412,7 @@ int Radio::recvHoudini(void* const* buffs, int samples, long long& frameTime) {
   }
   if (rx_profile_every > 0) {
     const auto p_t2 = std::chrono::steady_clock::now();
-    p_read += std::chrono::duration<double, std::micro>(p_t2 - p_t1).count() -
-              std::chrono::duration<double, std::micro>(p_t1 - p_t0).count() *
-                  0.0;
+    p_read += std::chrono::duration<double, std::micro>(p_t2 - p_t1).count();
     if (++p_calls >= rx_profile_every) {
       MLPD_INFO(
           "RX PROFILE over %zu radioRx calls: drain %.0f us (%.1f chunks, "
