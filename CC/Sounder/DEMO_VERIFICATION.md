@@ -206,6 +206,44 @@ tests/demo-verify/two_node_beacon_arrival.py + map_scan.py):
 
 (filled in phase 7)
 
+## 8. Free-running clock campaign (AP-33): what the internal references cost
+
+`clock_ref` is a DEVICE-side setting, so switching a board to its onboard
+reference is the only lever on this bench that produces real sample-clock
+drift. The campaign is a four-leg ladder, deliberately including a control and
+a prediction test, because the whole point of AP-33 is that the magnitude must
+be MEASURED and not inherited.
+
+| leg | BS `.21` | UE `.22` | what it measures |
+| --- | --- | --- | --- |
+| A | external | external | control: shared 10 MHz, so eps MUST read 0 |
+| B | external | internal | `.22`'s onboard reference against the lab 10 MHz |
+| C | internal | external | `.21`'s onboard reference against the lab 10 MHz |
+| D | internal | internal | the target config; PREDICTED by B and C |
+
+Three independent instruments, one of which touches no RF at all:
+
+| leg | hwtime ratio (no RF) | beacon arrival ramp | two_node drift |
+| --- | --- | --- | --- |
+| A | not run | **0.0000 ppm** (slope 0.0000 samp/s, jitter 0.0) | 0.000000 samp/frame |
+| B | -7.256 ppm | **-7.2019 ppm** (se 0.00002) | -7.2122 ppm |
+| C | -1.347 ppm | **-1.3305 ppm** (se 0.00003) | not run |
+| D | -8.511 ppm | **-8.5197 ppm** (se 0.00006) | -8.534 ppm |
+
+eps is defined throughout as (f_BS - f_UE) / f_UE.
+
+| # | claim | evidence | status |
+| --- | --- | --- | --- |
+| 8.1 | THE INTERNAL REFERENCES ARE A FEW ppm OFF, NOT HUNDREDS. `.22` internal = **+7.20 ppm** and `.21` internal = **-1.33 ppm**, both against the shared external 10 MHz. Ordinary crystal numbers. This independently confirms that striking the pre-rewrite +447 kHz / 894 ppm figure was right: 894 ppm is 100x what either board actually does, so it was an alias, not a reading | legs B and C, `clock_A..D_*.json` on the rig | VERIFIED-HW |
+| 8.2 | THE LADDER CLOSES. Legs B and C predict leg D at -8.532 ppm from the two boards' individual offsets; leg D measures **-8.5197 ppm** (arrival ramp), -8.511 ppm (hwtime), -8.534 ppm (two_node). Closure within 0.02 ppm across three instruments. This is the campaign's own validation: a scale or sign error in any one channel would break the closure | all four legs | VERIFIED-HW |
+| 8.3 | THE CONTROL LEG READS EXACTLY ZERO. On the shared reference the arrival ramp is slope 0.0000 samp/s with **0.0 samples of jitter** over 90 s and 8062 detections. The instrument is validated against the known-good case before any drift number off it is believed | leg A | VERIFIED-HW |
+| 8.4 | ACQUISITION SURVIVES; THE TARGETED SEARCH DOES NOT. At leg D the carrier offset is -8.52 ppm x 500 MHz = **-4.26 kHz**, far inside the ~100 kHz acquisition tolerance, so the beacon still acquires. But the timing drifts at **1046.9 samples/s = 1.047 samples/frame**, and the live UE's grid gate accepts \|resid\| <= kScatterTol = 1024 within a slice reaching +1088. So the anchored grid holds for **about 1.0 s** and then loses the beacon, roughly one re-acquisition per second. Exactly the failure order AP-33 predicted | receiver.cc kScatterTol/kLead/kTail against leg D's measured slope | VERIFIED-HW |
+| 8.5 | THE PILOT HORIZON EATS ITS GUARD BAND. The 96-frame pilot horizon composes one burst on a zero-drift assumption; at leg D it accumulates 96 x 1.047 = **100 samples** of drift end to end, against 128-sample guards. The burst still lands, with most of the guard margin consumed by the last frame | leg D slope vs the composed-burst geometry | VERIFIED-HW |
+| 8.6 | THE CFO CHANNEL IS PRECISE BUT NOT ACCURATE. Per-leg means are tight (se 8-12 Hz over 7000-11000 detections) yet do NOT lie on a line through the SCO truth: A +352.7 Hz at eps=0, B -1848.3 at -7.20 ppm, C -45.0 at -1.33 ppm, D -3980.4 at -8.52 ppm. Implied carrier slopes between pairs range 3.0e8 to 1.6e9 against a 500 MHz NCO, so this is a configuration-dependent bias of a few hundred to ~1800 Hz, not a scale factor to divide out. The SCO channel is the trustworthy one: it agrees with the no-RF hwtime probe on every leg to <= 0.05 ppm. Supports AP-34(b) directly -- a fixed phase error divided by a short lag, and the fix is lag, not calibration | all four legs, CFO vs SCO columns | VERIFIED-HW |
+| 8.7 | INSTRUMENT TRAP, cost three null runs: the find_beacon detector ratio is NOT a stable absolute quantity. It measured **0.36 to 9.7 across one session** on this bench, tracking link level. A 1.0 floor produced 0 detections in 76k-82k windows on links the known-good instrument locked at ratio 0.36. Gate only on a small margin over find_beacon's own crossing rule (ratio > 1/corr_scale), and never on an absolute | three null runs vs two_node in the same bench state | VERIFIED-HW |
+| 8.8 | `SoapyRPCUnpacker::recv() TIMEOUT` ON make() IS A SHORT DEADLINE, NOT A WEDGE. Measured: TCP connect is instant every time; a COLD make (server holds no live device instance, so construction runs the full RFDC bring-up) takes **3.34 s**, a WARM one **0.34 s**. Every demo-verify script passed `timeout="1000000"`, which is MICROSECONDS = 1 s, so the deadline sits inside the normal spread and trips depending only on whether a prior run still held the instance. Raised to 30 s. Three failures this session were read as the AP-20 wedge on symptom match alone before this was measured [user pushback] | timed make() probe, both boards, cold and warm | VERIFIED-HW |
+| 8.9 | THE REFERENCE SELECT IS LMK 0x147, AND THE CLK_SEL MUX THEORY WAS WRONG. `houdini-provision` programs internal as `0x147=0x1A` and external as `0x0A`, each readback-verified, with all four PLLs relocking in 150-300 ms. `CLK_SEL0/1` are the LMK's own pin-select inputs, don't-care in manual mode; there is no board mux. `docs/TWO_BOARD_CLOCK_LOCK.md` corrected | provisioner output on both nodes, all four switches | VERIFIED-HW |
+
 ## Standing traps (carried from the driver contract, apply to every phase)
 
 1. An unknown or non-writable writeSetting key logs a warning and silently
