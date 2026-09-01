@@ -28,6 +28,17 @@ import numpy as np
 import SoapySDR
 from SoapySDR import SOAPY_SDR_CS16, SOAPY_SDR_RX, SOAPY_SDR_TX
 
+# SoapyRemote's `timeout` device arg is MICROSECONDS, and it bounds the
+# make() RPC. Measured 2026-09-01 on this bench: a COLD make (the server
+# holds no live device instance, so construction runs the full RFDC
+# bring-up) takes 3.34 s; a WARM one 0.34 s. The long-standing 1000000
+# (= 1 s) therefore sits INSIDE the normal spread, and make() failed with
+# "SoapyRPCUnpacker::recv() TIMEOUT" three times in one session depending
+# only on whether a previous run still held the instance. That is a slow
+# call against a short deadline, NOT an unresponsive server -- do not
+# read it as one.
+RPC_TIMEOUT_US = "30000000"
+
 RATE = 122.88e6
 FRAME = 122880
 SLOT = 4096
@@ -94,7 +105,7 @@ class Ue:
         else:
             self.dev = SoapySDR.Device(dict(driver="houdinisdr",
                                             remote="tcp://%s:55132" % ip,
-                                            timeout="1000000"))
+                                            timeout=RPC_TIMEOUT_US))
             ident(self.dev, ip, "UE")
             self.dev.setSampleRate(SOAPY_SDR_RX, ch, RATE)
             self.dev.setFrequency(SOAPY_SDR_RX, ch, 500e6)
@@ -174,7 +185,7 @@ class Bs:
             self.shared = False
             self.dev = SoapySDR.Device(dict(driver="houdinisdr",
                                             remote="tcp://%s:55132" % self.ip,
-                                            timeout="1000000"))
+                                            timeout=RPC_TIMEOUT_US))
             ident(self.dev, self.ip, "BS")
             self.dev.setSampleRate(SOAPY_SDR_TX, self.ch, RATE)
             self.dev.setFrequency(SOAPY_SDR_TX, self.ch, 500e6)

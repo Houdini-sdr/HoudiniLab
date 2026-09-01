@@ -1250,8 +1250,12 @@ float Receiver::estimateCFO(const std::complex<int16_t>* buf, size_t buf_len,
   // The matched-NCO R2C RX mixer delivers baseband CONJUGATED (the same
   // inversion recorder_worker undoes via rx_conj_ for CSI). Sync runs on RAW
   // samples, so a +f carrier offset reads as -f here; undo it so the sign is
-  // physical. UNVERIFIED against a known injected offset -- confirm the sign
-  // before any correction loop consumes it (see BACKLOG AP-30).
+  // physical. Sign and scale VERIFIED against deliberate injection (AP-30).
+  // Not yet checked against a truth the estimator cannot infer: on a link with
+  // the sample clocks shared -- where the arrival ramp measures eps = 0 exactly
+  // -- this reads +353 Hz, so it carries a zero-point offset of that order
+  // (2026-09-01, clock_drift_probe.py leg A). AP-34(b) is the fix: precision
+  // scales with lag, and the bias is a fixed phase divided by a short one.
   if (config_->is_houdini()) f = -f;
   return static_cast<float>(f);
 }
