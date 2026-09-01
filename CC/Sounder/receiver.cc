@@ -113,6 +113,18 @@ static double beaconSnrDb(const std::complex<int16_t>* w, size_t n,
   return 10.0 * std::log10((core / core_len) / (rest / nrest) + 1e-30);
 }
 
+// Env override for a tunable double, with the compiled default when unset.
+// The AP-31 tracker gains are the first users: they need to be sweepable on a
+// live bench without a rebuild, since the right damping depends on the arrival
+// jitter and the detection rate, both of which are bench properties.
+static double envDouble(const char* name, double dflt) {
+  const char* e = getenv(name);
+  if (e == nullptr) return dflt;
+  char* end = nullptr;
+  const double v = std::strtod(e, &end);
+  return (end != e) ? v : dflt;
+}
+
 static double syncSnrFloorDb() {
   // [user 2026-08-30]: "keep the sync snr about 30 dB or so". The earlier
   // default of 20 compensated for the pre-guard-band metric under-reading by
@@ -1440,6 +1452,35 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   // per-frame read timestamp -- its HW framer delivers frame-locked reads.)
   long long houdini_pilot_ref = houdini_anchor;      // from confirmed acquisition
   bool houdini_pilot_ref_valid = houdini_anchored;
+  // AP-31 two-state grid tracker. The UE estimates the BS clock in its OWN
+  // sample units as (ref, period) and derives EVERY prediction from it. The
+  // old code fixed period at samps_per_frame -- "with the boards
+  // frequency-locked the frame period IS exactly samps_per_frame" -- which is
+  // true only on a shared reference. MEASURED on internal clocks 2026-09-01:
+  // eps = -8.52 ppm, so the BS frame period is 122881.047 UE samples, the
+  // anchored grid walks out of the +-kScatterTol gate in about 1.0 s, and the
+  // UE re-acquires roughly once a second forever (DEMO_VERIFICATION 8.4).
+  //
+  // alpha-beta rather than per-detection correction: the arrival jitter is
+  // 8-23 samples rms while the per-update drift is ~120 samples, so the SLOPE
+  // is what carries information -- snapping to each detection would inject the
+  // jitter straight into the TX schedule. ref is re-anchored to the newest
+  // observation on every update, so the extrapolation distance stays one
+  // update gap (~115 frames) instead of growing without bound from k = 0.
+  double houdini_frame_period =
+      static_cast<double>(config_->samps_per_frame());
+  const double kGridAlpha = envDouble("HOUDINI_GRID_ALPHA", 0.5);
+  const double kGridBeta = envDouble("HOUDINI_GRID_BETA", 0.1);
+  // Frame-start grid point n frames after the tracked reference.
+  auto houdiniGridStart = [&](long long n) {
+    return houdini_pilot_ref + llround(static_cast<double>(n) *
+                                       houdini_frame_period);
+  };
+  // Frames from the tracked reference to the grid point nearest t.
+  auto houdiniGridIndex = [&](long long t) {
+    return llround(static_cast<double>(t - houdini_pilot_ref) /
+                   houdini_frame_period);
+  };
   // Resync hold-off state [user 2026-08-30]: a large offset is applied only
   // after MORE THAN ONE consecutive consistent observation of it; a lone
   // large offset (artifact, scatter) is held, logged, and not applied.
@@ -1481,6 +1522,10 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
         if (step > fr / 2) step -= fr;
       }
       emitSync(kSyncEscalating, 0, 0.0, 0.0, step);
+      // Keep the learned period across a re-anchor: escalation means the OFFSET
+      // was lost (beacon moved or missed), and the two boards' oscillators did
+      // not change when that happened. Re-deriving the rate from scratch every
+      // escalation would throw away the one state that takes seconds to learn.
       houdini_pilot_ref = fresh;
       houdini_pilot_ref_valid = true;
       if (static_cast<size_t>(tid) < houdini_pilot_cursor_reset_.size())
@@ -1542,14 +1587,20 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
         // reading: the beacon itself straddling the edge with partial core
         // energy -- same-board TX coupling measured cold, ledger 4.40), so
         // an attempt only counts when the full beacon is predicted inside.
-        const long long fr =
-            static_cast<long long>(config_->samps_per_frame());
+        // PREDICTIVE (AP-31b): extrapolate the grid by the ESTIMATED period to
+        // the first beacon due at or after this window's start. The modulo
+        // form this replaces folded on samps_per_frame, which silently assumed
+        // period == nominal -- on free-running clocks that walks off the beacon
+        // within a second and the tracker then never gets another observation.
+        const long long beacon_end =
+            static_cast<long long>(houdiniBeaconEnd(config_));
+        const double n_due =
+            std::ceil(static_cast<double>(rx_beacon_time - houdini_pilot_ref -
+                                          beacon_end) /
+                      houdini_frame_period);
         const long long off =
-            (((houdini_pilot_ref + houdiniBeaconEnd(config_) -
-               rx_beacon_time) %
-              fr) +
-             fr) %
-            fr;
+            houdiniGridStart(static_cast<long long>(n_due)) + beacon_end -
+            rx_beacon_time;
         // The slice must be able to PRESENT every residual the liveness
         // gate can accept (+-kScatterTol = 1024) plus ~256 samples of
         // gold context for the correlator; a 700-sample lead left
@@ -1625,14 +1676,12 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
           emitSync(kSyncWeak, 0, 0.0, snr, 0);
           sync_index = -1;  // fall through to the miss path below
         } else {
-          const long long fr =
-              static_cast<long long>(config_->samps_per_frame());
           const long long abs_end = rx_beacon_time + sync_index;
-          const long long pred0 =
-              houdini_pilot_ref + houdiniBeaconEnd(config_);
-          const long long kf = llround(
-              static_cast<double>(abs_end - pred0) / static_cast<double>(fr));
-          const long long resid = abs_end - (pred0 + kf * fr);
+          const long long beacon_end =
+              static_cast<long long>(houdiniBeaconEnd(config_));
+          const long long kf = houdiniGridIndex(abs_end - beacon_end);
+          const long long resid =
+              abs_end - (houdiniGridStart(kf) + beacon_end);
           // Beacon CFO on the SAME validated detection (~600 flops at ~9/s).
           // Reported beside resid because they are one oscillator error seen
           // two ways: the SLOPE of resid is the fractional rate error, and
@@ -1665,6 +1714,17 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
           // MOVED -> escalate straight to re-acquisition, whose confirm
           // loop is immune to the common detector bias.
           if (std::llabs(resid) <= kScatterTol) {
+            // Accepted observation: advance the tracked grid. The gate keeps
+            // its old role as the alive/moved verdict AND becomes the tracker's
+            // outlier reject -- a rejected detection updates nothing rather
+            // than levering the rate estimate (AP-31).
+            if (kf > 0) {
+              const double dk = static_cast<double>(kf);
+              const double r = static_cast<double>(resid);
+              houdini_pilot_ref = houdiniGridStart(kf) +
+                                  llround(kGridAlpha * r);
+              houdini_frame_period += kGridBeta * r / dk;
+            }
             resync_hold_pending = false;
             resync_exhausted_streak = 0;
             resync = false;
@@ -1779,12 +1839,10 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
         // a constant frame phase, so the pilot lands at the same BS-frame position.
         long long pilot_base = rx_beacon_time;
         if (config_->is_houdini() && houdini_pilot_ref_valid) {
-          const long long frame =
-              static_cast<long long>(config_->samps_per_frame());
-          const long long k = std::llround(
-              static_cast<double>(rx_beacon_time - houdini_pilot_ref) /
-              static_cast<double>(frame));
-          pilot_base = houdini_pilot_ref + k * frame;
+          // Snap to the TRACKED grid, not a nominal-period one: on free-running
+          // clocks a nominal snap drifts out of the BS rx_gate at the same
+          // 1.047 samples per frame the beacon does.
+          pilot_base = houdiniGridStart(houdiniGridIndex(rx_beacon_time));
         }
         this->clientTxPilots(tid, pilot_base + txTimeDelta_);
       }
