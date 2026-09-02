@@ -98,6 +98,27 @@ Beacon dot11() {
   return b;
 }
 
+/// LEGACY + GUARD: our shipped beacon with ONLY the 802.11 GI2 idea added --
+/// a 32-sample cyclic prefix of the gold field, inserted between the STS run
+/// and the gold repetitions. This is the variant AP-34(a) actually tried and
+/// reverted, and it is the most INFORMATIVE of the four, because it changes one
+/// thing. If the timing sensitivity is cured here, the guard is the cause and a
+/// full preamble swap is unnecessary; if it is not, the cause is elsewhere in
+/// the preamble and swapping to 802.11 wholesale is justified. Neither the
+/// legacy nor the dot11 row can separate those two.
+Beacon legacy_guarded() {
+  Beacon b{"legacy + GI2 guard (AP-34a's attempt)", {}, {}, 0, 128, true};
+  auto sts = seq(CommsLib::STS_SEQ, 16);
+  auto gold = seq(CommsLib::GOLD_IFFT, 128);
+  for (int i = 0; i < 15; ++i) b.core.insert(b.core.end(), sts.begin(), sts.end());
+  // 32-sample cyclic prefix: the LAST 32 samples of the gold field, prepended.
+  for (size_t i = 128 - 32; i < 128; ++i) b.core.push_back(gold[i]);
+  b.fine_off = b.core.size();
+  for (int i = 0; i < 2; ++i) b.core.insert(b.core.end(), gold.begin(), gold.end());
+  b.replica = gold;
+  return b;
+}
+
 /// NR-SHAPED: a Zadoff-Chu acquisition field (the PSS family) followed by a
 /// GUARDED repeated tracking pair, which is the TRS idea expressed in one
 /// burst. NOT literally NR -- NR sends SSB and TRS as separate signals at
@@ -207,6 +228,7 @@ int main() {
   std::printf("silicon; nothing about that needed hardware to find.\n");
 
   probe(legacy());
+  probe(legacy_guarded());
   probe(dot11());
   probe(nr_shaped());
 
