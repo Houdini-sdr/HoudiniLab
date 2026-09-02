@@ -634,6 +634,8 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
   const auto& pind_d = cfg_->pilot_sc_ind();
   std::vector<std::complex<float>> sym_derot(Ys.size(),
                                              std::complex<float>(1.0f, 0.0f));
+  std::vector<double> sym_phase(Ys.size(), 0.0);
+  std::vector<char> sym_phase_ok(Ys.size(), 0);
   if (csi_phase_fix_ && !pind_d.empty()) {
     for (size_t si = 0; si < Ys.size(); ++si) {
       std::complex<double> acc(0.0, 0.0);
@@ -647,8 +649,59 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
       }
       if (std::abs(acc) > 1e-12) {
         const double ph = -std::arg(acc);
+        sym_phase[si] = -ph;   // the measured advance, kept for the alarm below
+        sym_phase_ok[si] = true;
         sym_derot[si] = std::complex<float>(static_cast<float>(std::cos(ph)),
                                             static_cast<float>(std::sin(ph)));
+      }
+    }
+    // CARRIER-HEALTH ALARM, and the reason it has to live here.
+    //
+    // The CNS score below is |mean(u^4)| over the CORRECTED points, so it sits
+    // DOWNSTREAM of this correction. Before the fix a growing carrier offset
+    // announced itself by collapsing that score (a 20 kHz injection took every
+    // datagram to ~0.44); with the fix absorbing the per-symbol spread the score
+    // stays high and the alarm is gone -- the branch removed its own end-to-end
+    // carrier indicator while adding the correction [Opus review]. The score is
+    // still a valid read of OUTPUT quality; it is no longer a read of INPUT
+    // health, and those are different jobs.
+    //
+    // The per-symbol phase ADVANCE is the input-side quantity, and this loop
+    // already computes it. Its slope across the slot is the residual carrier
+    // offset in exactly the units that matter: 360*f*(fft+cp)/rate degrees per
+    // symbol. Reported so a rising offset is visible even while it is being
+    // corrected.
+    int nph = 0;
+    double s_i = 0, s_p = 0, s_ii = 0, s_ip = 0, prev = 0;
+    double unwrapped = 0;
+    for (size_t si = 0; si < sym_phase.size(); ++si) {
+      if (!sym_phase_ok[si]) continue;
+      double v = sym_phase[si];
+      if (nph > 0) {                       // unwrap against the previous symbol
+        while (v - prev > M_PI) v -= 2.0 * M_PI;
+        while (v - prev < -M_PI) v += 2.0 * M_PI;
+      }
+      prev = v;
+      unwrapped = v;
+      const double x = static_cast<double>(si);
+      s_i += x; s_p += v; s_ii += x * x; s_ip += x * v;
+      ++nph;
+    }
+    (void)unwrapped;
+    if (nph >= 3) {
+      const double den = nph * s_ii - s_i * s_i;
+      if (std::abs(den) > 1e-9) {
+        const double slope = (nph * s_ip - s_i * s_p) / den;  // rad per symbol
+        const double hz = slope / (2.0 * M_PI) * cfg_->rate() /
+                          static_cast<double>(N + cp);
+        static std::atomic<unsigned> phn{0};
+        if ((phn.fetch_add(1) % 512) == 0) {
+          MLPD_INFO(
+              "carrier health: per-symbol phase advance %+.3f deg/sym = "
+              "%+.1f Hz residual across %d symbols (measured BEFORE the "
+              "correction, so it stays visible while corrected)\n",
+              slope * 180.0 / M_PI, hz, nph);
+        }
       }
     }
   }
