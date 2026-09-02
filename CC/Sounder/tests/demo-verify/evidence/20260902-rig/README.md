@@ -45,6 +45,18 @@ have produced a wrong decision.
    reported K, which is only ever 1, 2, 4, 8, 16, 32. Every entry in the first
    table was a power of two across 15 runs, with no exceptions. It was about to
    be filed as a CNS regression against 8.51. Fixed to read the summary only.
-2. **A/B arms were not interleaved.** Bench conditions demonstrably drift here,
+2. **A sign asserted from a derived quantity, not checked at its source.** I
+   told the software lane their "higher code = .22 runs faster" was inverted,
+   having inferred the physical direction from the direction our eps moved
+   without checking what our eps was defined as. It is written in
+   `clock_drift_probe.py`'s own docstring, line 4:
+   `epsilon = (f_BS - f_UE)/f_UE` -- identical to theirs, positive meaning the
+   DUT is slow. Their statement was correct; ours agreed with it all along.
+   The probe's `--self-test` confirms the relation end to end (injected 0,
+   +-2.5, +25, +-800 ppm all recover with matching sign). Withdrawn, and the
+   consequence is that AP-47's -0.1251 ppm/count is in EPS units and is the
+   same actuator and sign as the software lane's +0.129 in DUT-frequency
+   units, not a disagreement.
+3. **A/B arms were not interleaved.** Bench conditions demonstrably drift here,
    so PRE/POST and alpha-beta/kalman were both re-run interleaved. The
    conclusions held, but they were not entitled to until then.
