@@ -29,8 +29,16 @@ RE_REANCHOR_FAIL = re.compile(r"re-acquisition did NOT confirm")
 RE_CNS_OK = re.compile(r"CNS score ([\d.]+) rot ([+-][\d.]+) deg at frame "
                        r"(\d+) \((\d+) datagrams, (\d+) low\)")
 RE_ACQ = re.compile(r"lock CONFIRMED \(resid ([+-]?\d+) over (\d+)")
-RE_STARVED = re.compile(r"tracker did NOT update")
-RE_INNOV = re.compile(r"innovation ([\d.]+) sigma exceeds")
+# Throttled too (1st and every 100th), same as RE_INNOV. Take the total the
+# text carries, never the line count.
+RE_STARVED = re.compile(r"tracker did NOT update -- (\d+) such accepts so far")
+# THROTTLED, LIKE THE CNS WARNING. The line prints on the 1st rejection and
+# every 50th, so COUNTING LINES under-reports by up to 50x -- measured
+# 2026-09-02: 3 lines against "(50 so far)". This is the same defect this
+# same file was written to fix for CNS, missed here because I fixed the one
+# instance I had found instead of grepping the sounder for the pattern.
+# The running total is in the text; take it.
+RE_INNOV = re.compile(r"innovation [+-]?[\d.]+ sigma exceeds .*?\((\d+) so far")
 RE_GEOM = re.compile(r"Beacon accept window (\d+) samples of a (\d+)-sample "
                      r"slot \(([\d.]+)%\), scatter tol (\d+) samples")
 RE_TRACKER = re.compile(r"Grid tracker: (\S+)")
@@ -66,10 +74,12 @@ def analyse(path):
                 r["escalations"] += 1
             if RE_REANCHOR_FAIL.search(line):
                 r["reanchor_failed"] += 1
-            if RE_STARVED.search(line):
-                r["starved"] += 1
-            if RE_INNOV.search(line):
-                r["innov_rejected"] += 1
+            m = RE_STARVED.search(line)
+            if m:
+                r["starved"] = max(r["starved"], int(m.group(1)))
+            m = RE_INNOV.search(line)
+            if m:
+                r["innov_rejected"] = max(r["innov_rejected"], int(m.group(1)))
             # ONLY THE PERIODIC SUMMARY LINE CARRIES A TOTAL. The sounder emits
             # two CNS forms and they are NOT interchangeable:
             #   summary  "CNS score X rot Y deg at frame N (D datagrams, L low)"
