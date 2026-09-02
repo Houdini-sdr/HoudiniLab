@@ -320,6 +320,16 @@ eps is defined throughout as (f_BS - f_UE) / f_UE.
 | 8.41 | DISCIPLINE NOTE: individual CFO log lines are useless for judging this. The pre-fix run shows single lines at +508.6 Hz while its full-run mean is **-724.7**; post-fix single lines range -1301 to +967 while the means are within +-69. Any conclusion drawn from a handful of lines would have been wrong in both direction and magnitude. Compute the run statistic | the same logs, headed vs aggregated | VERIFIED-HW |
 
 
+### 8i. Steering loop closed, and an honest read on the phase fix
+
+| # | claim | evidence | status |
+| --- | --- | --- | --- |
+| 8.42 | **AP-47 STEERING LOOP CLOSED AND REPEATABLE, 3 RUNS.** Our rate tracker as the sensor, the measured -0.1251 ppm/count as the gain: eps **0.580 -> 0.188 -> 0.072**, **0.568 -> 0.200 -> 0.085**, **0.557 -> 0.155 -> 0.021**. Every run converges in **two pushes to the same landing code (offset +4)** and then holds inside the deadband for the remaining iterations (residual band 0.021-0.085 ppm). No overshoot, no hunting. **~9.5x on the pair offset**, and the residual sits at half the actuator quantum, which is the predicted floor. Released cleanly to the calibrated hold every time | `clock_steer_loop_{1,2,3}.json` | VERIFIED-HW |
+| 8.43 | **AP-38 EVALUATED HONESTLY: no regression, a modest gain, and NOT the headline the standards precedent suggested.** Low-frame counts over 2048 datagrams per leg: at 0 Hz **13 low with the fix vs 15 without**; at 2000 Hz **31 vs 38**. Consistent in direction (~15-18% fewer bad frames) and it does not hurt the healthy case, but small -- because at the steered operating point (~0.06 ppm = 30 Hz) the phase error it corrects is ~0.7 deg, i.e. there is almost nothing there to correct. **RECOMMENDATION: keep it.** It is the standard receiver structure, it costs nothing, and it is what carries the demo if an offset ever grows -- but it should not be sold as a fix for a problem clock steering has already removed at the source | `/tmp/leg_q{0,2000}_{0,1}.log` | VERIFIED-HW |
+| 8.44 | AP-38 does NOT rescue the extreme case and appears to hurt it: at a 20 kHz injection the scores went 0.437/0.450/0.451/0.439 without the fix to 0.204/0.033/0.988/0.071 with it. The mechanism is that 20 kHz smears **H itself** -- the pilot slot's 36 symbols span 169 deg, so the averaged channel estimate is attenuated and mis-phased per subcarrier, and a single per-symbol scalar cannot repair a per-subcarrier error. Correcting phase on top of a destroyed H can land anywhere. **The fix's domain is small offsets; it is not a large-offset rescue** | the 20 kHz A/B | VERIFIED-HW |
+| 8.45 | STATISTICS TRAP, caught mid-analysis and worth carrying: the CNS log lines are NOT a uniform sample. The INFO line prints every 512th datagram while the WARN line prints on power-of-two LOW occurrences, so averaging scores across lines weights rare bad frames enormously and produced an apparent "mean 0.48, 5 low of 9" on a link that was in fact **15 low of 2048**. Read the counters the INFO line carries (`N datagrams, M low`), never the distribution of the lines themselves. Same family as 8.41 | the four-way A/B, mis-analyzed then redone | VERIFIED-HW |
+
+
 ## Standing traps (carried from the driver contract, apply to every phase)
 
 1. An unknown or non-writable writeSetting key logs a warning and silently
