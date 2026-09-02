@@ -395,25 +395,30 @@ the gate run in the next row passes.
 | 8.69 | `houdini_pilot_cursor_reset_` had become write-only state: the escalation still stored true and `clientTxPilots` still exchanged it into a `(void)`, with nothing branching on it, because `i0` had subsumed its job. An atomic nothing reads still looks load-bearing to the next reader, which is worse than keeping or removing it. Removed at all four sites, with the reason left where the consumer was | review finding | VERIFIED-CODE |
 | 8.70 | The review independently confirmed the 48-byte SYN1 layout field-by-field against `SYN_HDR`, that `estimateCFO`'s new NaN has no other live caller and no `-ffast-math` to constant-fold it away, and that the alpha/beta signs, the `eps_tracked` definition and the acquisition refinement are sign-consistent. It also caught the tautological wire test I had started to write, which had already been reverted in favour of extending the real one (8.63) | review "checked and cleared" list | VERIFIED-CODE |
 
-**The gate run this branch now needs, in one rig session.** In order, because
-the later legs assume the earlier ones passed:
+**The gate run this branch now needs, in one rig session.** Legs 1-3 are the
+merge gate and run first, because everything after them assumes the build is
+good. Legs 4-9 are decision legs: each one exists to make a keep / improve /
+defer call on an open item, and each runs against the SAME 3 gate runs or as a
+short standalone probe. **Every A/B switch defaults OFF, so legs 1-3 exercise
+exactly the code path the merge would ship** [user 2026-09-02].
 
-1. **Gate, 3 runs.** Same protocol as 8.51 on the post-fix build. Pass = 0
-   escalations, 0 off-grid, acquisition confirming, CNS low fraction at or under
-   8.51's 0.15-0.34 %. **Record the sync residual sd and max**, which is the open
-   8.51 question (dispersion rose to sd 2.17 / max 14 with no explanation), and
-   record the resync attempt rate, which 8.53 predicts rises 1.3-2.4x.
-2. **AP-53(a).** Re-measure the two node stability with the fixed
-   `clock_stability.py` binning. Until this exists the shipped cadence default is
-   not defended by anything, since 8.30's plateau was the tool's own error.
-3. **AP-53(b).** Re-run the four leg ladder on this one instrument build, so
-   section 8's series is the controlled one it is presented as.
-4. **AP-43 cost probe.** One measurement, and it decides the whole item: does a
-   timed burst RX carry the same ~855 us per-call fixed cost as a continuous
-   read? Nothing on the UE has ever called `activateRecv(rxTime, numSamps, 2)`.
-5. **Run logs.** Every log backing a row above lands in
-   `tests/demo-verify/evidence/`, per the provenance note at the top of this file.
+| # | leg | what it decides | how |
+| --- | --- | --- | --- |
+| 1 | **Gate, 3 runs.** Same protocol as 8.51 on the post-fix build. Pass = 0 escalations, 0 off-grid, acquisition confirming, CNS low fraction at or under 8.51's 0.15-0.34 % | whether this branch may merge | defaults only, no knobs set |
+| 2 | **8.51's open question.** Record the sync residual sd and max on each of the 3 | AP-53(d), the unexplained dispersion rise (sd 2.17 / max 14) | same 3 runs |
+| 3 | **The cadence cost.** Record the resync attempt rate and the correlator duty | whether 8.53's 1.3-2.4x more frequent resync is affordable | same 3 runs, `HOUDINI_LOOP_PROFILE` on |
+| 4 | **AP-53(a).** Re-measure two-node stability with the fixed `clock_stability.py` binning | whether the shipped resync cadence default is defensible at all. Until this exists it rests on nothing, because 8.30's plateau was the tool's own error | a stability run per the 8.30 procedure |
+| 5 | **AP-53(b).** Re-run the four-leg ladder on THIS one instrument build | whether section 8's series is the controlled one it is presented as | `clock_drift_probe.py`, four clock configurations |
+| 6 | **AP-43.** `burst_rx_cost_probe.py --reps 200`, at least twice | the whole item. If arm + read fits inside a frame, per-frame DL reads are affordable and AP-43 is worth more than its fronthaul saving; if not, it is worth only the 97 % fronthaul saving. A refused arm is a finding about the driver contract | standalone, ~2 minutes |
+| 7 | **AP-34(b).** `cfo_ladder_probe.py --frames 8 --windows 20`, then compare its ppm against a `clock_drift_probe` leg on the same link | stage 3's ZERO POINT, which is the only thing between it and AP-41's fusion. Precision is already predicted at 0.26 Hz; accuracy is unmeasured | standalone, then one paired comparison |
+| 8 | **AP-51.** `HOUDINI_BS_RX_DEBUG=1 HOUDINI_BS_RX_EVERY=1 HOUDINI_CFO_LOG_EVERY=1`, then `two_way_transfer.py --log` | whether the de-embed machinery works. **NOT whether Doppler separates** -- the bench is wired, so rdot/c is 0 by construction and a clean result validates the machinery only | one run, large log |
+| 9 | **AP-52.** Sweep `HOUDINI_ESCALATE_EPISODES`, `HOUDINI_HOLD_OFFGRID`, `HOUDINI_RESYNC_RETRY_MAX`, `HOUDINI_SCATTER_TOL_US` one at a time against leg 1's baseline | which of AP-52's four "what can go now" items survive contact with the steered regime | one knob per run, baseline between |
+| 10 | **AP-10.** Watch for the RX-gap and TX-failure reporting during legs 1-3 | its FIRST silicon validation; the fix has been built and unvalidated since it was written | same 3 runs |
 
+Two standing rules for the session. **Run logs backing any row land in
+`tests/demo-verify/evidence/`** and are cited by that path, per the provenance
+note at the top of this file. **One run is not a behaviour**: legs 6 and 7 get
+at least two repeats before either conclusion is written down.
 
 ## Standing traps (carried from the driver contract, apply to every phase)
 

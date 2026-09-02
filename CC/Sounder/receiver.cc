@@ -1459,7 +1459,14 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   bool resync = true;
   bool resync_enable = (config_->frame_mode() == "continuous_resync");
   size_t resync_retry_cnt(0);
-  size_t resync_retry_max(100);
+  // AP-52 [user]: the escalation net was tuned against a grid that walked out
+  // of the gate in ~1 s. Steered, it holds for MINUTES, so these numbers are
+  // now absurdly conservative -- but the net stays, it is only retuned, and
+  // retuning it wants an A/B on live silicon rather than a guess here. Knobs,
+  // shipped at the values that were gated, so the default build is unchanged
+  // and the sweep costs no rebuild.
+  size_t resync_retry_max = static_cast<size_t>(
+      std::max(1.0, envDouble("HOUDINI_RESYNC_RETRY_MAX", 100.0)));
   size_t resync_success(0);
   size_t cfo_log_cnt = 0;  // throttles the beacon-CFO line (kCfoLogEvery)
   // Liveness accept/reject half-width. Shipped ON THE WIRE so the panel draws
@@ -1717,7 +1724,15 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   // are pure confirmation (Opus review M4: the old ~4.7%-by-chance figure
   // described the pre-targeting whole-window search). Hold-off itself
   // already covers the beacon-MOVED case; this covers beacon-LOST.
-  constexpr size_t kEscalateExhaustedEpisodes = 2;
+  const size_t kEscalateExhaustedEpisodes = static_cast<size_t>(
+      std::max(1.0, envDouble("HOUDINI_ESCALATE_EPISODES", 2.0)));
+  // How many consecutive off-grid detections before the beacon counts as
+  // MOVED. One is scatter (ledger 4.18); the shipped rule is two. Steered, an
+  // off-grid detection is far more surprising than it was, so this is the
+  // other half of the AP-52 retune and it sweeps with the same A/B.
+  const size_t kHoldOffGridCount = static_cast<size_t>(
+      std::max(1.0, envDouble("HOUDINI_HOLD_OFFGRID", 2.0)));
+  size_t resync_offgrid_streak = 0;
   size_t resync_exhausted_streak = 0;
   const size_t beacon_detect_window_esc = static_cast<size_t>(
       static_cast<float>(config_->samps_per_slot()) *
@@ -1795,6 +1810,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
     }
     resync_exhausted_streak = 0;
     resync_hold_pending = false;
+    resync_offgrid_streak = 0;
     resync = false;
     resync_retry_cnt = 0;
     last_resync = frame_id;
@@ -2109,6 +2125,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
               }
             }
             resync_hold_pending = false;
+            resync_offgrid_streak = 0;
             resync_exhausted_streak = 0;
             resync = false;
             resync_retry_cnt = 0;
@@ -2127,7 +2144,8 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
                 "pending %d) -- beacon possibly moved, tid %d\n",
                 frame_id, resid, snr, resync_hold_pending ? 1 : 0, tid);
             emitSync(kSyncHold, resid, cfo_tracked_hz, snr, 0, cfo_hz);
-            if (resync_hold_pending) {
+            ++resync_offgrid_streak;
+            if (resync_offgrid_streak >= kHoldOffGridCount) {
               houdiniEscalate("beacon moved");
               continue;  // rx_beacon_time is pre-hunt; restart the frame loop
             }

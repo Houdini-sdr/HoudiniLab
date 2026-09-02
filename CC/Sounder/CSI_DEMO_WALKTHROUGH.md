@@ -618,6 +618,18 @@ can be swept without a rebuild. Change one at a time and record which one.
 | `HOUDINI_COALESCE_SLOTS` | 1 | Collapse runs of discarded slots into one read. On by default. Set it to 0 for a per slot A/B comparison. It changes the client loop rate by roughly 2x, so any figure quoted per iteration has to say which setting produced it. |
 | `HOUDINI_LOOP_PROFILE` | 0 (off) | Print a breakdown of where a client loop iteration goes, once per this many iterations. Counts ITERATIONS. |
 | `HOUDINI_RX_PROFILE` | 0 (off) | Print the split between draining the FIFO and the read itself, once per this many radio reads. Counts READS, which is a different scale from the line above, and coalescing changes the ratio between them. |
+| `HOUDINI_CONFIRM_TOL_US` | 5.2083 | See the acquisition row above. Never applied looser than the tracking gate, whatever you set. |
+| `HOUDINI_RESYNC_RETRY_MAX` | 100 | Misses in one resync period before the client logs an exhausted episode. The anchored grid keeps flying either way; this is a counter, not a give-up. |
+| `HOUDINI_ESCALATE_EPISODES` | 2 | Consecutive exhausted episodes before the client abandons tracking and re-acquires from scratch. |
+| `HOUDINI_HOLD_OFFGRID` | 2 | Consecutive off grid detections before the beacon counts as MOVED. One is scatter, so the default waits for a second. |
+| `HOUDINI_BS_RX_EVERY` | 20 | How many base station frames pass per `HOUDINI_BS_RX:` line. Only has an effect when `HOUDINI_BS_RX_DEBUG` is set. Set it to 1 for a two way transfer measurement, which needs every frame; expect a very large log. |
+
+The last four are the escalation net. Their defaults were tuned when the client
+grid drifted out of tolerance in about a second. With the clock steered it holds
+for minutes, so the defaults are conservative by a wide margin and are expected
+to be retuned. Change them one at a time against a known good baseline run, and
+keep the net rather than removing it: it is what stands between a lost beacon
+and a client that flies on stale timing without saying so.
 
 `HOUDINI_CSI_SYM_START` is the one worth understanding. The cyclic prefix guard
 is one sided. A window placed early, still inside the prefix, is a valid
