@@ -623,6 +623,10 @@ can be swept without a rebuild. Change one at a time and record which one.
 | `HOUDINI_ESCALATE_EPISODES` | 2 | Consecutive exhausted episodes before the client abandons tracking and re-acquires from scratch. |
 | `HOUDINI_HOLD_OFFGRID` | 2 | Consecutive off grid detections before the beacon counts as MOVED. One is scatter, so the default waits for a second. |
 | `HOUDINI_BS_RX_EVERY` | 20 | How many base station frames pass per `HOUDINI_BS_RX:` line. Only has an effect when `HOUDINI_BS_RX_DEBUG` is set. Set it to 1 for a two way transfer measurement, which needs every frame; expect a very large log. |
+| `HOUDINI_TRACKER` | `ab` | Which estimator tracks the base station frame grid. `ab` is the shipped alpha beta. `kf` selects the Kalman, which carries the gap length in its own uncertainty rather than applying fixed gains to every gap. Leave it unset unless you are running the comparison. |
+| `HOUDINI_KF_INNOV_GATE` | 4.0 | Kalman only. How many sigma an observation may sit from the prediction before the filter refuses it. This is the Kalman's outlier defence and it is what makes that arm worth running; set it to 0 to disable and the arm gets measurably worse. |
+| `HOUDINI_KF_MEAS_VAR` | 0.5 | Kalman only. Assumed detector scatter variance in samples squared. The default is the measured 0.63 to 0.70 sample spread, squared. |
+| `HOUDINI_KF_RATE_RW` | 1e-9 | Kalman only. How fast the frame period is assumed to wander, in samples squared per frame cubed. The default comes from the 0.23 ppm the clock moved across one session. |
 
 The last four are the escalation net. Their defaults were tuned when the client
 grid drifted out of tolerance in about a second. With the clock steered it holds

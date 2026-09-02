@@ -34,6 +34,7 @@
 #include "include/logger.h"
 #include "include/macros.h"
 #include "include/node_version.h"
+#include "include/grid_tracker.h"
 #include "include/sync_geometry.h"
 #include "include/utils.h"
 
@@ -1697,7 +1698,42 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   // Count tracker updates so an escalation knows whether its own learned rate
   // is better than a fresh confirm-derived one (below).
   size_t houdini_grid_updates = 0;
-  size_t houdini_grid_starved = 0;  // in-gate accepts with kf == 0 (no update)
+  size_t houdini_grid_starved = 0;  // in-gate accepts with kf <= 0 (no update)
+  size_t houdini_grid_innov_rej = 0;  // kalman arm: gated by its own innovation
+  // AP-41. The estimator is swappable and DEFAULTS TO THE SHIPPED ALPHA-BETA,
+  // so a gate run with nothing set exercises exactly the gated path. It
+  // computes GAINS only; the state and its arithmetic stay here, so switching
+  // arms cannot change the rounding on the arm that is already gated.
+  //
+  // The offline A/B (grid_tracker_test) predicts, on this bench's own numbers:
+  // the two are identical at regular spacing, the kalman is ~2x better on the
+  // irregular spacing we actually have (median 179 frames, range 10-831), and
+  // the kalman WITHOUT its innovation gate is ~4x WORSE than alpha-beta when an
+  // edge-of-gate detection lands inside the +-kScatterTol window, because
+  // alpha-beta has the slew limit and a bare kalman has nothing. So the gate is
+  // not an optional extra, it is what makes this arm worth running.
+  Sounder::TrackerConfig tracker_cfg;
+  {
+    const char* tk = getenv("HOUDINI_TRACKER");
+    const bool want_kf =
+        tk != nullptr && (tk[0] == 'k' || tk[0] == 'K' || tk[0] == '1');
+    tracker_cfg.kind = want_kf ? Sounder::TrackerKind::kKalman
+                               : Sounder::TrackerKind::kAlphaBeta;
+    tracker_cfg.alpha = kGridAlpha;
+    tracker_cfg.beta = kGridBeta;
+    tracker_cfg.step_limit =
+        kGridStepPpm * 1e-6 * static_cast<double>(config_->samps_per_frame());
+    tracker_cfg.meas_var = envDouble("HOUDINI_KF_MEAS_VAR", 0.5);
+    tracker_cfg.rate_rw = envDouble("HOUDINI_KF_RATE_RW", 1e-9);
+    tracker_cfg.innov_gate = envDouble("HOUDINI_KF_INNOV_GATE", 4.0);
+    MLPD_INFO(
+        "Grid tracker: %s (alpha %.3f beta %.3f step limit %.3f ppm; kalman "
+        "R %.3f samp^2, q %.2g, innovation gate %.1f sigma)\n",
+        want_kf ? "KALMAN" : "alpha-beta", kGridAlpha, kGridBeta, kGridStepPpm,
+        tracker_cfg.meas_var, tracker_cfg.rate_rw, tracker_cfg.innov_gate);
+  }
+  Sounder::GridTracker tracker;
+  tracker.reset(tracker_cfg);
   // Frame-start grid point n frames after the tracked reference.
   auto houdiniGridStart = [&](long long n) {
     return houdini_pilot_ref + llround(static_cast<double>(n) *
@@ -1799,6 +1835,11 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
       }
       houdini_pilot_ref = fresh;
       houdini_pilot_ref_valid = true;
+      // A re-anchor is a wholesale write of BOTH states, so the filter's
+      // covariance must be re-inflated with them. Without this the kalman keeps
+      // the confidence it earned before the anchor was lost and under-weights
+      // every observation of the new one.
+      tracker.reset(tracker_cfg);
       MLPD_INFO("Re-sync ESCALATION: re-anchored at %lld, tid %d\n", fresh,
                 tid);
     } else if (config_->running()) {
@@ -2060,44 +2101,46 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
             // its old role as the alive/moved verdict AND becomes the tracker's
             // outlier reject -- a rejected detection updates nothing rather
             // than levering the rate estimate (AP-31).
-            if (kf > 0) {
-              const double dk = static_cast<double>(kf);
-              const double r = static_cast<double>(resid);
+            if (kf > 0 && tracker.update(kf, static_cast<double>(resid))) {
               // This IS a schedule move, up to kGridAlpha * kScatterTol = 512
               // samples in one step, and it used to be reported as shift = 0
               // while only the escalation's move was shown. Carry it out to
               // emitSync so the panel sees every move the UE makes.
-              applied_shift = llround(kGridAlpha * r);
+              applied_shift = llround(tracker.shift());
               houdini_pilot_ref = houdiniGridStart(kf) + applied_shift;
               // The absolute band below is a PLAUSIBILITY bound and cannot
-              // serve as the outlier reject: it admits a single edge-of-gate
-              // detection kicking the rate by kGridBeta * kScatterTol /
-              // (the cadence in real frames) ~ 3.2 ppm at the shipped
-              // settings, a third of the real 8.5 ppm offset
-              // and ~30x looser than the kick its own note describes. Bound
-              // how far ONE observation may move the estimate. The default is
-              // 14x the measured 0.036 ppm tracked residual, so a normal
-              // update (~0.003 ppm) is untouched and only an outlier is
-              // trimmed; convergence from the acquisition confirm, itself good
-              // to ~0.04 ppm, is unaffected.
-              const double step_lim =
-                  kGridStepPpm * 1e-6 *
-                  static_cast<double>(config_->samps_per_frame());
-              const double dp = std::min(
-                  step_lim, std::max(-step_lim, kGridBeta * r / dk));
-              houdini_frame_period += dp;
-              // Clamp to a plausible oscillator band. The gate that feeds this
-              // accepts |resid| <= kScatterTol = 1024, and the soonest an
-              // update follows the previous is one resync interval, so ONE
-              // edge-of-gate detection can kick the rate by
-              // beta*1024/260 = 0.39 samp/frame ~ 3.2 ppm -- a third again the
-              // real 8.5 ppm offset, and enough to walk the grid back out of
-              // the gate. kScatterTol is far too wide to serve as the outlier
-              // reject on its own at these spacings.
+              // serve as the outlier reject on its own: it admits a single
+              // edge-of-gate detection kicking the rate ~3.2 ppm at the shipped
+              // settings, a third of the real 8.5 ppm offset and ~30x looser
+              // than the kick its own note describes. Each arm bounds that its
+              // own way -- alpha-beta with a per-update slew limit
+              // (HOUDINI_GRID_STEP_PPM, 14x the measured 0.036 ppm residual, so
+              // a normal ~0.003 ppm update is untouched), the kalman with an
+              // innovation gate scaled by what it currently knows.
+              houdini_frame_period += tracker.deltaPeriod();
               houdini_frame_period =
                   std::min(kGridPeriodHi, std::max(kGridPeriodLo,
                                                    houdini_frame_period));
               houdini_grid_updates++;
+            } else if (kf > 0) {
+              // Only the kalman arm reaches here: its innovation gate rejected
+              // the observation. The detection is still ALIVE on the grid --
+              // the outer gate said so, and every counter below still clears --
+              // it simply does not inform the state.
+              houdini_grid_innov_rej++;
+              // Braces load-bearing: MLPD_WARN is three statements with no
+              // do/while wrapper, so unbraced the throttle governs only the
+              // header (the flood recorder_worker.cc already documented).
+              if (houdini_grid_innov_rej == 1 ||
+                  houdini_grid_innov_rej % 50 == 0) {
+                MLPD_WARN(
+                    "Re-sync frame %zu: innovation %.1f sigma exceeds the %.1f "
+                    "sigma gate, tracker not updated (%zu so far, sigma_t %.2f "
+                    "samp, sigma_rate %.4f samp/frame), tid %d\n",
+                    frame_id, tracker.innovSigmas(), tracker_cfg.innov_gate,
+                    houdini_grid_innov_rej, tracker.timeSigma(),
+                    tracker.rateSigma(), tid);
+              }
             } else {
               // No usable baseline, so the tracker learns nothing from this
               // detection -- while every counter below still clears and the

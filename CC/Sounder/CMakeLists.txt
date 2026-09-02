@@ -248,6 +248,12 @@ add_executable(sync_geometry_test tests/comms-func/sync_geometry_test.cc)
 target_include_directories(sync_geometry_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 add_test(NAME sync_geometry COMMAND sync_geometry_test)
 
+# Radio-free A/B: AP-41's kalman against the shipped alpha-beta over the SAME
+# synthetic detections. The rig can only run one at a time; this pairs them.
+add_executable(grid_tracker_test tests/comms-func/grid_tracker_test.cc)
+target_include_directories(grid_tracker_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME grid_tracker COMMAND grid_tracker_test)
+
 # HIL helper: transmit the real Gold beacon from a Houdini board so a Houdini UE
 # running the unmodified receiver.cc client-sync path can acquire it.
 add_executable(beacon_tx_gold
