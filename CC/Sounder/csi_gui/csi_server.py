@@ -32,17 +32,27 @@ Wire formats (little-endian), one datagram per (frame, antenna) per kind:
         accepted.
   CNS1  [magic][frame][ant][num_pts][mod_order]      then num_pts * (I f32, Q f32)
   SYN1  [magic][frame][tid][state][resid i32][cfo_hz f32][snr f32][shift i32]
-        [samps_per_frame u32][carrier_hz f32][scatter_tol u32]
+        [samps_per_frame u32][carrier_hz f32][scatter_tol u32][cfo_beacon f32]
         One datagram per resync DETECTION from the UE sync thread (not the
         recording path), so it is NOT per-antenna and carries no payload array.
         state: 1=LOCKED (beacon alive on the anchored grid), 2=HOLD (one
         off-grid detection seen, deliberately NOT acted on), 3=ESCALATING (the
-        anchor was re-acquired; `shift` is the schedule step applied, already
-        reduced modulo the frame period and centred), 4=WEAK (detected but under
-        the SNR floor -- distinct from no beacon at all), 5=REANCHOR FAILED (an
-        escalation ran and re-acquisition did not confirm). NOT SYNCED is inferred
-        from staleness -- while the acquisition loop hunts there is no detection
-        to hang a datagram on.
+        anchor was re-acquired), 4=WEAK (detected but under the SNR floor --
+        distinct from no beacon at all), 5=REANCHOR FAILED (an escalation ran
+        and re-acquisition did not confirm). NOT SYNCED is inferred from
+        staleness -- while the acquisition loop hunts there is no detection to
+        hang a datagram on.
+        `shift` is the schedule step the UE actually applied, already reduced
+        modulo the tracked frame period and centred. It is nonzero on an
+        ESCALATING record (the large re-anchor move) AND on a LOCKED one, where
+        the tracker's alpha half moves the schedule by alpha * resid.
+        TWO CFO FIELDS. `cfo_hz` is the TRACKED value, derived from the timing
+        grid, and is the accurate one. `cfo_beacon` is the beacon phase
+        estimator's independent reading, which is precise but carries a
+        configuration-dependent bias. The pair is the real cross-check; the
+        resid-slope figure the panel also prints is the tracking RESIDUAL and is
+        not a third opinion on the same quantity. `cfo_beacon` is NaN on any
+        record with no detection behind it, and the field is then dropped.
   ADC2  [magic][frame][ant][cols][samps][rate f32][peak][clipped][slot][any_peak]
         [any_clipped]  then cols * (I_min, I_max, Q_min, Q_max) as int16.  A min/max
         envelope of the whole slot rather than decimated samples, so a brief clip
@@ -77,7 +87,7 @@ CSI2_HDR = struct.Struct("<IIIIfI")  # ... plus reps (pilot symbols averaged)
 CNS_HDR = struct.Struct("<IIIII")   # magic, frame, ant, num_pts, mod_order
 ADC_HDR = struct.Struct("<IIIIIfII")   # magic, frame, ant, cols, samps, rate, peak, clipped
 ADC2_HDR = struct.Struct("<IIIIIfIIIII")  # ... plus slot, any_peak, any_clipped
-SYN_HDR = struct.Struct("<IIIIiffiIfI")  # ... plus samps_per_frame, carrier_hz, scatter_tol
+SYN_HDR = struct.Struct("<IIIIiffiIfIf")  # ... + samps_per_frame, carrier_hz, scatter_tol, cfo_beacon
 
 # ---- shared state: latest CSI + constellation per antenna ------------------
 _lock = threading.Lock()
@@ -194,7 +204,7 @@ def _parse_syn(payload):
                   % (len(payload), SYN_HDR.size, _sync_bad[0]), flush=True)
         return None
     (_m, frame, tid, state, resid, cfo, snr, shift, sfr, carrier,
-     tol) = SYN_HDR.unpack_from(payload, 0)
+     tol, cfo_b) = SYN_HDR.unpack_from(payload, 0)
     # A NaN or inf float would serialise as bare NaN/Infinity, which is invalid
     # JSON: the browser's JSON.parse throws, onData's catch swallows it, and the
     # dashboard silently stops updating for as long as the record stays in the
@@ -202,10 +212,17 @@ def _parse_syn(payload):
     if not (math.isfinite(cfo) and math.isfinite(snr) and math.isfinite(carrier)):
         _sync_bad[0] += 1
         return None
-    return {"frame": int(frame), "tid": int(tid), "state": int(state),
-            "resid": int(resid), "cfo": float(cfo), "snr": float(snr),
-            "shift": int(shift), "sfr": int(sfr), "fc": float(carrier),
-            "tol": int(tol)}
+    # The beacon estimate is only taken where there WAS a detection, so
+    # escalation / re-anchor-failure / weak records carry NaN. Drop the field,
+    # not the datagram: those records still carry a valid state and shift, and
+    # dropping them would hide exactly the events the panel exists to show.
+    rec = {"frame": int(frame), "tid": int(tid), "state": int(state),
+           "resid": int(resid), "cfo": float(cfo), "snr": float(snr),
+           "shift": int(shift), "sfr": int(sfr), "fc": float(carrier),
+           "tol": int(tol)}
+    if math.isfinite(cfo_b):
+        rec["cfob"] = float(cfo_b)
+    return rec
 
 
 def _udp_loop(bind_host, bind_port):
@@ -1221,21 +1238,38 @@ function drawSyncCard(tid, sync){
   let num=0,den=0;
   for(const p of loc){num+=(p.frame-mx)*(p.resid-my);den+=(p.frame-mx)*(p.frame-mx);}
   const sfr=loc[n-1].sfr||1, fc=loc[n-1].fc||0;
+  // THREE FIGURES, AND THEY ARE NOT THREE VIEWS OF ONE NUMBER. Reading this
+  // line wrong is the failure the panel had before: `clock` is the TOTAL
+  // offset the tracker holds, `residual` is what is LEFT after tracking it,
+  // and `beacon` is a separate instrument measuring the total offset its own
+  // way. Comparing clock against residual is comparing a quantity with its own
+  // error term, which can never agree and is not meant to; the cross-check
+  // that means something is clock against beacon.
   const tppm=(den>0?num/den:0)/sfr*1e6;
-  let cs=0; for(const p of loc)cs+=p.cfo;
-  const cm=cs/n;
-  let cq=0; for(const p of loc)cq+=(p.cfo-cm)*(p.cfo-cm);
-  // SEM, not the population SD: the figure quoted is the MEAN, so its error bar
-  // shrinks as sqrt(n). Printing the per-sample spread made a resolved offset
-  // look unresolvable.
-  const sem=Math.sqrt(cq/n)/Math.sqrt(n);
-  const cppm=(fc>0?cm/fc*1e6:0), cppmsem=(fc>0?sem/fc*1e6:0);
-  const noisy=Math.abs(cm)<CFO_NOISE_HZ;
+  // The tracked offset is a FILTERED STATE, not a set of independent samples,
+  // so it is quoted as a value with no error bar. A SEM over it would shrink
+  // as sqrt(n) while describing nothing but the filter's own smoothness.
+  let ks=0; for(const p of loc)ks+=p.cfo;
+  const km=ks/n, kppm=(fc>0?km/fc*1e6:0);
+  // The beacon estimator IS a set of independent per-detection readings, so a
+  // SEM is the right error bar here: the figure quoted is the mean.
+  const bl=loc.filter(p=>p.cfob!==undefined);
+  let bstr='beacon n/a';
+  if(bl.length){
+    let bs=0; for(const p of bl)bs+=p.cfob;
+    const bm=bs/bl.length;
+    let bq=0; for(const p of bl)bq+=(p.cfob-bm)*(p.cfob-bm);
+    const bsem=Math.sqrt(bq/bl.length)/Math.sqrt(bl.length);
+    const bppm=(fc>0?bm/fc*1e6:0), bsemppm=(fc>0?bsem/fc*1e6:0);
+    bstr='beacon '+bppm.toFixed(3)+' +/- '+bsemppm.toFixed(3)+' ppm ('
+        +bm.toFixed(0)+' +/- '+bsem.toFixed(0)+' Hz'
+        +(Math.abs(bm)<CFO_NOISE_HZ?', inside the ~2 kHz phase-noise floor':'')
+        +')';
+  }
   card.read.textContent=
-    'timing '+tppm.toFixed(4)+' ppm (resid slope)  |  carrier '
-    +cppm.toFixed(3)+' +/- '+cppmsem.toFixed(3)+' ppm ('+cm.toFixed(0)+' +/- '
-    +sem.toFixed(0)+' Hz'+(noisy?', inside the ~2 kHz phase-noise floor':'')
-    +')  |  '+n+' locked over '+span+' frames'+note;
+    'clock '+kppm.toFixed(3)+' ppm (tracked)  |  residual '
+    +tppm.toFixed(4)+' ppm (resid slope)  |  '+bstr
+    +'  |  '+n+' locked over '+span+' frames'+note;
 }
 
 function drawSync(sync){

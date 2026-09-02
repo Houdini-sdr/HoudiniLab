@@ -13,7 +13,10 @@ Two independent checks:
 
 2. TRANSPORT. Sends synthetic datagrams covering every state through a server
    this test starts itself, on a port chosen at runtime so it can never pass by
-   talking to a stale server someone left running, and reads the SSE back.
+   talking to a stale server someone left running, and reads the SSE back. This
+   half also covers what the layout half structurally cannot: that a NaN beacon
+   estimate costs the FIELD and not the DATAGRAM, and that a nonzero shift
+   survives on a LOCKED record and not only on a re-anchor.
 
 Note on reading SSE: a CSI payload is several KB, so a fixed-size read can cut a
 data line mid-JSON and look like "no data" -- read to the blank-line delimiter.
@@ -43,17 +46,30 @@ SFR, FC, TOL = 122880, 500e6, 1024
 # so swapping frame and tid -- which would put tid on the panel's frame axis --
 # is invisible to an offset/width/type comparison.
 CC_FIELD_ORDER = ["magic", "fr", "ti", "state", "rs", "cf", "sn", "sh",
-                  "sfr", "carrier", "scatter_tol"]
+                  "sfr", "carrier", "scatter_tol", "cb"]
 
-# frame, tid, state, resid, cfo, snr, shift
+NAN = float("nan")
+
+# frame, tid, state, resid, cfo, snr, shift, cfo_beacon
+#
+# `cfo` is the TRACKED estimate and is always present. `cfo_beacon` is the
+# beacon phase estimator's independent reading and is NaN wherever no detection
+# backs the record, which is every state but LOCKED and HOLD. That NaN must cost
+# the FIELD and not the DATAGRAM: an escalation record dropped for it would hide
+# exactly the event the panel exists to show, so the cases below deliberately
+# mix the two and the comparison asserts which side of that line each lands on.
+#
+# `shift` is nonzero on a RE-ANCHORED record (the large move) and on a LOCKED
+# one (the tracker's alpha nudge). Both shapes appear here; a LOCKED record with
+# shift == 0 alone would not have caught the field being hardcoded to zero.
 CASES = [
-    (1000, 0, 1,    0, -1147.0, 48.0,    0),   # LOCKED
-    (1100, 0, 1,    3,  -900.0, 47.6,    0),
-    (1250, 0, 2, 1500,  -800.0, 47.9,    0),   # HOLD: off-grid, not acted on
-    (1260, 0, 4,    0,     0.0, 12.0,    0),   # WEAK: under the SNR floor
-    (1270, 0, 3,    0,     0.0,  0.0, -412),   # RE-ANCHORED, step applied
-    (1280, 0, 5,    0,     0.0,  0.0,    0),   # re-anchor did NOT confirm
-    (1400, 0, 1,   -2, -1200.0, 48.1,    0),
+    (1000, 0, 1,    0, -1147.0, 48.0,    0,  -900.0),  # LOCKED
+    (1100, 0, 1,    3,  -900.0, 47.6,    2,  -880.0),  # LOCKED, alpha nudge
+    (1250, 0, 2, 1500,  -800.0, 47.9,    0,  -870.0),  # HOLD: off-grid
+    (1260, 0, 4,    0,     0.0, 12.0,    0,     NAN),  # WEAK: under SNR floor
+    (1270, 0, 3,    0,     0.0,  0.0, -412,     NAN),  # RE-ANCHORED
+    (1280, 0, 5,    0,     0.0,  0.0,    0,     NAN),  # re-anchor NOT confirmed
+    (1400, 0, 1,   -2, -1200.0, 48.1,   -1,  -910.0),
 ]
 
 
@@ -193,13 +209,20 @@ def check_transport(codes, magic):
             print("FAIL: server exited immediately (rc=%s)" % srv.returncode)
             return False
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        for (f, t, st, r, c, n, sh) in CASES:
-            sock.sendto(hdr.pack(magic, f, t, st, r, c, n, sh, SFR, FC, TOL),
-                        ("127.0.0.1", udp_port))
+        for (f, t, st, r, c, n, sh, cb) in CASES:
+            sock.sendto(
+                hdr.pack(magic, f, t, st, r, c, n, sh, SFR, FC, TOL, cb),
+                ("127.0.0.1", udp_port))
         time.sleep(1.0)
         rec = read_one_event("http://127.0.0.1:%d/stream" % http_port)
         if rec is None:
-            print("FAIL: no complete SSE data line")
+            # Observed 2026-09-02: admitting a NaN into a record produces
+            # exactly this, a stream of keepalives and no data line at all. The
+            # non-finite filter in _parse_syn is what prevents it, and one bad
+            # float costs the WHOLE push rather than one field, so check that
+            # filter first when this fires.
+            print("FAIL: no complete SSE data line (keepalives only). A "
+                  "non-finite float admitted into a record does this.")
             return False
         sync = rec.get("sync")
         if not sync or "0" not in sync:
@@ -221,12 +244,30 @@ def check_transport(codes, magic):
             if fields != want:
                 ok = False
                 print("FAIL: %s != %s" % (fields, want))
+            # The beacon field: present with its value where a detection backs
+            # it, ABSENT where it does not, and the record present either way.
+            want_cb = exp[7]
+            if want_cb != want_cb:  # NaN
+                if "cfob" in got:
+                    ok = False
+                    print("FAIL: frame %d has no detection behind it, so the "
+                          "beacon field must be dropped, got %r"
+                          % (exp[0], got["cfob"]))
+            elif "cfob" not in got:
+                ok = False
+                print("FAIL: frame %d lost its beacon field entirely" % exp[0])
+            elif round(got["cfob"], 2) != round(want_cb, 2):
+                ok = False
+                print("FAIL: frame %d beacon %r != %r"
+                      % (exp[0], got["cfob"], want_cb))
         if hist and (hist[0]["sfr"] != SFR or abs(hist[0]["fc"] - FC) > 1):
             ok = False
             print("FAIL: geometry not carried (sfr/fc)")
-        print("transport: %d points, states %s, shift %s, tol %s, age_ms %s -> %s"
+        print("transport: %d points, states %s, shifts %s, beacon on %d/%d, "
+              "tol %s, age_ms %s -> %s"
               % (len(hist), [p["state"] for p in hist],
-                 [p["shift"] for p in hist if p["state"] == 3],
+                 [p["shift"] for p in hist if p["shift"]],
+                 sum(1 for p in hist if "cfob" in p), len(hist),
                  hist[0]["tol"] if hist else "-", sync["0"]["age_ms"],
                  "OK" if ok else "MISMATCH"))
         return ok

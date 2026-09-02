@@ -446,9 +446,9 @@ The badge reads one of:
 
 | Badge | Meaning |
 |---|---|
-| `LOCKED` | Beacon found where the anchored grid predicted it. Normal. |
+| `LOCKED` | Beacon found where the anchored grid predicted it. Normal. The UE still nudges its schedule on one of these, by a fraction of the measured residual, so a locked run is a tracking run and not a frozen one. |
 | `HOLD PENDING` | One off-grid detection seen. Deliberately NOT acted on: single large offsets are scatter, so the sounder waits for a second consistent one. |
-| `RE-ANCHORED` | The UE gave up tracking and re-acquired. The readout names the schedule step applied. This is the only place the UE moves its own schedule. |
+| `RE-ANCHORED` | The UE gave up tracking and re-acquired. The readout names the schedule step applied. This is the LARGE move; the small per detection nudge on a `LOCKED` record is the other one. |
 | `WEAK BEACON` | Something was detected but it failed the SNR floor. Different from no beacon at all, and usually means levels or cabling. |
 | `RE-ANCHOR FAILED` | An escalation ran and re-acquisition did not confirm. The previous anchor is being kept. |
 | `NOT SYNCED` | No detections at all, or the stream has been silent for a minute. |
@@ -459,18 +459,34 @@ predicts the beacon inside the read window, so seconds of silence between bursts
 are normal on a perfectly healthy link. The plot dims while quiet so you can see
 at a glance that you are looking at held data rather than live data.
 
-The readout line carries two figures in ppm: the **timing** slope, fitted from
-the resid trace, and the **carrier** offset from the beacon CFO estimate. These
-are the same oscillator error reached two independent ways. They should agree
-when the error is real and large; they need not agree near zero, because a pure
-carrier offset moves the carrier figure and leaves the timing figure untouched,
-and a short-lag carrier reading is dominated by phase noise. Treat a mismatch
-below a few kHz as normal rather than as a fault.
-They are printed next to each other so a disagreement is visible rather than
-silent. The carrier figure carries its own spread, and is annotated when it
-falls inside the phase-noise floor: a short correlation lag turns a tiny phase
-error into an apparently large frequency, so treat sub-kilohertz carrier
-readings as instrument noise rather than a real offset.
+The readout line carries three figures in ppm, and they are not three views of
+one number. Read them in this order.
+
+1. **clock** is the total offset the client's timing tracker currently holds. It
+   comes from the frame period the tracker has learned, and on a two board bench
+   running on internal references it reads several ppm. It is a filtered state
+   rather than a set of samples, so it is printed as a value with no error bar.
+2. **residual** is what is left after the tracker has done its work, fitted from
+   the slope of the resid trace. It should sit near zero. This is the number that
+   tells you the loop is closed.
+3. **beacon** is a separate instrument. It measures the same total offset from
+   the beacon's own carrier phase, independently of the timing channel, and it
+   carries a standard error because each detection is an independent reading.
+
+The cross check that means something is **clock against beacon**, because those
+two measure the same quantity two different ways. Do not compare clock against
+residual: residual is clock's own error term, so the two are meant to differ by
+whatever factor the tracker is winning by, and a large ratio there is the loop
+working rather than a fault.
+
+Expect the beacon figure to sit off the clock figure by a fixed amount on any
+given bench. The beacon estimator is precise but carries a configuration
+dependent bias, so treat it as a liveness and sanity instrument rather than the
+value to correct with. It is annotated when it falls inside the phase noise
+floor: a short correlation lag turns a tiny phase error into an apparently large
+frequency, so treat sub kilohertz beacon readings as instrument noise rather
+than a real offset. It reads `beacon n/a` when the visible segment holds no
+detection to estimate from.
 
 ### 5.3 The ADC tab
 
@@ -575,6 +591,33 @@ same shell that launches it.
 | `HOUDINI_CSI_R_DEBUG` | unset | Recorder prints the per frame pilot re-alignment it chose (`r`, and the blind score behind it), one line per 30 corrections. |
 | `HOUDINI_CFO_LOG_EVERY` | 10 | How many beacon detections pass per `Beacon CFO` line. The default logs one in ten, so a quiet run is expected. Set it to 1 for a calibration run where you want every estimate. |
 | `HOUDINI_CNS_DUMP_LOW` | unset | Directory for autopsy dumps of the first few low scoring constellations. The directory must already exist. |
+
+### 7.1 Free running clock knobs
+
+These belong to the timing tracker the client runs when the two boards are on
+their own references rather than a shared one. Every default below is a measured
+value, not a guess, and the run is expected to be correct with all of them
+unset. They exist so a bench with different jitter or a different detection rate
+can be swept without a rebuild. Change one at a time and record which one.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `HOUDINI_SCATTER_TOL_US` | 8.3333 | How far a detection may land from the tracked grid and still count as the same beacon, in microseconds. Expressed in time so it holds at every sample rate. Raising it past about 15 makes the accept window larger than the slot can present, and the code clamps it and says so. |
+| `HOUDINI_CONFIRM_TOL_US` | 5.2083 | The same tolerance during acquisition, where two further detections must land on the first one's grid before the lock is trusted. Tighter than the tracking gate on purpose. |
+| `HOUDINI_SYNC_TOL_SAMPLES` | a quarter of the config `ofdm_tx_zero_prefix` | Timing slack budgeted to drift between two beacon checks. Half the input to the resync cadence. |
+| `HOUDINI_SYNC_RESIDUAL_PPM` | 1.0 | Assumed worst case clock error after tracking. The other half of the cadence input. The two together set how often the client looks at the beacon. |
+| `HOUDINI_GRID_ALPHA` | 0.5 | How much of each accepted detection's residual is applied to the schedule. Set both alpha and beta to 0 for a fixed period grid with no tracking at all. |
+| `HOUDINI_GRID_BETA` | 0.1 | How much of that residual is applied to the frame period estimate. |
+| `HOUDINI_GRID_STEP_PPM` | 0.5 | The most one detection may move the period estimate, in ppm. Guards against a single scatter outlier levering the rate. |
+| `HOUDINI_GRID_MAX_PPM` | 100 | Absolute band the period estimate may occupy either side of nominal. A plausibility bound, not an outlier reject. |
+| `HOUDINI_GRID_TRUST_PPM` | 1.0 | How far the tracked period and a fresh acquisition confirm may disagree before an escalation throws away the tracked one. |
+| `HOUDINI_ACQ_REFINE_SPAN` | 200 | Frames of baseline the acquisition stage wants before it trusts its rate estimate. Longer is more accurate and slower to lock. |
+| `HOUDINI_ACQ_MAX_PPM` | 100 | The same plausibility band applied to a rate that acquisition hands back. |
+| `HOUDINI_CFO_INDEX_GUARD` | 8 | Samples of margin the carrier estimator requires around the beacon before it will run. Out of range, it reports nothing rather than a fabricated figure. |
+| `HOUDINI_CSI_NO_PHASE_FIX` | unset | Set it to disable the per symbol common phase correction. On by default for Houdini. The residual carrier figure in the log is measured before this correction either way, so the health reading survives turning it off. |
+| `HOUDINI_COALESCE_SLOTS` | 1 | Collapse runs of discarded slots into one read. On by default. Set it to 0 for a per slot A/B comparison. It changes the client loop rate by roughly 2x, so any figure quoted per iteration has to say which setting produced it. |
+| `HOUDINI_LOOP_PROFILE` | 0 (off) | Print a breakdown of where a client loop iteration goes, once per this many iterations. Counts ITERATIONS. |
+| `HOUDINI_RX_PROFILE` | 0 (off) | Print the split between draining the FIFO and the read itself, once per this many radio reads. Counts READS, which is a different scale from the line above, and coalescing changes the ratio between them. |
 
 `HOUDINI_CSI_SYM_START` is the one worth understanding. The cyclic prefix guard
 is one sided. A window placed early, still inside the prefix, is a valid

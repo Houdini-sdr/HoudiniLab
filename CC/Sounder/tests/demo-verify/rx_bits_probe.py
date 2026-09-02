@@ -6,9 +6,18 @@ import numpy as np
 import SoapySDR
 from SoapySDR import SOAPY_SDR_CS16, SOAPY_SDR_RX, SOAPY_SDR_TX
 
+# SoapyRemote's `timeout` device arg is MICROSECONDS and it bounds the make()
+# RPC, not the stream. Measured on this bench: a COLD make (the server holds no
+# live device instance, so construction runs the full RFDC bring-up) takes
+# 3.34 s, a WARM one 0.34 s, so the long-standing 1000000 (= 1 s) sat INSIDE the
+# normal spread. A `SoapyRPCUnpacker::recv() TIMEOUT` on make is that, NOT an
+# unresponsive server: three were misread as a session wedge in one session
+# before it was measured. readStream's timeoutUs is a different thing and stays.
+RPC_TIMEOUT_US = "30000000"
+
 ip = sys.argv[1] if len(sys.argv) > 1 else "168.6.244.21"
 dev = SoapySDR.Device(dict(driver="houdinisdr", remote="tcp://%s:55132" % ip,
-                           timeout="1000000"))
+                           timeout=RPC_TIMEOUT_US))
 dev.setSampleRate(SOAPY_SDR_RX, 1, 122.88e6)
 dev.setFrequency(SOAPY_SDR_RX, 1, 500e6)
 rxs = dev.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CS16, [1],

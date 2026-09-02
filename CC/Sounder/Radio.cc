@@ -307,14 +307,21 @@ int Radio::recvHoudini(void* const* buffs, int samples, long long& frameTime) {
   }();
   static thread_local double p_drain = 0, p_read = 0;
   static thread_local size_t p_calls = 0, p_chunks = 0, p_drained = 0;
-  const auto p_t0 = std::chrono::steady_clock::now();
+  // Gated, not unconditional: this is the RX hot path (~30 calls per frame) and
+  // an always-taken clock read is cost the shipped build should not carry for
+  // an instrument that is off by default.
+  const auto p_t0 = rx_profile_every > 0
+                        ? std::chrono::steady_clock::now()
+                        : std::chrono::steady_clock::time_point{};
   int drained_chunks = 0, drained_samps = 0;
   int dr = 0;
   while ((dr = dev_->readStream(rxs_, jb.data(), drain_samps, jf, jt, 0)) > 0) {
     ++drained_chunks;
     drained_samps += dr;
   }
-  const auto p_t1 = std::chrono::steady_clock::now();
+  const auto p_t1 = rx_profile_every > 0
+                        ? std::chrono::steady_clock::now()
+                        : std::chrono::steady_clock::time_point{};
 
   // A dropped UDP packet splices a gap between two reads of THIS window. Detect it
   // from each read's own timestamp (the window used to keep only the first read's
