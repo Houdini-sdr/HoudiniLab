@@ -111,8 +111,37 @@ def stage12(core):
     return -f          # the matched-NCO RX mixer delivers baseband conjugated
 
 
-def stage3(core_a, core_b, lag, coarse_norm):
-    r = np.vdot(core_a, core_b)
+def mf_peak(win, gold_rep, near, span=16):
+    """Matched-filter peak near `near`: returns (index, complex value).
+
+    STAGE 3 MUST NOT TRUST THE DETECTOR INDEX. Correlating raw beacon cores at
+    the index find_beacon reports is destroyed by that index's jitter: modelled
+    2026-09-02, ONE sample of misalignment costs 200-350 Hz against a 130 Hz
+    truth, and random jitter of sd 0.5-3 samples gives a per-shot spread of
+    244-300 Hz. That matches the 279-477 Hz this probe measured on silicon
+    exactly, and it is why the first five runs disagreed by 13x. The core is a
+    structured sequence (15 x STS(16) + 2 x gold(128)), so a one-sample shift
+    decorrelates it against itself.
+
+    Searching for the matched-filter peak instead is index-INSENSITIVE: the
+    peak sits at the true position wherever the search starts, so the phase
+    read there does not carry the detector's error. Modelled at 0.0000 Hz error
+    and 0.0000 spread for index jitter up to 5 samples.
+    """
+    best = (-1.0, None, None)
+    lo = max(0, near - span)
+    hi = min(len(win) - len(gold_rep), near + span)
+    for j in range(lo, hi + 1):
+        v = np.vdot(gold_rep, win[j:j + len(gold_rep)])
+        a = abs(v)
+        if a > best[0]:
+            best = (a, j, v)
+    return best[1], best[2]
+
+
+def stage3(v_a, v_b, lag, coarse_norm):
+    """Frame-to-frame carrier phase from two matched-filter peak values."""
+    r = np.conj(v_a) * v_b
     if r == 0:
         return float("nan")
     f = -np.angle(r) / (2 * math.pi * lag)
@@ -255,7 +284,7 @@ def main():
         # the core start. A slice is one frame long, so exactly one beacon lands
         # in it -- but the beacon can straddle the slice boundary, so skip any
         # detection too close to either edge rather than reading past it.
-        cores, pos = [], []
+        cores, pos, peaks, ppos = [], [], [], []
         for k in range(a.frames + 1):
             sl = c[k * FRAME:(k + 1) * FRAME]
             idx, ratio = find_beacon(sl, sense_gold, a.corr_scale)
@@ -266,6 +295,13 @@ def main():
                 continue
             cores.append(c[start:start + CORE])
             pos.append(start)
+            # Stage 3's own observable: the matched-filter peak, FOUND rather
+            # than assumed. `idx` is the detector's estimate of the 2nd gold
+            # rep; search around it and keep where the peak actually is.
+            jj, vv = mf_peak(c, sense_gold, k * FRAME + idx)
+            if jj is not None:
+                peaks.append(vv)
+                ppos.append(jj)
         if len(cores) < 2:
             aborted += 1
             print("  window %d: only %d beacon(s) found" % (w + 1, len(cores)))
@@ -277,14 +313,14 @@ def main():
             continue
         s2avg = sum(s2) / len(s2)
         s2_all += [v * RATE for v in s2]
-        for k in range(len(cores) - 1):
-            lag = pos[k + 1] - pos[k]
+        for k in range(len(peaks) - 1):
+            lag = ppos[k + 1] - ppos[k]
             # Only ADJACENT frames carry a usable stage-3 range. A missed
             # detection makes the lag 2+ frames and shrinks the window below
             # what stage 2 can unwrap, so drop the pair rather than report it.
             if not (0.9 * FRAME < lag < 1.1 * FRAME):
                 continue
-            v = stage3(cores[k], cores[k + 1], lag, s2avg)
+            v = stage3(peaks[k], peaks[k + 1], lag, s2avg)
             if v == v:
                 s3_all.append(v * RATE)
 
