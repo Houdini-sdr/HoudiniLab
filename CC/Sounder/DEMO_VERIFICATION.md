@@ -414,6 +414,8 @@ exactly the code path the merge would ship** [user 2026-09-02].
 | 8 | **AP-51.** `HOUDINI_BS_RX_DEBUG=1 HOUDINI_BS_RX_EVERY=1 HOUDINI_CFO_LOG_EVERY=1`, then `two_way_transfer.py --log` | whether the de-embed machinery works. **NOT whether Doppler separates** -- the bench is wired, so rdot/c is 0 by construction and a clean result validates the machinery only | one run, large log |
 | 9 | **AP-52.** Sweep `HOUDINI_ESCALATE_EPISODES`, `HOUDINI_HOLD_OFFGRID`, `HOUDINI_RESYNC_RETRY_MAX`, `HOUDINI_SCATTER_TOL_US` one at a time against leg 1's baseline | which of AP-52's four "what can go now" items survive contact with the steered regime | one knob per run, baseline between |
 | 10 | **AP-10.** Watch for the RX-gap and TX-failure reporting during legs 1-3 | its FIRST silicon validation; the fix has been built and unvalidated since it was written | same 3 runs |
+| 11 | **AP-41.** `HOUDINI_TRACKER=kf` for 3 runs against leg 1's alpha-beta baseline. Record rate residual, escalations, and the `sigma_t` the filter reports | keep / improve / defer on the kalman. **The offline A/B predicts 77x better rate error robust-vs-robust, and that is a PREDICTION from a chosen noise model, not a result.** If the bench disagrees, the bench is right | `HOUDINI_TRACKER=kf`, everything else default |
+| 12 | **AP-41's gate matters.** One run at `HOUDINI_TRACKER=kf HOUDINI_KF_INNOV_GATE=0` | whether the innovation gate is load-bearing on silicon as it is offline, where removing it makes the kalman arm the worst of the four | one run |
 
 Two standing rules for the session. **Run logs backing any row land in
 `tests/demo-verify/evidence/`** and are cited by that path, per the provenance
