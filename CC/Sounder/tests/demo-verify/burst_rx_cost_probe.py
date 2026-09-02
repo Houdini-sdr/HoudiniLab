@@ -157,33 +157,58 @@ def main():
         except Exception as e:
             print("  getHardwareTime failed: %s" % e)
             break
-        # Arm a whole number of frames ahead so the burst lands on a frame
-        # boundary; the exact phase does not matter for a COST measurement.
-        when = int(now_ns + a.lead_frames * (FRAME / RATE) * 1e9)
+        # THE START TIME MUST BE A WHOLE MILLISECOND. The driver rejects an
+        # off-boundary arm outright rather than snapping it: "start N ns must be
+        # a whole millisecond (a multiple of 1000000 ns; or, with a TDD schedule
+        # engaged, on the 3125 ns TDD window grid); off-boundary is rejected,
+        # not snapped". Measured 2026-09-02: 120 of 120 arms refused because
+        # this line added a frame offset to an ARBITRARY `now`, and the probe's
+        # own verdict block then reported "the driver does not accept a timed RX
+        # burst on this build" -- filing a client-side arithmetic bug as a
+        # driver-contract finding, which is exactly the mistake its docstring
+        # warns the reader about.
+        #
+        # The frame is 122880 samples at 122.88 MSPS = exactly 1 ms, so whole
+        # millisecond alignment IS frame alignment here; snap UP so the target
+        # is never already in the past.
+        target = now_ns + a.lead_frames * (FRAME / RATE) * 1e9
+        when = int((int(target) // 1000000 + 1) * 1000000)
         t0 = time.perf_counter()
         r = dev.activateStream(rxs, SOAPY_SDR_HAS_TIME | SOAPY_SDR_END_BURST,
                                when, a.nsamps)
         t1 = time.perf_counter()
+        # RECORD THE ARM COST UNCONDITIONALLY. The arm is complete at t1
+        # whatever the read then does, and appending it only on a successful
+        # read measures the subset of arms whose reads happened to work -- a
+        # selection bias on the single number this probe exists to produce, and
+        # it mattered here because half the reads were failing for an unrelated
+        # reason (see the deactivate note below).
         if r != 0:
             arm_fail += 1
             continue
+        arm_us.append((t1 - t0) * 1e6)
         sr = dev.readStream(rxs, [buf], a.nsamps,
                             timeoutUs=int(2e6 + a.lead_frames * 1e3))
         t2 = time.perf_counter()
-        # Same rule as leg A. A MISSED slot is ret <= 0: the burst ended and
-        # nothing came back, which IS the cost AP-43 names. A truncated read is
-        # the ordinary platform behaviour and its timing still measures what
-        # this probe is here to measure.
+        # DEACTIVATE AFTER EVERY BURST, not only after a failed one. An
+        # END_BURST read that SUCCEEDS also leaves the stream needing a fresh
+        # activate, and without this every second arm landed on a stream that
+        # was not ready: measured 2026-09-02, EXACTLY half the bursts returned
+        # nothing in all six configurations tried (60/120, 40/80, 40/80, 40/80,
+        # 50/100, 50/100). "Exactly half, every time, independent of the lead"
+        # is the shape of a state-machine bug in the caller, not of a late arm,
+        # and it was reported as the latter.
+        try:
+            dev.deactivateStream(rxs)
+        except Exception:
+            pass
+        # A MISSED slot is ret <= 0. A truncated read is ordinary here and its
+        # timing still measures what this probe is for.
         if sr.ret <= 0:
             late += 1
-            try:
-                dev.deactivateStream(rxs)
-            except Exception:
-                pass
             continue
         if sr.ret != a.nsamps:
             brd_short += 1
-        arm_us.append((t1 - t0) * 1e6)
         brd_us.append((t2 - t1) * 1e6)
         brd_got.append(sr.ret)
     try:
@@ -197,7 +222,11 @@ def main():
     show("read after arm", stats(brd_us), a.nsamps)
     show("arm + read", stats([x + y for x, y in zip(arm_us, brd_us)]), a.nsamps)
     if arm_fail:
-        print("  %d arm(s) refused by the driver" % arm_fail)
+        print("  %d arm(s) REFUSED by the driver (activateStream returned "
+              "non-zero). Read the driver's own error line above before "
+              "concluding anything: an off-boundary start time is refused "
+              "outright, and that is a bug in this script's arithmetic rather "
+              "than a statement about the contract." % arm_fail)
     if late:
         print("  %d burst(s) returned NOTHING -- a LATE ARM misses the slot "
               "outright, which is the cost AP-43 names" % late)
@@ -217,9 +246,11 @@ def main():
         print("  rather than an AP-43 result. Check the link before rerunning.")
         return 1
     if not cb or not tb:
-        print("  NO BURST DATA. If every arm was refused, the driver does not")
-        print("  accept a timed RX burst on this build and THAT is the finding:")
-        print("  the item becomes a driver ask, not an application change.")
+        print("  NO BURST DATA. Before concluding anything about the driver,")
+        print("  check WHY the arms failed -- the driver prints a specific")
+        print("  reason and an off-boundary start time is a bug in this script,")
+        print("  not a contract limitation. Only a refusal the driver attributes")
+        print("  to the BURST MODE ITSELF makes this a driver ask.")
         return 1
     print("  continuous, drain + read   %8.1f us" % ta["mean"])
     print("  burst, arm + read          %8.1f us" % tb["mean"])

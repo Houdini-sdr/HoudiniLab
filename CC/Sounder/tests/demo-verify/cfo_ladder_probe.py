@@ -32,12 +32,24 @@ comparison, not this script's own numbers, is what decides AP-41's fusion.
 """
 import argparse
 import math
+import os
 import sys
 
 import numpy as np
 
 import SoapySDR
 from SoapySDR import SOAPY_SDR_CS16, SOAPY_SDR_RX
+
+# THE PROBE MUST ARM THE BS BEACON ITSELF. An earlier cut opened only the UE and
+# read, on the assumption that a beacon would be on the air. Nothing puts one
+# there unless the sounder is running or a probe arms it, so the first two runs
+# on silicon found 0 beacons in 24 windows with detector ratios of ~3e-7, six
+# orders below the 0.36-5.8 the sibling probes measure. That is the signature of
+# correlating against noise, not of a weak link, and reporting it as "0 beacons
+# found" would have read as a dead bench. Reuse the same BS helper
+# clock_drift_probe uses rather than writing a second one.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from two_node_beacon_arrival import Bs  # noqa: E402
 
 # SoapyRemote's `timeout` device arg is MICROSECONDS and bounds the make() RPC.
 # A cold make runs the full RFDC bring-up and measures 3.34 s on this bench, so
@@ -148,6 +160,11 @@ def capture(dev, rxs, nsamps, chunk=1 << 16):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ue", required=True, help="UE board IP")
+    ap.add_argument("--bs", required=True, help="BS board IP (this probe arms "
+                                                "the beacon itself)")
+    ap.add_argument("--core", default="beacon_core.bin",
+                    help="beacon core IQ, loaded into the BS TX RAM")
+    ap.add_argument("--tx-ch", type=int, default=1)
     ap.add_argument("--ch", type=int, default=1)
     ap.add_argument("--gold", default="gold.bin")
     ap.add_argument("--freq", type=float, default=500e6)
@@ -172,6 +189,22 @@ def main():
     # sibling probes try the pair and print which won. Trying only one makes a
     # sense mismatch indistinguishable from a dead link.
     senses = [("gold", gold), ("conj", np.conj(gold))]
+
+    # Arm the BS first, and CHECK it is actually playing. A silent BS makes
+    # every downstream number a measurement of noise.
+    cc = np.fromfile(a.core, dtype=np.int16).astype(np.float64)
+    cc = cc[0::2] + 1j * cc[1::2]
+    pk = np.max(np.abs(cc)) or 1.0
+    ram = np.zeros(2 * len(cc), dtype=np.int16)
+    ram[0:2 * len(cc):2] = np.round(cc.real / pk * 0.6 * 32767).astype(np.int16)
+    ram[1:2 * len(cc):2] = np.round(cc.imag / pk * 0.6 * 32767).astype(np.int16)
+    bs = Bs(a.bs, ram, a.tx_ch)
+    bs.open_and_arm()
+    if not bs.liveness():
+        print("BS beacon is NOT alive. Everything below would be a measurement")
+        print("of noise, so stopping here rather than reporting zero beacons.")
+        return 1
+    print("BS %s beacon armed and playing" % a.bs)
 
     dev = SoapySDR.Device(dict(driver="houdinisdr",
                                remote="tcp://%s:55132" % a.ue,
@@ -207,6 +240,15 @@ def main():
                 _idx, rr = find_beacon(c[:FRAME], g, a.corr_scale)
                 if rr > best[0]:
                     best = (rr, nm, g)
+            # A ratio orders below the 0.36-5.8 this bench measures means there
+            # is nothing to lock onto. Say that, rather than reporting "0
+            # beacons found" window after window as though the link were dead.
+            if best[0] < 0.05:
+                print("  best detector ratio %.3g is far below anything this "
+                      "bench produces (0.36-5.8 measured): the UE is seeing "
+                      "noise, not a beacon. Check the BS arm and the cabling."
+                      % best[0])
+                return 1
             _, sense_name, sense_gold = best
             print("  replica sense = %s (best ratio %.3g)" % (sense_name, best[0]))
         # Find one beacon per frame slice, then convert the detector index to
