@@ -265,6 +265,12 @@ add_test(NAME beacon_geometry COMMAND beacon_geometry_test)
 
 # HIL helper: transmit the real Gold beacon from a Houdini board so a Houdini UE
 # running the unmodified receiver.cc client-sync path can acquire it.
+add_executable(beacon_shape_dump
+    tests/comms-func/beacon_shape_dump.cc
+    comms-lib.cc comms-lib-portable.cc utils.cc)
+target_include_directories(beacon_shape_dump PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(beacon_shape_dump -lpthread ${MUFFT_LIBRARIES})
+
 add_executable(beacon_tx_gold
     tests/comms-func/beacon_tx_gold.cc
     comms-lib.cc

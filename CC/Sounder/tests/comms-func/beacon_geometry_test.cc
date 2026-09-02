@@ -52,6 +52,7 @@
 
 #include "include/beacon_shapes.h"
 #include "include/comms-lib.h"
+#include "include/utils.h"
 
 namespace {
 
@@ -219,6 +220,45 @@ int main() {
     const Row r = sweepAt(b, 200.0, Pick::kTargetedArgmax);
     check(r.miss == 0 && r.lo == kEndConvention && r.hi == kEndConvention,
           "  " + b.name + ": detected at 200 counts peak, index exact");
+  }
+
+  // THE CHECK THAT WOULD HAVE PREVENTED AP-34(a). beacon_shapes.h is about to
+  // become the thing Config::genPilots builds from, and the bench probes already
+  // read its dumped waveforms. If the header's `legacy` ever stops being the
+  // beacon config actually transmits, the bench measures one waveform and the
+  // build ships another -- which is exactly how a guard variant reached silicon
+  // with nobody having derived its index convention. So rebuild config.cc's
+  // beacon here, by its own recipe (genPilots: 15 x STS(16) then 2 x gold(128),
+  // each through Utils::float_to_cint16), and require sample equality.
+  {
+    auto sts_ci16 = Utils::float_to_cint16(CommsLib::getSequence(CommsLib::STS_SEQ));
+    auto gold_ci16 = Utils::float_to_cint16(CommsLib::getSequence(CommsLib::GOLD_IFFT));
+    std::vector<std::complex<int16_t>> want;
+    for (int i = 0; i < 15; ++i)
+      want.insert(want.end(), sts_ci16.begin(), sts_ci16.end());
+    for (int i = 0; i < 2; ++i)
+      want.insert(want.end(), gold_ci16.begin(), gold_ci16.end());
+
+    const auto legacy = beacon_shapes::make(Shape::kLegacy);
+    std::vector<std::complex<int16_t>> got;
+    {
+      std::vector<std::complex<float>> f(legacy.core.begin(), legacy.core.end());
+      got = Utils::cfloat_to_cint16(f);
+    }
+    bool same = want.size() == got.size();
+    size_t first_diff = 0;
+    if (same) {
+      for (size_t i = 0; i < want.size(); ++i) {
+        if (want[i] != got[i]) { same = false; first_diff = i; break; }
+      }
+    }
+    if (!same && want.size() == got.size())
+      std::printf("      first difference at sample %zu: config (%d,%d) vs "
+                  "beacon_shapes (%d,%d)\n", first_diff,
+                  want[first_diff].real(), want[first_diff].imag(),
+                  got[first_diff].real(), got[first_diff].imag());
+    check(same,
+          "  beacon_shapes 'legacy' is sample-identical to Config::genPilots");
   }
 
   std::printf("\nRESULT: %s (%d failure(s))\n", g_fail ? "FAIL" : "PASS", g_fail);
