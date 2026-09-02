@@ -139,14 +139,43 @@ def mf_peak(win, gold_rep, near, span=16):
     return best[1], best[2]
 
 
-def stage3(v_a, v_b, lag, coarse_norm):
-    """Frame-to-frame carrier phase from two matched-filter peak values."""
+def stage3_phase(v_a, v_b):
+    """RAW frame-to-frame phase difference, radians. No unwrap, no scaling."""
     r = np.conj(v_a) * v_b
-    if r == 0:
-        return float("nan")
-    f = -np.angle(r) / (2 * math.pi * lag)
+    return float("nan") if r == 0 else float(-np.angle(r))
+
+
+def stage3_unwrap(phases, lag, coarse_norm):
+    """AVERAGE IN THE PHASE DOMAIN, THEN UNWRAP ONCE.
+
+    The previous version unwrapped every pair independently against stage 2 and
+    then averaged the results. That is backwards and it was the whole bug. Each
+    unwrap does `round((coarse - f) / amb)` with amb = 1/lag, so it must decide
+    which 1000 Hz ambiguity bin the pair belongs to using a stage-2 estimate
+    whose per-shot spread is 400-1500 Hz on this bench. It gets that decision
+    wrong often enough that the ROUNDING, not the measurement, dominates: the
+    output spread came out ~474 Hz, roughly half an ambiguity step, which is the
+    signature of occasional bin errors rather than of noisy phase.
+
+    The phases themselves are excellent. Measured directly on silicon
+    2026-09-02: circular resultant R = 0.9919 and 0.9952 over 160 pairs,
+    circular sd 0.10-0.13 rad, which at this lag is about 20 Hz per pair.
+
+    So: average the phases first, where they are tightly clustered and a
+    circular mean is well conditioned, and unwrap that ONE well-determined value
+    against stage 2. One rounding decision for the whole run instead of one per
+    pair, and it is made on a quantity with ~1/sqrt(n) less noise.
+    """
+    ph = np.asarray([p for p in phases if p == p])
+    if len(ph) == 0:
+        return float("nan"), 0.0, 0
+    # Circular mean: the right average for angles, and it degrades gracefully
+    # if the cluster ever does spread out (R falls, which the caller reports).
+    z = np.mean(np.exp(1j * ph))
+    R = float(np.abs(z))
+    f = float(np.angle(z)) / (2 * math.pi * lag)
     amb = 1.0 / lag
-    return f + round((coarse_norm - f) / amb) * amb
+    return f + round((coarse_norm - f) / amb) * amb, R, len(ph)
 
 
 def sd(xs):
@@ -207,6 +236,11 @@ def main():
     # siblings lock cleanly. The ledger already records that trap -- the
     # detector ratio is not an absolute, it moves with link level.
     ap.add_argument("--corr-scale", type=float, default=10.0)
+    ap.add_argument("--coarse-hz", type=float, default=0.0,
+                    help="unwrap reference in Hz. Default 0 is correct while "
+                         "|offset| < 500 Hz (|eps| < 1 ppm at 500 MHz). For a "
+                         "free-running pair supply the TIMING channel's eps * "
+                         "carrier; never stage 2, which is too noisy.")
     a = ap.parse_args()
 
     gold = np.fromfile(a.gold, dtype=np.complex64).astype(np.complex128)
@@ -252,6 +286,8 @@ def main():
           % (a.frames + 1, nsamps, nsamps * 4 / 1e6, a.windows))
 
     s2_all, s3_all, aborted, shorts_total = [], [], 0, 0
+    s3_phase, s3_lag = [], []      # raw phases, unwrapped ONCE at the end
+    ramp_drift = []                # per-window arrival drift, samples
     sense_name, sense_gold = None, None
     for w in range(a.windows):
         c, err, shorts = capture(dev, rxs, nsamps)
@@ -313,6 +349,21 @@ def main():
             continue
         s2avg = sum(s2) / len(s2)
         s2_all += [v * RATE for v in s2]
+        # The beacon POSITIONS in this same capture are an arrival ramp, and
+        # its slope is the timing eps -- measured simultaneously, on the same
+        # samples, for free. That is a far better unwrap reference than stage 2.
+        # The arrival ramp within ONE window is NOT usable as a reference here,
+        # and the arithmetic says so before any data does: at 0.3 ppm the slip is
+        # 0.037 samples per frame, so across a 9-frame window the total drift is
+        # 0.3 samples -- below the integer quantisation of the detected position.
+        # The fit then returns ~0 and only LOOKS right because 0 Hz happens to
+        # sit inside the ambiguity window at this eps. Measured 2026-09-02: it
+        # printed "+0.0 Hz" on four consecutive runs. Recorded, and the drift is
+        # reported so the caller can see when a longer window would make it
+        # usable (about 290 frames at this eps for 10 samples of drift).
+        if len(ppos) >= 3:
+            drift = float(ppos[-1] - ppos[0]) - FRAME * (len(ppos) - 1)
+            ramp_drift.append(drift)
         for k in range(len(peaks) - 1):
             lag = ppos[k + 1] - ppos[k]
             # Only ADJACENT frames carry a usable stage-3 range. A missed
@@ -320,24 +371,85 @@ def main():
             # what stage 2 can unwrap, so drop the pair rather than report it.
             if not (0.9 * FRAME < lag < 1.1 * FRAME):
                 continue
-            v = stage3(peaks[k], peaks[k + 1], lag, s2avg)
-            if v == v:
-                s3_all.append(v * RATE)
+            ph = stage3_phase(peaks[k], peaks[k + 1])
+            if ph == ph:
+                s3_phase.append(ph)
+                s3_lag.append(lag)
 
     dev.deactivateStream(rxs)
     dev.closeStream(rxs)
 
     print("\n=== ladder over %d window(s), %d aborted, %d short read(s) "
           "stitched ===" % (a.windows, aborted, shorts_total))
-    if not s2_all or not s3_all:
-        print("NO RESULT: stage2 n=%d stage3 n=%d" % (len(s2_all), len(s3_all)))
+    # Check the RAW phase list, not s3_all: the latter is not populated until
+    # the single unwrap below, which is the whole point of the new ordering.
+    if not s2_all or not s3_phase:
+        print("NO RESULT: stage2 n=%d stage3 phases n=%d"
+              % (len(s2_all), len(s3_phase)))
         return 1
-    m2, m3 = float(np.mean(s2_all)), float(np.mean(s3_all))
-    d2, d3 = sd(s2_all), sd(s3_all)
+    # UNWRAP AGAINST THE TIMING CHANNEL, NOT STAGE 2. Stage 2's mean wanders
+    # by more than half an ambiguity step on this bench (+200, -142, +336 Hz
+    # measured across three runs), and one bad run then puts the whole answer
+    # exactly 1000 Hz out -- observed 2026-09-02, a paired run reading
+    # +2.2275 ppm against a timing truth of +0.2571 while its neighbour read
+    # +0.2581. The timing eps from THIS capture's own beacon arrivals is good to
+    # ~0.001 ppm, which is 0.5 Hz at 500 MHz and comfortably inside the +-500 Hz
+    # window, and it costs no extra device time because the positions are
+    # already in hand. Fall back to stage 2 only if the ramp is unavailable.
+    # WHAT THE UNWRAP NEEDS is a reference within +-RATE/(2*FRAME) = +-500 Hz of
+    # the truth. It does NOT need precision, and it must not come from a noisy
+    # source, because being wrong by more than the window puts the whole answer
+    # exactly 1000 Hz out.
+    #
+    # STAGE 2 IS NEVER THAT SOURCE. Its mean wandered +200 / -142 / +336 / +764 /
+    # +647 Hz across five runs on a link whose true offset was 120-150 Hz. An
+    # earlier version of this code used stage 2 whenever |stage2| > 500 Hz, on
+    # the reasoning that zero might then be unsafe -- which inverted the logic
+    # and caused exactly the failure it meant to prevent: two of three paired
+    # runs came out 1000 Hz wrong (+2.2849 and +2.2409 ppm against timing truths
+    # of +0.3004 and +0.2402) while the one run that used zero was right.
+    #
+    # So: ZERO by default, which is correct whenever |eps| * f_carrier < 500 Hz
+    # (|eps| < 1.0 ppm at 500 MHz) and, unlike stage 2, cannot wander. For a
+    # free-running pair at 8.5 ppm the offset is 4260 Hz, four steps out, and the
+    # caller must supply --coarse-hz from a source that is actually accurate --
+    # the timing channel, not this beacon's own stage 2.
+    amb_hz = RATE / (2.0 * FRAME)
+    coarse_hz = a.coarse_hz
+    coarse_src = ("--coarse-hz" if a.coarse_hz != 0.0
+                  else "zero (valid while |offset| < %.0f Hz)" % amb_hz)
+    s2m = float(np.mean(s2_all))
+    if abs(s2m) > 3 * amb_hz and a.coarse_hz == 0.0:
+        # Stage 2 is too noisy to unwrap with, but 3x the window is far enough
+        # out to be worth saying. Warn; do NOT silently switch to it.
+        print("  NOTE: stage 2 reads %+.0f Hz, past 3x the +-%.0f Hz window a"
+              % (s2m, amb_hz))
+        print("  zero reference covers. Stage 2 is too noisy to unwrap with, so")
+        print("  this run still uses zero. If the link really is that far off,")
+        print("  pass --coarse-hz from the timing channel; a wrong bin shows up")
+        print("  as an answer exactly %.0f Hz out." % (2 * amb_hz))
+    s2avg_norm = coarse_hz / RATE
+    lag_med = float(np.median(s3_lag)) if s3_lag else FRAME
+    f3, R3, n3 = stage3_unwrap(s3_phase, lag_med, s2avg_norm)
+    m3 = f3 * RATE
+    # The per-pair spread, reported in Hz, is now the honest measurement noise
+    # rather than the rounding noise the old code produced.
+    ph = np.asarray(s3_phase)
+    d3 = float(np.std(ph, ddof=1)) * RATE / (2 * math.pi * lag_med) if len(ph) > 1 else 0.0
+    print("  unwrap reference: %+.1f Hz from %s" % (coarse_hz, coarse_src))
+    print("  stage 3 phase cluster: R = %.4f over %d pairs (1 = coherent, "
+          "0 = uniform)" % (R3, n3))
+    if R3 < 0.7:
+        print("  WARNING: the phases are NOT tightly clustered, so the single")
+        print("  unwrap below is not well conditioned. Treat the result as")
+        print("  suspect and look at the beacon before believing it.")
+    s3_all = [m3]
+    m2 = float(np.mean(s2_all))
+    d2 = sd(s2_all)
     print("  stage 2  n=%4d  mean %+10.2f Hz  sd %9.2f Hz  sem %7.2f"
           % (len(s2_all), m2, d2, d2 / math.sqrt(len(s2_all))))
-    print("  stage 3  n=%4d  mean %+10.4f Hz  sd %9.4f Hz  sem %7.4f"
-          % (len(s3_all), m3, d3, d3 / math.sqrt(len(s3_all))))
+    print("  stage 3  n=%4d  mean %+10.4f Hz  per-pair sd %9.4f Hz  sem %7.4f"
+          % (n3, m3, d3, d3 / math.sqrt(max(1, n3))))
     if d3 > 0:
         print("  precision gain per shot: %.0fx" % (d2 / d3))
     print("  stage 3 vs stage 2 mean:  %+.2f Hz" % (m3 - m2))
