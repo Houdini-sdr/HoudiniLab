@@ -21,6 +21,7 @@ exception, because the hold is bench state that outlives this process.
 """
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -66,10 +67,23 @@ def set_offset(dev, cal_dac, off):
 def measure_eps(probe, gold, core, dwell, tag, outdir):
     """One clock_drift_probe run -> eps in ppm from the beacon arrival ramp."""
     out = "%s/steercal_%s.json" % (outdir, tag)
+    # NEVER read a stale result. The path is deterministic, so a probe that
+    # dies leaves the PREVIOUS sweep point's json in place, json.load succeeds
+    # on it, and that stale eps enters the least-squares fit -- corrupting the
+    # very ppm-per-count gain the steering loop then hardcodes. Remove first,
+    # and check the exit status.
+    try:
+        os.unlink(out)
+    except FileNotFoundError:
+        pass
     cmd = ["python3", probe, "--duration", str(dwell), "--label", tag,
            "--gold", gold, "--core", core, "--out", out]
-    subprocess.run(cmd, check=False, stdout=subprocess.DEVNULL,
-                   stderr=subprocess.DEVNULL)
+    rc = subprocess.run(cmd, check=False, stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL)
+    if rc.returncode != 0:
+        print("  probe exited %d for %s -- treating as no measurement"
+              % (rc.returncode, tag))
+        return None, None, None
     try:
         d = json.load(open(out))
     except Exception:

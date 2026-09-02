@@ -62,7 +62,16 @@ def bin_phase(t, x, tau0):
         if m.sum() == 0:
             tb.append(np.nan); xb.append(np.nan); cnt.append(0)
         else:
-            tb.append(lo + tau0 / 2); xb.append(x[m].mean()); cnt.append(int(m.sum()))
+            # Timestamp the bin at the MEAN DETECTION TIME, not the bin
+            # centre. Detections arrive irregularly, so their mean time wanders
+            # from the centre by ~tau0/sqrt(12n); against a real ppm ramp that
+            # wander converts straight into per-bin phase error -- white in
+            # phase, so it yields an ADEV falling as 1/tau and a FLAT
+            # drift-in-samples column. That is exactly the "measurement floor"
+            # plateau this tool reported, and it scales with eps, so it is
+            # absent at eps=0 and largest on the fastest leg: it masquerades as
+            # a clock property while being the binning's own artifact.
+            tb.append(float(t[m].mean())); xb.append(x[m].mean()); cnt.append(int(m.sum()))
     return np.array(tb), np.array(xb), np.array(cnt)
 
 

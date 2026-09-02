@@ -1444,8 +1444,29 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   // resync PERIOD is already rate-invariant because the frame itself is defined
   // in samples (30 slots x 4096). Only this tolerance was wrong.
   const double kScatterTolUs = envDouble("HOUDINI_SCATTER_TOL_US", 8.3333);
-  const long long kScatterTol =
-      std::max<long long>(1, llround(kScatterTolUs * 1e-6 * config_->rate()));
+  // CLAMPED TO WHAT THE READ WINDOW CAN HOLD. The targeted slice needs
+  // 2*tol + 2*kGoldLen + kGoldLen/2 samples inside request_samples, which is
+  // samps_per_slot -- pure OFDM geometry that does NOT scale with the rate.
+  // Without this clamp the time-based tolerance overruns it above ~226 MSPS
+  // (at 245.76 the slice wants 4416 of 4096) and the accept interval is EMPTY
+  // every frame: no search, no observation, no miss counted, so not even the
+  // exhausted-episode escalation fires. The UE would fly open loop with no
+  // telemetry at all -- silence being the worst possible failure here. Same
+  // trap at the shipped rate if HOUDINI_SCATTER_TOL_US is raised past ~15.
+  const long long kSlotCap =
+      (static_cast<long long>(config_->samps_per_slot()) -
+       (2 * kGoldLen + kGoldLen / 2)) / 2;
+  long long scatter_tol_want = llround(kScatterTolUs * 1e-6 * config_->rate());
+  if (scatter_tol_want > kSlotCap) {
+    MLPD_WARN(
+        "scatter tolerance %.2f us = %lld samples exceeds what a %zu-sample "
+        "slot can present (cap %lld); clamping. The gate is now %.2f us -- at "
+        "this rate the slot geometry, not the tolerance, is the limit.\n",
+        kScatterTolUs, scatter_tol_want, config_->samps_per_slot(), kSlotCap,
+        kSlotCap / config_->rate() * 1e6);
+    scatter_tol_want = kSlotCap;
+  }
+  const long long kScatterTol = std::max<long long>(1, scatter_tol_want);
   // Single place that knows the wire's fixed fields, so no call site can forget
   // the geometry the page needs to convert to ppm.
   // WEAK is the only branch that does not clear `resync`, so it repeats at the
@@ -1588,7 +1609,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   // jitter straight into the TX schedule. ref is re-anchored to the newest
   // observation on every update, so the extrapolation distance stays one
   // update gap (~115 frames) instead of growing without bound from k = 0.
-  double houdini_frame_period = houdini_boot_period;
+  double houdini_frame_period = houdini_boot_period;  // clamped just below
   // Physically plausible band for the BS frame period seen in UE samples. A
   // +-100 ppm bound is generous against any crystal pair (our measured pair is
   // 8.5 ppm) and exists only to stop a single bad observation from parking the
@@ -1599,6 +1620,13 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
       static_cast<double>(config_->samps_per_frame()) * (1.0 - kGridMaxPpm * 1e-6);
   const double kGridPeriodHi =
       static_cast<double>(config_->samps_per_frame()) * (1.0 + kGridMaxPpm * 1e-6);
+  // The bootstrap is a wholesale write too, and acquisition has no band of its
+  // own: a confirm accepted at small k with a large residual can hand back a
+  // wildly implausible rate (resid 640 over k=4 is ~1300 ppm, 150x the real
+  // offset). Clamp on the way in so no path installs a period the incremental
+  // update would have rejected.
+  houdini_frame_period =
+      std::min(kGridPeriodHi, std::max(kGridPeriodLo, houdini_frame_period));
   // Count tracker updates so an escalation knows whether its own learned rate
   // is better than a fresh confirm-derived one (below).
   size_t houdini_grid_updates = 0;
@@ -1670,6 +1698,10 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
       const double disagree_ppm =
           std::fabs(fresh_period - houdini_frame_period) /
           static_cast<double>(config_->samps_per_frame()) * 1e6;
+      // Clamp the confirm's value the same way the incremental update is
+      // clamped: houdiniAcquireAnchor has no band of its own, so without this
+      // the two wholesale writes bypass the only guard in the system.
+      fresh_period = std::min(kGridPeriodHi, std::max(kGridPeriodLo, fresh_period));
       if (houdini_grid_updates == 0 || disagree_ppm > kGridTrustPpm) {
         if (houdini_grid_updates != 0) {
           MLPD_WARN(
@@ -1869,7 +1901,18 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
           const long long cfo_guard =
               static_cast<long long>(envDouble("HOUDINI_CFO_INDEX_GUARD", 8.0));
           long long cfo_index = sync_index - resid + cfo_guard;
-          if (cfo_index > request_samples) cfo_index = sync_index;  // fall back
+          // BOTH bounds. estimateCFO returns 0.0f for start < 0 with no warning
+          // and no counter, and the caller cannot tell that apart from a real
+          // zero -- so an out-of-range index would be logged as a genuine
+          // "beacon +0.0 Hz" reading in the very line whose job is to keep the
+          // disagreement visible. resid is only bounded by half a frame at this
+          // point (the +-kScatterTol gate is below), so the low side is
+          // reachable on any off-grid detection: exactly when the reading
+          // matters most.
+          if (cfo_index > request_samples ||
+              cfo_index < static_cast<long long>(kBeaconCoreLen)) {
+            cfo_index = sync_index;  // fall back to the detector's own index
+          }
           const float cfo_norm =
               estimateCFO(reinterpret_cast<std::complex<int16_t>*>(
                               rxbuff.at(kSyncDetectChannel)),
@@ -2227,6 +2270,8 @@ bool Receiver::houdiniAcquireAnchor(int tid, size_t detect_window,
   bool have_first = false;
   int confirms = 0;
   int hunts = 0;
+  int consecutive_fails = 0;
+  const double kAcqMaxPpm = envDouble("HOUDINI_ACQ_MAX_PPM", 100.0);
   double period = static_cast<double>(fr);  // coarse after stage 2, fine after 3
   while (config_->running()) {
     if (++hunts > kMaxHunts) {
@@ -2258,9 +2303,20 @@ bool Receiver::houdiniAcquireAnchor(int tid, size_t detect_window,
         abs_end - (first_abs + llround(static_cast<double>(k) * period));
     if (k != 0 && std::llabs(resid) <= kConfirmTol) {
       ++confirms;
-      // Every accepted detection improves the rate: resid/k is the period
-      // error over a span of k REAL frames.
-      period += static_cast<double>(resid) / static_cast<double>(k);
+      // Every accepted detection improves the rate: resid/k is the period error
+      // over a span of k REAL frames -- but the gain is 1/k and k is SMALL
+      // early, which the full-frame window made the common case rather than the
+      // rare one (each hunt is about one read, so k advances a few frames at a
+      // time). A scatter outlier accepted at k=4 with resid at the 640
+      // tolerance moves the period by 160 samples/frame, about 1300 ppm and 150
+      // times the real offset. Bound it to a physically plausible band, the
+      // same guard the tracker applies to its own updates.
+      const double cand =
+          period + static_cast<double>(resid) / static_cast<double>(k);
+      const double lo = static_cast<double>(fr) * (1.0 - kAcqMaxPpm * 1e-6);
+      const double hi = static_cast<double>(fr) * (1.0 + kAcqMaxPpm * 1e-6);
+      period = std::min(hi, std::max(lo, cand));
+      consecutive_fails = 0;
       if (confirms >= 2 && k >= kRefineSpan) {
         anchor_out = first_abs - houdiniBeaconEnd(config_);
         if (period_out != nullptr) *period_out = period;
@@ -2284,10 +2340,22 @@ bool Receiver::houdiniAcquireAnchor(int tid, size_t detect_window,
           tid, resid, k);
       first_abs = abs_end;
       confirms = 0;
-      // KEEP the refined period across a failed confirm. The failure says the
-      // ANCHOR was wrong (false lock or a scatter outlier); the two
-      // oscillators did not change, so throwing the rate away only doubles the
-      // baseline this acquisition has to re-earn.
+      // Keep the refined period across a failed confirm ONLY while it is still
+      // plausible. The original reasoning holds -- the failure says the ANCHOR
+      // was wrong and the oscillators did not change -- but it assumed the
+      // period could not itself be the cause. It can: a bad refinement makes
+      // every later prediction wrong, so every confirm fails, and keeping it
+      // unconditionally made that state PERMANENT with no way back short of a
+      // restart. Two consecutive failures means the rate is the suspect.
+      if (++consecutive_fails >= 2) {
+        MLPD_WARN(
+            "houdiniAcquireAnchor [%d]: %d consecutive confirm failures -- "
+            "resetting the period estimate %.4f back to nominal, it is the "
+            "likely culprit\n",
+            tid, consecutive_fails, period);
+        period = static_cast<double>(fr);
+        consecutive_fails = 0;
+      }
     }
   }
   return false;

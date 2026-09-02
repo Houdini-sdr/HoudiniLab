@@ -743,13 +743,16 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
       // reports a tight constellation whether or not it is correctly oriented.
       // arg(mean(u^4))/4 is that missing orientation, modulo 90 deg for QPSK.
       //
-      // Why it matters here: H is estimated in the P slot and applied in the U
-      // slot, (U-P)*samps_per_slot apart, so an uncorrected carrier offset f
-      // leaves a COMMON rotation of 360*f*dt degrees on every data symbol and
-      // nothing in this pipeline removes it (the blind 4th-power search below
-      // corrects a phase RAMP; its score is magnitude-based). Logging the
-      // measured rotation beside the offset predicted from dt turns that from
-      // an argument into a reading.
+      // CORRECTION [Opus review]: an earlier version of this comment claimed
+      // "nothing in this pipeline removes it". That was WRONG, and it is wrong
+      // about code 80 lines above: the blind global 4th-power de-rotation
+      // already rotates `pts` to the ideal constellation before this runs. So
+      // this reading is the RESIDUAL after that de-rotation and is pinned near
+      // zero by construction -- it cannot measure the physical pilot-to-data
+      // rotation, and the campaign's measurement of that (+16.6 deg against
+      // +16.8 predicted at a 700 Hz injection) came from the pilot-tone
+      // intercept below, not from here. Kept as a de-rotation-residual health
+      // line; do not read it as the carrier rotation.
       // Referenced to the IDEAL QPSK constellation, not to zero. The ideal
       // points sit at +-45/+-135 deg, so u^4 = -1 and a RAW arg(u4)/4 reads a
       // constant +-45 deg on a perfectly aligned constellation -- which is
@@ -760,12 +763,21 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
       while (r4 > M_PI) r4 -= 2.0 * M_PI;
       while (r4 <= -M_PI) r4 += 2.0 * M_PI;
       const double rot_deg = r4 / 4.0 * 180.0 / M_PI;
-      const int pslot = cfg_->cl_pilot_slots().at(0).empty()
+      // Guard the OUTER vector too. cl_pilot_slots_/cl_ul_slots_ are indexed by
+      // client schedule LINE, and a BS-only or internal-measurement config has
+      // none -- while this path is reached via the BS-side ul_slots_, so it IS
+      // live there. This runs inside a detached recorder thread with no
+      // try/catch anywhere above it, so an out_of_range here calls
+      // std::terminate and takes the whole sounder down, minutes into an
+      // apparently healthy run (it fires on the 512th good datagram).
+      const auto& cps = cfg_->cl_pilot_slots();
+      const auto& cus = cfg_->cl_ul_slots();
+      const int pslot = (cps.empty() || cps.at(0).empty())
                             ? -1
-                            : static_cast<int>(cfg_->cl_pilot_slots().at(0).at(0));
-      const int uslot = cfg_->cl_ul_slots().at(0).empty()
+                            : static_cast<int>(cps.at(0).at(0));
+      const int uslot = (cus.empty() || cus.at(0).empty())
                             ? -1
-                            : static_cast<int>(cfg_->cl_ul_slots().at(0).at(0));
+                            : static_cast<int>(cus.at(0).at(0));
       const double dt = (pslot >= 0 && uslot >= 0)
                             ? (uslot - pslot) * slot / cfg_->rate()
                             : 0.0;

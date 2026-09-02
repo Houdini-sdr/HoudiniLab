@@ -29,6 +29,7 @@ motion in the frequency domain.
 """
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -58,10 +59,24 @@ def read_state(dev):
 
 def measure_eps(probe, gold, core, dwell, tag, outdir):
     out = "%s/steerloop_%s.json" % (outdir, tag)
-    subprocess.run(["python3", probe, "--duration", str(dwell), "--label", tag,
+    # NEVER read a stale result. The path is deterministic, so a probe that
+    # dies (import error, make() timeout, unhandled fit exception) would
+    # otherwise leave the PREVIOUS point's json in place, json.load would
+    # succeed on it, and the loop would push a DAC code from a measurement
+    # it never took -- converging on, or running away from, stale data with
+    # no diagnostic at all. Remove first, and check the exit status.
+    try:
+        os.unlink(out)
+    except FileNotFoundError:
+        pass
+    rc = subprocess.run(["python3", probe, "--duration", str(dwell), "--label", tag,
                     "--gold", gold, "--core", core, "--out", out],
                    check=False, stdout=subprocess.DEVNULL,
                    stderr=subprocess.DEVNULL)
+    if rc.returncode != 0:
+        print("  probe exited %d for %s -- treating as no measurement"
+              % (rc.returncode, tag))
+        return None, None
     try:
         d = json.load(open(out))
     except Exception:
