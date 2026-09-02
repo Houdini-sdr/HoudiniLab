@@ -330,6 +330,11 @@ eps is defined throughout as (f_BS - f_UE) / f_UE.
 | 8.45 | STATISTICS TRAP, caught mid-analysis and worth carrying: the CNS log lines are NOT a uniform sample. The INFO line prints every 512th datagram while the WARN line prints on power-of-two LOW occurrences, so averaging scores across lines weights rare bad frames enormously and produced an apparent "mean 0.48, 5 low of 9" on a link that was in fact **15 low of 2048**. Read the counters the INFO line carries (`N datagrams, M low`), never the distribution of the lines themselves. Same family as 8.41 | the four-way A/B, mis-analyzed then redone | VERIFIED-HW |
 
 
+| # | claim | evidence | status |
+| --- | --- | --- | --- |
+| 8.46 | **FULL STACK VERIFIED TOGETHER, 3 RUNS, NO REGRESSION.** All of AP-38/39/40/50s1 on by default, calibrated clocks, no injection: **123/133/127 accepted detections, 0 escalations and 0 off-grid in every run**, sync residual sd **0.95/0.69/0.97** (max 4/2/4), CNS low frames **15/2560, 7/3072, 29/3072** (0.23-0.94%), and acquisition locking at **resid 0/1/1 over 207/208/205 frames** -- the deliberate refine span doing its job every time. The tolerance rescaling (AP-40) is confirmed behaviour-neutral at the tuned rate, as designed | `/tmp/leg_fin{1,2,3}.log` | VERIFIED-HW |
+
+
 ## Standing traps (carried from the driver contract, apply to every phase)
 
 1. An unknown or non-writable writeSetting key logs a warning and silently
