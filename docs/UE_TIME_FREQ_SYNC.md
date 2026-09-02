@@ -244,6 +244,49 @@ residual, not the raw uplink rate, and with a converged tracker it goes to zero.
 The UE knows exactly what grid rate it applied, so adding it back de-embeds the
 correction and restores independence.
 
+
+## 10. The cadence and the gate, as measured [2026-09-02]
+
+Sections 1 to 9 were written when the client resynced every 260 ms and the
+alive/moved gate admitted +-1024 samples. Both defaults changed on 2026-09-02,
+and the reasoning is worth carrying because it is the same reasoning that will
+apply next time.
+
+**Neither old value came from a measurement of the thing it governed.** The
+cadence was derived from an ASSUMED 1.0 ppm post-tracking residual. The gate's
++-1024 dated from the era before targeted resync, when the detector could anchor
+hundreds of samples early.
+
+**What the measurements say.** Three 300 s captures, with the binning artifact
+of section 4 fixed, give a proper Allan deviation bathtub: the minimum sits at
+tau = 2 s, drift there is 0.46 to 0.58 samples, and at tau = 20 s it is 18 to 23
+samples against a 32-sample budget. That implies an effective residual of 0.002
+ppm at 2 s and 0.008 at 20 s, so the 1.0 ppm assumption was 120 to 500 times
+pessimistic. Separately, the detection residual under targeted resync measures
+-2 to +3 samples across about twenty runs, worst case 6, so the +-1024 gate was
+roughly 170 times the worst case.
+
+**What was changed, and what was deliberately left.** The cadence went to 2.6 s
+(0.1 ppm assumed), keeping 12 to 50 times margin on the measured rate. The full
+measured margin would be 26 s, and that was NOT taken: 20 s is where the Allan
+deviation data ends and beyond it the number would be an extrapolation rather
+than a measurement. The gate went to 2.0 us, 246 samples, which is 41 times the
+worst observed residual and is the only tighter value that has actually been run
+on silicon.
+
+**A tighter gate finds MORE beacons, not fewer.** This is the counterintuitive
+part and it is worth stating plainly. The targeted search needs a slice of
+kLead + kTail samples inside the read, and both scale with the tolerance. So
+tightening the tolerance shrinks the slice and WIDENS the window of read phases
+that can host an attempt, from 42 % of a slot to 80 %. Measured: 153 accepted
+detections in 60 s against the baseline's 91.
+
+**Consequence for anyone reading a gate result.** The verification campaign in
+DEMO_VERIFICATION section 8 was run against the OLD defaults. A 10x cadence
+means about 10x fewer detections per run, so accept counts and residual standard
+deviations from those runs are not comparable to new ones, and the gate criteria
+have to be restated before the next gate rather than after it.
+
 ## 9. What to keep, and what not to
 
 - **KEEP the software grid tracker** as sensor and inner loop, per above.

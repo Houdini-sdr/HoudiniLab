@@ -1098,7 +1098,23 @@ const cardObserver=(typeof ResizeObserver!=='undefined') ? new ResizeObserver(()
 let pktCount=0,t0=Date.now();
 // ---- beacon sync / CFO panel (AP-32) --------------------------------------
 // One card per client tid, matching how every other stream here is keyed.
-const SYNC_SHOW=120, SYNC_QUIET_MS=2500, SYNC_DEAD_MS=60000;
+const SYNC_SHOW=120, SYNC_QUIET_FLOOR_MS=2500, SYNC_DEAD_MS=60000;
+// THE QUIET THRESHOLD MUST TRACK THE RESYNC CADENCE, NOT A CONSTANT. 2500 ms was
+// chosen when the client resynced every 260 ms, so it meant "about ten missed
+// opportunities". The cadence default became 2604 ms on 2026-09-02, which put
+// every NORMAL detection past a fixed 2500 and would have dimmed the card and
+// shown "quiet 2.6s" permanently -- destroying the one badge whose whole job is
+// to distinguish held data from live data.
+//
+// SYN1 does not carry the cadence, so the page measures it: the median interval
+// between arriving records for this tid, over the last few. Self-calibrating, no
+// wire change, and it survives the next cadence change too.
+function syncQuietMs(card){
+  const g=card.gaps||[];
+  if(g.length<3) return SYNC_QUIET_FLOOR_MS;
+  const m=g.slice().sort((a,b)=>a-b)[Math.floor(g.length/2)];
+  return Math.max(SYNC_QUIET_FLOOR_MS, 3*m);
+}
 // The lane MEASURED a 1.9 kHz run-to-run spread with the clocks locked (two
 // zero-injection runs, +756 vs -1147 Hz), because a short correlation lag turns
 // a tiny phase error into a large apparent frequency. Anything under this is an
@@ -1162,14 +1178,27 @@ function drawSyncCard(tid, sync){
   card.rec=sync;
   const hist=(sync.hist||[]).slice(-SYNC_SHOW);
   const age=(sync.age_ms===null||sync.age_ms===undefined)?Infinity:sync.age_ms;
+  // Learn this link's own detection cadence from the records as they arrive. A
+  // FRESH record (small age) that carries a new last-frame is one arrival; the
+  // gap since the previous arrival is one sample of the cadence.
+  const lastFrame=hist.length?hist[hist.length-1].frame:null;
+  const nowMs=Date.now();
+  if(lastFrame!==null && lastFrame!==card.lastFrameSeen){
+    if(card.lastArrival) {
+      card.gaps=(card.gaps||[]).concat(nowMs-card.lastArrival).slice(-8);
+    }
+    card.lastArrival=nowMs;
+    card.lastFrameSeen=lastFrame;
+  }
+  const quietMs=syncQuietMs(card);
   const last=hist.length?hist[hist.length-1]:null;
   let [label,cls]=syncChip(last,age);
-  if(last && age>=SYNC_QUIET_MS && age<SYNC_DEAD_MS){
+  if(last && age>=quietMs && age<SYNC_DEAD_MS){
     label+=' \u00b7 quiet '+(age/1000).toFixed(1)+'s';
   }
   card.chip.textContent=label;
   card.chip.className='badge '+cls;
-  if(card.plot) card.plot.style.opacity=(age>=SYNC_QUIET_MS)?'0.4':'1';
+  if(card.plot) card.plot.style.opacity=(age>=quietMs)?'0.4':'1';
 
   const d=fitCanvas(card.cv,true), ctx=d.ctx;
   ctx.clearRect(0,0,d.w,d.h);

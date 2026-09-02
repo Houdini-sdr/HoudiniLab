@@ -459,6 +459,15 @@ predicts the beacon inside the read window, so seconds of silence between bursts
 are normal on a perfectly healthy link. The plot dims while quiet so you can see
 at a glance that you are looking at held data rather than live data.
 
+How long is normal changed on 2026-09-02. The client now looks at the beacon
+every 2.6 seconds by default rather than every 260 milliseconds, because the
+measured clock stability supports coasting far longer than the old cadence
+assumed. So a healthy link is quiet most of the time, and the badge only means
+something if it is much longer than the cadence. The page works this out for
+itself: it measures the interval between the reports it actually receives and
+marks the card quiet at three times that, so the badge keeps its meaning if the
+cadence is changed again. Nothing to configure.
+
 The readout line carries three figures in ppm, and they are not three views of
 one number. Read them in this order.
 
@@ -619,7 +628,7 @@ can be swept without a rebuild. Change one at a time and record which one.
 | `HOUDINI_LOOP_PROFILE` | 0 (off) | Print a breakdown of where a client loop iteration goes, once per this many iterations. Counts ITERATIONS. |
 | `HOUDINI_RX_PROFILE` | 0 (off) | Print the split between draining the FIFO and the read itself, once per this many radio reads. Counts READS, which is a different scale from the line above, and coalescing changes the ratio between them. |
 | `HOUDINI_CONFIRM_TOL_US` | 5.2083 | See the acquisition row above. Never applied looser than the tracking gate, whatever you set. |
-| `HOUDINI_RESYNC_RETRY_MAX` | 100 | Misses in one resync period before the client logs an exhausted episode. The anchored grid keeps flying either way; this is a counter, not a give-up. |
+| `HOUDINI_RESYNC_RETRY_MAX` | 100 | Misses in one resync period before the client logs an exhausted episode. The anchored grid keeps flying either way; this is a counter, not a give-up. Note the resync period is now 2.6 seconds, so one episode covers far more wall time than it used to. |
 | `HOUDINI_ESCALATE_EPISODES` | 2 | Consecutive exhausted episodes before the client abandons tracking and re-acquires from scratch. |
 | `HOUDINI_HOLD_OFFGRID` | 2 | Consecutive off grid detections before the beacon counts as MOVED. One is scatter, so the default waits for a second. |
 | `HOUDINI_BS_RX_EVERY` | 20 | How many base station frames pass per `HOUDINI_BS_RX:` line. Only has an effect when `HOUDINI_BS_RX_DEBUG` is set. Set it to 1 for a two way transfer measurement, which needs every frame; expect a very large log. |
