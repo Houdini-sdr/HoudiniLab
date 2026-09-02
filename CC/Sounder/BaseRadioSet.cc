@@ -902,8 +902,23 @@ int BaseRadioSet::houdiniTddRx(size_t radio_id, void* const* buffs,
                 s + st * 2, static_cast<size_t>(n) * 4);
   }
   if (getenv("HOUDINI_BS_RX_DEBUG") != nullptr) {
+    // Throttle is its OWN knob. HOUDINI_BS_RX_DEBUG=1 has meant "on" in the
+    // runbook, the walkthrough, ap15_correlate.py and run_pad_campaign.sh
+    // since it was added, and redefining it as a period would turn every one
+    // of those into a 1 kHz flood and invalidate ledger 4.60's measured line
+    // rate. So: DEBUG stays on/off, EVERY sets the period.
+    //
+    // AP-51 needs every frame for a while: `pilot_grid_off` is one of the two
+    // observables in the two-way transfer, and a slope fit over 1-in-20 at a
+    // 260 ms cadence has too few points to separate the clock term from the
+    // range-rate term.
+    static const int bs_rx_every = [] {
+      const char* e = getenv("HOUDINI_BS_RX_EVERY");
+      const int v = (e != nullptr) ? atoi(e) : 0;
+      return (v > 0) ? v : 20;
+    }();
     static std::atomic<int> dc{0};
-    if ((dc.fetch_add(1) % 20) == 0) {
+    if ((dc.fetch_add(1) % bs_rx_every) == 0) {
       // Rederive the UE's realized schedule on the BS grid: the read stamp
       // (ns) + in-buffer position - epoch, folded into the frame, gives the
       // pilot slot's absolute offset from its scheduled slot boundary. The
@@ -926,11 +941,15 @@ int BaseRadioSet::houdiniTddRx(size_t radio_id, void* const* buffs,
             static_cast<long long>(htdd_pilot_slot_);
         pu_err = (u_start - p_start) - slots_gap * n;
       }
-      MLPD_INFO("HOUDINI_BS_RX: frame=%lld cg=%d pilot-rms=%.0f selfsim=%.2f "
-                "p_start=%lld rx_slots=%zu pilot_grid_off=%lld pu_spacing_err="
-                "%lld\n",
-                htdd_frame_counter_, cg, pilot_rms, selfsim(at), p_start, K,
-                rel_pilot, pu_err);
+      // stamp_ticks is carried explicitly: `pilot_grid_off` is an offset and
+      // AP-51 needs its SLOPE against time, which the frame counter cannot
+      // give (it counts PROCESSED frames, and the BS drops none only when it
+      // keeps up). Both numbers on one line so an offline fit needs no join.
+      MLPD_INFO("HOUDINI_BS_RX: frame=%lld stamp_ticks=%lld cg=%d "
+                "pilot-rms=%.0f selfsim=%.2f p_start=%lld rx_slots=%zu "
+                "pilot_grid_off=%lld pu_spacing_err=%lld\n",
+                htdd_frame_counter_, stamp_ticks, cg, pilot_rms, selfsim(at),
+                p_start, K, rel_pilot, pu_err);
     }
   }
   // Landing-map instrument (phase 5-7 walk): dump the raw continuous read plus
