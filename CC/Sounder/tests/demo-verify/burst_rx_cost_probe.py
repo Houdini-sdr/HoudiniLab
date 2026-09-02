@@ -252,8 +252,21 @@ def main():
         print("  not a contract limitation. Only a refusal the driver attributes")
         print("  to the BURST MODE ITSELF makes this a driver ask.")
         return 1
+    cy = stats(cycle_us)
+    frame_us = FRAME / RATE * 1e6
+    if cy:
+        rd = stats(brd_us)["mean"] if brd_us else 0.0
+        am = stats(arm_us)["mean"] if arm_us else 0.0
+        print("  burst FULL CYCLE           %8.1f us  (%.1f frames)  <-- quote THIS"
+              % (cy["mean"], cy["mean"] / frame_us))
+        print("     of which arm %.0f us, read %.0f us, teardown %.0f us"
+              % (am, rd, cy["mean"] - am - rd))
+        print("     at a 260 ms beacon cadence that is %.2f%% overhead"
+              % (cy["mean"] / 260000.0 * 100))
+        print()
     print("  continuous, drain + read   %8.1f us" % ta["mean"])
-    print("  burst, arm + read          %8.1f us" % tb["mean"])
+    print("  burst, arm + read          %8.1f us  (a COMPONENT, not the cost)"
+          % tb["mean"])
     print("  ratio                      %8.2fx" % (tb["mean"] / ta["mean"]))
     print()
     print("  Against the 1 ms frame: continuous %.0f%% of a frame, burst %.0f%%."
