@@ -2090,10 +2090,19 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
           //     so it is a configuration-dependent bias, not a scale factor to
           //     divide out (DEMO_VERIFICATION 8.6).
           //   - the timing channel agrees with a completely independent, RF-free
-          //     hardware-clock ratio on every leg to <= 0.05 ppm, and the
-          //     tracked residual is 0.036 ppm = ~18 Hz at 500 MHz.
+          //     hardware-clock ratio to <= 0.05 ppm, and the tracked residual is
+          //     0.036 ppm = ~18 Hz at 500 MHz. SCOPE, ADDED 2026-09-02: that
+          //     agreement was established on legs where eps was 7-8 ppm and it
+          //     does NOT transfer to a sub-ppm pair. `hwtime_rate_probe` reads
+          //     two host-referenced rates that each wander ~3 ppm between runs,
+          //     so differencing them leaves ~+-0.26 ppm -- measured, two
+          //     consecutive runs 0.87 ppm apart with a sign flip on a 0.25 ppm
+          //     pair (DEMO_VERIFICATION 8.91). Do not cite it below ~1 ppm.
           // Both are logged so the disagreement stays visible rather than
-          // becoming folklore; AP-34(b) is the fix for the estimator itself.
+          // becoming folklore. AP-34(b) is FIXED as of 2026-09-02: the ladder's
+          // stage 3 now agrees with the timing channel to 0.02 ppm over four
+          // paired runs, so the estimator's own bias is measurable rather than
+          // merely known about (8.100, 8s).
           const double eps_tracked =
               (houdini_frame_period > 0.0)
                   ? (static_cast<double>(config_->samps_per_frame()) /
