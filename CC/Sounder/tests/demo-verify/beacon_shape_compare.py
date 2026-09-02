@@ -1,0 +1,338 @@
+#!/usr/bin/env python3
+"""Which beacon works best, measured on silicon, on the same link, interleaved.
+
+[user 2026-09-02] "try each of the beacon types and report on tracking
+frequency / CFO / timing correction based on each. ie which one works the best,
+which one we want to keep as default."
+
+Four candidates, all built by include/beacon_shapes.h and dumped by
+beacon_shape_dump, so the waveform this probe transmits is sample-for-sample the
+waveform Config::genPilots will build. That is not a nicety: AP-34(a) cost a
+bench session because the bench and the build disagreed about a beacon.
+
+  legacy        15 x STS(16) + 2 x gold(128)      -- what we ship
+  legacy_guard  the same, with an 802.11 GI2 cyclic guard before the gold
+  dot11         the actual 802.11 legacy preamble: STF(160) + GI2 + 2 x LTS(64)
+  nr            NR PSS (38.211 7.4.2.2) + CP + 2 x a 38.211 5.2.1 CSI-RS symbol
+
+WHAT IS MEASURED, per shape:
+  timing     residual of the beacon arrival against the predicted frame grid --
+             sd and worst case. This IS the timing correction quality: it is the
+             number the scatter tolerance has to cover.
+  frequency  the residual slope over the run, in ppm. Two clocks free-running,
+             so this is the tracked clock difference the sync loop has to hold.
+  CFO        from the fine field's repeated pair, the same estimator
+             Receiver::estimateCFO uses, plus the circular resultant R across
+             detections. R is the honest part: a stable-looking mean CFO with
+             R near 0 is noise that happens to average.
+  detection  fraction of predicted arrivals that produced a detection, the
+             detector ratio distribution, and the in-window SNR.
+
+INTERLEAVED, NOT BACK TO BACK. Shapes run round-robin with the order rotated
+each round. A previous campaign on this bench produced a confident "2.8x
+instrument disagreement" that was entirely an artifact of comparing two
+non-interleaved runs, and it was reported to another lane before it was
+retracted. Anything that drifts with time or temperature now hits all four
+shapes equally instead of loading onto whichever ran last.
+
+Reuses two_node_beacon_arrival's device wiring so there is one BS arm path and
+one UE read path on this bench, not two that can drift apart.
+
+  python3 beacon_shape_compare.py --shapes-dir DIR --rounds 3 --matches 60
+"""
+import argparse
+import json
+import os
+import sys
+import time
+
+import numpy as np
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import two_node_beacon_arrival as tn  # noqa: E402
+
+RATE = tn.RATE
+FRAME = tn.FRAME
+
+
+def load_shape(d, name, geom):
+    """Read one shape's transmit core and correlator replica off disk.
+
+    The core arrives as the ci16 the DAC would replay; it is CONJUGATED here for
+    the same reason beacon_tx_gold conjugates: the matched-NCO real->complex
+    mixer delivers the beacon conjugated and the detector correlates raw RX, so
+    pre-conjugating the transmit cancels it.
+    """
+    core = np.fromfile(os.path.join(d, "%s_core.bin" % name), dtype=np.int16)
+    cc = core[0::2].astype(np.float64) - 1j * core[1::2]
+    if len(cc) != geom["core_len"]:
+        raise RuntimeError("%s_core.bin has %d samples, shapes.json says %d"
+                           % (name, len(cc), geom["core_len"]))
+    pk = np.abs(cc).max()
+    ram = np.zeros(2 * 4096, dtype=np.int16)
+    ram[0:2 * len(cc):2] = np.round(cc.real / pk * 0.6 * 32767).astype(np.int16)
+    ram[1:2 * len(cc):2] = np.round(cc.imag / pk * 0.6 * 32767).astype(np.int16)
+    rep = np.fromfile(os.path.join(d, "%s_replica.bin" % name),
+                      dtype=np.complex64).astype(np.complex128)
+    if len(rep) != geom["replica_len"]:
+        raise RuntimeError("%s_replica.bin has %d taps, shapes.json says %d"
+                           % (name, len(rep), geom["replica_len"]))
+    return ram, rep
+
+
+def core_off(geom):
+    """Where find_beacon's returned index sits, relative to the core start.
+
+    NOT a constant, and NOT copied from the legacy value. This probe's detector
+    correlates so that gc peaks at the START of a matched field, so the lag
+    product peaks at the start of the SECOND fine repetition. Derived from the
+    shape geometry so it cannot go stale when a shape changes -- the hard-coded
+    368 in two_node_beacon_arrival is exactly the legacy case of this.
+    """
+    return geom["fine_off"] + geom["fine_len"]
+
+
+def cfo_from_fine(c, core_start, geom, conj_sense):
+    """CFO in Hz from the fine field's repeated pair.
+
+    The same estimator Receiver::estimateCFO uses on the gold pair, generalised
+    to the shape: correlate repetition 1 against repetition 2 at lag fine_len,
+    which is a phase ramp of 2*pi*f*fine_len/RATE.
+
+    Returns (hz, |r|) or (nan, 0). |r| is the normalised correlation magnitude:
+    a CFO read off a pair that did not actually correlate is not a measurement,
+    and returning 0.0 for it -- as an earlier version of the C++ estimator did --
+    lets a fabricated number be averaged in with no symptom.
+    """
+    g1 = core_start + geom["fine_off"]
+    g2 = g1 + geom["fine_len"]
+    n = geom["fine_len"]
+    if g1 < 0 or g2 + n > len(c):
+        return float("nan"), 0.0
+    a = c[g1:g1 + n]
+    b = c[g2:g2 + n]
+    r = np.vdot(a, b)                      # sum conj(a) * b
+    na = np.linalg.norm(a) * np.linalg.norm(b)
+    if na <= 0:
+        return float("nan"), 0.0
+    ph = float(np.angle(r))
+    if conj_sense:
+        ph = -ph      # the received beacon is the conjugate of the reference
+    return ph / (2.0 * np.pi * n) * RATE, float(abs(r) / na)
+
+
+def snr_db(c, core_start, geom):
+    """In-window SNR: core power against a same-length window ahead of it."""
+    L = geom["core_len"]
+    if core_start < L or core_start + L > len(c):
+        return float("nan")
+    sig = float(np.mean(np.abs(c[core_start:core_start + L]) ** 2))
+    noi = float(np.mean(np.abs(c[core_start - L:core_start]) ** 2))
+    if noi <= 0 or sig <= 0:
+        return float("nan")
+    return 10.0 * np.log10(sig / noi)
+
+
+def run_one(ue, rep, geom, corr_scale, matches, max_windows):
+    """Acquire, then track `matches` arrivals. Returns a dict of measurements."""
+    off2 = core_off(geom)
+    senses = [("gold", rep), ("conj", np.conj(rep))]
+    anchor = None
+    sense = None
+    windows = 0
+    for w in range(400):
+        if tn.over_budget():
+            break
+        windows = w + 1
+        tk, c = ue.window()
+        if tk is None:
+            continue
+        for nm, g in senses:
+            idx, ratio = tn.find_beacon(c, g, corr_scale)
+            if idx >= 0 and ratio >= tn.MIN_RATIO[0]:
+                anchor = tk + idx - off2
+                sense = (nm, g)
+                break
+        if anchor is not None:
+            break
+    if anchor is None:
+        return {"locked": False, "acq_windows": windows}
+
+    nm, g = sense
+    conj_sense = nm == "conj"
+    resids, ks, ratios, cfos, rmags, snrs = [], [], [], [], [], []
+    attempts = 0
+    for w in range(max_windows):
+        if len(resids) >= matches or tn.over_budget():
+            break
+        tk, c = ue.window()
+        if tk is None:
+            continue
+        k = int(round((tk + 2048 - anchor) / FRAME))
+        pred = anchor + k * FRAME
+        o = pred - tk
+        span = geom["core_len"] + 384
+        if not (0 <= o < len(c) - span - 256):
+            continue
+        lo = max(0, o - 256)
+        sl = c[lo:o + span]
+        attempts += 1
+        idx, rr = tn.find_beacon(sl, g, corr_scale)
+        if idx < 0 or rr < tn.MIN_RATIO[0]:
+            continue
+        meas = tk + lo + idx - off2
+        resids.append(meas - pred)
+        ks.append(k)
+        ratios.append(rr)
+        cs = lo + idx - off2                       # core start inside the slice
+        hz, rm = cfo_from_fine(sl, cs, geom, conj_sense)
+        cfos.append(hz)
+        rmags.append(rm)
+        snrs.append(snr_db(sl, cs, geom))
+
+    r = np.array(resids, dtype=np.float64)
+    kk = np.array(ks, dtype=np.float64)
+    out = {"locked": True, "acq_windows": windows, "sense": nm,
+           "n": len(r), "attempts": attempts,
+           "detect_frac": (len(r) / attempts) if attempts else 0.0,
+           "resid": resids, "k": ks, "ratio": ratios,
+           "cfo_hz": [None if np.isnan(x) else x for x in cfos],
+           "cfo_r": rmags,
+           "snr_db": [None if np.isnan(x) else x for x in snrs]}
+    if len(r) >= 3:
+        out["resid_sd"] = float(np.std(r))
+        out["resid_max"] = float(np.max(np.abs(r)))
+        # ppm: residual grows by (eps * FRAME) samples per frame, and k counts
+        # frames. Positive slope = the UE clock is SLOW relative to the BS.
+        sl_, _ = np.polyfit(kk, r, 1)
+        out["eps_ppm"] = float(sl_ / FRAME * 1e6)
+        fin = [x for x in cfos if not np.isnan(x)]
+        if fin:
+            out["cfo_hz_mean"] = float(np.mean(fin))
+            out["cfo_hz_sd"] = float(np.std(fin))
+            # Circular resultant over the per-detection CFO phases: how much of
+            # the agreement is real rather than an average of noise.
+            phz = np.array(fin) * 2 * np.pi * geom["fine_len"] / RATE
+            out["cfo_R"] = float(abs(np.mean(np.exp(1j * phz))))
+        out["ratio_med"] = float(np.median(ratios))
+        out["ratio_min"] = float(np.min(ratios))
+        fs = [x for x in snrs if not np.isnan(x)]
+        if fs:
+            out["snr_med"] = float(np.median(fs))
+    return out
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--bs-ip", default="168.6.244.21")
+    ap.add_argument("--ue-ip", default="168.6.244.22")
+    ap.add_argument("--shapes-dir", required=True)
+    ap.add_argument("--shapes", default="legacy,legacy_guard,dot11,nr")
+    ap.add_argument("--rounds", type=int, default=3)
+    ap.add_argument("--matches", type=int, default=60)
+    ap.add_argument("--corr-scale", type=float, default=10.0)
+    ap.add_argument("--min-ratio", type=float, default=1e-2)
+    ap.add_argument("--budget", type=float, default=2400.0)
+    ap.add_argument("--tx-ch", type=int, default=1)
+    ap.add_argument("--rx-ch", type=int, default=1)
+    ap.add_argument("--out", default="beacon_shape_compare.json")
+    args = ap.parse_args()
+    tn.DEADLINE[0] = time.time() + args.budget
+    tn.MIN_RATIO[0] = args.min_ratio
+
+    with open(os.path.join(args.shapes_dir, "shapes.json")) as f:
+        shapes_json = json.load(f)["shapes"]
+    names = [s for s in args.shapes.split(",") if s]
+    for n in names:
+        if n not in shapes_json:
+            print("no geometry for shape %r in shapes.json" % n)
+            return 2
+    loaded = {n: load_shape(args.shapes_dir, n, shapes_json[n]) for n in names}
+    for n in names:
+        g = shapes_json[n]
+        print("%-13s core %4d  replica %3d  fine@%d x%d  index off %d  PAPR %.2f dB"
+              % (n, g["core_len"], g["replica_len"], g["fine_off"],
+                 g["fine_len"], core_off(g), g["papr_db"]))
+
+    out = {"rounds": [], "shapes": shapes_json, "argv": vars(args)}
+    rc = 0
+    ue = None
+    try:
+        ue = tn.Ue(args.ue_ip, args.rx_ch)
+        for rnd in range(args.rounds):
+            # Rotate the order every round: whatever drifts with time hits each
+            # shape in a different slot instead of always the same one.
+            order = names[rnd % len(names):] + names[:rnd % len(names)]
+            print("\n=== round %d/%d, order %s ===" % (rnd + 1, args.rounds,
+                                                       ",".join(order)))
+            rec = {}
+            for nm in order:
+                if tn.over_budget():
+                    print("  (budget) stopping before %s" % nm)
+                    break
+                ram, rep = loaded[nm]
+                bs = tn.Bs(args.bs_ip, ram, args.tx_ch)
+                try:
+                    bs.open_and_arm()
+                    if not bs.liveness(settle=0.6):
+                        print("  %-13s BEACON NOT PLAYING -- skipped" % nm)
+                        rec[nm] = {"locked": False, "reason": "liveness"}
+                        continue
+                    r = run_one(ue, rep, shapes_json[nm], args.corr_scale,
+                                args.matches, args.matches * 30)
+                finally:
+                    bs.close()
+                rec[nm] = r
+                if not r.get("locked"):
+                    print("  %-13s NO LOCK in %d windows" % (nm, r["acq_windows"]))
+                    continue
+                print("  %-13s n=%-3d det=%4.0f%%  resid sd %5.2f max %3.0f  "
+                      "eps %+.4f ppm  CFO %+8.1f Hz (sd %5.1f R %.3f)  "
+                      "ratio med %6.2f min %6.2f  SNR %4.1f dB  acq %d win"
+                      % (nm, r["n"], 100 * r["detect_frac"],
+                         r.get("resid_sd", float("nan")),
+                         r.get("resid_max", float("nan")),
+                         r.get("eps_ppm", float("nan")),
+                         r.get("cfo_hz_mean", float("nan")),
+                         r.get("cfo_hz_sd", float("nan")),
+                         r.get("cfo_R", float("nan")),
+                         r.get("ratio_med", float("nan")),
+                         r.get("ratio_min", float("nan")),
+                         r.get("snr_med", float("nan")), r["acq_windows"]))
+            out["rounds"].append(rec)
+    except KeyboardInterrupt:
+        print("interrupted")
+        rc = 130
+    finally:
+        if ue is not None:
+            ue.close()
+        with open(args.out, "w") as f:
+            json.dump(out, f, indent=1)
+        print("\nwrote %s" % args.out)
+
+    # Summary across rounds. Reported per shape with the ROUND-TO-ROUND spread
+    # beside every mean, because a single round is one sample and this bench has
+    # already produced one confident conclusion from an unreplicated pair.
+    print("\n%-13s %6s %6s %8s %8s %10s %9s %8s %7s" %
+          ("shape", "rounds", "n", "resid sd", "resid max", "eps ppm",
+           "CFO Hz", "CFO R", "det %"))
+    for nm in names:
+        rs = [r[nm] for r in out["rounds"] if nm in r and r[nm].get("n", 0) >= 3]
+        if not rs:
+            print("%-13s %6d  -- no usable round --" % (nm, 0))
+            continue
+        def col(k):
+            v = [x[k] for x in rs if k in x]
+            return (np.mean(v), np.std(v)) if v else (float("nan"),) * 2
+        sd = col("resid_sd"); mx = col("resid_max"); ep = col("eps_ppm")
+        cf = col("cfo_hz_mean"); cr = col("cfo_R"); df = col("detect_frac")
+        print("%-13s %6d %6d %8.2f %8.0f %+10.4f %+9.1f %8.3f %7.0f"
+              % (nm, len(rs), int(np.sum([x["n"] for x in rs])), sd[0], mx[0],
+                 ep[0], cf[0], cr[0], 100 * df[0]))
+        print("%-13s %6s %6s %8.2f %8.0f %10.4f %9.1f %8.3f %7.0f   (spread)"
+              % ("", "", "", sd[1], mx[1], ep[1], cf[1], cr[1], 100 * df[1]))
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main())
