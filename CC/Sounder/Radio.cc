@@ -350,7 +350,14 @@ int Radio::recvHoudini(void* const* buffs, int samples, long long& frameTime) {
     int r =
         dev_->readStream(rxs_, cur.data(), samples - got, flags, t, 1000000);
     if (r <= 0) {
-      if (got == 0) return r;
+      if (got == 0) {
+      // Account the call before leaving, or the drain cost already added above
+      // is divided across a call count that never saw it -- over-reporting
+      // drain per call on the very instrument this branch's cost evidence
+      // rests on.
+      if (rx_profile_every > 0) ++p_calls;
+      return r;
+    }
       break;
     }
     if (got == 0) frameTime = t;  // first (grid-anchoring) read stamps the window

@@ -24,8 +24,16 @@ from collections import Counter
 RE_ALIVE = re.compile(r"beacon alive on the anchored grid \(resid ([+-]?\d+) "
                       r"within scatter, snr ([\d.]+) dB")
 RE_OFFGRID = re.compile(r"off-grid detection ([+-]?\d+)")
-RE_ESC = re.compile(r"Re-sync ESCALATION")
-RE_REANCHOR_FAIL = re.compile(r"re-acquisition did NOT confirm")
+# ONE ESCALATION LOGS FOUR DIFFERENT LINES (receiver.cc 1786 / 1837 / 1851 /
+# 1855), so matching the common prefix counted a single event 2-3 times and the
+# multiplier CHANGED silently when this branch added the period-disagreement
+# WARN at 1837. Match only the line that fires exactly once per escalation.
+RE_ESC = re.compile(r"Re-sync ESCALATION \(")
+# CASE. receiver.cc:1855 logs "re-acquisition did not confirm" in lowercase,
+# so this never matched and a run in which EVERY re-anchor failed scored
+# reanchor_failed = 0 -- the instrument reporting the worst failure mode as
+# clean. Anchored case-insensitively on the stable part of the sentence.
+RE_REANCHOR_FAIL = re.compile(r"re-acquisition did not confirm", re.I)
 RE_CNS_OK = re.compile(r"CNS score ([\d.]+) rot ([+-][\d.]+) deg at frame "
                        r"(\d+) \((\d+) datagrams, (\d+) low\)")
 RE_ACQ = re.compile(r"lock CONFIRMED \(resid ([+-]?\d+) over (\d+)")

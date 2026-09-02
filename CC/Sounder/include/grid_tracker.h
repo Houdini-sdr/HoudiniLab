@@ -52,9 +52,13 @@ struct TrackerConfig {
                              ///< 0.028 samples/frame over ~6e5 frames, so
                              ///< q ~ 0.028^2/6e5 ~ 1.3e-9.
   double innov_gate = 0.0;   ///< sigmas; 0 = off. A principled outlier reject.
-  // both
-  double period_lo = 0.0;    ///< plausibility band, samples/frame
-  double period_hi = 0.0;
+  // NOTE: there is deliberately NO period band here. The plausibility clamp
+  // lives with the caller that owns the period (receiver.cc), because this
+  // class holds no state to clamp -- it returns GAINS. Fields named period_lo
+  // and period_hi used to sit here, unread, which made them look enforced: a
+  // caller could set them, drop its own clamp, and lose the band with no
+  // compile or runtime signal. grid_tracker_test applies the clamp in its
+  // harness for the same reason.
 };
 
 /**

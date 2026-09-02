@@ -41,6 +41,10 @@ constexpr double kEpsPpm = 8.52;           // the measured pair
 constexpr double kTruePeriod = kFrame * (1.0 + kEpsPpm * 1e-6);
 constexpr double kScatterSd = 0.70;        // measured sync residual sd, samples
 constexpr long long kScatterTol = 1024;    // the outer alive/moved gate
+// The +-100 ppm plausibility band, applied by the harness because the caller
+// owns it (see grid_tracker.h).
+constexpr double kPeriodLo = kFrame * (1.0 - 100e-6);
+constexpr double kPeriodHi = kFrame * (1.0 + 100e-6);
 
 struct Trace {
   std::vector<long long> gaps;   ///< frames between consecutive detections
@@ -145,8 +149,9 @@ Result run(const Trace& t, Sounder::TrackerConfig cfg) {
     if (tr.update(since_ref, resid)) {
       ref = gridStart(since_ref) + std::llround(tr.shift());
       period += tr.deltaPeriod();
-      if (cfg.period_hi > cfg.period_lo)
-        period = std::min(cfg.period_hi, std::max(cfg.period_lo, period));
+      // The plausibility band belongs to the CALLER, exactly as in
+      // receiver.cc -- GridTracker returns gains and holds no period to clamp.
+      period = std::min(kPeriodHi, std::max(kPeriodLo, period));
       since_ref = 0;
     }
     const double err_ppm = (period - t.drift[i]) / kFrame * 1e6;
@@ -170,8 +175,6 @@ Sounder::TrackerConfig ab() {
   c.alpha = 0.5;
   c.beta = 0.1;
   c.step_limit = 0.5e-6 * kFrame;   // HOUDINI_GRID_STEP_PPM default
-  c.period_lo = kFrame * (1.0 - 100e-6);
-  c.period_hi = kFrame * (1.0 + 100e-6);
   return c;
 }
 

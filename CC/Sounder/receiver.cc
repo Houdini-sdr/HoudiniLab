@@ -130,9 +130,15 @@ static double envDouble(const char* name, double dflt) {
   // behaviour) or that use the value in a clamp, where a NaN makes every
   // comparison false and disables the guard with no symptom. Reject non-finite
   // once here rather than at each of the ten call sites.
-  if (end == e || !std::isfinite(v)) {
-    MLPD_WARN("%s=\"%s\" is not a finite number -- using the default %g\n",
-              name, e, dflt);
+  // Finite is not enough. 1e30 passes isfinite and still overflows the
+  // static_cast<long long> at the three call sites that take one -- the exact
+  // undefined behaviour this guard exists to close. Bound the magnitude to
+  // something no tuning knob here could legitimately want.
+  constexpr double kEnvMax = 1e9;
+  if (end == e || !std::isfinite(v) || std::fabs(v) > kEnvMax) {
+    MLPD_WARN(
+        "%s=\"%s\" is not a finite number below %g -- using the default %g\n",
+        name, e, kEnvMax, dflt);
     return dflt;
   }
   return v;
@@ -1824,13 +1830,15 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
       // TRACKED value is the suspect one. Without this, a single bad kick is
       // permanent: escalation re-anchors the offset, keeps the bad period, and
       // the grid walks out again forever.
+      // Clamp FIRST, then measure the disagreement, so the ppm printed below
+      // is reproducible from the two periods on the same line. Computing it
+      // from the unclamped value and printing the clamped one made the message
+      // internally inconsistent whenever the clamp bit, which is reachable by
+      // setting HOUDINI_ACQ_MAX_PPM above HOUDINI_GRID_MAX_PPM.
+      fresh_period = std::min(kGridPeriodHi, std::max(kGridPeriodLo, fresh_period));
       const double disagree_ppm =
           std::fabs(fresh_period - houdini_frame_period) /
           static_cast<double>(config_->samps_per_frame()) * 1e6;
-      // Clamp the confirm's value the same way the incremental update is
-      // clamped: houdiniAcquireAnchor has no band of its own, so without this
-      // the two wholesale writes bypass the only guard in the system.
-      fresh_period = std::min(kGridPeriodHi, std::max(kGridPeriodLo, fresh_period));
       if (houdini_grid_updates == 0 || disagree_ppm > kGridTrustPpm) {
         if (houdini_grid_updates != 0) {
           MLPD_WARN(
@@ -1848,6 +1856,12 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
       // the confidence it earned before the anchor was lost and under-weights
       // every observation of the new one.
       tracker.reset(tracker_cfg);
+      // The counter must be wiped WITH the state it describes. It is the
+      // "tracker has learned nothing" test the branch above uses to decide
+      // whether to trust a fresh confirm; leaving it set after resetting the
+      // filter makes the NEXT escalation refuse a good confirm on the strength
+      // of learning that no longer exists.
+      houdini_grid_updates = 0;
       MLPD_INFO("Re-sync ESCALATION: re-anchored at %lld, tid %d\n", fresh,
                 tid);
     } else if (config_->running()) {
@@ -2196,6 +2210,11 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
                 frame_id, resid, snr, resync_hold_pending ? 1 : 0, tid);
             emitSync(kSyncHold, resid, cfo_tracked_hz, snr, 0, cfo_hz);
             ++resync_offgrid_streak;
+            // resync_hold_pending used to BE the escalation decision; the
+            // streak counter replaced it. It survives only as the "pending"
+            // field of the WARN above, so keep it exactly consistent with the
+            // streak rather than letting it drift as separate state -- the
+            // write-only pattern this file already deleted once.
             if (resync_offgrid_streak >= kHoldOffGridCount) {
               houdiniEscalate("beacon moved");
               continue;  // rx_beacon_time is pre-hunt; restart the frame loop
@@ -2388,7 +2407,15 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
         // still says so, below, with the numbers that describe it. Only a read
         // that yielded no whole slot at all is a genuine bad receive.
         rx_data_status = (whole >= 1) ? static_cast<int>(samples_per_slot) : got;
-        if (whole < run && got > 0) {
+        // THROTTLED. Both of these sit in the per-slot RX loop, and the
+        // condition they report (rx_gap_break truncating a read) is PERSISTENT
+        // rather than one-shot -- ret=2032 against a 12288 request was observed
+        // continuously, which at loop rate is ~400 lines/s. That is the flood
+        // hazard the rest of this file guards against with exactly this idiom,
+        // and I added these two without it.
+        static std::atomic<size_t> short_cnt{0};
+        const size_t sc = short_cnt.fetch_add(1);
+        if (whole < run && got > 0 && (sc == 0 || sc % 200 == 0)) {
           MLPD_INFO(
               "coalesced throwaway short read %d/%zu at frame %zu slot %zu: "
               "%zu of %zu slots consumed, index advanced to match\n",
@@ -2406,7 +2433,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
         // mis-decoded DL slot (AP row filed; the realignment needs a DL
         // schedule to validate against, and none exists yet).
         const size_t rem = (got > 0) ? static_cast<size_t>(got) % samples_per_slot : 0;
-        if (rem != 0) {
+        if (rem != 0 && (sc == 0 || sc % 200 == 0)) {
           MLPD_WARN(
               "coalesced throwaway short read %d/%zu at frame %zu slot %zu: "
               "%zu sub-slot samples consumed and unaccounted, so the stream is "
