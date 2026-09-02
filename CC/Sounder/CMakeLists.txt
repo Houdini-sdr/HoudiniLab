@@ -239,6 +239,15 @@ target_link_libraries(sounder_module -lpthread --enable-threadsafe ${GFLAGS_LIBR
     ${HDF5_LIBRARIES}
     ${SoapySDR_LIBRARIES})
 
+# Radio-free unit test: the UE beacon-sync geometry across the whole rate
+# ladder. Links NOTHING (sync_geometry.h is header-only and dependency-free) so
+# it builds and runs anywhere, which is the point -- the two defects it covers
+# were only visible by running a UE against silicon at one rate.
+enable_testing()
+add_executable(sync_geometry_test tests/comms-func/sync_geometry_test.cc)
+target_include_directories(sync_geometry_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME sync_geometry COMMAND sync_geometry_test)
+
 # HIL helper: transmit the real Gold beacon from a Houdini board so a Houdini UE
 # running the unmodified receiver.cc client-sync path can acquire it.
 add_executable(beacon_tx_gold

@@ -34,6 +34,7 @@
 #include "include/logger.h"
 #include "include/macros.h"
 #include "include/node_version.h"
+#include "include/sync_geometry.h"
 #include "include/utils.h"
 
 //Default to detect the beacon on first channel
@@ -1477,63 +1478,63 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   // resync PERIOD is already rate-invariant because the frame itself is defined
   // in samples (30 slots x 4096). Only this tolerance was wrong.
   const double kScatterTolUs = envDouble("HOUDINI_SCATTER_TOL_US", 8.3333);
-  // CLAMPED TO LEAVE A USABLE ACCEPT WINDOW, NOT MERELY A NON-NEGATIVE ONE.
-  // The targeted slice needs kLead + kTail = 2*tol + 2*kGoldLen + kGoldLen/2
-  // samples inside request_samples (~= samps_per_slot, pure OFDM geometry that
-  // does NOT scale with the rate), and the gate below admits a read only when
-  // its phase `off` lands in [kLead, request_samples - kTail]. The WIDTH of
-  // that interval is what decides how often a resync is even attempted: 1728
-  // samples at the shipped rate, which is the ~1.4 % of frames the gate's own
-  // comment quotes.
-  //
-  // The first version of this clamp used the whole slot, so the moment it fired
-  // the interval collapsed to a SINGLE phase value (and to nothing at all for
-  // any nonzero beacon_adjust): no search, no observation, no miss counted, so
-  // not even the exhausted-episode escalation fires. That is the same silent
-  // open-loop failure the clamp was added to prevent, merely one sample wide
-  // instead of zero, and it was reachable at every rate above ~226 MSPS -- i.e.
-  // at exactly the rates the time-based tolerance exists to serve. Reserve a
-  // quarter of the slot for the window so a clamped gate still functions.
-  const long long kSlotGeom =
-      static_cast<long long>(2 * kGoldLen + kGoldLen / 2);
-  const long long kWindowReserve =
-      static_cast<long long>(config_->samps_per_slot()) / 4;
-  const long long kSlotCap =
-      std::max<long long>(1, (static_cast<long long>(config_->samps_per_slot()) -
-                              kSlotGeom - kWindowReserve) / 2);
-  long long scatter_tol_want = llround(kScatterTolUs * 1e-6 * config_->rate());
-  if (scatter_tol_want > kSlotCap) {
+  // The same argument that made kScatterTol a TIME (AP-40): what the
+  // acquisition gate admits is detector scatter plus path, both properties of
+  // the correlator and the cable measured in microseconds, so a fixed sample
+  // count silently retunes it at every rate while the tracking gate scales.
+  // 5.2083 us reproduces the old 640 samples exactly at 122.88 MSPS.
+  const double kConfirmTolUs = envDouble("HOUDINI_CONFIRM_TOL_US", 5.2083);
+  double sync_tol_samples =
+      envDouble("HOUDINI_SYNC_TOL_SAMPLES",
+                static_cast<double>(config_->prefix()) / 4.0);
+  double sync_residual_ppm = envDouble("HOUDINI_SYNC_RESIDUAL_PPM", 1.0);
+  // Both inputs are validated: a zero or negative ppm makes the cadence
+  // quotient infinite, and a config without `ofdm_tx_zero_prefix` gives a zero
+  // tolerance and a resync attempt every single frame. Neither should degrade
+  // quietly. (envDouble already rejects NaN and inf, AP-54.)
+  if (!(sync_tol_samples > 0.0) || !std::isfinite(sync_tol_samples)) {
     MLPD_WARN(
-        "scatter tolerance %.2f us = %lld samples exceeds what a %zu-sample "
-        "slot can present (cap %lld); clamping. The gate is now %.2f us -- at "
-        "this rate the slot geometry, not the tolerance, is the limit.\n",
-        kScatterTolUs, scatter_tol_want, config_->samps_per_slot(), kSlotCap,
-        kSlotCap / config_->rate() * 1e6);
-    scatter_tol_want = kSlotCap;
+        "sync tolerance %.3f is not a positive finite sample count (config "
+        "ofdm_tx_zero_prefix = %d?) -- falling back to 32\n",
+        sync_tol_samples, config_->prefix());
+    sync_tol_samples = 32.0;
   }
-  const long long kScatterTol = std::max<long long>(1, scatter_tol_want);
+  if (!(sync_residual_ppm > 0.0) || !std::isfinite(sync_residual_ppm)) {
+    MLPD_WARN("sync residual %.4f ppm is not positive finite -- using 1.0\n",
+              sync_residual_ppm);
+    sync_residual_ppm = 1.0;
+  }
+  // ONE derivation, shared with sync_geometry_test so the whole rate ladder is
+  // checkable without a radio (AP-56). Everything below reads out of `geom`.
+  const Sounder::SyncGeometry geom = Sounder::computeSyncGeometry(
+      config_->rate(), static_cast<long long>(config_->samps_per_slot()),
+      static_cast<long long>(config_->samps_per_frame()), kScatterTolUs,
+      kConfirmTolUs, sync_tol_samples, sync_residual_ppm);
+  const long long kScatterTol = geom.scatter_tol;
+  if (geom.scatter_clamped) {
+    MLPD_WARN(
+        "scatter tolerance %.2f us exceeds what a %lld-sample slot can present "
+        "while leaving a usable accept window; clamped to %lld samples "
+        "(%.2f us)\n",
+        kScatterTolUs, static_cast<long long>(config_->samps_per_slot()),
+        geom.slot_cap, geom.slot_cap / config_->rate() * 1e6);
+  }
   // State the resulting geometry at bring-up. This is the number that decides
-  // whether the UE ever LOOKS for the beacon, and it was previously derivable
-  // only by hand from three constants in two places; a zero here is the silent
-  // failure, so it must be visible without being computed by the reader.
-  {
-    const long long win = static_cast<long long>(config_->samps_per_slot()) -
-                          (2 * kScatterTol + kSlotGeom);
-    if (win <= 0) {
-      MLPD_ERROR(
-          "beacon accept window is %lld samples: the UE will never attempt a "
-          "resync and will fly open loop with no telemetry. Lower "
-          "HOUDINI_SCATTER_TOL_US.\n",
-          win);
-    } else {
-      MLPD_INFO(
-          "Beacon accept window %lld samples of a %zu-sample slot (%.1f%%), "
-          "scatter tolerance %lld samples = %.2f us\n",
-          win, config_->samps_per_slot(),
-          100.0 * static_cast<double>(win) /
-              static_cast<double>(config_->samps_per_slot()),
-          kScatterTol, kScatterTol / config_->rate() * 1e6);
-    }
+  // whether the UE ever LOOKS for the beacon, and a zero here is the silent
+  // failure, so it must be visible without the reader computing it.
+  if (!geom.usable) {
+    MLPD_ERROR(
+        "beacon accept window is %lld samples: the UE will never attempt a "
+        "resync and will fly open loop with no telemetry. Lower "
+        "HOUDINI_SCATTER_TOL_US.\n",
+        geom.accept_window);
+  } else {
+    MLPD_INFO(
+        "Beacon accept window %lld samples of a %zu-sample slot (%.1f%%), "
+        "scatter tol %lld samples = %.2f us, confirm tol %lld samples\n",
+        geom.accept_window, config_->samps_per_slot(),
+        100.0 * geom.accept_window_frac, kScatterTol,
+        kScatterTol / config_->rate() * 1e6, geom.confirm_tol);
   }
   // Single place that knows the wire's fixed fields, so no call site can forget
   // the geometry the page needs to convert to ppm.
@@ -1571,73 +1572,34 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   // plausibility band further down: see the note at the update site for why
   // that band alone cannot reject an outlier.
   const double kGridStepPpm = envDouble("HOUDINI_GRID_STEP_PPM", 0.5);
-  // How often to LOOK at the beacon, derived rather than hardcoded.
+  // How often to LOOK at the beacon, derived rather than hardcoded (see
+  // sync_geometry.h for the derivation and the test that covers it).
   //
   // The old form was `1e9 / (max_cfo_ppb * samps_per_frame)` with max_cfo = 100
   // ppb "For Iris", which decodes as "resync once the drift reaches ONE
   // sample". Both halves were wrong for this hardware: the tolerance is not one
   // sample but the slot's zero padding, and 100 ppb is neither our clock
-  // (8520 ppb measured) nor a crystal spec (a +-25 ppm pair is 50000 ppb).
-  //
-  // The real tolerance is the timing slack built into the slot:
-  //   48 symbols x (fft 64 + cp 16) + prefix 128 + postfix 128 = 4096 = a slot,
-  // so the burst may shift +-ofdm_tx_zero_prefix samples before OFDM content
-  // crosses the slot boundary. Budget a quarter of it to inter-observation
-  // drift and leave the rest for detector jitter, snap quantization and the
-  // tx_advance residual.
+  // (8520 ppb measured) nor a crystal spec (a +-25 ppm pair is 50000 ppb). The
+  // real tolerance is the timing slack built into the slot: 48 symbols x (fft
+  // 64 + cp 16) + prefix 128 + postfix 128 = 4096 = a slot, so the burst may
+  // shift +-ofdm_tx_zero_prefix samples before OFDM content crosses the slot
+  // boundary. A quarter of that is budgeted to inter-observation drift.
   //
   // The rate error is the RESIDUAL after tracking, not the raw offset:
-  // measured 0.036 ppm against a raw 8.52 ppm, 240x better. Allan deviation
-  // over a 600 s run puts the two-node stability under 0.04 ppm out to
-  // tau = 10 s, so this period is not accuracy-limited at all -- what actually
-  // bounds it is how long we are willing to not notice the beacon is gone, and
-  // (on the read side) that each radioRx costs ~855 us fixed. Hence a
-  // deliberately conservative default with a large safety factor: eps drifted
-  // 0.23 ppm across one session, this bench is WIRED, and OTA will add more.
-  // Both inputs are validated: a zero or negative ppm makes the quotient
-  // infinite and the size_t cast UB (on x86-64 it lands on a huge value that
-  // survives the max() and disables beacon checking ENTIRELY, silently), and a
-  // config without `ofdm_tx_zero_prefix` gives a zero tolerance and a resync
-  // attempt every single frame. Neither should degrade quietly.
-  double sync_tol_samples =
-      envDouble("HOUDINI_SYNC_TOL_SAMPLES",
-                static_cast<double>(config_->prefix()) / 4.0);
-  double sync_residual_ppm = envDouble("HOUDINI_SYNC_RESIDUAL_PPM", 1.0);
-  if (!(sync_tol_samples > 0.0) || !std::isfinite(sync_tol_samples)) {
-    MLPD_WARN(
-        "sync tolerance %.3f is not a positive finite sample count (config "
-        "ofdm_tx_zero_prefix = %d?) -- falling back to 32\n",
-        sync_tol_samples, config_->prefix());
-    sync_tol_samples = 32.0;
-  }
-  if (!(sync_residual_ppm > 0.0) || !std::isfinite(sync_residual_ppm)) {
-    MLPD_WARN("sync residual %.4f ppm is not positive finite -- using 1.0\n",
-              sync_residual_ppm);
-    sync_residual_ppm = 1.0;
-  }
-  const double resync_frames =
-      sync_tol_samples /
-      (sync_residual_ppm * 1e-6 * static_cast<double>(config_->samps_per_frame()));
-  // The model above is expressed in REAL frames, but `frame_id` counts LOOP
-  // ITERATIONS and this loop runs slower than real time (measured 412-746
-  // iter/s against 1000 frames/s), so triggering on the iteration counter
+  // measured 0.036 ppm against a raw 8.52 ppm. What bounds this cadence is not
+  // accuracy at all, it is how long we are willing to not notice the beacon is
+  // gone, and (on the read side) that each radioRx costs ~855 us fixed.
+  //
+  // TIMED, NOT COUNTED. The model is expressed in REAL frames while `frame_id`
+  // counts LOOP ITERATIONS, and the loop runs slower than real time (measured
+  // 412-746 iter/s against 1000 frames/s), so triggering on the counter
   // stretched the interval by that ratio and the grid drifted 1.3-2.4x further
-  // than the tolerance the period was derived from. Trigger on elapsed TIME,
-  // which is the domain the drift model lives in and the only one that stays
-  // right when the loop rate moves (HOUDINI_COALESCE_SLOTS alone moves it ~2x).
-  const double rate_hz =
-      config_->rate() > 0.0 ? config_->rate() : static_cast<double>(config_->samps_per_frame()) * 1e3;
-  const double resync_interval_s =
-      std::min(1e3, std::max(1e-3, resync_frames *
-                                       static_cast<double>(config_->samps_per_frame()) /
-                                       rate_hz));
-  // Iris/UHD keeps the cadence it was tuned for. Everything above is Houdini
-  // clock physics -- a measured 8.52 ppm pair and a slot-padding tolerance --
-  // and applying it unconditionally moved those backends from 81 frames to 260
-  // with nothing measured about them to justify it.
-  const size_t resync_period = static_cast<size_t>(std::max(
-      1.0, std::floor(1e9 / (100.0 * std::max(1.0, static_cast<double>(
-                                          config_->samps_per_frame()))))));
+  // than the tolerance it was derived from. Iris/UHD keeps its own frame-count
+  // cadence: everything above is Houdini clock physics, and applying it there
+  // unconditionally had moved those backends from 81 to 260 with nothing
+  // measured about them to justify it.
+  const double resync_interval_s = geom.resync_interval_s;
+  const size_t resync_period = static_cast<size_t>(geom.resync_period_iters);
   size_t last_resync = frame_id;
   auto last_resync_tp = std::chrono::steady_clock::now();
   if (config_->running() == true) {
@@ -1647,7 +1609,8 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
         "grid tracker alpha %.3f beta %.3f (0/0 = fixed-period grid), step "
         "limit %.3f ppm, bootstrap period %.4f (%+.4f samp/frame vs nominal); "
         "cadence derived from tol %.1f samples / %.3f ppm\n",
-        tid, resync_interval_s * 1e3, std::floor(resync_frames), resync_period,
+        tid, resync_interval_s * 1e3, std::floor(geom.resync_frames),
+        resync_period,
         kGridAlpha, kGridBeta, kGridStepPpm, houdini_boot_period,
         houdini_boot_period - static_cast<double>(config_->samps_per_frame()),
         sync_tol_samples, sync_residual_ppm);
@@ -1914,9 +1877,8 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
         // A sample count by nature: the matched filter needs 2 gold lengths of
         // run-up regardless of how fast we sample, so this one does NOT scale
         // with the rate the way kScatterTol does.
-        const long long kCorrContext = 2 * kGoldLen;   // gold correlator run-up
-        const long long kLead = kScatterTol + kCorrContext;
-        const long long kTail = kScatterTol + kGoldLen / 2;
+        const long long kLead = geom.lead;
+        const long long kTail = geom.tail;
         if (off >= kLead && off + kTail <= request_samples) {
           auto* base = reinterpret_cast<std::complex<int16_t>*>(
               rxbuff.at(kSyncDetectChannel));
@@ -2428,16 +2390,15 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
 bool Receiver::houdiniAcquireAnchor(int tid, size_t detect_window,
                                     long long& anchor_out,
                                     double* period_out) {
-  // The same argument that made kScatterTol a TIME (AP-40): what this admits
-  // is detector scatter plus path, both properties of the correlator and the
-  // cable measured in microseconds, so a fixed sample count silently retunes
-  // the acquisition gate at every rate while the tracking gate scales. 640
-  // samples was the value measured at the shipped 122.88 MSPS; 5.2083 us is
-  // that same number expressed in the domain it belongs to, and it reproduces
-  // 640 exactly at that rate.
-  const long long kConfirmTol = std::max<long long>(
-      1, llround(envDouble("HOUDINI_CONFIRM_TOL_US", 5.2083) * 1e-6 *
-                 config_->rate()));  // detector scatter (4.18) + path
+  // Detector scatter (ledger 4.18) plus path, expressed in TIME so it scales
+  // with the rate the way the tracking gate does. Derived in sync_geometry.h,
+  // which is where the whole rate ladder is checked (AP-56).
+  const long long kConfirmTol =
+      Sounder::computeSyncGeometry(
+          config_->rate(), static_cast<long long>(config_->samps_per_slot()),
+          static_cast<long long>(config_->samps_per_frame()), 8.3333,
+          envDouble("HOUDINI_CONFIRM_TOL_US", 5.2083), 32.0, 1.0)
+          .confirm_tol;
   // The refine stage wants a LONG baseline, because the rate error is the
   // detection-pair noise divided by the span and that noise is sub-sample
   // (measured 0.15-0.94 across four acquisitions). k ~ 20 gives ~4% rate
