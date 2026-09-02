@@ -1831,11 +1831,33 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
           // cfo/carrier is that same fraction read off the carrier. They must
           // agree -- a disagreement means one instrument is wrong, which is the
           // whole reason both are measured (BACKLOG AP-30/AP-31).
+          // AP-50 stage 1: give estimateCFO the TRACKER'S predicted beacon
+          // end, not find_beacon's detected one, plus a small positive guard.
+          //
+          // The estimator's whole measured bias is one-sided window
+          // misalignment: delta < 0 slides its first gold window back into the
+          // STS and the STS x gold cross-correlation injects phase (+226 to
+          // +2817 Hz modelled at true CFO = 0), while delta > 0 slides the
+          // second window into the beacon's trailing ZEROS, where the terms
+          // multiply by zero and cost only a little correlation energy.
+          // find_beacon uses an earliest-crossing rule, so it biases early by
+          // construction -- into the toxic side -- which is why every
+          // disagreement measured on silicon was positive.
+          //
+          // pred_end = sync_index - resid by definition of resid, so the
+          // tracker's estimate is free here. It replaces the detector's bias
+          // and scatter with the tracker's own error (resid sd 0.63-0.70, max 3
+          // measured), and the guard then biases what is left onto the harmless
+          // side. Modelled: mean error +1487.5 Hz -> -31.8 Hz.
+          const long long cfo_guard =
+              static_cast<long long>(envDouble("HOUDINI_CFO_INDEX_GUARD", 8.0));
+          long long cfo_index = sync_index - resid + cfo_guard;
+          if (cfo_index > request_samples) cfo_index = sync_index;  // fall back
           const float cfo_norm =
               estimateCFO(reinterpret_cast<std::complex<int16_t>*>(
                               rxbuff.at(kSyncDetectChannel)),
                           static_cast<size_t>(request_samples),
-                          static_cast<int>(sync_index));
+                          static_cast<int>(cfo_index));
           const double cfo_hz =
               static_cast<double>(cfo_norm) * config_->rate();
           const double cfo_ppm = (config_->freq() > 0.0)
