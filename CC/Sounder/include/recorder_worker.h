@@ -67,6 +67,10 @@ class RecorderWorker {
   // frame, pick the integer pilot re-align (a ramp on the cached H) that maximizes the
   // QPSK 4th-power concentration. On by default for is_houdini; HOUDINI_CSI_NO_TIMING_FIX.
   bool csi_timing_fix_ = false;
+  // AP-38: per-symbol common-phase correction from the pilot tones. Tier 2
+  // of the standard OFDM receiver, and the only correction that follows a
+  // carrier offset WITHIN a slot rather than just between slots.
+  bool csi_phase_fix_ = false;
   std::unordered_map<uint32_t, long long> csi_last_ns_;   // CSI (pilot) send timer
   std::unordered_map<uint32_t, long long> cns_last_ns_;   // constellation send timer
   std::unordered_map<uint32_t, long long> adc_last_ns_;   // raw-ADC envelope send timer

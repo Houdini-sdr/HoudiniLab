@@ -1431,7 +1431,21 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   // Liveness accept/reject half-width. Shipped ON THE WIRE so the panel draws
   // the band it actually illustrates rather than a hardcoded copy (AP-31
   // proposes retuning this, after which a page-side constant would silently lie).
-  constexpr long long kScatterTol = 1024;
+  // AP-40: the scatter tolerance is a PHYSICAL quantity -- detector scatter,
+  // cable and RF-chain delay -- so it belongs in TIME, not samples. As a sample
+  // constant its physical meaning shrank every rung up the rate ladder (1024
+  // samples is 8.33 us at 122.88 MSPS but 2.08 us at 491.52), tightening the
+  // gate for no physical reason and making the loop twitchier at high rates.
+  // The default is the 8.33 us that 1024 samples meant at the rate this was
+  // tuned on, so behaviour here is unchanged and only the scaling is fixed.
+  //
+  // Note what does NOT move with it: the correlator run-up below is a property
+  // of the 128-tap gold sequence and is genuinely a sample count, and the
+  // resync PERIOD is already rate-invariant because the frame itself is defined
+  // in samples (30 slots x 4096). Only this tolerance was wrong.
+  const double kScatterTolUs = envDouble("HOUDINI_SCATTER_TOL_US", 8.3333);
+  const long long kScatterTol =
+      std::max<long long>(1, llround(kScatterTolUs * 1e-6 * config_->rate()));
   // Single place that knows the wire's fixed fields, so no call site can forget
   // the geometry the page needs to convert to ppm.
   // WEAK is the only branch that does not clear `resync`, so it repeats at the
@@ -1751,9 +1765,12 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
         // able to PRESENT every residual the gate can accept, so a retune of
         // kScatterTol (AP-31) has to move these with it, or the panel draws a
         // band wider than the detector can ever fill.
-        constexpr long long kCorrContext = 256;  // gold correlator run-up
-        constexpr long long kLead = kScatterTol + kCorrContext;
-        constexpr long long kTail = kScatterTol + 64;
+        // A sample count by nature: the matched filter needs 2 gold lengths of
+        // run-up regardless of how fast we sample, so this one does NOT scale
+        // with the rate the way kScatterTol does.
+        const long long kCorrContext = 2 * kGoldLen;   // gold correlator run-up
+        const long long kLead = kScatterTol + kCorrContext;
+        const long long kTail = kScatterTol + kGoldLen / 2;
         if (off >= kLead && off + kTail <= request_samples) {
           auto* base = reinterpret_cast<std::complex<int16_t>*>(
               rxbuff.at(kSyncDetectChannel));

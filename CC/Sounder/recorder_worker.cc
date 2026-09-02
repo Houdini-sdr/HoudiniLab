@@ -108,11 +108,16 @@ void RecorderWorker::initCsi(void) {
   // Per-frame pilot-vs-data timing re-align (Houdini framer jitter). Default on for Houdini.
   csi_timing_fix_ = cfg_->is_houdini();
   if (std::getenv("HOUDINI_CSI_NO_TIMING_FIX")) csi_timing_fix_ = false;
+  // Per-symbol pilot common-phase (AP-38). Default on for Houdini; the env is
+  // the A/B lever, since the whole point is that it should be invisible when
+  // the carrier offset is small and decisive when it is not.
+  csi_phase_fix_ = cfg_->is_houdini();
+  if (std::getenv("HOUDINI_CSI_NO_PHASE_FIX")) csi_phase_fix_ = false;
   view_mode_ = true;
   MLPD_INFO("CSI view mode: streaming to %s:%d (%d subcarriers, ~%.0f fps/ant, rx_conj=%d, "
-            "sym_start=%s, timing_fix=%d)\n", host.c_str(), port, N, fps, rx_conj_ ? 1 : 0,
+            "sym_start=%s, timing_fix=%d, phase_fix=%d)\n", host.c_str(), port, N, fps, rx_conj_ ? 1 : 0,
             csi_sym_start_ >= 0 ? std::to_string(csi_sym_start_).c_str() : "auto",
-            csi_timing_fix_ ? 1 : 0);
+            csi_timing_fix_ ? 1 : 0, csi_phase_fix_ ? 1 : 0);
 }
 
 // Energy leading edge of a slot (first index where the sliding-64 power crosses
@@ -606,15 +611,57 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
       }                         // HOUDINI_CSI_R_DEBUG on (second review 3.1)
     }
   }
+  // AP-38: PER-SYMBOL common-phase correction from the pilot subcarriers. This
+  // is what 802.11 and LTE actually rely on, and what this repo's own reference
+  // implementations do (PYTHON/IrisUtils/ofdmtxrx.py phase_correction, MATLAB
+  // rl_ofdm_siso.m DO_APPLY_PHASE_ERR_CORRECTION, which ships ENABLED while the
+  // bulk LTS correction ships disabled).
+  //
+  // Note the transpose against the timing fit above: that one accumulates PER
+  // PILOT TONE across all symbols and keeps the slope, which is right for a
+  // frequency-domain ramp and destroys the per-symbol information. This one
+  // accumulates PER SYMBOL across the tones and keeps the phase, which is the
+  // only form that can follow a carrier offset -- an uncorrected offset leaves
+  // both a common rotation between the pilot and data slots (measured
+  // 0.0240 deg/Hz, confirmed at +16.6 against +16.8 predicted) AND a rotation
+  // that ADVANCES symbol to symbol within the slot (0.0084 deg/Hz across 36
+  // symbols; a 20 kHz injection collapsed every datagram exactly as that
+  // predicts). A single common phase cannot fix the second one; this can.
+  //
+  // Self-correcting: it consumes no CFO estimate, so it is immune to the
+  // estimator bias entirely.
+  const auto& psc_d = cfg_->pilot_sc();
+  const auto& pind_d = cfg_->pilot_sc_ind();
+  std::vector<std::complex<float>> sym_derot(Ys.size(),
+                                             std::complex<float>(1.0f, 0.0f));
+  if (csi_phase_fix_ && !pind_d.empty()) {
+    for (size_t si = 0; si < Ys.size(); ++si) {
+      std::complex<double> acc(0.0, 0.0);
+      for (size_t c = 0; c < pind_d.size() && c < psc_d.size(); ++c) {
+        const size_t k = pind_d[c];
+        if (k >= static_cast<size_t>(N)) continue;
+        const std::complex<float> h = Hc[k];
+        if (std::abs(h) < hmin || std::norm(h) < 1e-9f) continue;
+        acc += (std::complex<double>(Ys[si][k]) / std::complex<double>(h)) *
+               std::conj(std::complex<double>(psc_d[c]));
+      }
+      if (std::abs(acc) > 1e-12) {
+        const double ph = -std::arg(acc);
+        sym_derot[si] = std::complex<float>(static_cast<float>(std::cos(ph)),
+                                            static_cast<float>(std::sin(ph)));
+      }
+    }
+  }
   std::vector<std::complex<float>> pts;
   pts.reserve(kMaxPts);
   for (size_t si = 0; si < Ys.size() && pts.size() < kMaxPts; ++si) {
     const auto& Y = Ys[si];
+    const std::complex<float> dr = sym_derot[si];
     for (size_t j = 0; j < data_ind.size() && pts.size() < kMaxPts; ++j) {
       const size_t k = data_ind[j];
       const std::complex<float> h = Hc[k];
       if (std::abs(h) < hmin || std::norm(h) < 1e-9f) continue;  // deep fade
-      pts.push_back(Y[k] / h);  // zero-forcing equalizer
+      pts.push_back((Y[k] / h) * dr);  // zero-forcing equalizer + phase fix
     }
   }
   if (pts.empty()) return;
