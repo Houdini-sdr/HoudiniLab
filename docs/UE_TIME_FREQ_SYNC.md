@@ -173,3 +173,97 @@ of loop ITERATIONS on which a search is attempted at all. Of those detections,
 48.6 dB accepted, 11.2 dB rejected) because the low mode is the beacon
 straddling the slice edge, where the arrival time would be biased. The floor is
 doing its job, not wasting good detections.
+
+## 8. The clock actuator, and what the software layer is now for
+
+The software lane shipped `CLOCK_ADJ` (SH-341): the LMK holdover DAC as a
+runtime setting, an actuator only under `clock_ref = calibrated`. Both nodes now
+hold their VCXO at a code tracked to the shared 10 MHz, free-running, re-entered
+at every boot. `.21` cal_dac 408, `.22` cal_dac 404.
+
+**This is the point the campaign was walking toward.** Timing drift and carrier
+offset were never two problems: they are one reference error seen two ways,
+which is exactly why the timing tracker reports the carrier offset for free. An
+actuator at that reference nulls both at once.
+
+### Measured, by us
+
+| quantity | value | note |
+| --- | --- | --- |
+| actuator gain | **-0.1251 ppm/count** | protocol says 0.129 (3% off), bench doc 0.087 (44% off, a stated lower bound) |
+| linearity | 0.059 ppm rms over ~5 ppm | 6-point sweep |
+| hold wander | 0.19 ppm / 7 min (~1.5 counts) | matches the lane's "a count in ten minutes" |
+| loop convergence | **0.57 -> 0.06 ppm in 2 pushes, 3/3 runs** | same landing code each time, no overshoot |
+
+Using the bench doc's 0.087 would have made the loop gain 1.44x too large. That
+is why the gain was measured before the loop was closed.
+
+**Sign, because it is the easiest thing to invert:** eps = (f_BS - f_UE)/f_UE
+and we steer the UE, so f_UE sits in the numerator AND the denominator and
+raising it LOWERS eps. A negative d(eps)/d(count) therefore means higher code =
+FASTER UE. My own calibration script printed this backwards once; an inverted
+gain is positive feedback.
+
+### The software tracker is not superseded, its role changed
+
+Outer loop = clock steer (slow, seconds to minutes). Inner loop = the grid
+tracker. Five reasons the inner loop stays:
+
+1. **It is the sensor.** The steer's error signal is eps and nothing else
+   measures it.
+2. **Steering fixes RATE, never OFFSET.** Propagation delay and RF-chain latency
+   are a static time offset no frequency correction touches. LTE keeps timing
+   advance on frequency-locked networks for exactly this reason.
+3. **Bandwidth.** The steer is deliberately slow; re-acquisition and glitch
+   recovery are inner-loop work.
+4. **Quantum and range.** 0.1251 ppm/count leaves +-0.065 ppm for software, and a
+   node not in `calibrated` mode refuses the actuator outright.
+5. **Doppler.** The steer must NOT chase motion, so the inner loop has to carry
+   the fast-varying part. That division of labour IS the invariance.
+
+### Doppler invariance requires a two-way measurement
+
+Correcting a claim made earlier in this campaign: the timing channel is **not**
+Doppler-immune. A range rate changes the propagation delay continuously, which
+is an apparent time scaling indistinguishable from a clock rate offset -- a
+Doppler shift IS a time dilation. On a one-way link the two are degenerate at
+any lag, and no estimator separates them.
+
+The separation is the standard two-way result: the clock term flips sign between
+directions, the range-rate term does not.
+
+    downlink = +eps - rdot/c        uplink = -eps - rdot/c
+    difference -> clock             sum -> Doppler
+
+We already produce both halves (the UE's arrival ramp and the BS's
+`pilot_grid_off`), and both threads live in one process, so the reporting path
+on this bench is a shared value rather than a protocol. **One subtlety that
+would bite an implementer:** our uplink half is not independent, because the UE
+transmits on its TRACKED grid -- so `pilot_grid_off`'s slope is the tracker's
+residual, not the raw uplink rate, and with a converged tracker it goes to zero.
+The UE knows exactly what grid rate it applied, so adding it back de-embeds the
+correction and restores independence.
+
+## 9. What to keep, and what not to
+
+- **KEEP the software grid tracker** as sensor and inner loop, per above.
+- **KEEP the per-symbol pilot phase correction**, without overselling it:
+  measured 13 vs 15 low frames of 2048 at zero offset, 31 vs 38 at 2000 Hz.
+  Consistent, no regression, but small -- because steering removed the cause and
+  left ~0.7 deg to correct. It does NOT rescue large offsets: at 20 kHz it hurts,
+  because that smears H itself and a per-symbol scalar cannot repair a
+  per-subcarrier error.
+- **KEEP the beacon phase estimator** now that its bias is fixed (-724.7 Hz mean
+  before, within +-69 after, three runs). Not as a clock source -- the timing
+  channel is 20x better -- but as the only channel that can ever see Doppler.
+- **DROP the longer-lag estimator at this priority.** It needs detection pairs
+  <= ~9 frames apart where ours arrive ~260 apart, so it is a scheduling change;
+  it cannot bootstrap itself (the lag-128 estimate cannot unwrap even one frame);
+  and it buys 0.05 Hz where the timing channel gives 18 and the actuator quantum
+  is 64. Doppler separation, the reason to keep a carrier channel at all, is
+  two-way.
+- **DROP UE TX frequency pre-compensation** except for non-steerable nodes:
+  steering the reference moves the TX NCO with it.
+- **RETUNE rather than remove** the escalation thresholds, the scatter gate, the
+  alpha-beta gains and the resync cadence. All were derived against 8.5 ppm; the
+  steered regime is two orders quieter.
