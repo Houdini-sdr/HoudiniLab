@@ -1558,7 +1558,10 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
         houdini_boot_period - static_cast<double>(config_->samps_per_frame()),
         sync_tol_samples, sync_residual_ppm);
   }
-  // AP-31 loop profile. The UE iterates ~5x slower than real time, which is
+  // AP-31 loop profile. The UE iterates SLOWER than real time -- measured
+  // 205-417 iterations/s against 1000 frames/s, and the ratio moves ~2x with
+  // HOUDINI_COALESCE_SLOTS, so quote the measurement not a single figure. That
+  // is
   // WHY recvHoudini drains and therefore why the read lands at an arbitrary
   // frame phase and the beacon is only in the accept band ~1.4% of the time.
   // The drain is a symptom; this measures where the iteration actually goes so
