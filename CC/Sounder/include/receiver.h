@@ -18,6 +18,8 @@
 #include <memory>
 #include <vector>
 
+#include "comms-lib.h"  // CommsLib::BeaconPick, named in syncSearch's signature
+
 #if defined(USE_UHD)
 #include "BaseRadioSetUHD.h"
 #include "ClientRadioSetUHD.h"
@@ -74,11 +76,17 @@ class Receiver {
   static void* clientTxRx_launch(void* in_context);
   void clientTxRx(int tid);
   void clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer);
-  // refine_first_cluster: acquisition passes true (one beacon in the window, and the
-  // frame anchor depends on getting the right peak); re-sync leaves it false.
+  // `pick` is the crossing-selection rule, and the two callers need DIFFERENT
+  // ones. Acquisition searches a wide window that can hold several beacon copies
+  // 4096 samples apart, so it takes the earliest copy refined to its own peak --
+  // repeatable across restarts, which the once-only pilot anchor depends on.
+  // Re-sync searches a targeted lead+tail slice that cannot hold two copies, so
+  // it takes the strongest crossing: there the earliest one is the beacon's own
+  // lag-128 self-coherent STS preamble, hundreds of samples early, and whether
+  // it wins depends on received level. See CommsLib::BeaconPick.
   ssize_t syncSearch(const std::complex<int16_t>* check_data,
                      size_t search_window, float corr_scale,
-                     bool refine_first_cluster = false);
+                     CommsLib::BeaconPick pick);
 
   // Two-stage beacon CFO estimate, normalized (cycles/sample); multiply by
   // the sample rate for Hz. Pointer form so both the vector-backed legacy

@@ -1114,7 +1114,7 @@ int Receiver::clientTxData(int tid, int frame_id, long long base_time) {
 
 ssize_t Receiver::syncSearch(const std::complex<int16_t>* check_data,
                              size_t search_window, float corr_scale,
-                             bool refine_first_cluster) {
+                             CommsLib::BeaconPick pick) {
   ssize_t sync_index(-1);
   assert(search_window <= config_->samps_per_frame());
 #if defined(USE_CUDA)
@@ -1125,15 +1125,15 @@ ssize_t Receiver::syncSearch(const std::complex<int16_t>* check_data,
   // portable find_beacon_avx works on x86 and aarch64 (see comms-lib-portable.cc)
   const char* kPath = "avx";
   sync_index = CommsLib::find_beacon_avx(check_data, config_->gold_cf32(),
-                                         search_window, corr_scale,
-                                         refine_first_cluster);
+                                         search_window, corr_scale, pick);
 #endif
   if (std::getenv("HOUDINI_SYNC_DEBUG") != nullptr) {
     static std::atomic<int> c{0};
     if ((c.fetch_add(1) % 20) == 0) {  // braces load-bearing (macro)
-      MLPD_INFO("syncSearch[%s]: window=%zu corr_scale=%.3f gold=%zu -> idx=%ld\n",
+      MLPD_INFO("syncSearch[%s]: window=%zu corr_scale=%.3f gold=%zu pick=%d "
+                "-> idx=%ld\n",
                 kPath, search_window, corr_scale, config_->gold_cf32().size(),
-                sync_index);
+                static_cast<int>(pick), sync_index);
     }
   }
   return sync_index;
@@ -1993,18 +1993,31 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
           const ssize_t s0 = static_cast<ssize_t>(off - kLead);
           const ssize_t slice_len = kLead + kTail;
           prof_sync_searched++;
+          // TARGETED slice: lead+tail is far shorter than the 4096-sample
+          // beacon copy spacing, so the strongest crossing is unambiguous and
+          // the earliest one is the STS preamble. See CommsLib::BeaconPick.
           const ssize_t idx = this->syncSearch(
               base + s0, static_cast<size_t>(slice_len),
-              config_->corr_scale(tid) + resync_retry_cnt);
+              config_->corr_scale(tid) + resync_retry_cnt,
+              CommsLib::BeaconPick::kTargetedArgmax);
           if (idx >= 0) sync_index = s0 + idx;
         } else {
           resync_attempted = false;  // beacon not due in this window
         }
       } else {
+        // UNTARGETED re-sync: the whole read is searched, so it CAN hold more
+        // than one beacon copy and kTargetedArgmax's precondition does not hold.
+        // Left on kFirstCrossing, which is the shipped behaviour and is the
+        // path Iris/UHD hardware takes -- hardware this bench cannot exercise.
+        // It is not a good rule (the earliest crossing returned a sidelobe on 58
+        // of 62 detections, and the STS plateau reaches it too), but changing it
+        // would alter untestable behaviour to fix a path the Houdini link does
+        // not use once its grid is valid. Tracked as its own item.
         sync_index = this->syncSearch(
             reinterpret_cast<std::complex<int16_t>*>(
                 rxbuff.at(kSyncDetectChannel)),
-            request_samples, config_->corr_scale(tid) + resync_retry_cnt);
+            request_samples, config_->corr_scale(tid) + resync_retry_cnt,
+            CommsLib::BeaconPick::kFirstCrossing);
       }
       if (sync_index >= 0 && config_->is_houdini() &&
           houdini_pilot_ref_valid) {
@@ -2693,7 +2706,7 @@ ssize_t Receiver::clientSyncBeacon(size_t radio_id, size_t sample_window,
         sync_index = syncSearch(syncbuffmem.at(kSyncDetectChannel).data(),
                                 sample_window,
                                 config_->corr_scale_init(radio_id),
-                                /*refine_first_cluster=*/true);
+                                CommsLib::BeaconPick::kFirstClusterRefined);
         // SNR floor: a correlation crossing at noise level is the artifact
         // class, not the beacon (measured: real ~45 dB, artifacts ~0 dB).
         // Reject and keep hunting rather than anchor on it.

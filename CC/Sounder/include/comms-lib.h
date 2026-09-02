@@ -12,6 +12,12 @@
 ---------------------------------------------------------------------
 */
 
+// NO INCLUDE GUARD until 2026-09-02. Every translation unit included this once
+// and directly, so it never bit; the first HEADER to include it (receiver.h,
+// which now names CommsLib::BeaconPick in a signature) would have made the class
+// definition arrive twice in most of the build.
+#pragma once
+
 #include <complex.h>
 #include <math.h>
 #include <stdio.h> /* for fprintf */
@@ -119,17 +125,39 @@ class CommsLib {
                            std::vector<float> const&, double, double, size_t,
                            const size_t delta = 10);
 
+  // WHICH threshold crossing find_beacon_avx returns. The choice is not a
+  // refinement detail: it decides whether a strong link anchors on the beacon or
+  // on its own preamble, and the right answer differs between a wide window that
+  // may hold several beacon copies and a targeted slice that provably holds one.
+  enum class BeaconPick {
+    // Earliest crossing in the window, unrefined. HISTORICAL, and unsafe on a
+    // strong link -- see kTargetedArgmax.
+    kFirstCrossing,
+    // Earliest crossing, then the best ratio within one sequence length of it.
+    // Selects the earliest beacon COPY (repeatable across restarts, which the
+    // once-only pilot anchor needs) without returning that copy's leading skirt.
+    // For windows wide enough to hold more than one copy: acquisition.
+    kFirstClusterRefined,
+    // Strongest crossing anywhere in the window. ONLY valid when the window
+    // cannot hold two beacon copies -- true of the targeted resync slice, which
+    // is lead+tail (~812 samples at shipped defaults) against a 4096-sample copy
+    // spacing. There the earliest-crossing rule is actively wrong: the beacon's
+    // own STS preamble is 16-periodic, 16 divides the 128-sample correlator lag,
+    // so the STS field is lag-128 self-coherent and manufactures crossings a few
+    // hundred samples before the true peak. Whether they cross is a function of
+    // RECEIVED LEVEL, because the test compares a 4th-order quantity against a
+    // 2nd-order one, so a link that is fine today false-locks after a gain
+    // change. Measured: the shipped beacon flips from -1 to -363 samples between
+    // 1600 and 3200 counts RMS (beacon_geometry_test).
+    kTargetedArgmax,
+  };
+
   // Functions using AVX
   static int find_beacon(const std::vector<std::complex<float>>& raw_samples);
-  // refine_first_cluster: keep the EARLIEST crossing, which selects the earliest
-  // beacon copy and is repeatable across restarts, but return the strongest index
-  // within one sequence length of it rather than its leading skirt. The definition
-  // explains why the two kinds of crossing (sidelobes of one copy, versus separate
-  // copies) need opposite handling.
   static int find_beacon_avx(
       const std::vector<std::complex<float>>& raw_samples,
       const std::vector<std::complex<float>>& match_samples, float corr_scale,
-      bool refine_first_cluster = false);
+      BeaconPick pick = BeaconPick::kFirstCrossing);
 
   ///Find Beacon with raw samples from the radio
   static int find_beacon(const std::complex<int16_t>* raw_samples,
@@ -138,11 +166,12 @@ class CommsLib {
   static ssize_t find_beacon_avx(
       const std::complex<int16_t>* raw_samples,
       const std::vector<std::complex<float>>& match_samples,
-      size_t check_window, float corr_scale, bool refine_first_cluster = false);
+      size_t check_window, float corr_scale,
+      BeaconPick pick = BeaconPick::kFirstCrossing);
   // GPU beacon detector (find_beacon_cuda.cu), defined only when built with
   // -DUSE_CUDA (CMake HOUDINI_USE_CUDA), which is OFF by default and OFF on the
   // rig. NOTE it still returns the FIRST crossing (atomicMin over the index), so
-  // it does NOT match find_beacon_avx with refine_first_cluster set: it needs the same
+  // it does NOT match find_beacon_avx with any other BeaconPick: it needs the same
   // argmax-by-ratio change before the GPU path can be used for acquisition.
   static ssize_t find_beacon_cuda(
       const std::complex<int16_t>* raw_samples,
