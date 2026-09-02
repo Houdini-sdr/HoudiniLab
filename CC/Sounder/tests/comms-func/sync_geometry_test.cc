@@ -52,10 +52,10 @@ const std::vector<Rung> kLadder = {
 };
 
 // Shipped defaults, from receiver.cc's envDouble fallbacks.
-constexpr double kScatterUs = 8.3333;
+constexpr double kScatterUs = 2.0;         // was 8.3333 until 2026-09-02
 constexpr double kConfirmUs = 5.2083;
 constexpr double kSyncTolSamples = 32.0;   // ofdm_tx_zero_prefix 128 / 4
-constexpr double kResidualPpm = 1.0;
+constexpr double kResidualPpm = 0.1;       // was 1.0 until 2026-09-02
 
 }  // namespace
 
@@ -120,24 +120,46 @@ int main() {
           "the Iris/UHD frame-count cadence is unchanged by the rate" + at);
   }
 
-  // ---- the shipped rate must be bit-identical to what was gated --------
-  // 640 samples was the acquisition tolerance measured at 122.88 MSPS and 1024
-  // the tracking one. Expressing them in time was meant to change the SCALING
-  // and nothing else, so if either moves here, the gate evidence taken at this
-  // rate no longer describes this build.
-  check(geo[0].scatter_tol == 1024, "shipped rate: tracking gate is still 1024 samples");
-  check(geo[0].confirm_tol == 640, "shipped rate: acquisition gate is still 640 samples");
-  check(!geo[0].scatter_clamped, "shipped rate: the tolerance is not clamped");
-  check(geo[0].accept_window == 1728, "shipped rate: the accept window is still 1728 samples");
-  check(geo[0].resync_interval_s > 0.2604 - 1e-4 &&
-            geo[0].resync_interval_s < 0.2604 + 1e-4,
-        "shipped rate: the resync cadence is 260.4 ms");
+  // ---- the shipped defaults, and what they were when 8.51 gated ---------
+  // These CHANGED on 2026-09-02 [user], so the assertions below pin the NEW
+  // values and the comment records the old ones. The gate at 8.51/8.79 was
+  // taken on the old defaults and does NOT cover these; it has to re-run.
+  //   was: scatter 1024, confirm 640, window 1728 (42.2 %), cadence 260.4 ms
+  //   now: scatter  246, confirm 246, window 3284 (80.2 %), cadence 2604 ms
+  check(geo[0].scatter_tol == 246, "shipped: tracking gate is 246 samples (2.0 us)");
+  check(geo[0].confirm_tol == 246,
+        "shipped: acquisition gate is PULLED IN to the tracking gate");
+  check(geo[0].confirm_clamped,
+        "shipped: the confirm tolerance is clamped by the tracking gate now");
+  check(!geo[0].scatter_clamped, "shipped rate: the tolerance is not slot-clamped");
+  check(geo[0].accept_window == 3284,
+        "shipped: the accept window is 3284 samples (80.2 % of the slot)");
+  check(geo[0].accept_window_frac > 0.75,
+        "shipped: tightening the gate WIDENED the window past 75 %");
+  check(geo[0].resync_interval_s > 2.604 - 1e-3 &&
+            geo[0].resync_interval_s < 2.604 + 1e-3,
+        "shipped: the resync cadence is 2.604 s (was 260.4 ms)");
   check(geo[0].resync_period_iters == 81,
-        "the Iris/UHD cadence is back to its original 81 frames");
+        "the Iris/UHD cadence is UNCHANGED at 81 frames by both edits");
 
   // ---- the clamp must engage where the slot really does run out --------
-  check(!geo[0].scatter_clamped && geo[1].scatter_clamped,
-        "the clamp engages between the shipped rate and 2x, as the slot fills");
+  // The clamp must not bite at the shipped rate, and must bite SOMEWHERE on the
+  // ladder -- otherwise it is untested. Which rung it first bites at is a
+  // consequence of the tolerance default and moved when that default changed
+  // (8.3333 us clamped at 2x, 2.0 us does not clamp until ~688 MSPS), so
+  // pinning a rung would have been pinning the wrong thing.
+  check(!geo[0].scatter_clamped,
+        "the clamp does NOT bite at the shipped rate");
+  {
+    bool any = false;
+    size_t first = 0;
+    for (size_t i = 0; i < geo.size(); ++i) {
+      if (geo[i].scatter_clamped) { any = true; first = i; break; }
+    }
+    check(any, "the clamp bites somewhere on the ladder, so it is exercised");
+    if (any)
+      std::printf("  clamp first engages at %s\n", kLadder[first].name);
+  }
 
   // ---- THE DOCUMENTED SWEEP, which is where this broke ------------------
   // HOUDINI_SCATTER_TOL_US is a sweep knob (walkthrough 7.1) and session-plan

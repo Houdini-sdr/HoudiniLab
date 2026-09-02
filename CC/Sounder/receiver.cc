@@ -1416,7 +1416,21 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   // HOUDINI_SCATTER_TOL_US, which the walkthrough documents and session-plan
   // leg 9 does, silently inverted the two gates and would have produced a
   // lock that escalates immediately, forever. One derivation, passed in.
-  const double kScatterTolUs = envDouble("HOUDINI_SCATTER_TOL_US", 8.3333);
+  // DEFAULT LOWERED 8.3333 -> 2.0 us [user 2026-09-02, "a conservative value"].
+  // 8.3333 us = 1024 samples was never derived from a measurement of this gate;
+  // it dated from the pre-targeting era when find_beacon could anchor hundreds
+  // of samples early. With targeted resync the measured detection residual is
+  // -2 to +3 samples across ~20 runs, worst |resid| 6, so 1024 was ~170x the
+  // worst case and the row AP-52 calls it "demote from control law to a tighter
+  // outlier reject".
+  //
+  // 2.0 us = 246 samples is 41x the worst observed residual AND is the only
+  // tighter value with silicon evidence: the AP-52 sweep ran it for 60 s with 0
+  // escalations, 0 off-grid, the same residual spread, and 153 accepted
+  // detections against the baseline's 91 -- because a tighter tolerance shrinks
+  // kLead/kTail and therefore WIDENS the accept window, 42.2 % of the slot to
+  // 80.2 %. Tighter still would be untested, which is the argument against it.
+  const double kScatterTolUs = envDouble("HOUDINI_SCATTER_TOL_US", 2.0);
   // The same argument that made kScatterTol a TIME (AP-40): what the
   // acquisition gate admits is detector scatter plus path, both properties of
   // the correlator and the cable measured in microseconds, so a fixed sample
@@ -1426,7 +1440,22 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   double sync_tol_samples =
       envDouble("HOUDINI_SYNC_TOL_SAMPLES",
                 static_cast<double>(config_->prefix()) / 4.0);
-  double sync_residual_ppm = envDouble("HOUDINI_SYNC_RESIDUAL_PPM", 1.0);
+  // DEFAULT LOWERED 1.0 -> 0.1 ppm [user 2026-09-02, "a conservative value,
+  // maybe 10x"]. This is the assumed worst-case clock error AFTER tracking, and
+  // it sets the cadence: 1.0 ppm gave a 260 ms resync, which AP-53(a) showed is
+  // ~75-100x more often than the oscillator requires.
+  //
+  // What the measurement says, three 300 s captures with the binning artifact
+  // fixed: the ADEV minimum sits at tau = 2 s, drift there is 0.46 / 0.58 /
+  // 0.49 samples, and at tau = 20 s it is 18.1 / 23.5 / 20.3 against our
+  // 32-sample budget. That implies an effective residual rate of 0.002 ppm at
+  // 2 s and 0.008 ppm at 20 s -- so the 1.0 ppm assumption was 120-500x
+  // pessimistic. 0.1 ppm gives a 2.6 s cadence and still leaves 12-50x margin
+  // on the measured rate and ~45x on the 32-sample tolerance itself. The full
+  // measured margin would be 0.01 ppm and a 26 s cadence; that is deliberately
+  // NOT taken, because 20 s is where the ADEV data ends and beyond it we would
+  // be extrapolating.
+  double sync_residual_ppm = envDouble("HOUDINI_SYNC_RESIDUAL_PPM", 0.1);
   // Both inputs are validated: a zero or negative ppm makes the cadence
   // quotient infinite, and a config without `ofdm_tx_zero_prefix` gives a zero
   // tolerance and a resync attempt every single frame. Neither should degrade

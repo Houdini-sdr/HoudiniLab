@@ -602,10 +602,10 @@ can be swept without a rebuild. Change one at a time and record which one.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `HOUDINI_SCATTER_TOL_US` | 8.3333 | How far a detection may land from the tracked grid and still count as the same beacon, in microseconds. Expressed in time so it holds at every sample rate. Raising it past about 15 makes the accept window larger than the slot can present, and the code clamps it and says so. |
+| `HOUDINI_SCATTER_TOL_US` | 2.0 | How far a detection may land from the tracked grid and still count as the same beacon, in microseconds. Expressed in time so it holds at every sample rate. Raising it past about 15 makes the accept window larger than the slot can present, and the code clamps it and says so. Lowering it WIDENS the window the client searches in, so a tighter tolerance finds more beacons, not fewer. |
 | `HOUDINI_CONFIRM_TOL_US` | 5.2083 | The same tolerance during acquisition, where two further detections must land on the first one's grid before the lock is trusted. Tighter than the tracking gate on purpose. |
 | `HOUDINI_SYNC_TOL_SAMPLES` | a quarter of the config `ofdm_tx_zero_prefix` | Timing slack budgeted to drift between two beacon checks. Half the input to the resync cadence. |
-| `HOUDINI_SYNC_RESIDUAL_PPM` | 1.0 | Assumed worst case clock error after tracking. The other half of the cadence input. The two together set how often the client looks at the beacon. |
+| `HOUDINI_SYNC_RESIDUAL_PPM` | 0.1 | Assumed worst case clock error after tracking. The other half of the cadence input. The two together set how often the client looks at the beacon, which at these defaults is every 2.6 seconds. |
 | `HOUDINI_GRID_ALPHA` | 0.5 | How much of each accepted detection's residual is applied to the schedule. Set both alpha and beta to 0 for a fixed period grid with no tracking at all. |
 | `HOUDINI_GRID_BETA` | 0.1 | How much of that residual is applied to the frame period estimate. |
 | `HOUDINI_GRID_STEP_PPM` | 0.5 | The most one detection may move the period estimate, in ppm. Guards against a single scatter outlier levering the rate. |
