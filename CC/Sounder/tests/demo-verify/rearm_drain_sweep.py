@@ -32,10 +32,29 @@ PROBE = os.path.join(HERE, "burst_rx_cost_probe.py")
 
 
 def run_one(ue, drain, reps, lead):
-    out = subprocess.run(
+    """A FAILED SUBPROCESS MUST NOT LOOK LIKE A CLEAN RESULT.
+
+    Measured 2026-09-02: the probe rejected an unrecognised --rearm-drain-ms,
+    printed a usage message to stderr, and produced no stdout. Every regex below
+    then found nothing, which this function reported as empty=0 and short=0 --
+    a perfectly clean sweep across fifteen runs that never started. The
+    INCONCLUSIVE guard on 0 ms caught it, but only by luck of the design; this
+    check catches it directly.
+    """
+    r = subprocess.run(
         [sys.executable, PROBE, "--ue", ue, "--reps", str(reps),
-         "--lead-frames", str(lead), "--rearm-drain-ms", str(drain)],
-        capture_output=True, text=True, timeout=900).stdout
+         "--lead-frames", str(lead), "--rearm-drain-ms", str(drain),
+         # The drain only applies to an arm that follows a delivered burst with
+         # NO deactivate in between, so a sweep that deactivates measures
+         # nothing about it.
+         "--no-deactivate"],
+        capture_output=True, text=True, timeout=900)
+    out = r.stdout
+    if r.returncode != 0 or "leg B" not in out:
+        raise SystemExit(
+            "probe FAILED at drain=%d (rc=%d). This is a broken measurement,\n"
+            "not a clean one. stderr:\n%s\nstdout tail:\n%s"
+            % (drain, r.returncode, (r.stderr or "")[-600:], out[-600:]))
     empty = 0
     short = 0
     cycle = None

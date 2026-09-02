@@ -78,6 +78,13 @@ def main():
     ap.add_argument("--reps", type=int, default=200)
     ap.add_argument("--nsamps", type=int, default=SLOT,
                     help="samples per read (default one slot)")
+    ap.add_argument("--no-deactivate", action="store_true",
+                    help="do NOT deactivate between bursts. Correct on a build "
+                         "with the END_BURST re-arm fix, and REQUIRED to measure "
+                         "the real cycle there.")
+    ap.add_argument("--rearm-drain-ms", type=int, default=-1,
+                    help="host plugin rx_rearm_drain_ms for leg B's stream "
+                         "(0-50). -1 leaves it unset, i.e. the driver default.")
     ap.add_argument("--lead-frames", type=int, default=4,
                     help="how far ahead of now to arm each burst")
     a = ap.parse_args()
@@ -157,6 +164,12 @@ def main():
     arm_us, brd_us, brd_got, cycle_us = [], [], [], []
     late, arm_fail, brd_short = 0, 0, 0
     for _ in range(a.reps):
+        # THE FULL CYCLE IS THE NUMBER THAT MATTERS. This probe used to time
+        # activateStream and readStream between their own clock pairs and quote
+        # the ARM as "the cost". deactivateStream sat outside both, and the
+        # driver gives it a 50 ms drain -- so the workaround path measured at
+        # 1.75 ms actually cost a consumer about 52 ms per burst.
+        cycle_t0 = time.perf_counter()
         try:
             now_ns = dev.getHardwareTime()
         except Exception as e:
@@ -203,10 +216,15 @@ def main():
         # 50/100, 50/100). "Exactly half, every time, independent of the lead"
         # is the shape of a state-machine bug in the caller, not of a late arm,
         # and it was reported as the latter.
-        try:
-            dev.deactivateStream(rxs)
-        except Exception:
-            pass
+        # ...and on a build WITH the re-arm fix the deactivate is unnecessary
+        # AND ruinous to measure with: it carries a 50 ms driver drain that
+        # measured 66 ms of a 74.5 ms cycle, so the workaround dominated the
+        # quantity being measured. --no-deactivate is required there.
+        if not a.no_deactivate:
+            try:
+                dev.deactivateStream(rxs)
+            except Exception:
+                pass
         # A MISSED slot is ret <= 0. A truncated read is ordinary here and its
         # timing still measures what this probe is for.
         if sr.ret <= 0:
@@ -216,6 +234,7 @@ def main():
             brd_short += 1
         brd_us.append((t2 - t1) * 1e6)
         brd_got.append(sr.ret)
+        cycle_us.append((time.perf_counter() - cycle_t0) * 1e6)
     try:
         dev.deactivateStream(rxs)
     except Exception:
