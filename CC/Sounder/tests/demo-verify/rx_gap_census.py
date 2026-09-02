@@ -36,6 +36,33 @@ RPC_TIMEOUT_US = "30000000"
 RATE = 122.88e6
 
 
+
+def census(a, nsamps, reads):
+    """One (node, request size) point: short-read rate and minimum length."""
+    dev = SoapySDR.Device(dict(driver="houdinisdr",
+                               remote="tcp://%s:55132" % a.ue,
+                               timeout=RPC_TIMEOUT_US))
+    dev.setSampleRate(SOAPY_SDR_RX, a.ch, RATE)
+    dev.setFrequency(SOAPY_SDR_RX, a.ch, a.freq)
+    rxs = dev.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CS16, [a.ch],
+                          dict(local_port=str(10001 + a.ch),
+                               rx_gap_break=a.gap_break))
+    dev.activateStream(rxs)
+    buf = np.zeros(2 * nsamps, dtype=np.int16)
+    rets = []
+    for _ in range(reads):
+        sr = dev.readStream(rxs, [buf], nsamps, timeoutUs=1000000)
+        if sr.ret > 0:
+            rets.append(int(sr.ret))
+    dev.deactivateStream(rxs)
+    dev.closeStream(rxs)
+    if not rets:
+        return None
+    short = sum(1 for r in rets if r != nsamps)
+    return {"n": len(rets), "short_pct": 100.0 * short / len(rets),
+            "min": min(rets)}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ue", required=True)
@@ -43,11 +70,33 @@ def main():
     ap.add_argument("--freq", type=float, default=500e6)
     ap.add_argument("--nsamps", type=int, default=12288)
     ap.add_argument("--reads", type=int, default=4000)
+    ap.add_argument("--sweep-nsamps", default="",
+                    help="comma-separated request sizes to sweep, e.g. "
+                         "2048,4096,12288,32768,65536. Discriminates a "
+                         "BUFFERING BOUNDARY (rate varies with request size "
+                         "against some quantum) from a timing property (rate "
+                         "flat in request size). Either answer narrows the "
+                         "node asymmetry; another hypothesis does not.")
     ap.add_argument("--gap-break", default="1",
                     help="rx_gap_break setting. Run it BOTH ways: with 1 the "
                          "driver truncates at a hole, with 0 it does not, and "
                          "the difference between the two is the answer.")
     a = ap.parse_args()
+
+    if a.sweep_nsamps:
+        # Sweep mode: same node, same stream settings, request size varied.
+        # Reports the rate AND the minimum returned length, because those
+        # discriminate differently -- a rate difference at equal minima is a
+        # timing property, while different minima say the batch SIZE
+        # distribution differs, not only its cadence.
+        print("%-10s %-14s %-12s %-12s" % ("nsamps", "short %", "min ret", "reads"))
+        for ns in [int(v) for v in a.sweep_nsamps.split(",") if v.strip()]:
+            r = census(a, ns, a.reads)
+            if r is None:
+                print("%-10d %s" % (ns, "no reads"))
+                continue
+            print("%-10d %-14.1f %-12d %-12d" % (ns, r["short_pct"], r["min"], r["n"]))
+        return 0
 
     dev = SoapySDR.Device(dict(driver="houdinisdr",
                                remote="tcp://%s:55132" % a.ue,
