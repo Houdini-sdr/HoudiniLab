@@ -254,6 +254,15 @@ add_executable(grid_tracker_test tests/comms-func/grid_tracker_test.cc)
 target_include_directories(grid_tracker_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 add_test(NAME grid_tracker COMMAND grid_tracker_test)
 
+# The index-convention check AP-34(a) did not have. Links the real CommsLib so
+# it exercises the REAL detector; a replica would agree with itself.
+add_executable(beacon_geometry_test
+    tests/comms-func/beacon_geometry_test.cc
+    comms-lib.cc comms-lib-avx.cc comms-lib-portable.cc utils.cc)
+target_include_directories(beacon_geometry_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(beacon_geometry_test -lpthread ${MUFFT_LIBRARIES})
+add_test(NAME beacon_geometry COMMAND beacon_geometry_test)
+
 # HIL helper: transmit the real Gold beacon from a Houdini board so a Houdini UE
 # running the unmodified receiver.cc client-sync path can acquire it.
 add_executable(beacon_tx_gold
