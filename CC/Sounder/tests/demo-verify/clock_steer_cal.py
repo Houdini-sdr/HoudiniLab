@@ -141,7 +141,16 @@ def main():
         print("ppm per DAC count = %+.4f   (protocol says 0.129, bench doc 0.087)"
               % slope)
         print("linearity: fit residual %.5f ppm rms over %d points" % (rms, n))
-        print("sign: higher code = %s clock" % ("FASTER" if slope > 0 else "SLOWER"))
+        # eps = (f_BS - f_UE)/f_UE and we steer the UE, so the UE sits in the
+        # numerator AND the denominator: raising f_UE LOWERS eps. A NEGATIVE
+        # slope therefore means higher code = faster UE. The first cut of this
+        # line read the slope as if eps were the UE's own frequency and printed
+        # the sign backwards, which would have inverted the steering loop.
+        print("sign: higher code = %s UE clock  (d(eps)/d(count) = %+.4f; eps "
+              "has f_UE in its denominator, so the sign inverts)"
+              % ("FASTER" if slope < 0 else "SLOWER", slope))
+        print("loop: to null eps, push %+d counts per ppm of eps"
+              % round(1.0 / abs(slope)))
     else:
         print("not enough good points to fit")
     with open(args.out, "w") as f:
