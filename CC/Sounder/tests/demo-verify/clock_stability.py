@@ -107,7 +107,20 @@ def main():
           % (-np.polyfit(t, x_samp, 1)[0] / RATE * 1e6))
 
     tb, xb, cnt = bin_phase(t, x, args.tau0)
+    # bin_phase returns empty arrays when the run is SHORTER than one bin, and
+    # the median of an empty array is nan, which int() raises on -- so a short
+    # capture died before printing anything at all rather than saying it was
+    # short. Reachable with any probe json whose span is under --tau0.
+    if len(tb) == 0 or not np.any(cnt > 0):
+        print("  run spans %.2f s, shorter than one --tau0 bin (%.2f s): "
+              "nothing to bin. Capture longer, or lower --tau0."
+              % (t[-1] - t[0], args.tau0))
+        return 2
     ok = np.isfinite(xb)
+    if ok.sum() < 3:
+        print("  only %d populated bin(s) at --tau0 %.2f s: an ADEV needs "
+              "more. Capture longer, or lower --tau0." % (ok.sum(), args.tau0))
+        return 2
     print("  binned at %.2f s: %d/%d bins populated, median %d detections/bin"
           % (args.tau0, ok.sum(), len(xb), int(np.median(cnt[cnt > 0]))))
     # de-trend: ADEV is about the CHANGE in rate, not the rate itself

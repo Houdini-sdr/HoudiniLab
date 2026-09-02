@@ -102,7 +102,8 @@ def main():
                           dict(local_port=str(10001 + a.ch), rx_gap_break="1"))
     dev.activateStream(rxs)
     time.sleep(0.2)
-    drain_us, cont_us, cont_bad = [], [], 0
+    drain_us, cont_us, cont_got = [], [], []
+    cont_bad, cont_short = 0, 0
     for _ in range(a.reps):
         t0 = time.perf_counter()
         while True:
@@ -112,11 +113,20 @@ def main():
         t1 = time.perf_counter()
         sr = dev.readStream(rxs, [buf], a.nsamps, timeoutUs=1000000)
         t2 = time.perf_counter()
-        if sr.ret != a.nsamps:
+        # A SHORT READ IS NORMAL HERE, not a failure. readStream truncates on
+        # this platform as a matter of course (ret=2032 against a 12288 request,
+        # observed live and counted by clock_drift_probe.py). Only ret <= 0 is a
+        # failed read. Counting truncation as failure would have emptied both
+        # legs and, in leg B, printed "the driver does not accept a timed RX
+        # burst" -- blaming the driver contract for this script's own policy.
+        if sr.ret <= 0:
             cont_bad += 1
             continue
+        if sr.ret != a.nsamps:
+            cont_short += 1
         drain_us.append((t1 - t0) * 1e6)
         cont_us.append((t2 - t1) * 1e6)
+        cont_got.append(sr.ret)
     dev.deactivateStream(rxs)
     dev.closeStream(rxs)
 
@@ -125,7 +135,11 @@ def main():
     show("read after drain", stats(cont_us), a.nsamps)
     show("drain + read", stats([d + c for d, c in zip(drain_us, cont_us)]), a.nsamps)
     if cont_bad:
-        print("  %d short/failed read(s) excluded" % cont_bad)
+        print("  %d failed read(s) (ret <= 0) excluded" % cont_bad)
+    if cont_short:
+        print("  %d short read(s) INCLUDED, mean %.0f of %d samples requested "
+              "-- truncation is normal here and is not a failure"
+              % (cont_short, sum(cont_got) / len(cont_got), a.nsamps))
     print()
 
     # ---------------- leg B: timed burst, arm per read ---------------------
@@ -135,7 +149,8 @@ def main():
     # an RPC round trip per frame, an expensive READ is the data path.
     rxs = dev.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CS16, [a.ch],
                           dict(local_port=str(10001 + a.ch), rx_gap_break="1"))
-    arm_us, brd_us, late, arm_fail = [], [], 0, 0
+    arm_us, brd_us, brd_got = [], [], []
+    late, arm_fail, brd_short = 0, 0, 0
     for _ in range(a.reps):
         try:
             now_ns = dev.getHardwareTime()
@@ -155,15 +170,22 @@ def main():
         sr = dev.readStream(rxs, [buf], a.nsamps,
                             timeoutUs=int(2e6 + a.lead_frames * 1e3))
         t2 = time.perf_counter()
-        if sr.ret != a.nsamps:
+        # Same rule as leg A. A MISSED slot is ret <= 0: the burst ended and
+        # nothing came back, which IS the cost AP-43 names. A truncated read is
+        # the ordinary platform behaviour and its timing still measures what
+        # this probe is here to measure.
+        if sr.ret <= 0:
             late += 1
             try:
                 dev.deactivateStream(rxs)
             except Exception:
                 pass
             continue
+        if sr.ret != a.nsamps:
+            brd_short += 1
         arm_us.append((t1 - t0) * 1e6)
         brd_us.append((t2 - t1) * 1e6)
+        brd_got.append(sr.ret)
     try:
         dev.deactivateStream(rxs)
     except Exception:
@@ -177,15 +199,23 @@ def main():
     if arm_fail:
         print("  %d arm(s) refused by the driver" % arm_fail)
     if late:
-        print("  %d burst(s) returned short -- a LATE ARM misses the slot "
+        print("  %d burst(s) returned NOTHING -- a LATE ARM misses the slot "
               "outright, which is the cost AP-43 names" % late)
+    if brd_short:
+        print("  %d burst(s) truncated, mean %.0f of %d -- normal, included"
+              % (brd_short, sum(brd_got) / len(brd_got), a.nsamps))
     print()
 
     # ---------------- the verdict AP-43 asked for --------------------------
-    ca, cb = stats(cont_us), stats(brd_us)
+    cb = stats(brd_us)
     ta = stats([d + c for d, c in zip(drain_us, cont_us)])
     tb = stats([x + y for x, y in zip(arm_us, brd_us)]) if brd_us else None
     print("=== AP-43 verdict ===")
+    if not ta:
+        print("  NO CONTINUOUS DATA: every leg-A read failed (ret <= 0). There")
+        print("  is nothing to compare against, so this is a bench problem")
+        print("  rather than an AP-43 result. Check the link before rerunning.")
+        return 1
     if not cb or not tb:
         print("  NO BURST DATA. If every arm was refused, the driver does not")
         print("  accept a timed RX burst on this build and THAT is the finding:")

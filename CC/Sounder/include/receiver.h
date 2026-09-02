@@ -27,6 +27,7 @@
 #endif
 #include "concurrentqueue.h"
 #include "config.h"
+#include "sync_geometry.h"
 #include "macros.h"
 
 class ReceiverException : public std::runtime_error {
@@ -97,6 +98,7 @@ class Receiver {
   // how far the beacon slipped over them, so the rate costs nothing extra --
   // see the bootstrap note at the definition.
   bool houdiniAcquireAnchor(int tid, size_t detect_window,
+                            const Sounder::SyncGeometry& geom,
                             long long& anchor_out,
                             double* period_out = nullptr);
   void clientAdjustRx(size_t radio_id, size_t discard_samples);

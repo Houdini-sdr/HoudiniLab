@@ -107,6 +107,20 @@ def fit(x, y, nsig=3.0, iters=4):
         if (nk == keep).all():
             break
         keep = nk
+    else:
+        # Loop exhausted `iters` rather than converging. `keep` was reassigned
+        # on the last pass but a, b and sy still belong to the PREVIOUS mask, so
+        # returning them alongside an sxx computed from the new one reports a
+        # slope from one subset with a standard error describing another. That
+        # SE is what clock_steer_cal.py uses as the per-point weight for the
+        # ppm-per-count calibration, so the mismatch propagates into a shipped
+        # number. Refit once on the final mask.
+        if keep.sum() >= 3:
+            a, b = np.polyfit(x[keep], y[keep], 1)
+            r = y - (a * x + b)
+            sy = float(np.sqrt(np.sum(r[keep] ** 2) / max(1, keep.sum() - 2)))
+        else:
+            return None, None, None, int((~keep).sum())
     sxx = float(np.sum((x[keep] - x[keep].mean()) ** 2))
     return (float(a), (sy / math.sqrt(sxx) if sxx > 0 else None), sy,
             int((~keep).sum()))

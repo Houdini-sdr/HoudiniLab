@@ -139,6 +139,33 @@ int main() {
   check(!geo[0].scatter_clamped && geo[1].scatter_clamped,
         "the clamp engages between the shipped rate and 2x, as the slot fills");
 
+  // ---- THE DOCUMENTED SWEEP, which is where this broke ------------------
+  // HOUDINI_SCATTER_TOL_US is a sweep knob (walkthrough 7.1) and session-plan
+  // leg 9 sweeps it. The acquisition gate is CLAMPED by the tracking one, so
+  // any caller deriving the two from different scatter tolerances inverts
+  // them. That is exactly what happened: houdiniAcquireAnchor re-derived its
+  // own copy with the tolerance hardcoded to the default, and at
+  // HOUDINI_SCATTER_TOL_US=4 the tracking gate was 492 against an acquisition
+  // gate of 640. There is one derivation now, threaded through; this walks the
+  // sweep so the invariant is checked across it rather than at the default.
+  std::printf("=== HOUDINI_SCATTER_TOL_US swept, shipped rate ===\n");
+  for (double tol_us : {1.0, 2.0, 4.0, 8.3333, 12.0, 20.0, 60.0}) {
+    const auto g = Sounder::computeSyncGeometry(122.88e6, 4096, 122880, tol_us,
+                                                kConfirmUs, kSyncTolSamples,
+                                                kResidualPpm);
+    std::printf("  %6.2f us -> scatter %5lld  confirm %5lld%s  window %5lld "
+                "(%.1f%%)\n", tol_us, g.scatter_tol, g.confirm_tol,
+                g.confirm_clamped ? " (pulled in)" : "            ",
+                g.accept_window, 100.0 * g.accept_window_frac);
+    check(g.confirm_tol <= g.scatter_tol,
+          "swept: acquisition stays no looser than tracking at " +
+              std::to_string(tol_us) + " us");
+    check(g.usable && g.accept_window_frac >= 0.20,
+          "swept: the accept window stays usable at " +
+              std::to_string(tol_us) + " us");
+  }
+  std::printf("\n");
+
   // ---- degenerate inputs must not produce a silent open loop -----------
   {
     // A tolerance far too large for any slot: the clamp, not the caller, has to

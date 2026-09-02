@@ -113,22 +113,36 @@ def sd(xs):
 
 
 def capture(dev, rxs, nsamps, chunk=1 << 16):
-    """One CONTIGUOUS window. Any gap makes stage 3 meaningless, so a short or
-    flagged read aborts the window rather than being stitched over."""
+    """One CONTIGUOUS window.
+
+    A SHORT READ IS NORMAL AND IS NOT A GAP. readStream truncates on this
+    platform as a matter of course -- clock_drift_probe.py counts them
+    (ret=2032 against a 12288 request, observed live) and
+    two_node_beacon_arrival.py simply uses sr.ret. An earlier cut of this
+    function aborted the window on any short read, which meant every window
+    aborted and the probe could never produce the measurement it exists for.
+    Take what the read returned and continue; contiguity is preserved because
+    the next read resumes where this one stopped.
+
+    What DOES invalidate stage 3 is a dropped-packet GAP, which is a different
+    thing: the driver is opened with rx_gap_break=1 so a gap ENDS the read with
+    ret <= 0 rather than splicing across it, and that is what aborts here.
+    """
     out = np.zeros(2 * nsamps, dtype=np.int16)
     got = 0
+    shorts = 0
     buf = np.zeros(2 * chunk, dtype=np.int16)
     while got < nsamps:
         want = min(chunk, nsamps - got)
         sr = dev.readStream(rxs, [buf], want, timeoutUs=2000000)
         if sr.ret <= 0:
-            return None, "read returned %d" % sr.ret
+            return None, "read returned %d after %d/%d samples" % (sr.ret, got, nsamps), shorts
         if sr.ret != want:
-            return None, "short read %d/%d (a gap here invalidates stage 3)" % (sr.ret, want)
+            shorts += 1
         out[2 * got:2 * (got + sr.ret)] = buf[:2 * sr.ret]
         got += sr.ret
     w = out.astype(np.float64)
-    return (w[0::2] + 1j * w[1::2]) / 32767.0, None
+    return (w[0::2] + 1j * w[1::2]) / 32767.0, None, shorts
 
 
 def main():
@@ -140,13 +154,24 @@ def main():
     ap.add_argument("--frames", type=int, default=8,
                     help="consecutive-frame PAIRS per window (window = N+1 frames)")
     ap.add_argument("--windows", type=int, default=20)
-    ap.add_argument("--corr-scale", type=float, default=1.0)
+    # 10.0 is what clock_drift_probe.py and two_node_beacon_arrival.py both
+    # use. find_beacon admits a peak only when ratio > 1/corr_scale, so a
+    # default of 1.0 is a floor of 1.0 against ratios measured 0.36 to 5.8 on
+    # this very link: the probe would report "0 beacons found" on a link the
+    # siblings lock cleanly. The ledger already records that trap -- the
+    # detector ratio is not an absolute, it moves with link level.
+    ap.add_argument("--corr-scale", type=float, default=10.0)
     a = ap.parse_args()
 
     gold = np.fromfile(a.gold, dtype=np.complex64).astype(np.complex128)
     if len(gold) != GOLD_L:
         print("gold is %d samples, expected %d" % (len(gold), GOLD_L))
         return 2
+    # BOTH SENSES. The TX RAM holds the conjugated core, so which replica
+    # matches is a property of the bench rather than a constant, and both
+    # sibling probes try the pair and print which won. Trying only one makes a
+    # sense mismatch indistinguishable from a dead link.
+    senses = [("gold", gold), ("conj", np.conj(gold))]
 
     dev = SoapySDR.Device(dict(driver="houdinisdr",
                                remote="tcp://%s:55132" % a.ue,
@@ -164,13 +189,26 @@ def main():
     print("window = %d frames = %d samples (%.1f MB), %d windows\n"
           % (a.frames + 1, nsamps, nsamps * 4 / 1e6, a.windows))
 
-    s2_all, s3_all, aborted = [], [], 0
+    s2_all, s3_all, aborted, shorts_total = [], [], 0, 0
+    sense_name, sense_gold = None, None
     for w in range(a.windows):
-        c, err = capture(dev, rxs, nsamps)
+        c, err, shorts = capture(dev, rxs, nsamps)
+        shorts_total += shorts
         if c is None:
             aborted += 1
             print("  window %d ABORTED: %s" % (w + 1, err))
             continue
+        # Settle the replica sense once, on the first window that yields a
+        # detection either way, then hold it: switching mid-run would make the
+        # per-window results incomparable.
+        if sense_gold is None:
+            best = (-1.0, None, None)
+            for nm, g in senses:
+                _idx, rr = find_beacon(c[:FRAME], g, a.corr_scale)
+                if rr > best[0]:
+                    best = (rr, nm, g)
+            _, sense_name, sense_gold = best
+            print("  replica sense = %s (best ratio %.3g)" % (sense_name, best[0]))
         # Find one beacon per frame slice, then convert the detector index to
         # the core start. A slice is one frame long, so exactly one beacon lands
         # in it -- but the beacon can straddle the slice boundary, so skip any
@@ -178,7 +216,7 @@ def main():
         cores, pos = [], []
         for k in range(a.frames + 1):
             sl = c[k * FRAME:(k + 1) * FRAME]
-            idx, ratio = find_beacon(sl, gold, a.corr_scale)
+            idx, ratio = find_beacon(sl, sense_gold, a.corr_scale)
             if idx < 0:
                 continue
             start = k * FRAME + idx - CORE_OFF_2NDREP
@@ -211,7 +249,8 @@ def main():
     dev.deactivateStream(rxs)
     dev.closeStream(rxs)
 
-    print("\n=== ladder over %d window(s), %d aborted ===" % (a.windows, aborted))
+    print("\n=== ladder over %d window(s), %d aborted, %d short read(s) "
+          "stitched ===" % (a.windows, aborted, shorts_total))
     if not s2_all or not s3_all:
         print("NO RESULT: stage2 n=%d stage3 n=%d" % (len(s2_all), len(s3_all)))
         return 1

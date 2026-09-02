@@ -49,31 +49,51 @@ struct Trace {
   std::vector<double> drift;     ///< true period at each detection
 };
 
+// DETERMINISTIC ACROSS STANDARD LIBRARIES, deliberately. std::mt19937 is
+// specified bit-for-bit by the standard; std::normal_distribution and friends
+// are NOT -- their algorithms are implementation-defined, so the same seed
+// draws different numbers on libstdc++, libc++ and MSVC. This is registered as
+// a ctest and its checks turn on statistical margins, so an implementation
+// change would fail it with no code change and no bug. Build the draws from raw
+// mt19937 output instead.
+double u01(std::mt19937& g) {
+  // mt19937 yields [0, 2^32); the +0.5 keeps the result strictly inside (0, 1),
+  // which log() below requires.
+  return (static_cast<double>(g()) + 0.5) / 4294967296.0;
+}
+
+double gauss(std::mt19937& g) {   // Box-Muller
+  const double u1 = u01(g), u2 = u01(g);
+  return std::sqrt(-2.0 * std::log(u1)) * std::cos(2.0 * M_PI * u2);
+}
+
 /// Detections spaced as the bench spaces them, with a slow rate random walk.
 Trace makeTrace(unsigned seed, int n, bool irregular, double outlier_rate,
                 double drift_ppm_per_1e5) {
   std::mt19937 rng(seed);
-  std::normal_distribution<double> scat(0.0, kScatterSd);
   // Measured: median 179 frames, range 10-831. A lognormal reproduces that
   // shape far better than a uniform, and the shape is the point.
-  std::lognormal_distribution<double> gap(std::log(179.0), 0.75);
-  std::uniform_real_distribution<double> u(0.0, 1.0);
+  auto lognormal_gap = [&rng]() {
+    return std::exp(std::log(179.0) + 0.75 * gauss(rng));
+  };
   Trace t;
   double period = kTruePeriod;
   long long elapsed = 0;
   for (int i = 0; i < n; ++i) {
-    long long g = irregular
-                      ? std::max<long long>(10, std::min<long long>(831, static_cast<long long>(gap(rng))))
-                      : 260;
+    long long g =
+        irregular ? std::max<long long>(
+                        10, std::min<long long>(
+                                831, static_cast<long long>(lognormal_gap())))
+                  : 260;
     elapsed += g;
     // A slow, real rate walk: the session-scale 0.23 ppm drift.
     period = kTruePeriod * (1.0 + drift_ppm_per_1e5 * 1e-6 *
                                       static_cast<double>(elapsed) / 1e5);
     t.gaps.push_back(g);
-    t.noise.push_back(scat(rng));
+    t.noise.push_back(kScatterSd * gauss(rng));
     // An occasional edge-of-gate detection: inside the +-1024 alive/moved gate,
     // so the shipped code ACCEPTS it, which is exactly the case 8.56 is about.
-    t.outlier.push_back(u(rng) < outlier_rate ? 900.0 : 0.0);
+    t.outlier.push_back(u01(rng) < outlier_rate ? 900.0 : 0.0);
     t.drift.push_back(period);
   }
   return t;
