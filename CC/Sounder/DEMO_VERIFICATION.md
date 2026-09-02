@@ -345,6 +345,11 @@ eps is defined throughout as (f_BS - f_UE) / f_UE.
 | 8.50 | HIGH-SEVERITY BUGS FOUND AND FIXED, none of which the bench would have surfaced: **AP-40's rate-scaled tolerance makes the resync accept band EMPTY above ~226 MSPS** (2*tol+320 must fit samps_per_slot, which does not scale) with no search, no counted miss and therefore not even an escalation -- silence being the worst failure mode available; the acquisition rate refinement had unbounded 1/k gain and my "keep the period across a failed confirm" rule made a bad kick permanent; both wholesale period installs bypassed the only clamp; `estimateCFO`'s index guard checked only the upper bound so an out-of-range index logs a fabricated "+0.0 Hz"; the rot log could throw `out_of_range` from a detached thread on a BS-only config; and both steering instruments silently reused the PREVIOUS point's json when a probe died, so the loop could push a DAC code from a measurement it never took | Opus review, all verified against source and fixed | VERIFIED-CODE |
 
 
+| # | claim | evidence | status |
+| --- | --- | --- | --- |
+| 8.51 | POST-REVIEW RE-VERIFICATION, 3 RUNS on the fixed build: **98/104/128 accepted, 0 escalations and 0 off-grid in every run**, acquisition locking at resid 0/-1/-1 over 205/203/202 frames, CNS low **3/7/3 of 2048** (0.15-0.34%, better than the 0.23-0.94% before the fixes). **Reported honestly: the sync residual scatter was HIGHER in two of the three (sd 0.54/2.17/1.73, max 2/12/14) against 0.69/0.95/0.97 before.** Max \|resid\| 14 is still two orders inside the gate and nothing escalated, so it is not a functional regression, but it is a real change in dispersion that this session did not explain and the next one should watch rather than assume away | `/tmp/leg_pr{3,4,5}.log` | VERIFIED-HW |
+
+
 ## Standing traps (carried from the driver contract, apply to every phase)
 
 1. An unknown or non-writable writeSetting key logs a warning and silently
