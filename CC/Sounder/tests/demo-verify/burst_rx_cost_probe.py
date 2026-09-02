@@ -147,9 +147,14 @@ def main():
     # read, let the burst end itself. The arm is timed separately from the read
     # because they are different costs with different fixes: an expensive ARM is
     # an RPC round trip per frame, an expensive READ is the data path.
-    rxs = dev.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CS16, [a.ch],
-                          dict(local_port=str(10001 + a.ch), rx_gap_break="1"))
-    arm_us, brd_us, brd_got = [], [], []
+    # rx_rearm_drain_ms is a host-plugin seam the software lane exposed so this
+    # drain can be SIZED from a measurement instead of left at a conservative
+    # bound. Unset leaves the driver default.
+    sargs = dict(local_port=str(10001 + a.ch), rx_gap_break="1")
+    if a.rearm_drain_ms >= 0:
+        sargs["rx_rearm_drain_ms"] = str(a.rearm_drain_ms)
+    rxs = dev.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CS16, [a.ch], sargs)
+    arm_us, brd_us, brd_got, cycle_us = [], [], [], []
     late, arm_fail, brd_short = 0, 0, 0
     for _ in range(a.reps):
         try:
