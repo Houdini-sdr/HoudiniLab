@@ -162,6 +162,7 @@ def main():
         sargs["rx_rearm_drain_ms"] = str(a.rearm_drain_ms)
     rxs = dev.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CS16, [a.ch], sargs)
     arm_us, brd_us, brd_got, cycle_us = [], [], [], []
+    seam_err = []   # returned first-sample tick minus armed tick
     late, arm_fail, brd_short = 0, 0, 0
     for _ in range(a.reps):
         # THE FULL CYCLE IS THE NUMBER THAT MATTERS. This probe used to time
@@ -235,6 +236,16 @@ def main():
         brd_us.append((t2 - t1) * 1e6)
         brd_got.append(sr.ret)
         cycle_us.append((time.perf_counter() - cycle_t0) * 1e6)
+        # THE SEAM CHECK. The joinless re-arm accepts one residual by design: a
+        # straggler from the PREVIOUS burst arriving at the head of the next.
+        # It is directly visible -- compare the time the burst was ARMED for
+        # against the time of the first sample actually returned. Equal means
+        # the read starts where it was told to. EARLIER means samples from the
+        # previous burst led the buffer, which is the straggler.
+        if sr.flags & SOAPY_SDR_HAS_TIME:
+            armed_tick = int(round(when * RATE / 1e9))
+            got_tick = int(round(sr.timeNs * RATE / 1e9))
+            seam_err.append(got_tick - armed_tick)
     try:
         dev.deactivateStream(rxs)
     except Exception:
@@ -287,6 +298,18 @@ def main():
               % (am, rd, cy["mean"] - am - rd))
         print("     at a 260 ms beacon cadence that is %.2f%% overhead"
               % (cy["mean"] / 260000.0 * 100))
+        print()
+    if seam_err:
+        arr = np.asarray(seam_err, dtype=np.int64)
+        exact = int((arr == 0).sum())
+        early = int((arr < 0).sum())
+        print("  SEAM: %d of %d bursts started EXACTLY where armed; %d early "
+              "(straggler), %d late" % (exact, len(arr), early,
+                                        int((arr > 0).sum())))
+        if early:
+            print("        earliest lead-in %d samples (%.1f us of the previous "
+                  "burst at the head of this one)"
+                  % (int(arr.min()), abs(int(arr.min())) / RATE * 1e6))
         print()
     print("  continuous, drain + read   %8.1f us" % ta["mean"])
     print("  burst, arm + read          %8.1f us  (a COMPONENT, not the cost)"

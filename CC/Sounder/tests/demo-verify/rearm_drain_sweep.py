@@ -111,6 +111,24 @@ def main():
 
     print("0 ms DOES fail (empty %s, short %s), so the sweep can see failure."
           % ([x["empty"] for x in results[0]], [x["short"] for x in results[0]]))
+    # REFUSE A NON-MONOTONIC RESULT. A drain that fixes something must not get
+    # WORSE as it grows. Measured 2026-09-02 at 30 reps: 1 ms was clean and 5 ms
+    # was dirtier, and the "first clean value" rule below happily reported 1 ms
+    # as the answer. It was noise -- at 100 reps both were dominated by a
+    # low-rate event unrelated to the drain. A rule that reports a threshold
+    # from a non-monotone series is reporting the shape of the noise.
+    def bad(d):
+        return sum(x["empty"] + x["short"] for x in results[d])
+    seq = [(d, bad(d)) for d in sorted(vals)]
+    worse = [(d, n) for (d, n), (_pd, pn) in zip(seq[1:], seq[:-1]) if n > pn]
+    if worse:
+        print("NON-MONOTONIC: failures do not fall as the drain grows -- %s."
+              % ", ".join("%d ms has %d" % (d, n) for d, n in worse))
+        print("A threshold read off a non-monotone series is the shape of the")
+        print("noise, not of the drain. Increase --reps until the series is")
+        print("monotone, or conclude the failures are not drain-dependent.")
+        return 1
+
     best = None
     for d in sorted(vals):
         if all(x["empty"] == 0 and x["short"] == 0 for x in results[d]):
