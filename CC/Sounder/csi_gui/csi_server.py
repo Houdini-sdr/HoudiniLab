@@ -472,8 +472,24 @@ def _launch_sounder(args, udp_dest):
         '  kill -0 "$SUP" 2>/dev/null || { echo "[sounder] supervisor gone, not retrying"; break; }; '
         '  timeout 60 python3 %s 2>&1 | sed -u "s/^/[teardown] /"; sleep 8; '
         '  kill -0 "$SUP" 2>/dev/null || { echo "[sounder] supervisor gone, not starting"; break; }; '
+        # Run it in the BACKGROUND and watch the supervisor. The guard above only
+        # fires between attempts, so on its own it stops a NEW sounder starting
+        # while leaving the running one holding both boards until it happens to
+        # exit -- which, for a --view run, is never. Polling the supervisor once
+        # a second and killing the sounder when it disappears is what actually
+        # frees the boards. Measured: a sounder releases both boards on SIGTERM,
+        # SIGINT and SIGKILL alike, so ending it is sufficient.
         '  ./build/sounder --view --conf_file "%s" --storepath "%s" 2>&1 | '
-        '     sed -u "s/^/[sounder] /"; '
+        '     sed -u "s/^/[sounder] /" & '
+        '  SPID=$!; '
+        '  while kill -0 "$SPID" 2>/dev/null; do '
+        '    kill -0 "$SUP" 2>/dev/null || { echo "[sounder] supervisor gone, stopping sounder"; '
+        '      pkill -INT -P "$SPID" 2>/dev/null; kill -INT "$SPID" 2>/dev/null; sleep 4; '
+        '      pkill -KILL -P "$SPID" 2>/dev/null; kill -KILL "$SPID" 2>/dev/null; break; }; '
+        '    sleep 1; '
+        '  done; '
+        '  wait "$SPID" 2>/dev/null; '
+        '  kill -0 "$SUP" 2>/dev/null || break; '
         '  echo "[sounder] exited, retrying..."; sleep 5; '
         'done'
     ) % (args.venv, args.venv, args.venv, sd, os.getpid(), td, args.conf,
