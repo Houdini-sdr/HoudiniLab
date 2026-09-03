@@ -368,6 +368,14 @@ int main(int argc, char** argv) {
     auto pu = SyncConfig::loadFromText("{}");
     pu.resolve(rpf);
     check(!pu.detector.pfa_applies, "P3: pfa unset -> corr_scale applies even on the coherence form");
+    auto pc = SyncConfig::loadFromText(R"({"sync": {"detector": {"pfa_per_window": 1e-3}}})");
+    houdini::sync::ResolveContext rpc = rpf;
+    rpc.backend_applies_config = false;
+    pc.resolve(rpc);
+    bool not_in_force = false;
+    for (const auto& w : pc.warnings()) not_in_force |= (w.find("not in force") != std::string::npos);
+    check(!pc.detector.pfa_applies && not_in_force,
+          "P3: a backend that applies no configuration -> the probability is noted as not in force");
     const double bar = houdini::sync::ThresholdPolicy::coherenceBar(128, 1e-3, 4096);
     const double want = 1.0 - std::pow(1e-3 / 4096.0, 1.0 / 127.0);
     check(std::fabs(bar - want) < 1e-12 && bar > 0.09 && bar < 0.13,

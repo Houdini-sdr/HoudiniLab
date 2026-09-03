@@ -15,7 +15,6 @@
 #include <unistd.h>
 
 #include <atomic>
-#include <functional>
 #include <chrono>
 #include <climits>
 #include <limits>
@@ -103,6 +102,15 @@ Receiver::Receiver(
     if (config_->client_present()) client_radio_set_ = makeClientRadioSet(config_);
     if (config_->bs_present()) base_radio_set_ = makeBaseRadioSet(config_, false);
   } catch (std::exception& e) {
+    // The client set may exist when the base set's construction throws: stop
+    // it (the hardware-framer disable it needs is not in its destructor)
+    // before the exception continues (confirmation review, item 2).
+    if (client_radio_set_ != nullptr) {
+      try {
+        client_radio_set_->radioStop();
+      } catch (...) {
+      }
+    }
     throw ReceiverException(e.what());
   }
   // Anything below that throws leaves the sets to their destructors, which
@@ -115,19 +123,26 @@ Receiver::Receiver(
   struct StopOnThrow {
     Receiver* self;
     bool armed = true;
-    static void stop(const char* which, const std::function<void()>& fn) {
-      try {
-        fn();
-      } catch (const std::exception& e) {
-        MLPD_ERROR("%s radio set stop during construction failure: %s\n", which, e.what());
-      } catch (...) {
-        MLPD_ERROR("%s radio set stop during construction failure: unknown error\n", which);
-      }
-    }
     ~StopOnThrow() {
       if (!armed) return;
-      if (self->base_radio_set_ != nullptr) stop("base", [&] { self->base_radio_set_->radioStop(); });
-      if (self->client_radio_set_ != nullptr) stop("client", [&] { self->client_radio_set_->radioStop(); });
+      if (self->base_radio_set_ != nullptr) {
+        try {
+          self->base_radio_set_->radioStop();
+        } catch (const std::exception& e) {
+          MLPD_ERROR("base radio set stop during construction failure: %s\n", e.what());
+        } catch (...) {
+          MLPD_ERROR("base radio set stop during construction failure: unknown error\n");
+        }
+      }
+      if (self->client_radio_set_ != nullptr) {
+        try {
+          self->client_radio_set_->radioStop();
+        } catch (const std::exception& e) {
+          MLPD_ERROR("client radio set stop during construction failure: %s\n", e.what());
+        } catch (...) {
+          MLPD_ERROR("client radio set stop during construction failure: unknown error\n");
+        }
+      }
     }
   } stop_on_throw{this};
 
@@ -1669,15 +1684,20 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
     // log carried no record of which rule produced its numbers -- in a change
     // whose other half exists because a run's identity was not recorded.
     {
+      char bar_text[64];
+      if (sync_detector_->backendAppliesConfig() && sync_detector_->barFromPfa()) {
+        std::snprintf(bar_text, sizeof bar_text, "from pfa %g per window",
+                      sync_detector_->pfaPerWindow());
+      } else {
+        std::snprintf(bar_text, sizeof bar_text, "1/corr_scale");
+      }
       MLPD_INFO(
-          "Beacon detector [%s]: threshold %s (bar %s), resync pick %s, acquisition "
-          "pick %s (first-path back window %d samples, floor %.1f dB); SNR floor "
-          "%.1f dB, SNR guard %zu samples; CFO guard %d margin %d\n",
+          "Beacon detector [%s]: threshold %s (bar %s), targeted resync pick %s, "
+          "acquisition pick %s, untargeted resync pick first_crossing (first-path "
+          "back window %d samples, floor %.1f dB); SNR floor %.1f dB, SNR guard "
+          "%zu samples; CFO guard %d margin %d\n",
           sync_detector_->backendName(), houdini::sync::name(sync_detector_->form()),
-          sync_detector_->barFromPfa()
-              ? ("from pfa " + std::to_string(sync_detector_->pfaPerWindow()) + " per window").c_str()
-              : "1/corr_scale",
-          houdini::sync::name(sync_detector_->pick()),
+          bar_text, houdini::sync::name(sync_detector_->pick()),
           houdini::sync::name(sync_detector_->pick()),
           sync_detector_->firstPathWindow(), sync_detector_->firstPathFloorDb(),
           sync_guard_->floorDb(), sync_guard_->guard(),

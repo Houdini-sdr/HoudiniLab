@@ -109,7 +109,8 @@ struct ThresholdPolicy {
   /// P(coh > bar) per index is (1 - bar)^(L-1) and
   /// bar = 1 - (pfa_per_window / window_samples)^(1/(L-1)). Measured against
   /// its prediction in beacon_geometry_test; applied by the detector for the
-  /// coherence form when DetectorConfig::pfa_applies (P3). The correlator
+  /// coherence form when DetectorConfig::pfa_applies, on a backend that
+  /// applies the configuration (P3). The correlator
   /// ranks window + L - 1 indices, so the realised rate is that fraction
   /// above the requested one (about 3 % at 4096 and 128), well inside the
   /// Beta model's own error.
@@ -186,6 +187,11 @@ struct ResolveContext {
   Platform platform = Platform::kHoudini;
   bool single_copy_replica = false;///< the replica appears once (nr_pss): coherence form
   size_t clients = 1;              ///< configured clients; above 1 the per-client arrays apply
+  /// Whether the detector backend this library was built with applies the
+  /// configured form, pick and bar (Detector::backendAppliesConfigByDefault;
+  /// the CUDA correlator applies none). Off, the probability is noted as
+  /// not in force rather than recorded as applied.
+  bool backend_applies_config = true;
 };
 
 struct SyncConfig {
@@ -286,6 +292,7 @@ struct SyncConfig {
   size_t clients_ = 1;
   Platform platform_ = Platform::kHoudini;
   bool resolved_ = false;  ///< resolve() has run: notes that need the resolved form may fire
+  bool backend_applies_config_ = true;
   bool block_sets_threshold_ = false;  ///< the sync block (not the legacy array) set a bar
   void validate();
   /// The schema index of a path; throws std::logic_error for a path the

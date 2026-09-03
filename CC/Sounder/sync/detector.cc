@@ -65,6 +65,14 @@ Detector::Detector(const BeaconShape& shape, const DetectorConfig& cfg)
   pfa_applies_ = cfg.pfa_applies && form_ == ThresholdForm::kCoherence && backendAppliesConfig();
 }
 
+bool Detector::backendAppliesConfigByDefault() {
+#if defined(USE_CUDA)
+  return false;
+#else
+  return true;
+#endif
+}
+
 const char* Detector::backendName() const {
   return backend_ == DetectorBackend::kCuda ? "cuda" : "portable";
 }

@@ -17,6 +17,7 @@
 #include <random>
 
 #include "sync/beacon_shapes.h"
+#include "sync/detector.h"
 #include "include/comms-lib.h"
 #include "include/constants.h"
 #include "include/logger.h"
@@ -864,6 +865,7 @@ void Config::genPilots() {
   rctx.platform = platform();
   rctx.single_copy_replica = shape.singleCopy();
   rctx.clients = num_cl_sdrs_;
+  rctx.backend_applies_config = houdini::sync::Detector::backendAppliesConfigByDefault();
   sync_.resolve(rctx);
   CommsLib::setCorrelatorThreads(static_cast<unsigned>(sync_.detector.corr_threads));
   MLPD_INFO("%s", sync_.describe().c_str());

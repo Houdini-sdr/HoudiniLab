@@ -527,8 +527,10 @@ void SyncConfig::resolve(const ResolveContext& ctx) {
   }
   // The pfa-derived bar applies to the coherence form when a configuration
   // set the probability (P3); the repeated-field forms keep corr_scale.
-  detector.pfa_applies =
-      wasSet("detector.pfa_per_window") && detector.threshold == ThresholdForm::kCoherence;
+  detector.pfa_applies = wasSet("detector.pfa_per_window") &&
+                         detector.threshold == ThresholdForm::kCoherence &&
+                         ctx.backend_applies_config;
+  backend_applies_config_ = ctx.backend_applies_config;
   // Several clients: the receiver applies the legacy per-client arrays, not
   // the block's one value.
   clients_ = ctx.clients;
@@ -584,8 +586,14 @@ void SyncConfig::validate() {
   // Only once the form is resolved (a repeated-field replica runs the
   // normalised cross-correlation whatever "auto" said).
   if (resolved_ && wasSet("detector.pfa_per_window") && !detector.pfa_applies) {
-    note(std::string("detector.pfa_per_window applies to the coherence form only; the resolved "
-                     "form (") + name(detector.threshold) + ") keeps its corr_scale bar");
+    if (!backend_applies_config_) {
+      note("detector.pfa_per_window is not in force: this build's detector backend applies "
+           "no configured form, pick or bar");
+    } else {
+      note(std::string("detector.pfa_per_window applies to the coherence form only; the "
+                       "resolved form (") + name(detector.threshold) +
+           ") keeps its corr_scale bar");
+    }
   }
   if (tracker.type == TrackerType::kAlphaBeta && tracker.alpha == 0.0 && tracker.beta == 0.0) {
     note("tracker alpha and beta are both 0: the grid is fixed-period");

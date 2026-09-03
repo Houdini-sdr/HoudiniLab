@@ -87,9 +87,12 @@ class Detector {
 
   DetectorBackend backend() const { return backend_; }
   const char* backendName() const;
-  /// False for a backend that ignores the configured form, pick and
-  /// first-path knobs (the CUDA correlator: first crossing, power ratio).
+  /// False for a backend that ignores the configured form, pick, first-path
+  /// knobs and bar (the CUDA correlator: first crossing, power ratio).
   bool backendAppliesConfig() const { return backend_ == DetectorBackend::kPortable; }
+  /// The same fact for the backend this library was built with, for a
+  /// configuration resolving before any detector exists.
+  static bool backendAppliesConfigByDefault();
 
   /// kAuto resolves to the normalised cross-correlation; a single-copy
   /// replica takes the coherence form whatever was asked (8.154). The
