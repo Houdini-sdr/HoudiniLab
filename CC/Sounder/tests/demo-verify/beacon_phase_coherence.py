@@ -52,17 +52,15 @@ def main():
     ap.add_argument("--windows", type=int, default=10)
     ap.add_argument("--corr-scale", type=float, default=10.0)
     ap.add_argument("--sense", default="conj", choices=["conj", "gold", "auto"],
-                    help="which replica sense to correlate with. The Houdini "
-                         "receive mixer delivers baseband CONJUGATED (the "
-                         "sounder's rx_conj=1), so conj is the physical answer "
-                         "and the default. gold is the WRONG sense for this "
-                         "path and exists to reproduce the 2026-09-03 fault: "
-                         "for the legacy replica conj(g) is reverse(g), so the "
-                         "wrong sense computes a convolution whose several "
-                         "strong lags have unrelated phases, and the integer "
-                         "peak hops between them as the timing drifts. auto "
-                         "picks by lag-product ratio, which chose wrong in 2 "
-                         "of 6 runs that day.")
+                    help="which replica sense to correlate with. This probe "
+                         "transmits the dumped core as is and the Houdini "
+                         "receive mixer conjugates, so the received beacon "
+                         "matches conj(replica): conj is the physical answer "
+                         "and the default. (The sounder pre-conjugates its "
+                         "transmit and therefore correlates with the replica "
+                         "itself.) auto picks by lag-product ratio and chose "
+                         "conj in every 2026-09-03 run; gold is here to show "
+                         "the wrong sense barely detects at all.")
     ap.add_argument("--dump-raw", default=None,
                     help="write the FIRST captured window as complex64 so the "
                          "received waveform itself can be examined offline")
@@ -154,13 +152,15 @@ def main():
             tau = max(-0.5, min(0.5, tau))
             vi = v*(1-abs(tau)) + (vp if tau > 0 else vm)*abs(tau)
             peaks.append(v); pos.append(j); ipeaks.append(vi)
-            # The conjugate-image ratio: the WRONG sense's peak against the
-            # right one's at this beacon. A pure beacon through a clean chain
-            # reads ~0.1 (1/sqrt(L) for a random 128-tap sequence); 2026-09-03
-            # it ranged 0.004 to 0.5 between stream re-arms, and the two runs
-            # whose integer-peak phase hopped by 0.6 and 2.4 rad were the ones
-            # where the correlation lobe's phase slope was largest. Reported per
-            # run so the receive chain's state is on the record with the result.
+            # Two chain statistics, reported per run so the receive chain's
+            # state travels with the result. READ THEM AGAINST THE NULL in
+            # phase_probe_null.py, not against a rule of thumb: for this replica
+            # a pure beacon gives a wrong/right peak ratio of 0.16 to 0.28
+            # (tau-dependent) and a lobe phase step of ~0.01 rad; real windows
+            # read 0.18 to 0.34 and 0.06 to 0.30. The one run that hopped by
+            # 2.4 rad had two equal-magnitude adjacent samples 2.4 rad apart,
+            # which a single lobe cannot produce; its waveform was not kept, so
+            # --dump-raw is worth arming on every run until one is.
             other = np.conj(sense)
             vo = max((abs(np.vdot(other, c[jj:jj+len(sense)])) for jj in range(j-2, j+3)), default=0.0)
             image_ratios.append(vo / a0 if a0 else 0.0)
@@ -231,8 +231,9 @@ def main():
               "lobe phase step to the strong neighbour mean %+.2f rad, sd %.2f, n %d"
               % (np.mean(image_ratios), np.min(image_ratios), np.max(image_ratios),
                  float(np.mean(ls)), float(np.std(ls)), len(lobe_steps)))
-        print("  (a hop between two half-sample-split samples moves the integer-peak"
-              " phase by that step; read the phase at the fractional peak instead)")
+        print("  (null for a pure beacon: ratio 0.16-0.28 by tau, lobe step ~0.01;"
+              " see phase_probe_null.py. A hop between two half-sample-split"
+              " samples moves the integer-peak phase by the lobe step.)")
     if all_recs:
         # Flag the pairs outside 1 rad of the main cluster and show what the
         # frames on both sides looked like: did the peak position step, did
