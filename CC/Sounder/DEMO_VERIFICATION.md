@@ -682,6 +682,7 @@ any code moves, because in this migration a difference is a bug by definition.
 
 | # | claim | evidence | status |
 | --- | --- | --- | --- |
+| 8.170 | **P1 GATE PASSED: THE LIBRARY-BACKED SOUNDER IS INDISTINGUISHABLE FROM THE ONE IT REPLACES.** Four runs, Latin square, shipped defaults, binary built 10:04 from `e90e93f`. **L1:** `lock CONFIRMED` at residual +0 / +1 / +0 / +0; the log carries the effective `sync configuration` block with every value `default` except `beacon.type`, which reads `json` because the config file names it at top level (the pre-registration's "all default" did not think of that key; the behaviour is the intended one). **L2:** accepts 23 / 23 / 23 / 23, 0 escalations, 0 off-grid. **L3:** `Beacon detector: threshold xcorr, resync pick first-path ... back window 64` for legacy and `threshold coherence` for nr_pss. **L4:** nr_pss's one hunt rejection per run present in both, the single-copy path taken (forced form). **L5:** adjacent-difference jitter legacy 0.96 / 0.78 against A's 1.05-1.90, nr_pss 1.70 / 0.75 against A's 1.36-1.41, all inside 2x. Offline the same binary's `golden_window_test` returns the recorded index and SNR on all 12 windows on aarch64 as on x86. **The refactor moved nothing that any instrument here can see.** Remaining before `develop`: the review loop (AP-71) | `logs/gate_p1` on the rig; `evidence/20260903-rig/gate_p1_summary.txt` | VERIFIED-HW |
 
 ### 8x. The gate, and the proof the crossing-rule fix was needed
 
