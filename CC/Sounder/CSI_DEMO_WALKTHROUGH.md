@@ -605,18 +605,19 @@ same shell that launches it.
 
 The base station transmits a short burst at the top of every frame and the
 client finds it by correlation. Which burst it sends is a config field,
-`beacon_type`, in the `tdd_conf` block. Four are available:
+`beacon_type`, in the `tdd_conf` block. Five are available:
 
 | value | what it is |
 | --- | --- |
 | `legacy` | The default. Fifteen repeats of a 16 sample training symbol, then two repeats of a 128 sample Gold sequence. |
 | `legacy_guard` | The same, with a 32 sample cyclic guard inserted before the Gold field, in the style of an 802.11 long training field. |
 | `dot11` | The 802.11a/g/n legacy preamble as the standard defines it: the short training field, then the guard and two long training symbols. |
-| `nr` | The 5G NR primary synchronisation signal, then a guard and two repeats of a tracking symbol built from the NR reference sequence. |
+| `nr` | The 5G NR primary synchronisation signal, then a guard and two repeats of a tracking symbol built from the NR reference sequence. The client finds it on the repeated tracking symbol. |
+| `nr_pss` | The same burst as `nr`, sample for sample, but the client finds it the way an NR handset does: a plain matched filter on the primary synchronisation signal, with no repeat check. The log says `threshold form forced to nolag` when this is in effect. |
 
-All four were measured on the bench, four rounds each with the order rotated,
-about 8000 detections apiece, and all four have since been run end to end
-through the client. The margin figures below were measured with the older
+The first four were measured on the bench, four rounds each with the order
+rotated, about 8000 detections apiece, and all five have since been run end to
+end through the client (`nr_pss` on 2026-09-03, `DEMO_VERIFICATION.md` 8z). The margin figures below were measured with the older
 comparison rule, so read them as a ranking rather than as absolute numbers. **Timing is the same for all of them**, within
 measurement error. What separates them is detection margin: the worst detection
 of the run cleared the threshold by 12x for `legacy` and `legacy_guard`, 7x for

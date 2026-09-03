@@ -310,3 +310,197 @@ have to be restated before the next gate rather than after it.
 - **RETUNE rather than remove** the escalation thresholds, the scatter gate, the
   alpha-beta gains and the resync cadence. All were derived against 8.5 ppm; the
   steered regime is two orders quieter.
+
+## 11. The NR form, and what a repeating beacon can and cannot give [2026-09-03]
+
+Written for AP-66 and the question that came with it: is an NR-style time and
+frequency sync a big change here, and does phase need downlink pilots or can
+the beacon carry it. The short answers: the NR acquisition architecture costs
+five files and about 150 lines against the beacon we already send (section
+11.2); the beacon can carry phase to roughly 5 degrees across a 1 ms frame,
+which is enough for QPSK and 16-QAM and not for anything better or for
+anything coherent across nodes (section 11.4).
+
+### 11.1 What NR actually does (TS 38.211 7.4.2 and 7.4.3, TS 38.213 4.1)
+
+The SS/PBCH block is four OFDM symbols over 240 subcarriers: PSS in symbol 0,
+PBCH in 1 and 3, SSS in the middle of symbol 2 with PBCH either side. The PSS
+is a length-127 BPSK m-sequence, x(i+7) = x(i+4) + x(i) mod 2, with three
+cyclic shifts carrying N_ID2. The SSS is the product of two length-127
+m-sequences with 336 x 3 shift pairs carrying the cell identity. The PBCH
+demodulation reference is scrambled by the cell identity and the SSB index.
+
+The UE procedure, as the two reference implementations do it (MATLAB's NR cell
+search example; srsRAN's `ssb.c`):
+
+1. **Time-domain matched filter on the PSS.** The received samples are
+   correlated against the time-domain PSS waveform for each of the three
+   candidates. srsRAN does it as an FFT-domain product with a correlation size
+   at least 8x the symbol, applies NO threshold, and takes the maximum; MATLAB
+   repeats the search across carrier-offset hypotheses spaced half a
+   subcarrier apart. The peak gives symbol timing and N_ID2.
+2. **Fine frequency.** MATLAB correlates each symbol's cyclic prefix with its
+   tail. srsRAN takes the phase between the PSS and SSS least-squares channel
+   estimates one symbol apart: `cfo = arg(corr_sss * conj(corr_pss)) / (2 pi
+   dt)`. Both are the repetition-phase estimator this repo's stages 1 and 2
+   use, applied to two known symbols instead of two copies of one.
+3. **SSS in the frequency domain,** at the timing the PSS gave, against the 336
+   candidates. This is ALSO the confirmation that the PSS peak was real: NR's
+   false-lock guard is a second sequence, not a repeat structure.
+4. **PBCH DMRS gives the SSB index,** which tells the UE where in the frame the
+   block sat; the decoded MIB gives the frame number. Our frame puts one beacon
+   at a fixed position, so this stage has nothing to tell us.
+5. **Delay refinement** from the phase slope of the channel estimate across
+   subcarriers (srsRAN), which is sub-sample timing for free once the FFT has
+   been taken.
+6. **Afterwards,** fine time and frequency tracking from the TRS (a periodic
+   CSI-RS burst, two symbols in each of two slots, every 10 to 80 ms; TS 38.214
+   5.1.6.1.1); channel and phase per slot from the DMRS inside the data; the
+   per-symbol common phase error from the PTRS (TS 38.211 7.4.1.2), which is
+   dense in time and sparse in frequency because phase noise rotates every
+   subcarrier alike.
+
+Four facts to carry from this. The acquisition detector is a plain matched
+filter on a sequence that does NOT repeat, so there is no lag product and no
+repeat check. The false-lock guard is a second decoded sequence. Frequency comes
+from two known symbols at a known spacing. Phase is never carried from the SSB
+into the data; it is re-measured inside every slot.
+
+### 11.2 How that maps onto our beacon, and what it cost to do
+
+The `nr` shape already transmitted the standard's PSS (127 tones in a 128-point
+IFFT, which at 122.88 MSPS is the 960 kHz numerology, DC nulled, no cyclic
+prefix), then a 16-sample guard and two copies of a 64-tone TRS symbol built on
+the 38.211 Gold sequence. Every measurement of it through 2026-09-02 correlated
+on the TRS pair through the lag product, so it measured OUR detector on an NR
+waveform and found it 5 dB short of legacy (DEMO_VERIFICATION 8.134). The
+"NR-style detector loses" row (8.144) dropped the lag product but kept the
+repeated replica, and measured the rep1/rep2 ambiguity of a matched filter
+against a symbol that appears twice.
+
+`nr_pss` (2026-09-03) is the transmit-identical control: the same core, the PSS
+as the replica, the plain matched filter forced by the replica's single copy,
+the first-path pick unchanged. Offline it holds every prediction that was
+written before it ran: exact at all seven levels and eight noise draws, one
+`corr_scale` across a 64x level sweep, processing gain 37.8 dB against legacy's
+37.7, first-path unbiased on all six multipath channels at 8.5 ppm. The
+architecture was never the problem; the replica was. Silicon is 8z.
+
+Scope, measured by doing it rather than estimated: `beacon_shapes.h` (the
+shape, plus `replica_off`/`replica_reps` so the beacon end is derived rather
+than assumed), `config.h`/`config.cc` (two accessors), `receiver.cc` (the
+detector form follows the replica; the 144-sample replica tail is added in the
+one place both search paths pass through), the geometry test, the dumper and
+the probe. About 150 lines. The frame, the slot, the replay RAM, the tracker,
+the CFO estimator, the SNR guard and the beacon-end convention are untouched.
+
+What is still NOT NR about it, in the order it would matter over the air:
+
+- no SSS, so the false-lock guard stays the in-window SNR floor plus the grid
+  residual (a decoded second sequence would be stronger and cheaper than an
+  SNR window on a fading channel);
+- no cyclic prefix on the PSS, so a multipath echo longer than a sample or two
+  contaminates the symbol instead of rotating it;
+- the PSS fills the whole band instead of 127 of 240 subcarriers, which is fine
+  here and would not be in a shared band;
+- frequency comes from the TRS repetition, not from the PSS-to-SSS phase.
+
+An SSB-lite that adds the SSS with NR cyclic-prefix lengths at the 240 kHz
+numerology (512-point symbols, 36-sample prefix, four symbols = 2192 samples,
+inside the 4096-sample replay RAM) closes all four. It is about a day: SSS
+generation is thirty lines against the same 38.211 recurrences, the
+frequency-domain SSS check and the PSS-to-SSS CFO estimator are one FFT each,
+and nothing in the driver or the gateware moves. That is the item to take up if
+the OTA target wants NR-shaped acquisition; it is not needed to answer AP-66.
+
+Why the proof of concept did not link srsRAN or OpenAirInterface: both assume
+the full 240-subcarrier block with PBCH, and at the 30 kHz numerology one block
+is 4 x 4384 = 17536 samples, over four times the replay RAM. At 240 kHz it
+fits, but the library's PBCH and MIB machinery exists to tell a UE WHERE in the
+frame it is, which our fixed beacon position already settles, and it would pull
+a large dependency into the sounder for two sequences that
+`include/beacon_shapes.h` already generates from the standard's own
+definitions.
+
+### 11.3 What the literature does with a repeating beacon
+
+The classical estimators, all of which this repo already uses: timing from the
+matched-filter peak; frequency from the phase of the repetition correlation,
+coarse to fine by lag (Moose 1994, Schmidl and Cox 1997, Morelli and Mengali
+1999 for L repeats); phase from the complex value of the matched-filter peak,
+which is the carrier phase at that instant.
+
+The distributed-MIMO work is the literature that runs independent oscillators
+from a periodic over-the-air reference, and it is consistent to a fault:
+
+- **AirSync** (Balan et al., 2013): the master broadcasts pilot tones
+  continuously in a reserved part of the band; each secondary tracks the
+  per-subcarrier phase drift and PREDICTS it a few OFDM symbols ahead with a
+  linear or Kalman predictor to cover its own transmit pipeline latency.
+  Implemented on WARP FPGAs; carrier phase coherence within a few degrees
+  after correction.
+- **MegaMIMO** (Rahul et al., 2012): in band, per packet; secondaries measure
+  the lead node's reference in every packet and rotate their transmission by
+  the accumulated phase.
+- **BeamSync** (2023): the sync signal is beamformed in the dominant direction
+  of the inter-node channel; a nonlinear least-squares phase estimator and a
+  simpler one that matches it at high SNR; a frequency estimator; oscillator
+  phase modelled as a discrete Wiener process, variance 4 pi^2 fc^2 c_vco Ts.
+  Simulation only.
+- **Merlo et al.** (2025, arXiv 2506.07267): two-way time transfer with pulsed
+  two-tone waveforms (20 MHz tone separation, 1.5 us pulses, an 11.5 us epoch,
+  resynchronised about every 40 ms) on X310 radios at 200 MSa/s: 60 to 70 ps
+  time and phase precision, 3.73 ppb frequency RMSE, median coherent gain
+  above 99 percent. Their stated rule for the reference interval: the update
+  rate must sit well above the frequencies where the phase-noise and vibration
+  spectrum has its power.
+- **OTA phase calibration inside the TDD flow** (2025, arXiv 2509.03722): each
+  node's oscillator phase is a Wiener random walk with variance
+  4 pi^2 10^10 S(100 kHz) / fs, tracked pairwise with a Kalman filter; for
+  S(100 kHz) = -100 dBc/Hz the beamforming loss becomes significant once the
+  calibration interval passes 10 to 20 ms.
+
+The common shape: a periodic reference; a two-state estimator (phase and
+frequency, or offset and rate) with a random-walk process model; prediction
+between references; and a reference interval set by the phase-noise spectrum
+rather than by the estimator's own noise. Our timing tracker (AP-31, AP-41)
+already has this shape. The phase side does not exist yet.
+
+### 11.4 Do we need downlink pilots for phase? The arithmetic, with our numbers
+
+What the beacon can carry. The frame-to-frame beacon phase IS coherent
+(AP-34(b): circular resultant 0.99, circular sd 0.10 to 0.13 rad at the 1 ms
+frame spacing over 160 pairs, at the calibrated clock state). A two-state phase
+and frequency tracker on the beacon would therefore predict the carrier phase
+across a frame with an innovation of at most about 7 degrees per ms, and that
+figure includes the estimator's own noise. The frequency term alone is
+2 pi df T, which at the 0.02 ppm the tracked clock agrees with the timing
+channel (10 Hz at 500 MHz) is 3.6 degrees at the end of the frame. Mid-frame,
+call it 4 to 5 degrees rms.
+
+What that buys: QPSK and 16-QAM downlink demodulation with no pilot in the
+slot (a phase error floor near -20 dB EVM), and a per-frame phase reference
+good enough for the UE-side pre-compensation of AP-42. What it does not buy:
+64-QAM or denser (about 2 degrees rms is needed), anything coherent ACROSS
+nodes (every system above that beamforms from independent oscillators uses
+references every 1 to 40 ms AND a predictor), or immunity to a scatterer or
+Doppler change inside the frame.
+
+NR's answer is DMRS plus PTRS inside the slot; 802.11's is four pilot
+subcarriers in every symbol; this repo's MATLAB reference ships with the
+per-symbol pilot correction as the tier that carries it (section 5). So the
+durable design is unchanged from section 9: the beacon supplies time,
+frequency and a coarse per-frame phase anchor, and a few pilot tones in each
+downlink data symbol supply the common-phase-error correction. Downlink data
+symbols do not exist yet (AP-45); when they do, the phase tracker is the piece
+to build. The cheap measurement that would size the pilot density BEFORE then
+is the beacon-phase innovation against elapsed frames, k = 1 to 8, which
+`beacon_phase_coherence.py` already measures at k = 1.
+
+Sources: TS 38.211 (7.4.2.2 PSS, 7.4.2.3 SSS, 7.4.3 PBCH, 5.2.1 Gold
+sequence), TS 38.213 4.1, TS 38.214 5.1.6.1.1;
+https://www.mathworks.com/help/5g/ug/nr-cell-search-and-mib-and-sib1-recovery.html;
+srsRAN 4G `lib/src/phy/sync/ssb.c` and `pss_nr.c`;
+https://arxiv.org/abs/1205.6862 (AirSync); https://arxiv.org/abs/2311.11070
+(BeamSync); https://arxiv.org/abs/2506.07267 (Merlo et al.);
+https://arxiv.org/abs/2509.03722 (OTA phase calibration in TDD).
