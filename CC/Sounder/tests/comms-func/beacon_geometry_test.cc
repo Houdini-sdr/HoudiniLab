@@ -128,10 +128,18 @@ long long residualCh(const Desc& b, double peak_counts, double snr_db,
         static_cast<int16_t>(std::max(-32000.0, std::min(32000.0, re))),
         static_cast<int16_t>(std::max(-32000.0, std::min(32000.0, im))));
   }
+  // A single-copy replica (nr_pss) has no repeat to check: the receiver forces
+  // the plain matched filter for it (syncSearch), and so does this test, so
+  // every column below measures the form the shape would actually run with.
+  if (b.replica_reps < 2) thresh_form = Thr::kXCorrNoLag;
   const ssize_t idx =
       CommsLib::find_beacon_avx(buf.data(), b.replica, n, corr_scale, pick,
                                 thresh_form);
-  return idx < 0 ? kMiss : s0 + idx - end;   // vs the DIRECT path's beacon end
+  // The detector reports the last sample of the MATCHED field; the beacon end
+  // is replica_tail() later (0 for every shape but nr_pss), exactly as
+  // syncSearch applies it.
+  const long long rep_tail = static_cast<long long>(b.replica_tail());
+  return idx < 0 ? kMiss : s0 + idx + rep_tail - end;  // vs the DIRECT path's end
 }
 long long residual(const Desc& b, double peak_counts, double snr_db,
                    long long lead, long long tail, float corr_scale, Pick pick,
@@ -166,9 +174,11 @@ long long residual(const Desc& b, double peak_counts, double snr_db,
         static_cast<int16_t>(std::max(-32000.0, std::min(32000.0, re))),
         static_cast<int16_t>(std::max(-32000.0, std::min(32000.0, im))));
   }
+  if (b.replica_reps < 2) thresh_form = Thr::kXCorrNoLag;  // see residualCh
   const ssize_t idx = CommsLib::find_beacon_avx(buf.data(), b.replica, n,
                                                corr_scale, pick, thresh_form);
-  return idx < 0 ? kMiss : s0 + idx - end;
+  const long long rep_tail = static_cast<long long>(b.replica_tail());
+  return idx < 0 ? kMiss : s0 + idx + rep_tail - end;
 }
 
 // The shipped resync slice at 122.88 MSPS with the 2026-09-02 defaults
@@ -220,7 +230,8 @@ int main() {
   const Desc ds[] = {beacon_shapes::make(Shape::kLegacy),
                      beacon_shapes::make(Shape::kLegacyGuard),
                      beacon_shapes::make(Shape::kDot11),
-                     beacon_shapes::make(Shape::kNr)};
+                     beacon_shapes::make(Shape::kNr),
+                     beacon_shapes::make(Shape::kNrPss)};
 
   std::printf("Candidate beacons, and where the detector says they are.\n");
   std::printf("Resync slice [end-%lld, end+%lld), corr_scale %.0f, SNR %.0f dB.\n",
@@ -228,17 +239,23 @@ int main() {
   std::printf("Cells are (returned index - true beacon end) over 8 noise draws;\n");
   std::printf("%+lld is correct.\n", kEndConvention);
 
-  std::printf("\n%-14s %6s %8s %8s %8s %10s\n", "shape", "core", "fine_off",
-              "fine_len", "PAPR dB", "proc gain");
+  // The processing gain is that of the REPLICA field -- the fine field for
+  // four shapes, the PSS for nr_pss -- because that is what the matched filter
+  // integrates over. `tail` is how far the beacon end sits past the index the
+  // detector returns; syncSearch adds it, and so does residual() below.
+  std::printf("\n%-14s %6s %8s %8s %5s %8s %10s\n", "shape", "core", "rep_off",
+              "rep_len", "reps", "PAPR dB", "proc gain");
   for (const auto& b : ds) {
     double pk = 0.0, fp = 0.0;
+    const size_t rl = b.replica.size();
     for (const auto& v : b.core) pk = std::max(pk, static_cast<double>(std::norm(v)));
-    for (size_t i = b.fine_off; i < b.fine_off + b.fine_len; ++i)
+    for (size_t i = b.replica_off; i < b.replica_off + rl; ++i)
       fp += std::norm(b.core[i]);
-    fp /= static_cast<double>(b.fine_len);
-    std::printf("%-14s %6zu %8zu %8zu %8.2f %7.1f dB\n", b.name.c_str(),
-                b.core.size(), b.fine_off, b.fine_len, b.papr_db(),
-                20.0 * std::log10(b.fine_len * std::sqrt(fp / pk)));
+    fp /= static_cast<double>(rl);
+    std::printf("%-14s %6zu %8zu %8zu %5zu %8.2f %7.1f dB  (tail %zu)\n",
+                b.name.c_str(), b.core.size(), b.replica_off, rl,
+                b.replica_reps, b.papr_db(),
+                20.0 * std::log10(rl * std::sqrt(fp / pk)), b.replica_tail());
   }
 
   for (const auto pick : {Pick::kFirstCrossing, Pick::kTargetedArgmax}) {
@@ -378,7 +395,7 @@ int main() {
               "pow+first", "pow+argmx", "pow+1stpth", "xc+first",
               "xc+argmx", "xc+1stpth", "nolag+frst", "nolag+1stp");
   int norm_first_bad = 0, norm_argmax_bad = 0, power_first_bad = 0;
-  int nolag_bad = 0;
+  int nolag_bad = 0, nrpss_bad = 0;
   for (const auto& b : ds) {
     std::printf("%-14s", b.name.c_str());
     struct Combo { Thr tf; Pick pk; };
@@ -412,8 +429,12 @@ int main() {
           norm_argmax_bad += nlev - exact;
         if (tf == Thr::kPowerRatio && pk == Pick::kFirstCrossing)
           power_first_bad += nlev - exact;
-        if (tf == Thr::kXCorrNoLag && pk == Pick::kFirstPath)
-          nolag_bad += nlev - exact;
+        // nr_pss runs nolag in EVERY column (residual() forces it), so it must
+        // not be counted as evidence about the repeat check on the others.
+        if (tf == Thr::kXCorrNoLag && pk == Pick::kFirstPath) {
+          if (b.replica_reps < 2) nrpss_bad += nlev - exact;
+          else nolag_bad += nlev - exact;
+        }
         char c[32];
         std::snprintf(c, sizeof c, "%dex/%dms", exact, miss);
         std::printf(" %11s", c);
@@ -435,7 +456,15 @@ int main() {
   // ARCHITECTURE (acquisition field, then pilots for fine tracking) and keep the
   // 802.11-style detector that the waveform actually supports.
   check(nolag_bad > 0,
-        "  no-lag (NR-style) is worse: the repeat check is load-bearing");
+        "  no-lag on a REPEATED replica is worse: the repeat check is load-bearing");
+  // AP-66, THE OTHER HALF OF NR, STATED BEFORE THE NUMBERS. The rows above
+  // measured NR's detector on a replica that appears twice and found the
+  // rep1/rep2 ambiguity (-129 = one fine_len on legacy_guard). NR's PSS
+  // appears once. PREDICTION: with the PSS as the replica the plain matched
+  // filter has nothing to be ambiguous about and is exact at every level; if
+  // it is not, the failure is in the code and not in the architecture.
+  check(nrpss_bad == 0,
+        "  nr_pss: the PSS matched filter (no repeat check) is exact at every level");
   // Reported, not gated, because it is the claim under test rather than a
   // requirement: if normalising alone were enough, the selection rule would be
   // belt-and-braces rather than load-bearing.
@@ -459,6 +488,10 @@ int main() {
   for (const auto& b : ds) {
     for (const auto tf : {Thr::kPowerRatio, Thr::kNormalizedXCorr,
                           Thr::kXCorrNoLag}) {
+      // A single-copy replica runs nolag whatever is asked (residual() forces
+      // it, as syncSearch does), so its other two rows would be duplicates
+      // printed under the wrong name.
+      if (b.replica_reps < 2 && tf != Thr::kXCorrNoLag) continue;
       std::printf("%-14s %-10s", b.name.c_str(),
                   tf == Thr::kPowerRatio ? "power"
                       : tf == Thr::kNormalizedXCorr ? "xcorr" : "nolag");
@@ -499,9 +532,17 @@ int main() {
   //
   // CFO here is 4.25 kHz = 8.5 ppm of 500 MHz, the measured free-running offset
   // between these two boards on internal clocks.
-  std::printf("\n=== over-the-air channels, legacy beacon, xcorr threshold ===\n");
-  {
-    const auto b = beacon_shapes::make(Shape::kLegacy);
+  // Run for the shipped beacon under the shipped threshold, then for nr_pss,
+  // whose threshold is necessarily the plain matched filter. PREDICTION for
+  // nr_pss: first-path exact on every channel, argmax biased on the stronger
+  // echoes just as it is for legacy -- the pick rule is a property of the
+  // channel, not of the replica.
+  struct Ota { Shape shape; Thr tf; const char* label; };
+  const Ota otas[] = {{Shape::kLegacy, Thr::kNormalizedXCorr, "legacy beacon, xcorr threshold"},
+                      {Shape::kNrPss, Thr::kXCorrNoLag, "nr_pss beacon, nolag threshold"}};
+  for (const auto& ota : otas) {
+    std::printf("\n=== over-the-air channels, %s ===\n", ota.label);
+    const auto b = beacon_shapes::make(ota.shape);
     const Channel chans[] = {
         {{{0, 1.0}}, 0.0, "1 path, no CFO"},
         {{{0, 1.0}}, 4250.0, "1 path, 8.5 ppm CFO"},
@@ -510,15 +551,19 @@ int main() {
         {{{0, 1.0}, {24, 1.4}}, 4250.0, "echo +24 samp, STRONGER"},
         {{{0, 0.5}, {40, 1.4}}, 4250.0, "weak direct, echo +40 STRONGER"},
     };
-    std::printf("%-30s %13s %13s %13s %13s\n", "channel", "xc+first",
-                "xc+argmax", "xc+1stpath", "nolag+1stpath");
+    const bool nolag_only = ota.tf == Thr::kXCorrNoLag;
+    std::printf("%-30s %13s %13s %13s %13s\n", "channel",
+                nolag_only ? "nolag+first" : "xc+first",
+                nolag_only ? "nolag+argmax" : "xc+argmax",
+                nolag_only ? "nolag+1stpath" : "xc+1stpath",
+                nolag_only ? "(same)" : "nolag+1stpath");
     int argmax_bias = 0, firstpath_bias = 0;
     for (const auto& ch : chans) {
       std::printf("%-30s", ch.name);
       struct MC { Thr tf; Pick pk; };
-      const MC mcs[] = {{Thr::kNormalizedXCorr, Pick::kFirstCrossing},
-                        {Thr::kNormalizedXCorr, Pick::kTargetedArgmax},
-                        {Thr::kNormalizedXCorr, Pick::kFirstPath},
+      const MC mcs[] = {{ota.tf, Pick::kFirstCrossing},
+                        {ota.tf, Pick::kTargetedArgmax},
+                        {ota.tf, Pick::kFirstPath},
                         {Thr::kXCorrNoLag, Pick::kFirstPath}};
       for (const auto& mc : mcs) {
         const Pick pk = mc.pk;
@@ -538,11 +583,12 @@ int main() {
         std::printf(" %13s", c);
         const long long worst = std::max(std::llabs(lo - kEndConvention),
                                          std::llabs(hi - kEndConvention));
-        // COUNT THE SHIPPED COMBINATION ONLY. Keying on the pick rule alone
-        // lumped xcorr+first-path together with nolag+first-path, and since the
-        // shipped column is exact on every channel it contributed nothing --
-        // so the gate below was silently a statement about the NO-LAG rule.
-        if (miss < 6 && worst > 4 && mc.tf == Thr::kNormalizedXCorr) {
+        // COUNT THE SHAPE'S OWN THRESHOLD FORM ONLY. Keying on the pick rule
+        // alone lumped xcorr+first-path together with nolag+first-path, and
+        // since the shipped column is exact on every channel it contributed
+        // nothing -- so the gate below was silently a statement about the
+        // NO-LAG rule.
+        if (miss < 6 && worst > 4 && mc.tf == ota.tf) {
           if (pk == Pick::kTargetedArgmax) ++argmax_bias;
           if (pk == Pick::kFirstPath) ++firstpath_bias;
         }
@@ -552,9 +598,11 @@ int main() {
     std::printf("\n  channels where the rule is >4 samples off the DIRECT path:"
                 "  argmax %d, first-path %d\n", argmax_bias, firstpath_bias);
     check(argmax_bias > 0,
-          "  argmax IS biased on multipath (the comparison is not a no-op)");
+          std::string("  ") + b.name +
+              ": argmax IS biased on multipath (the comparison is not a no-op)");
     check(firstpath_bias == 0,
-          "  the SHIPPED rule (xcorr + first-path) is exact on every channel");
+          std::string("  ") + b.name +
+              ": first-path is exact on every channel");
   }
 
   std::printf("\nRESULT: %s (%d failure(s))\n", g_fail ? "FAIL" : "PASS", g_fail);

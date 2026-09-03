@@ -1,6 +1,6 @@
 /**
  * @file beacon_shapes.h
- * @brief The four candidate beacon waveforms, defined ONCE.
+ * @brief The candidate beacon waveforms, defined ONCE.
  *
  * [user 2026-09-02] "instead of being 802.11 LTS / NR TRS and 802.11 'like',
  * what about going straight 802.11 and NR beacons (we can have it as a
@@ -40,6 +40,7 @@ enum class Shape {
   kLegacyGuard,  ///< the same, with an 802.11-style cyclic guard before gold.
   kDot11,        ///< the actual 802.11a/g/n legacy preamble: STF + LTF.
   kNr,           ///< NR PSS (38.211 7.4.2.2) + CP + a CSI-RS tracking pair.
+  kNrPss,        ///< the kNr core, matched-filtered on its PSS: NR's ARCHITECTURE.
 };
 
 /// Everything a consumer needs: the waveform, what to correlate against, and
@@ -48,7 +49,27 @@ struct Desc {
   std::string name;
   Shape shape;
   std::vector<cf> core;     ///< transmitted burst, unit-ish scale
-  std::vector<cf> replica;  ///< the matched-filter reference (one fine symbol)
+  std::vector<cf> replica;  ///< the matched-filter reference (one symbol)
+
+  // WHERE THE REPLICA SITS IN THE CORE. `replica_off` is the offset of its
+  // first copy and `replica_reps` how many back-to-back copies the core
+  // carries. Two facts every consumer needs follow from these and nothing
+  // else:
+  //   - the detector reports the LAST sample of the last matched copy, so the
+  //     beacon END -- the convention sync_index, the SNR window and the CFO
+  //     index all rest on -- is replica_tail() samples later. That is 0 for
+  //     every shape whose replica is its trailing fine field, and 144 for
+  //     kNrPss, whose replica is the LEADING PSS.
+  //   - replica_reps == 1 is a NON-REPEATING reference. The lag-product
+  //     threshold forms multiply the peak by the correlation one replica
+  //     length earlier, which for such a reference is the silence before the
+  //     beacon, so they score zero at the right index. Only the plain matched
+  //     filter (BeaconThresh::kXCorrNoLag) describes it, and consumers select
+  //     that form from this field rather than from the environment.
+  size_t replica_off = 0, replica_reps = 0;
+  size_t replica_tail() const {
+    return core.size() - (replica_off + replica.size() * replica_reps);
+  }
 
   // COARSE field: `coarse_reps` back-to-back copies of a `coarse_len` symbol
   // starting at `coarse_off`. Used for the wide-range CFO stage (ambiguity
@@ -199,6 +220,43 @@ inline void scaleToPeak(std::vector<cf>& v, double peak) {
   for (auto& x : v) x *= g;
 }
 
+/// The NR core: PSS, cyclic guard, two copies of a TRS symbol. Shared by kNr
+/// and kNrPss, which transmit the SAME burst and differ only in what the
+/// detector correlates against. Returns the PSS symbol length.
+inline size_t buildNr(Desc& d) {
+    // NR sends SSB and TRS as separate signals at different periodicities.
+    // Under this link's constraint -- the UE sees ONE periodic downlink burst
+    // and gets no pilots of its own -- the NR structure collapses to: an
+    // acquisition field that is a full-band non-repeating sequence, then a
+    // guarded repeated tracking symbol. Both fields are the standard's own
+    // sequences, not stand-ins.
+    std::vector<cf> pss_tones;
+    for (float v : nrPssMSeq(0)) pss_tones.push_back(cf(v, 0.f));
+    auto pss = toneIfft(pss_tones, 128);
+    unitPower(pss);
+    // TRS symbol: QPSK over a 38.211 Gold sequence, full band. c_init is
+    // arbitrary but must be FIXED, or TX and the correlator disagree.
+    const size_t kTrsLen = 64;
+    const auto c = gold38211(2 * kTrsLen, 0x1u);
+    std::vector<cf> trs_tones(kTrsLen);
+    const float r = static_cast<float>(1.0 / std::sqrt(2.0));
+    for (size_t i = 0; i < kTrsLen; ++i)
+      trs_tones[i] = cf(r * (1.f - 2.f * c[2 * i]), r * (1.f - 2.f * c[2 * i + 1]));
+    auto trs = toneIfft(trs_tones, kTrsLen);
+    unitPower(trs);
+    d.core = pss;
+    // The PSS is one symbol, so it gives no repeat pair: no coarse stage.
+    d.coarse_reps = 0;
+    d.guard_len = 16;
+    d.fine_off = d.core.size() + d.guard_len;
+    d.fine_len = kTrsLen; d.fine_reps = 2;
+    appendGuardedReps(d.core, trs, d.guard_len, 2);
+    scaleToPeak(d.core, 1.0);
+    d.replica.assign(d.core.begin() + d.fine_off,
+                     d.core.begin() + d.fine_off + d.fine_len);
+  return 128;  // the PSS symbol: 127 tones in a 128-point IFFT
+}
+
 }  // namespace detail
 
 inline Desc make(Shape s) {
@@ -263,39 +321,36 @@ inline Desc make(Shape s) {
       break;
     }
     case Shape::kNr: {
-      // NR sends SSB and TRS as separate signals at different periodicities.
-      // Under this link's constraint -- the UE sees ONE periodic downlink burst
-      // and gets no pilots of its own -- the NR structure collapses to: an
-      // acquisition field that is a full-band non-repeating sequence, then a
-      // guarded repeated tracking symbol. Both fields are the standard's own
-      // sequences, not stand-ins.
       d.name = "nr";
-      std::vector<cf> pss_tones;
-      for (float v : nrPssMSeq(0)) pss_tones.push_back(cf(v, 0.f));
-      auto pss = toneIfft(pss_tones, 128);
-      unitPower(pss);
-      // TRS symbol: QPSK over a 38.211 Gold sequence, full band. c_init is
-      // arbitrary but must be FIXED, or TX and the correlator disagree.
-      const size_t kTrsLen = 64;
-      const auto c = gold38211(2 * kTrsLen, 0x1u);
-      std::vector<cf> trs_tones(kTrsLen);
-      const float r = static_cast<float>(1.0 / std::sqrt(2.0));
-      for (size_t i = 0; i < kTrsLen; ++i)
-        trs_tones[i] = cf(r * (1.f - 2.f * c[2 * i]), r * (1.f - 2.f * c[2 * i + 1]));
-      auto trs = toneIfft(trs_tones, kTrsLen);
-      unitPower(trs);
-      d.core = pss;
-      // The PSS is one symbol, so it gives no repeat pair: no coarse stage.
-      d.coarse_reps = 0;
-      d.guard_len = 16;
-      d.fine_off = d.core.size() + d.guard_len;
-      d.fine_len = kTrsLen; d.fine_reps = 2;
-      appendGuardedReps(d.core, trs, d.guard_len, 2);
-      scaleToPeak(d.core, 1.0);
-      d.replica.assign(d.core.begin() + d.fine_off,
-                       d.core.begin() + d.fine_off + d.fine_len);
+      buildNr(d);
       break;
     }
+    case Shape::kNrPss: {
+      // THE SAME BURST, DETECTED THE WAY NR DETECTS IT. kNr transmits a PSS and
+      // hands the detector the TRACKING pair, so it runs an NR waveform through
+      // an 802.11-shaped detector, and DEMO_VERIFICATION 8.134/8.144 measured
+      // that as the worst of the four on detection margin. NR itself never
+      // correlates on a repeated field: the UE matched-filters the PSS -- a
+      // 127-tone m-sequence that appears ONCE in the burst -- and the peak is
+      // the peak (38.213 4.1; srsRAN's ssb_pss_find is an FFT-domain matched
+      // filter over exactly this sequence, MATLAB's NR cell search the same
+      // across half-subcarrier CFO hypotheses). This shape is the
+      // transmit-identical control that isolates that architectural
+      // difference: same core, same TRS pair for the CFO estimator, replica =
+      // the PSS, and the detector's repeat check necessarily off. AP-66.
+      d.name = "nr_pss";
+      const size_t pss_len = buildNr(d);
+      d.replica.assign(d.core.begin(), d.core.begin() + pss_len);
+      d.replica_off = 0;
+      d.replica_reps = 1;
+      break;
+    }
+  }
+  if (d.replica_reps == 0) {
+    // Every shape whose replica is its fine field: the detector matches the
+    // trailing repeated symbol, so the returned index IS the beacon end.
+    d.replica_off = d.fine_off;
+    d.replica_reps = d.fine_reps;
   }
   return d;
 }
@@ -308,9 +363,11 @@ inline bool parse(const std::string& s, Shape* out) {
   if (s == "legacy_guard") { *out = Shape::kLegacyGuard; return true; }
   if (s == "dot11" || s == "802.11") { *out = Shape::kDot11; return true; }
   if (s == "nr" || s == "5gnr") { *out = Shape::kNr; return true; }
+  if (s == "nr_pss" || s == "5gnr_pss") { *out = Shape::kNrPss; return true; }
   return false;
 }
 
-inline const char* kAllNames[] = {"legacy", "legacy_guard", "dot11", "nr"};
+inline const char* kAllNames[] = {"legacy", "legacy_guard", "dot11", "nr",
+                                  "nr_pss"};
 
 }  // namespace beacon_shapes

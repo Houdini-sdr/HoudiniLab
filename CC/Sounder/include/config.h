@@ -151,6 +151,15 @@ class Config {
   inline size_t beacon_coarse_off(void) const { return beacon_coarse_off_; }
   inline size_t beacon_coarse_len(void) const { return beacon_coarse_len_; }
   inline size_t beacon_coarse_reps(void) const { return beacon_coarse_reps_; }
+  // The replica's place in the core (beacon_shapes::Desc). The detector reports
+  // the LAST sample of the matched field; adding beacon_replica_tail() to that
+  // gives the beacon END every downstream index convention rests on. Zero for
+  // every shape whose replica is its trailing fine field, 144 for `nr_pss`.
+  // beacon_replica_reps() == 1 is a NON-REPEATING reference (the NR PSS), on
+  // which the lag-product threshold forms are meaningless -- the receiver
+  // selects the plain matched filter from this rather than from the env.
+  inline size_t beacon_replica_tail(void) const { return beacon_replica_tail_; }
+  inline size_t beacon_replica_reps(void) const { return beacon_replica_reps_; }
   inline const std::string& pilot_seq(void) const { return this->pilot_seq_; }
   inline const std::string& data_mod(void) const { return this->data_mod_; }
   inline const std::string& cl_data_mod(void) const {
@@ -375,6 +384,7 @@ class Config {
   std::string beacon_type_;
   size_t beacon_fine_off_ = 0, beacon_fine_len_ = 0, beacon_fine_reps_ = 0;
   size_t beacon_coarse_off_ = 0, beacon_coarse_len_ = 0, beacon_coarse_reps_ = 0;
+  size_t beacon_replica_tail_ = 0, beacon_replica_reps_ = 0;
   bool ul_data_slot_present_;
   bool dl_data_slot_present_;
   std::string data_mod_;

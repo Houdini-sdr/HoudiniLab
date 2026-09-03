@@ -792,7 +792,7 @@ void Config::genPilots() {
     // failure this parameter exists to make visible.
     throw std::invalid_argument(
         "unknown beacon_type \"" + beacon_type_ +
-        "\" -- expected legacy, legacy_guard, dot11 or nr");
+        "\" -- expected legacy, legacy_guard, dot11, nr or nr_pss");
   }
   const auto shape_desc = beacon_shapes::make(shape);
   beacon_fine_off_ = shape_desc.fine_off;
@@ -801,6 +801,8 @@ void Config::genPilots() {
   beacon_coarse_off_ = shape_desc.coarse_off;
   beacon_coarse_len_ = shape_desc.coarse_len;
   beacon_coarse_reps_ = shape_desc.coarse_reps;
+  beacon_replica_tail_ = shape_desc.replica_tail();
+  beacon_replica_reps_ = shape_desc.replica_reps;
 
   // NOTE THE REPLICA'S SCALE IS LOAD-BEARING, and do not "tidy" it to unit
   // power. find_beacon's test is `corr_scale * |gc|^2|gc_lag|^2 > sum|gc|^2`,
@@ -811,8 +813,10 @@ void Config::genPilots() {
   auto gold_ifft_ci16 = Utils::cfloat_to_cint16(shape_desc.replica);
   gold_cf32_.assign(shape_desc.replica.begin(), shape_desc.replica.end());
   std::cout << "Beacon: type " << beacon_type_ << ", core " << shape_desc.core.size()
-            << " samples, matched field " << shape_desc.fine_reps << " x "
-            << shape_desc.fine_len << " at offset " << shape_desc.fine_off
+            << " samples, matched field " << shape_desc.replica_reps << " x "
+            << shape_desc.replica.size() << " at offset "
+            << shape_desc.replica_off << " (beacon end = index + "
+            << shape_desc.replica_tail() << ")"
             << (shape_desc.guard_len ? " (cyclic guard " : " (no guard")
             << (shape_desc.guard_len
                     ? std::to_string(shape_desc.guard_len) + ")"

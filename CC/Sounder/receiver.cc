@@ -1251,12 +1251,39 @@ ssize_t Receiver::syncSearch(const std::complex<int16_t>* check_data,
   // bar 0.0625 against a statistic that reads ~0.32, so ~5x margin where the
   // power form had orders of magnitude). Their tuning notes also document the
   // power-form populations, which would no longer describe what the code does.
+  //
+  // A NON-REPEATING REPLICA HAS NO LAG PRODUCT TO TAKE. The NR PSS (`nr_pss`)
+  // appears once in its core, so the repeat-check forms would multiply the
+  // true peak by the correlation one replica length EARLIER -- the silence
+  // before the beacon -- and score zero at the right index. The plain matched
+  // filter is the only form that describes such a replica, so it is selected
+  // by the replica and not by the environment; HOUDINI_BEACON_THRESH keeps its
+  // meaning for every shape that does repeat.
+  const bool single_copy = config_->beacon_replica_reps() < 2;
   const CommsLib::BeaconThresh thresh_form =
-      config_->is_houdini() ? kResyncThresh : CommsLib::BeaconThresh::kPowerRatio;
+      !config_->is_houdini() ? CommsLib::BeaconThresh::kPowerRatio
+      : single_copy          ? CommsLib::BeaconThresh::kXCorrNoLag
+                             : kResyncThresh;
   sync_index = CommsLib::find_beacon_avx(check_data, config_->gold_cf32(),
                                          search_window, corr_scale, pick,
                                          thresh_form);
 #endif
+  // THE DETECTOR REPORTS THE LAST SAMPLE OF THE MATCHED FIELD, and every
+  // consumer of sync_index wants the beacon END. For the shipped shapes those
+  // coincide because the replica is the trailing fine field; for `nr_pss` the
+  // replica is the LEADING PSS and the end sits beacon_replica_tail() later.
+  // Applied here, in the one place both search paths pass through, so the
+  // acquisition anchor, the resync residual, the SNR window and the CFO index
+  // all see one convention and nothing downstream learns a second one. A
+  // detection whose implied end would fall outside the window is reported as
+  // none: the SNR guard could not measure it anyway.
+  if (sync_index >= 0 && config_->is_houdini()) {
+    const ssize_t tail = static_cast<ssize_t>(config_->beacon_replica_tail());
+    if (tail > 0) {
+      if (sync_index + tail >= static_cast<ssize_t>(search_window)) return -1;
+      sync_index += tail;
+    }
+  }
   if (std::getenv("HOUDINI_SYNC_DEBUG") != nullptr) {
     static std::atomic<int> c{0};
     if ((c.fetch_add(1) % 20) == 0) {  // braces load-bearing (macro)
@@ -1941,6 +1968,13 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
                                                                : "refined",
         config_->is_houdini() ? "same as resync" : "first-cluster-refined",
         static_cast<long long>(firstPathBackWindow()));
+    if (config_->beacon_replica_reps() < 2) {
+      MLPD_INFO(
+          "Beacon replica is a single copy (%s): threshold form forced to "
+          "nolag (plain matched filter, no repeat check); beacon end = "
+          "detector index + %zu\n",
+          config_->beacon_type().c_str(), config_->beacon_replica_tail());
+    }
     MLPD_INFO(
         "Grid tracker: %s (alpha %.3f beta %.3f step limit %.3f ppm; kalman "
         "R %.3f samp^2, q %.2g, innovation gate %.1f sigma)\n",

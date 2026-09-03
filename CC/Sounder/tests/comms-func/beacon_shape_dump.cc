@@ -71,11 +71,12 @@ int main(int argc, char** argv) {
     char buf[512];
     std::snprintf(buf, sizeof buf,
                   "%s    \"%s\": {\"core_len\": %zu, \"replica_len\": %zu, "
+                  "\"replica_off\": %zu, \"replica_reps\": %zu, "
                   "\"fine_off\": %zu, \"fine_len\": %zu, \"fine_reps\": %zu, "
                   "\"guard_len\": %zu, \"coarse_off\": %zu, \"coarse_len\": %zu, "
                   "\"coarse_reps\": %zu, \"papr_db\": %.3f}",
                   first ? "" : ",\n", d.name.c_str(), d.core.size(),
-                  d.replica.size(), d.fine_off, d.fine_len, d.fine_reps,
+                  d.replica.size(), d.replica_off, d.replica_reps, d.fine_off, d.fine_len, d.fine_reps,
                   d.guard_len, d.coarse_off, d.coarse_len, d.coarse_reps,
                   d.papr_db());
     js += buf;

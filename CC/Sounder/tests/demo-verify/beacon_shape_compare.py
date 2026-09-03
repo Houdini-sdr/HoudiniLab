@@ -89,7 +89,47 @@ def core_off(geom):
     shape geometry so it cannot go stale when a shape changes -- the hard-coded
     368 in two_node_beacon_arrival is exactly the legacy case of this.
     """
-    return geom["fine_off"] + geom["fine_len"]
+    # Generalised 2026-09-03 for a replica that is NOT the fine field: nr_pss
+    # correlates on the leading PSS, once, so the plain matched filter peaks at
+    # the START of that single copy. shapes.json carries replica_off/reps since
+    # the same date; older dumps fall back to the fine-field convention.
+    ro = geom.get("replica_off", geom["fine_off"])
+    rr = geom.get("replica_reps", geom["fine_reps"])
+    return ro + geom["replica_len"] * (rr - 1)
+
+
+def find_beacon_nolag(raw, rep, corr_scale):
+    """Plain matched filter, NO repeat check: the NR form, for a replica that
+    appears once in the burst (nr_pss). Mirrors CommsLib's kXCorrNoLag: the
+    statistic is |gc|^2 / (E_raw * E_rep), a coherence in [0, 1], level
+    invariant, and the bar is 1/corr_scale exactly as in C++. Returns the index
+    of the START of the matched field (this file's convention) and the
+    coherence at it. NOTE the coherence is not on the same scale as
+    tn.find_beacon's power ratio, so a margin quoted from it is not comparable
+    across the two detector forms -- only within one."""
+    L = len(rep)
+    if len(raw) < 2 * L + 8:
+        return -1, 0.0
+    n = 1 << int(np.ceil(np.log2(len(raw) + L)))
+    gc = np.fft.ifft(np.fft.fft(raw, n) * np.conj(np.fft.fft(rep, n)))
+    gc = gc[:len(raw) - L + 1]
+    ca = np.abs(raw) ** 2
+    csum = np.concatenate(([0.0], np.cumsum(ca)))
+    idx = np.arange(len(gc))
+    e_raw = csum[idx + L] - csum[idx]  # energy of the window [i, i+L)
+    e_rep = float(np.sum(np.abs(rep) ** 2))
+    coh = np.abs(gc) ** 2 / (e_raw * e_rep + 1e-30)
+    best = int(np.argmax(coh))
+    if coh[best] <= 1.0 / corr_scale:
+        return -1, float(coh[best])
+    return best, float(coh[best])
+
+
+def detect(raw, rep, geom, corr_scale):
+    """The detector the shape would actually run with (see syncSearch)."""
+    if geom.get("replica_reps", 2) < 2:
+        return find_beacon_nolag(raw, rep, corr_scale)
+    return tn.find_beacon(raw, rep, corr_scale)
 
 
 def synth_beacon(core_ci16, geom, cfo_hz, snr_db_want, n, pos, seed):
@@ -176,7 +216,7 @@ def run_one(ue, rep, geom, corr_scale, matches, max_windows, dwell_s):
         if tk is None:
             continue
         for nm, g in senses:
-            idx, ratio = tn.find_beacon(c, g, corr_scale)
+            idx, ratio = detect(c, g, geom, corr_scale)
             if idx >= 0 and ratio >= tn.MIN_RATIO[0]:
                 anchor = tk + idx - off2
                 sense = (nm, g)
@@ -210,7 +250,7 @@ def run_one(ue, rep, geom, corr_scale, matches, max_windows, dwell_s):
         lo = o - lead
         sl = c[lo:o + span]
         attempts += 1
-        idx, rr = tn.find_beacon(sl, g, corr_scale)
+        idx, rr = detect(sl, g, geom, corr_scale)
         if idx < 0 or rr < tn.MIN_RATIO[0]:
             continue
         meas = tk + lo + idx - off2
@@ -280,7 +320,7 @@ def main():
     ap.add_argument("--bs-ip", default="168.6.244.21")
     ap.add_argument("--ue-ip", default="168.6.244.22")
     ap.add_argument("--shapes-dir", required=True)
-    ap.add_argument("--shapes", default="legacy,legacy_guard,dot11,nr")
+    ap.add_argument("--shapes", default="legacy,legacy_guard,dot11,nr,nr_pss")
     ap.add_argument("--rounds", type=int, default=3)
     ap.add_argument("--matches", type=int, default=4000,
                     help="hard cap on detections per shape per round; the "
