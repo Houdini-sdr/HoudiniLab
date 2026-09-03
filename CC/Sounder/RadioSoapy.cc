@@ -257,7 +257,7 @@ RadioSoapy::RadioSoapy(const RadioParams& params, Type type)
         if (type == Type::kSoapyUhd) {
           args["driver"] = "uhd";
           args["addr"] = params.id;
-          std::cout << "Init bsRadios: " << args["addr"] << std::endl;
+          std::cout << "Init radio (uhd): " << args["addr"] << std::endl;
         } else {
           args["driver"] = "iris";
           args["serial"] = params.id;

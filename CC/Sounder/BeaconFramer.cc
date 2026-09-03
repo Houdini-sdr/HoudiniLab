@@ -11,14 +11,14 @@
 #include "include/IrisFramer.h"
 
 std::unique_ptr<BeaconFramer> BeaconFramer::create(houdini::sync::Platform platform, Config* cfg,
-                                                   Radios& radios) {
+                                                   Radios& radios,
+                                                   std::vector<SoapySDR::Device*>& hubs,
+                                                   std::vector<int>& trigger_offsets) {
   switch (platform) {
     case houdini::sync::Platform::kHoudini:
       return std::make_unique<HoudiniFramer>(cfg, radios);
     case houdini::sync::Platform::kIrisUhd:
-      throw std::invalid_argument(
-          "BeaconFramer::create: the Iris framer needs the set's hubs and trigger offsets; "
-          "use IrisFramer directly");
+      return std::make_unique<IrisFramer>(cfg, radios, hubs, trigger_offsets);
   }
   throw std::invalid_argument("BeaconFramer::create: unknown platform");
 }

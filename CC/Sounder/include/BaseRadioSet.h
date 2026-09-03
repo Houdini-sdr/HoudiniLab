@@ -13,29 +13,29 @@
 
 #include "BeaconFramer.h"
 #include "Radio.h"
+#include "RadioSetInterfaces.h"
 #include "SoapySDR/Device.hpp"
 #include "config.h"
 
-class BaseRadioSet {
+class BaseRadioSet : public IBaseRadioSet {
  public:
   BaseRadioSet(Config* cfg, const bool calibrate_proc);
-  ~BaseRadioSet(void);
-  void radioTx(const void* const* buffs);
-  void radioRx(void* const* buffs);
+  ~BaseRadioSet(void) override;
+  void radioTx(const void* const* buffs) override;
+  void radioRx(void* const* buffs) override;
   int radioTx(size_t radio_id, size_t cell_id, const void* const* buffs,
-              int flags, long long& frameTime);
+              int flags, long long& frameTime) override;
   int radioRx(size_t radio_id, size_t cell_id, void* const* buffs,
-              long long& frameTime);
+              long long& frameTime) override;
   int radioRx(size_t radio_id, size_t cell_id, void* const* buffs, int numSamps,
-              long long& frameTime);
+              long long& frameTime) override;
   // Samples zero-padded into the window backing the LAST radioRx (0 = clean). The
   // caller stamps it onto the Packet so downstream (notably the CSI/view path) can
   // tell a slot carrying inserted zeros from an all-real one. See AP-10.
-  size_t lastRxPadSamples(size_t radio_id, size_t cell_id) const;
-  void radioStart(void);
-  void radioStop(void);
-  bool getRadioNotFound() { return radioNotFound; }
-  void adjustDelays(void);
+  size_t lastRxPadSamples(size_t radio_id, size_t cell_id) const override;
+  void radioStart(void) override;
+  void radioStop(void) override;
+  bool getRadioNotFound() override { return radioNotFound; }
 
  private:
   // use for create pthread

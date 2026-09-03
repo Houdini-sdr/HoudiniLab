@@ -25,11 +25,6 @@
 #include <random>
 
 #include "SoapySDR/Time.hpp"
-#if defined(USE_UHD)
-#include "include/ClientRadioSetUHD.h"
-#else
-#include "include/ClientRadioSet.h"
-#endif
 #include "include/comms-lib.h"
 #include "include/logger.h"
 #include "include/macros.h"
@@ -104,17 +99,8 @@ Receiver::Receiver(
   MLPD_TRACE("Receiver Construction - CL present: %d, BS Present: %d\n",
              config_->client_present(), config_->bs_present());
   try {
-#if defined(USE_UHD)
-    this->client_radio_set_ =
-        config_->client_present() ? new ClientRadioSetUHD(config_) : nullptr;
-    this->base_radio_set_ =
-        config_->bs_present() ? new BaseRadioSetUHD(config_) : nullptr;
-#else
-    this->client_radio_set_ =
-        config_->client_present() ? new ClientRadioSet(config_) : nullptr;
-    this->base_radio_set_ =
-        config_->bs_present() ? new BaseRadioSet(config_, false) : nullptr;
-#endif
+    if (config_->client_present()) client_radio_set_ = makeClientRadioSet(config_);
+    if (config_->bs_present()) base_radio_set_ = makeBaseRadioSet(config_, false);
   } catch (std::exception& e) {
     throw ReceiverException(e.what());
   }
@@ -157,13 +143,13 @@ Receiver::Receiver(
       MLPD_WARN("Invalid Base Radio Setup: %d\n",
                 this->base_radio_set_ == nullptr);
       this->base_radio_set_->radioStop();
-      delete this->base_radio_set_;
+      this->base_radio_set_.reset();
     }
     if (this->client_radio_set_ != nullptr) {
       MLPD_WARN("Invalid Client Radio Setup: %d\n",
                 this->client_radio_set_ == nullptr);
       this->client_radio_set_->radioStop();
-      delete this->client_radio_set_;
+      this->client_radio_set_.reset();
     }
     throw ReceiverException("Invalid Radio Setup");
   }
@@ -184,11 +170,11 @@ Receiver::~Receiver() {
              this->client_radio_set_ == nullptr);
   if (this->base_radio_set_ != nullptr) {
     this->base_radio_set_->radioStop();
-    delete this->base_radio_set_;
+    this->base_radio_set_.reset();
   }
   if (this->client_radio_set_ != nullptr) {
     this->client_radio_set_->radioStop();
-    delete this->client_radio_set_;
+    this->client_radio_set_.reset();
   }
 
   for (auto memory : zeros_) {

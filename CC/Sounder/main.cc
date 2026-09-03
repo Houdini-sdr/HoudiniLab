@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <iostream>
 
+#include "include/RadioSetInterfaces.h"
 #include "include/data_generator.h"
 #include "include/scheduler.h"
 #include "include/signalHandler.hpp"
@@ -64,7 +65,9 @@ int main(int argc, char* argv[]) {
     auto dg = std::make_unique<DataGenerator>(config.get());
     dg->GenerateData(FLAGS_storepath);
   } else if (FLAGS_calibrate) {
-    auto base_radio_set_ = std::make_unique<BaseRadioSet>(config.get(), true);
+    // The calibration run: the set this build provides, constructed in its
+    // calibration mode (the Iris sample-offset procedure), through the factory.
+    auto base_radio_set_ = makeBaseRadioSet(config.get(), true);
   } else {
     int cnt = 0;
     int maxTry = 2;

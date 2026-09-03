@@ -38,15 +38,13 @@
 using json = nlohmann::json;
 
 BaseRadioSet::BaseRadioSet(Config* cfg, const bool calibrate_proc) : _cfg(cfg) {
-  std::vector<size_t> num_bs_antenntas(_cfg->num_cells());
   bsRadios.resize(_cfg->num_cells());
   radioNotFound = false;
   std::vector<std::string> radio_serial_not_found;
 
   for (size_t c = 0; c < _cfg->num_cells(); c++) {
     size_t num_radios = _cfg->n_bs_sdrs()[c];
-    num_bs_antenntas[c] = num_radios * _cfg->bs_channel().length();
-    MLPD_TRACE("Setting up radio: %zu, cells: %zu\n", num_radios,
+      MLPD_TRACE("Setting up radio: %zu, cells: %zu\n", num_radios,
                _cfg->num_cells());
 
     // TODO: we can handle this better!
@@ -177,10 +175,15 @@ BaseRadioSet::BaseRadioSet(Config* cfg, const bool calibrate_proc) : _cfg(cfg) {
     // used to reach an out-of-range index here; it is skipped.)
     if (!bsRadios.at(c).empty() && bsRadios.at(c).front()->hasHardwareTrigger()) {
       ensureFramer();
-      static_cast<IrisFramer*>(framer_.get())->syncDelays(c);
+      auto* iris = dynamic_cast<IrisFramer*>(framer_.get());
+      if (iris != nullptr) iris->syncDelays(c);
     }
   }
 
+  // The framer exists from here on, whichever path follows: radioStop() on
+  // the failure/retry path must still run the Houdini teardown ladder over
+  // the radios that did open (S2 review, item 2).
+  ensureFramer();
   if (radioNotFound == true) {
     for (auto st = radio_serial_not_found.begin();
          st != radio_serial_not_found.end(); st++)
@@ -192,12 +195,14 @@ BaseRadioSet::BaseRadioSet(Config* cfg, const bool calibrate_proc) : _cfg(cfg) {
                  "\033[0m"
               << std::endl;
   } else {
-    if (calibrate_proc && _cfg->sample_cal_en() == true) {
-      ensureFramer();
+    // The sample-offset calibration is an Iris procedure (trigger-based); a
+    // Houdini calibration run arms its framer as any run does (S2 review,
+    // item 1: the branch had moved in front of both platforms).
+    if (calibrate_proc && _cfg->sample_cal_en() == true &&
+        dynamic_cast<IrisFramer*>(framer_.get()) != nullptr) {
       this->syncTimeOffset();
       return;
     }
-    ensureFramer();
     framer_->arm();
   }
 }
@@ -210,11 +215,7 @@ void BaseRadioSet::ensureFramer() {
   for (const auto& cell : bsRadios)
     for (const auto& r : cell)
       if (r != nullptr) platform = r->platform();
-  if (platform == houdini::sync::Platform::kHoudini) {
-    framer_ = std::make_unique<HoudiniFramer>(_cfg, bsRadios);
-  } else {
-    framer_ = std::make_unique<IrisFramer>(_cfg, bsRadios, hubs, trigger_offsets_);
-  }
+  framer_ = BeaconFramer::create(platform, _cfg, bsRadios, hubs, trigger_offsets_);
 }
 
 BaseRadioSet::~BaseRadioSet(void) {
@@ -355,6 +356,7 @@ int BaseRadioSet::radioTx(size_t radio_id, size_t cell_id,
                           long long& frameTime) {
   // The per-frame beacon transmission is the framer's: a software TX on
   // Iris, a no-op that reports the slot as sent on Houdini (device replay).
+  if (framer_ == nullptr) return 0;
   return framer_->txBeacon(radio_id, cell_id, buffs, flags, frameTime);
 }
 

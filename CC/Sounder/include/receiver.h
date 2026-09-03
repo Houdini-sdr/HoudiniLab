@@ -19,13 +19,7 @@
 #include <vector>
 
 
-#if defined(USE_UHD)
-#include "BaseRadioSetUHD.h"
-#include "ClientRadioSetUHD.h"
-#else
-#include "BaseRadioSet.h"
-#include "ClientRadioSet.h"
-#endif
+#include "RadioSetInterfaces.h"
 #include "concurrentqueue.h"
 #include "config.h"
 #include "sync/beacon_shape.h"
@@ -121,13 +115,10 @@ class Receiver {
   std::unique_ptr<houdini::sync::SnrWindowGuard> sync_guard_;
   std::unique_ptr<houdini::sync::RepetitionPhaseEstimator> cfo_estimator_;
 
-#if defined(USE_UHD)
-  ClientRadioSetUHD* client_radio_set_;
-  BaseRadioSetUHD* base_radio_set_;
-#else
-  ClientRadioSet* client_radio_set_;
-  BaseRadioSet* base_radio_set_;
-#endif
+  // The sets behind their interfaces (RadioSetInterfaces.h): the factory
+  // picks the Soapy or the native-UHD implementation for this build.
+  std::unique_ptr<IClientRadioSet> client_radio_set_;
+  std::unique_ptr<IBaseRadioSet> base_radio_set_;
 
   size_t thread_num_;
   // pointer of message_queue_

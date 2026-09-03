@@ -21,15 +21,21 @@
 #include "Radio.h"
 #include "config.h"
 
+namespace SoapySDR {
+class Device;
+}
+
 class BeaconFramer {
  public:
   /// The radios a framer drives: [cell][radio], owned by the set.
   using Radios = std::vector<std::vector<std::unique_ptr<Radio>>>;
 
-  /// The framer for a platform. Throws std::invalid_argument for a platform
-  /// this build has no framer for.
+  /// The framer for a platform: the Houdini one, or the Iris one with the
+  /// hubs and trigger offsets it drives. The one place that knows.
   static std::unique_ptr<BeaconFramer> create(houdini::sync::Platform platform, Config* cfg,
-                                              Radios& radios);
+                                              Radios& radios,
+                                              std::vector<SoapySDR::Device*>& hubs,
+                                              std::vector<int>& trigger_offsets);
   virtual ~BeaconFramer() = default;
 
   /// Program the schedule and the beacon after the radios are configured

@@ -10,21 +10,22 @@
 #include <memory>
 
 #include "Radio.h"
+#include "RadioSetInterfaces.h"
 #include "config.h"
 
-class ClientRadioSet {
+class ClientRadioSet : public IClientRadioSet {
  public:
   ClientRadioSet(Config* cfg);
-  ~ClientRadioSet(void);
-  int triggers(int i);
+  ~ClientRadioSet(void) override;
+  int triggers(int i) override;
   int radioRx(size_t radio_id, void* const* buffs, int numSamps,
-              long long& frameTime);
+              long long& frameTime) override;
   int radioTx(size_t radio_id, const void* const* buffs, int numSamps,
-              int flags, long long& frameTime);
+              int flags, long long& frameTime) override;
   // Drain asynchronous TX status for one client radio; see Radio::drainTxStatus.
-  int drainTxStatus(size_t radio_id);
-  void radioStop(void);
-  bool getRadioNotFound() { return radioNotFound; }
+  int drainTxStatus(size_t radio_id) override;
+  void radioStop(void) override;
+  bool getRadioNotFound() override { return radioNotFound; }
 
  private:
   struct ClientRadioContext {

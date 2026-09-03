@@ -147,6 +147,7 @@ void IrisFramer::arm() {
         }
       }
     }
+  MLPD_INFO("BaseRadioSet done!\n");
 }
 
 SoapySDR::Device* IrisFramer::baseRadio(size_t cellId) {
