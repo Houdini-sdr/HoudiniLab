@@ -136,17 +136,12 @@ Rules:
 - `threshold: auto` picks the form from the replica (single copy: coherence)
   and derives the bar from `pfa_per_window` and L; `corr_scale` is read only
   when a legacy form is named explicitly.
-- Startup prints the effective struct with one of `default`, `json`, `env`
-  beside every value. With `allow_env_overrides: false` an `HOUDINI_*` knob
-  that would have changed a value is reported and ignored. AS SHIPPED IN P1
-  the flag defaults to TRUE, because the bench scripts still sweep through
-  the environment: every override is logged; a number outside a knob's range
-  is clamped to the bound with a note for the knobs whose old readers clamped
-  or had no bound at all (the AP-56 class), and ignored with a note for the
-  three whose old readers ignored it (`beacon.tx_full_scale`,
-  `detector.first_path_window`, `detector.first_path_floor_db`). The
-  recommendation is to flip the default next release and remove the path
-  after.
+- `allow_env_overrides` defaults to FALSE since 2026-09-03 (seam step S0,
+  decided with the user): the JSON is the configuration and the bench
+  scripts sweep through the campaign overlay. A config can turn the
+  HOUDINI_* readers back on, each override logged; a stale export while
+  they are off is reported as IGNORED. The environment path is removed next
+  release.
 - `detector.pfa_per_window` is the coherence form's bar when a configuration
   sets it (P3, landed 2026-09-03): the detector turns it into a bar from the
   replica and window lengths; unset, or on a repeated-field form, corr_scale
