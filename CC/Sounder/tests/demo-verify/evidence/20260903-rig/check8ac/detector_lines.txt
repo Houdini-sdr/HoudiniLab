@@ -1,0 +1,11 @@
+41:198014 INFOR: sync configuration (value  provenance):
+--
+42:927460 INFOR: Beacon detector [portable]: threshold xcorr, resync pick first_path, acquisition pick first_path (first-path back window 32 samples, floor -9.0 dB); SNR floor 30.0 dB, SNR guard 64 samples; CFO guard 8 margin 0
+--
+2:817106 INFOR: sync configuration (value  provenance):
+--
+4:545967 INFOR: Beacon detector [portable]: threshold xcorr, resync pick first_path, acquisition pick first_path (first-path back window 64 samples, floor -9.0 dB); SNR floor 30.0 dB, SNR guard 64 samples; CFO guard 8 margin 0
+--
+72:022604 INFOR: sync configuration (value  provenance):
+--
+73:735283 INFOR: Beacon detector [portable]: threshold coherence, resync pick first_path, acquisition pick first_path (first-path back window 64 samples, floor -9.0 dB); SNR floor 30.0 dB, SNR guard 64 samples; CFO guard 8 margin 0
