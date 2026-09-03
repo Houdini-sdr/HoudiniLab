@@ -649,6 +649,40 @@ whether an NR-shaped beacon is a live option for the OTA target.
 | 8.167 | **THE CONJUGATE-IMAGE INFERENCE IS RETRACTED, AND WHAT SURVIVES IS SMALLER AND BETTER FOUNDED.** [user: "any test should be validated again even if it matches the hypothesis"; "I am skeptical of a conjugate-image"]. The inference rested on a rule of thumb -- a pure beacon gives a wrong-sense/right-sense peak ratio of 1/sqrt(128) = 0.09 -- that this replica violates: the Gold IFFT sequence is structured and its conjugate-free self-product, computed exactly on a pure delayed beacon (`phase_probe_null.py`), is **0.16 to 0.28 depending on the fractional delay**. The identical analysis on the real windows reads **0.18 to 0.24 on the sounder's six golden windows and 0.29 to 0.34 on the probe's raw window**, i.e. at the null; and the estimator barely responds to an injected image below b = 0.3 (0.211 at b = 0, 0.212 at b = 0.2), so it could not have detected a small one anyway. The "100x variation between re-arms" was the probe's lag-product ratio for the wrong sense, a statistic that was never given a null and cannot carry a claim. **Retracted: image, chain-state variation, and the AP-70 handoff as filed.** **What survives, validated the same way:** (1) the correlation lobe's phase step between adjacent samples is **0.06 to 0.30 rad on real data in BOTH capture paths** (sounder windows -0.07 / -0.16 / -0.29 / +0.20 / -0.07 / -0.14; probe -0.06 to -0.30) against **0.01 for a pure delayed beacon**, so the received beacon's spectrum is asymmetric by a modest, benign amount (chain and cable dispersion) and an integer-peak phase readout inherits that step at every argmax hop; (2) one run had two equal-magnitude adjacent samples **2.4 rad apart**, which a single correlation lobe cannot produce and which fits a two-component arrival about one sample apart; its waveform was not captured, so it is **UNEXPLAINED**, and the probe now arms a raw dump so the next one is. (3) Incidental and verified: the probe transmits the dumped core as is while the sounder pre-conjugates its transmit, so the probe's windows correlate with conj(g) and the sounder's with g; both are consistent with the conjugating receive mixer. The AP-67 design rule stands on (1) alone | `tests/demo-verify/phase_probe_null.py` (null, calibration, both real paths) | VERIFIED-TEST; image claim RETRACTED; 2.4 rad run UNEXPLAINED |
 | 8.168 | **AP-67 MEASURED: THE BEACON PHASE IS PREDICTABLE FOUR FRAMES AHEAD TO ABOUT 1.5 DEGREES.** On the clean runs the phase innovation after removing one fitted per-frame advance is **0.021 / 0.026 / 0.024 / 0.025 rad at lags 1 / 2 / 3 / 4 frames** (192 / 180 / 168 / 156 pairs), i.e. flat: neither the linear growth of a frequency error nor the sqrt(lag) growth of a random walk is visible above the lag-1 floor, which is the estimator's own noise. So over 4 ms the transmitter's carrier phase relative to the receiver's is a constant advance to 1.5 degrees, and the 5-degree budget in `docs/UE_TIME_FREQ_SYNC.md` section 11.4 was conservative by 3x. Consequence: a beacon-only phase tracker supports 64-QAM-grade phase (about 2 degrees) across the frame on this bench, and the in-slot pilots the doc recommends are for channel change and for other hardware, not for this oscillator pair. One caveat carried: the runs were 6 to 12 windows of 17 frames on a cable at the calibrated clock state; the innovation over tens of frames and over the air is not measured | `ap67.log`, `evidence/20260903-rig/ap67_*.csv` | VERIFIED-HW |
 
+### 8aa. The sync library, phase P1: criteria written BEFORE the gate runs
+
+Pre-registration, in the 8v style. `docs/SYNC_LIBRARY_ARCHITECTURE.md` is the
+plan; P1 moves the detector, the SNR confirm and the beacon CFO estimator into
+`houdini_sync` and reads every sync knob from the JSON `sync` block through
+`SyncConfig`, with the environment variables honoured as logged overrides this
+release. The claim under test is NOT an improvement: it is that nothing moved.
+
+**Offline gates (already run at the time of writing):** `golden_window_test`
+returns the recorded index and SNR (to 0.01 dB) on all 12 silicon windows, on
+x86 and on the rig's aarch64; `sync_config_test` loads every numeric knob at
+both bounds and throws one step outside (25 knobs), refuses unknown keys, and
+applies or refuses environment overrides as configured; `beacon_geometry_test`
+unchanged and passing.
+
+**Silicon gate:** `run_shape_campaign.sh`, shapes legacy and nr_pss, two rounds
+Latin square, 60 s, shipped defaults, on the library-backed binary built 10:04.
+PRE is campaign A (8.154), same day, same stack, pre-library binary.
+
+| # | prediction | confirms | refutes |
+| --- | --- | --- | --- |
+| L1 | every run acquires with residual within +-1 and reports the effective `sync configuration` block with all provenance `default` | 4 of 4 | any run failing to confirm, or a provenance other than default |
+| L2 | accepts 22-23 per run (saturated, as A), 0 escalations, 0 off-grid | as stated | fewer than 20, or any escalation or off-grid |
+| L3 | the `Beacon detector:` line reads xcorr / first-path / window 64 / floor -9 dB / SNR floor 30 / guard 8 margin 0 for legacy and coherence for nr_pss | as stated | any other value |
+| L4 | nr_pss still shows its one hunt rejection per run (8.159) and `beacon end = detector index + 144` | as stated | its absence would mean the tail or the form moved |
+| L5 | adjacent-difference jitter within 2x of A's for the same shape | as stated | > 2x in 3 of 4 |
+
+**What changes if a prediction fails:** the refactor is not shipped to
+`develop`; the failing quantity is diffed against A's log line by line before
+any code moves, because in this migration a difference is a bug by definition.
+
+| # | claim | evidence | status |
+| --- | --- | --- | --- |
+
 ### 8x. The gate, and the proof the crossing-rule fix was needed
 
 Run against the criteria pre-registered in 8v, on ONE node stack
