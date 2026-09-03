@@ -692,6 +692,48 @@ integer once you know the right value for your bench.
 
 ## 8. If something goes wrong
 
+### 8.0 The run produces almost no output, or says it cannot find a radio
+
+This is the most common failure on a busy bench and it is almost never the
+radio. Look for a line like this early in the log:
+
+```
+setSampleRate(RX): an RX stream is open; a rate change is NOT live
+```
+
+A previous run left a receive stream open on the board. The board will refuse
+every new run until that stream is released, and a refused run writes almost
+nothing to its log, so it looks like nothing happened rather than like an error.
+If you are running several captures in a row, the first one that fails this way
+makes all the rest fail too.
+
+The usual cause is how the previous run ended. The launcher starts the sounder
+underneath a small retry loop, so if you kill the launcher, the retry loop keeps
+going and starts another sounder, and that sounder holds both boards. Killing
+the window you launched from is not enough.
+
+Release it, from the rig, in the sounder directory:
+
+```sh
+python3 tools/rig_release_holders.py
+python3 csi_gui/teardown_framer.py
+```
+
+The first command finds and stops any leftover sounder on the rig host. The
+second confirms the boards are clear; it prints `all 2 radio(s) clear` when they
+are. Then start your run again.
+
+If the release tool finds nothing and the boards are still held, something
+outside your session is holding them, and the board's own server has to be
+restarted:
+
+```sh
+sudo systemctl restart SoapySDRServer
+```
+
+That needs a password, so on a shared bench it is worth asking whether a
+colleague is using the boards before reaching for it.
+
 ### 8.1 The dashboard shows "connecting" and never populates
 
 The page is reaching the backend but no datagrams have arrived. Confirm the
