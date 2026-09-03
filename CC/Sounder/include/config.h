@@ -138,6 +138,19 @@ class Config {
   inline const std::string& trace_file(void) const { return this->trace_file_; }
   inline const std::string& cl_channel(void) const { return this->cl_channel_; }
   inline const std::string& beacon_seq(void) const { return this->beacon_seq_; }
+  // The beacon SHAPE and the geometry every downstream estimator needs. The
+  // index convention does NOT appear here on purpose: with the targeted resync
+  // rule the detector returns the beacon end for every shape (measured across
+  // 4 shapes x 7 levels, beacon_geometry_test), so `beacon_size()` remains the
+  // only offset anyone needs and AP-34(a)'s "re-derive the convention" caveat is
+  // discharged rather than parameterised.
+  inline const std::string& beacon_type(void) const { return beacon_type_; }
+  inline size_t beacon_fine_off(void) const { return beacon_fine_off_; }
+  inline size_t beacon_fine_len(void) const { return beacon_fine_len_; }
+  inline size_t beacon_fine_reps(void) const { return beacon_fine_reps_; }
+  inline size_t beacon_coarse_off(void) const { return beacon_coarse_off_; }
+  inline size_t beacon_coarse_len(void) const { return beacon_coarse_len_; }
+  inline size_t beacon_coarse_reps(void) const { return beacon_coarse_reps_; }
   inline const std::string& pilot_seq(void) const { return this->pilot_seq_; }
   inline const std::string& data_mod(void) const { return this->data_mod_; }
   inline const std::string& cl_data_mod(void) const {
@@ -359,6 +372,9 @@ class Config {
   float pilot_scale_;
   std::string pilot_seq_;
   std::string beacon_seq_;
+  std::string beacon_type_;
+  size_t beacon_fine_off_ = 0, beacon_fine_len_ = 0, beacon_fine_reps_ = 0;
+  size_t beacon_coarse_off_ = 0, beacon_coarse_len_ = 0, beacon_coarse_reps_ = 0;
   bool ul_data_slot_present_;
   bool dl_data_slot_present_;
   std::string data_mod_;

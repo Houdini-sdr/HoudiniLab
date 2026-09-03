@@ -45,11 +45,12 @@ static constexpr bool kEnableCfo = false;
 // Beacon core geometry, mirrored from Config::genBeacon (config.cc): 15 reps of
 // STS(16) then 2 reps of gold(128). estimateCFO() correlates BOTH structures
 // and guards on the total at runtime.
+// The legacy beacon's layout, kept ONLY as the reference the sync-geometry
+// constants are written against. The CFO estimator no longer uses them: it
+// reads the configured shape's geometry from Config, because `beacon_type`
+// now selects between four beacons (include/beacon_shapes.h).
 static constexpr int kStsLen = 16;
-static constexpr int kStsReps = 15;
 static constexpr int kGoldLen = 128;
-static constexpr int kGoldReps = 2;
-static constexpr int kBeaconCoreLen = kStsLen * kStsReps + kGoldLen * kGoldReps;
 // Beacon CFO logs at ~9/s; print 1 in N so a long run does not add millions of
 // lines. The panel gets every sample regardless. HOUDINI_CFO_LOG_EVERY=1 makes
 // it dense, which is what a calibration run wants.
@@ -1283,7 +1284,11 @@ static void sendSyncTelemetry(size_t frame, int tid, uint32_t state,
 // ever appeared in a run log.
 //
 // `sync_index` is the beacon END (syncSearch convention), so the core occupies
-// [sync_index - 496, sync_index).
+// [sync_index - beacon_size, sync_index) -- for EVERY shape. That the convention
+// is shape-independent is measured, not assumed: with the targeted resync rule
+// all four candidates return the beacon end at every received level
+// (beacon_geometry_test), which discharges AP-34(a)'s condition that the index
+// convention and tx_advance be re-derived together before any shape change.
 // EVERY FAILURE PATH RETURNS NaN, NOT ZERO. A failed estimate is not a
 // measurement of zero offset, and the caller cannot tell the two apart from a
 // float. That mattered only for a log line while this value was print-only; it
@@ -1295,21 +1300,31 @@ float Receiver::estimateCFO(const std::complex<int16_t>* buf, size_t buf_len,
                             int sync_index) const {
   const float kNoEstimate = std::numeric_limits<float>::quiet_NaN();
   if (buf == nullptr) return kNoEstimate;
-  // Geometry guard: this estimator is tied to the STS+gold layout above. If the
-  // beacon is ever rebuilt to another shape, fail rather than silently return a
-  // wrong frequency that a correction loop would then act on.
-  if (static_cast<int>(config_->beacon_size()) != kBeaconCoreLen) {
+  // GEOMETRY COMES FROM THE CONFIGURED BEACON SHAPE, not from constants. This
+  // used to hard-code the STS+gold layout and disable itself on anything else,
+  // which was the right guard while the shape was fixed; now that `beacon_type`
+  // selects it, refusing to estimate would silently drop the SYN1 beacon field
+  // for three of the four shapes.
+  const int core_len = static_cast<int>(config_->beacon_size());
+  const int fine_off = static_cast<int>(config_->beacon_fine_off());
+  const int fine_len = static_cast<int>(config_->beacon_fine_len());
+  const int fine_reps = static_cast<int>(config_->beacon_fine_reps());
+  const int coarse_off = static_cast<int>(config_->beacon_coarse_off());
+  const int coarse_len = static_cast<int>(config_->beacon_coarse_len());
+  const int coarse_reps = static_cast<int>(config_->beacon_coarse_reps());
+  if (fine_len <= 0 || fine_reps < 2 ||
+      fine_off + fine_len * fine_reps > core_len) {
     static std::atomic<bool> warned{false};
-    if (warned.exchange(true) == false) {
+    if (warned.exchange(true) == false) {  // braces load-bearing (macro)
       MLPD_WARN(
-          "estimateCFO: beacon is %d samples, expected %d (%d x STS(%d) + "
-          "%d x gold(%d)) -- CFO estimation disabled\n",
-          static_cast<int>(config_->beacon_size()), kBeaconCoreLen, kStsReps,
-          kStsLen, kGoldReps, kGoldLen);
+          "estimateCFO: beacon '%s' has no usable repeated field (core %d, "
+          "fine %d x %d at %d) -- CFO estimation disabled\n",
+          config_->beacon_type().c_str(), core_len, fine_reps, fine_len,
+          fine_off);
     }
     return kNoEstimate;
   }
-  const int start = sync_index - kBeaconCoreLen;
+  const int start = sync_index - core_len;
   if (start < 0 || sync_index < 0 ||
       static_cast<size_t>(sync_index) > buf_len) {
     return kNoEstimate;
@@ -1320,28 +1335,39 @@ float Receiver::estimateCFO(const std::complex<int16_t>* buf, size_t buf_len,
                                 static_cast<double>(buf[i].imag()));
   };
 
-  // Fine: gold rep2 against rep1 (lag 128).
-  const int g1 = start + kStsLen * kStsReps;
-  const int g2 = g1 + kGoldLen;
+  // Fine: repetition 2 against repetition 1, at lag fine_len.
+  const int g1 = start + fine_off;
+  const int g2 = g1 + fine_len;
   std::complex<double> r_fine(0.0, 0.0);
-  for (int i = 0; i < kGoldLen; ++i) r_fine += std::conj(at(g1 + i)) * at(g2 + i);
+  for (int i = 0; i < fine_len; ++i) r_fine += std::conj(at(g1 + i)) * at(g2 + i);
+  if (std::abs(r_fine) == 0.0) return kNoEstimate;
 
-  // Coarse: every consecutive STS pair (lag 16), summed coherently.
-  std::complex<double> r_coarse(0.0, 0.0);
-  for (int k = 0; k + 1 < kStsReps; ++k) {
-    for (int i = 0; i < kStsLen; ++i) {
-      r_coarse += std::conj(at(start + k * kStsLen + i)) *
-                  at(start + (k + 1) * kStsLen + i);
+  const double f_fine = std::arg(r_fine) / (2.0 * M_PI * fine_len);
+  double f = f_fine;
+
+  // Coarse: every consecutive pair of the acquisition field, at lag coarse_len,
+  // summed coherently, used ONLY to unwrap the fine stage.
+  //
+  // A SHAPE WITHOUT A COARSE FIELD IS NOT A DEFECT, AND THE ARITHMETIC SAYS SO.
+  // The fine stage alone is unambiguous to +-rate/(2*fine_len): 480 kHz at
+  // fine_len 128, 960 kHz at 64. This link's CFO cannot exceed 8.5 ppm of
+  // 500 MHz = 4.25 kHz, two orders of magnitude inside either. So the NR shape,
+  // whose PSS is a single non-repeating symbol, skips the unwrap rather than
+  // being refused an estimate.
+  if (coarse_reps >= 2 && coarse_len > 0 &&
+      coarse_off + coarse_len * coarse_reps <= core_len) {
+    std::complex<double> r_coarse(0.0, 0.0);
+    for (int k = 0; k + 1 < coarse_reps; ++k) {
+      for (int i = 0; i < coarse_len; ++i) {
+        r_coarse += std::conj(at(start + coarse_off + k * coarse_len + i)) *
+                    at(start + coarse_off + (k + 1) * coarse_len + i);
+      }
     }
+    if (std::abs(r_coarse) == 0.0) return kNoEstimate;
+    const double f_coarse = std::arg(r_coarse) / (2.0 * M_PI * coarse_len);
+    const double ambiguity = 1.0 / fine_len;
+    f = f_fine + std::round((f_coarse - f_fine) / ambiguity) * ambiguity;
   }
-  if (std::abs(r_fine) == 0.0 || std::abs(r_coarse) == 0.0) return kNoEstimate;
-
-  const double f_fine = std::arg(r_fine) / (2.0 * M_PI * kGoldLen);
-  const double f_coarse = std::arg(r_coarse) / (2.0 * M_PI * kStsLen);
-  // Unwrap the fine estimate into the coarse stage's range.
-  const double ambiguity = 1.0 / kGoldLen;
-  const double m = std::round((f_coarse - f_fine) / ambiguity);
-  double f = f_fine + m * ambiguity;
   // The matched-NCO R2C RX mixer delivers baseband CONJUGATED (the same
   // inversion recorder_worker undoes via rx_conj_ for CSI). Sync runs on RAW
   // samples, so a +f carrier offset reads as -f here; undo it so the sign is
@@ -2136,7 +2162,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
           // reachable on any off-grid detection: exactly when the reading
           // matters most.
           if (cfo_index > request_samples ||
-              cfo_index < static_cast<long long>(kBeaconCoreLen)) {
+              cfo_index < static_cast<long long>(config_->beacon_size())) {
             cfo_index = sync_index;  // fall back to the detector's own index
           }
           const float cfo_norm =

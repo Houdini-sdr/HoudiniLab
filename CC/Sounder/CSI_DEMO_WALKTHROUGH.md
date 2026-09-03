@@ -601,6 +601,36 @@ same shell that launches it.
 | `HOUDINI_CFO_LOG_EVERY` | 10 | How many beacon detections pass per `Beacon CFO` line. The default logs one in ten, so a quiet run is expected. Set it to 1 for a calibration run where you want every estimate. |
 | `HOUDINI_CNS_DUMP_LOW` | unset | Directory for autopsy dumps of the first few low scoring constellations. The directory must already exist. |
 
+### 7.0 Choosing the beacon waveform
+
+The base station transmits a short burst at the top of every frame and the
+client finds it by correlation. Which burst it sends is a config field,
+`beacon_type`, in the `tdd_conf` block. Four are available:
+
+| value | what it is |
+| --- | --- |
+| `legacy` | The default. Fifteen repeats of a 16 sample training symbol, then two repeats of a 128 sample Gold sequence. |
+| `legacy_guard` | The same, with a 32 sample cyclic guard inserted before the Gold field, in the style of an 802.11 long training field. |
+| `dot11` | The 802.11a/g/n legacy preamble as the standard defines it: the short training field, then the guard and two long training symbols. |
+| `nr` | The 5G NR primary synchronisation signal, then a guard and two repeats of a tracking symbol built from the NR reference sequence. |
+
+All four were measured on the bench, four rounds each with the order rotated,
+about 8000 detections apiece. **Timing is the same for all of them**, within
+measurement error. What separates them is detection margin: the worst detection
+of the run cleared the threshold by 12x for `legacy` and `legacy_guard`, 7x for
+`dot11`, and only 2.3x for `nr`.
+
+**Leave it at `legacy` unless you have a reason.** The margin is the best of the
+four, and it is the waveform every other measurement in this repository was
+taken against. If you set a value that is not in the table the client refuses to
+start rather than falling back, so a typo cannot quietly leave you on a
+different beacon than you think.
+
+The one thing the alternatives are better at is the beacon's own frequency
+estimate, where `dot11` is about a third more stable. That number is a
+secondary reading on the sync panel, not what the client actually tracks
+frequency with, so it does not currently justify the margin it costs.
+
 ### 7.1 Free running clock knobs
 
 These belong to the timing tracker the client runs when the two boards are on

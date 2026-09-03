@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <random>
 
+#include "include/beacon_shapes.h"
 #include "include/comms-lib.h"
 #include "include/constants.h"
 #include "include/logger.h"
@@ -123,6 +124,10 @@ Config::Config(const std::string& jsonfile, const std::string& directory,
   cal_tx_gain_.shrink_to_fit();
 
   beam_sweep_ = tddConf.value("beamsweep", false);
+  // WHICH beacon waveform. Parsed here because this is where tddConf lives;
+  // genPilots builds from it. Unknown names throw there rather than falling
+  // back, so a typo cannot quietly ship the old beacon.
+  beacon_type_ = tddConf.value("beacon_type", std::string("legacy"));
   beacon_ant_ = tddConf.value("beacon_antenna", 0);
   beacon_radio_ = beacon_ant_ / bs_sdr_ch_;
   beacon_ch_ = beacon_ant_ % bs_sdr_ch_;
@@ -768,18 +773,47 @@ void Config::genPilots() {
   std::vector<std::complex<int16_t>> prefix_zpad(prefix_, 0);
   std::vector<std::complex<int16_t>> postfix_zpad(postfix_, 0);
 
-  // compose Beacon slot:
-  // STS Sequence (for AGC) + GOLD Sequence (for Sync)
-  // 15reps of STS(16) + 2reps of gold_ifft(128)
+  // Compose the beacon slot. WHICH beacon is a config choice since 2026-09-02
+  // ("beacon_type": legacy | legacy_guard | dot11 | nr), and every candidate is
+  // defined once in include/beacon_shapes.h -- the same header the offline
+  // geometry test and the bench probes build from, so the waveform this
+  // transmits is sample-for-sample the waveform they measured. That agreement
+  // is the point: AP-34(a) cost a bench session because the bench and the build
+  // disagreed about a beacon.
+  //
+  // DEFAULT IS `legacy`, WHICH IS BIT-IDENTICAL TO WHAT THIS FUNCTION BUILT
+  // BEFORE (asserted by beacon_geometry_test against this very recipe), because
+  // it measured the best detection margin of the four and every prior result in
+  // DEMO_VERIFICATION was taken against it. See 8.111-8.116 for the comparison.
   srand(time(NULL));
-  const int seq_len = 128;
-  std::vector<std::vector<float>> gold_ifft =
-      CommsLib::getSequence(CommsLib::GOLD_IFFT);
-  auto gold_ifft_ci16 = Utils::float_to_cint16(gold_ifft);
-  gold_cf32_.clear();
-  for (size_t i = 0; i < seq_len; i++) {
-    gold_cf32_.push_back(std::complex<float>(gold_ifft[0][i], gold_ifft[1][i]));
+  beacon_shapes::Shape shape;
+  if (beacon_shapes::parse(beacon_type_, &shape) == false) {
+    // Do NOT fall back. A typo that quietly ships the old beacon is exactly the
+    // failure this parameter exists to make visible.
+    throw std::invalid_argument(
+        "unknown beacon_type \"" + beacon_type_ +
+        "\" -- expected legacy, legacy_guard, dot11 or nr");
   }
+  const auto shape_desc = beacon_shapes::make(shape);
+  beacon_fine_off_ = shape_desc.fine_off;
+  beacon_fine_len_ = shape_desc.fine_len;
+  beacon_fine_reps_ = shape_desc.fine_reps;
+  beacon_coarse_off_ = shape_desc.coarse_off;
+  beacon_coarse_len_ = shape_desc.coarse_len;
+  beacon_coarse_reps_ = shape_desc.coarse_reps;
+
+  const size_t seq_len = shape_desc.replica.size();
+  auto gold_ifft_ci16 = Utils::cfloat_to_cint16(shape_desc.replica);
+  gold_cf32_.assign(shape_desc.replica.begin(), shape_desc.replica.end());
+  std::cout << "Beacon: type " << beacon_type_ << ", core " << shape_desc.core.size()
+            << " samples, matched field " << shape_desc.fine_reps << " x "
+            << shape_desc.fine_len << " at offset " << shape_desc.fine_off
+            << (shape_desc.guard_len ? " (cyclic guard " : " (no guard")
+            << (shape_desc.guard_len
+                    ? std::to_string(shape_desc.guard_len) + ")"
+                    : ")")
+            << ", PAPR " << shape_desc.papr_db() << " dB" << std::endl;
+
   if (getenv("HOUDINI_DUMP_GOLD") != nullptr) {  // the exact find_beacon match
     FILE* f = std::fopen("/tmp/gold.bin", "wb");
     if (f) {
@@ -793,35 +827,21 @@ void Config::genPilots() {
     }
   }
 
-  std::vector<std::vector<float>> sts_seq =
-      CommsLib::getSequence(CommsLib::STS_SEQ);
-  auto sts_seq_ci16 = Utils::float_to_cint16(sts_seq);
-
-  // Populate STS (stsReps repetitions)
-  int stsReps = 15;
-  for (int i = 0; i < stsReps; i++) {
-    beacon_ci16_.insert(beacon_ci16_.end(), sts_seq_ci16.begin(),
-                        sts_seq_ci16.end());
-  }
-
-  // NOTE: a 32-sample cyclic guard was inserted HERE (802.11 GI2 pattern) to
-  // remove the STS->gold channel transient that puts +157 deg on the first term
-  // of conj(rep1)*rep2. REVERTED 2026-08-31: it moves the correlator's returned
-  // index by a measured -274 samples, so the invariant the whole timing chain
-  // rests on -- sync_index == houdiniBeaconEnd() == strobe + beacon_size -- no
-  // longer holds, beaconSnrDb() then measures a window of pre-beacon noise and
-  // reports 10.5 dB against a true 48.3 dB, and the 30 dB floor rejects every
-  // resync detection. Acquisition still worked; only the liveness path died.
-  // The benefit was also unmeasurable: skipping the contaminated head does not
-  // improve the CFO estimate (it worsens it). Any retry must re-derive the
-  // find_beacon index convention and tx_advance TOGETHER. See BACKLOG AP-34.
-  // Populate gold sequence (two reps, 128 each)
-  int goldReps = 2;
-  for (int i = 0; i < goldReps; i++) {
-    beacon_ci16_.insert(beacon_ci16_.end(), gold_ifft_ci16.begin(),
-                        gold_ifft_ci16.end());
-  }
-
+  // HISTORICAL NOTE, kept because it names a cause that turned out to be wrong.
+  // A 32-sample cyclic guard was inserted between the STS run and the gold field
+  // (the 802.11 GI2 pattern) and reverted on 2026-08-31, because the returned
+  // detector index moved by a measured -274 samples and the invariant the whole
+  // timing chain rests on -- sync_index == houdiniBeaconEnd() == strobe +
+  // beacon_size -- stopped holding, so beaconSnrDb measured pre-beacon noise and
+  // the 30 dB floor rejected every resync while acquisition still worked. THE
+  // GUARD WAS NOT THE CAUSE. The resync search took the EARLIEST threshold
+  // crossing, and the STS preamble is 16-periodic against a 128-sample
+  // correlator lag, so it is perfectly lag-128 self-coherent and manufactures
+  // crossings hundreds of samples early once the link is strong enough. The
+  // guard only lowered the level at which that happens. Fixed 2026-09-02 by
+  // CommsLib::BeaconPick::kTargetedArgmax; `legacy_guard` is now a selectable
+  // shape and measures the same index as every other. See BACKLOG AP-34.
+  beacon_ci16_ = Utils::cfloat_to_cint16(shape_desc.core);
   beacon_size_ = beacon_ci16_.size();
   if (getenv("HOUDINI_DUMP_GOLD") != nullptr) {
     // The 496-sample STS+gold core (pre-prefix, unconjugated, unit scale) --
