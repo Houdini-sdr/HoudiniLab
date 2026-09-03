@@ -122,16 +122,32 @@ inline std::vector<int> gold38211(size_t len, uint32_t c_init) {
 
 /// Map `tones` frequency-domain values onto an `n`-point IFFT, DC nulled,
 /// centred, and return the n time samples normalised to unit mean power.
+///
+/// THE DC SKIP MUST NOT COLLIDE, AND THE FIRST VERSION OF THIS DID. It centred
+/// the tones on DC and, when a tone landed on bin 0, "parked" it at k/2 + 1.
+/// For the NR tracking symbol that is 64 tones into a 64-point IFFT, and bin
+/// k/2+1 = 33 is ALREADY OCCUPIED by the tone from bin -31. The assignment
+/// silently overwrote it, so the symbol went out with one tone doubled and one
+/// missing. Transmit and correlator shared the same malformed symbol, so
+/// detection still worked and nothing failed -- it simply measured a beacon
+/// nobody designed, and the NR row's anomalies (4x the CFO scatter of the
+/// equal-length dot11 field, and 4.5 dB of unexplained SNR) were partly mine.
+/// Fixed by walking the non-DC bins in order instead: bins -floor/.../+ceil
+/// skipping zero, taking as many as there is room for.
 inline std::vector<cf> toneIfft(const std::vector<cf>& tones, size_t n) {
   std::vector<cf> f(n, cf(0.f, 0.f));
-  const size_t k = tones.size();
-  // centre the occupied tones around DC, skipping DC itself
-  const long long start = -static_cast<long long>(k / 2);
-  for (size_t i = 0; i < k; ++i) {
-    long long bin = start + static_cast<long long>(i);
-    if (bin == 0) bin = static_cast<long long>(k / 2) + 1;  // park off DC
-    const size_t idx = static_cast<size_t>((bin + static_cast<long long>(n)) %
-                                           static_cast<long long>(n));
+  const size_t k = std::min(tones.size(), n - 1);  // n-1 usable bins, DC nulled
+  // Bin positions, centred and skipping DC, generated in order so no two tones
+  // can ever land on the same bin.
+  std::vector<long long> bins;
+  bins.reserve(k);
+  for (long long b = -static_cast<long long>((k + 1) / 2);
+       bins.size() < k && b <= static_cast<long long>(n / 2); ++b) {
+    if (b != 0) bins.push_back(b);
+  }
+  for (size_t i = 0; i < bins.size(); ++i) {
+    const size_t idx = static_cast<size_t>(
+        (bins[i] + static_cast<long long>(n)) % static_cast<long long>(n));
     f[idx] = tones[i];
   }
   auto t = CommsLib::IFFT(f, static_cast<int>(n), 1.0f, false, false);

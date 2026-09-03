@@ -261,6 +261,33 @@ int main() {
           "  beacon_shapes 'legacy' is sample-identical to Config::genPilots");
   }
 
+  // NO TWO TONES ON ONE BIN. The NR fields are built in the frequency domain,
+  // and the first version of toneIfft "parked" a DC-landing tone at a bin that
+  // was already occupied, so the tracking symbol shipped with one tone doubled
+  // and one missing. Nothing failed: transmit and correlator shared the same
+  // malformed symbol, so it detected fine and merely measured a beacon nobody
+  // designed. Check the property directly -- every field must occupy as many
+  // distinct non-DC bins as it has tones.
+  {
+    const auto nr = beacon_shapes::make(Shape::kNr);
+    // The tracking symbol is the last fine_len samples of the core.
+    std::vector<cf> sym(nr.core.end() - nr.fine_len, nr.core.end());
+    auto spec = CommsLib::FFT(sym, static_cast<int>(nr.fine_len), false);
+    double tot = 0.0;
+    for (const auto& v : spec) tot += std::norm(v);
+    int occupied = 0;
+    for (size_t i = 0; i < spec.size(); ++i) {
+      if (std::norm(spec[i]) > tot / (200.0 * spec.size())) ++occupied;
+    }
+    // 64 tones into a 64-point IFFT leaves 63 usable bins once DC is nulled.
+    check(occupied == static_cast<int>(nr.fine_len) - 1,
+          "  NR tracking symbol occupies every non-DC bin exactly once (" +
+              std::to_string(occupied) + " of " +
+              std::to_string(nr.fine_len - 1) + ")");
+    check(std::norm(spec[0]) <= tot / (200.0 * spec.size()),
+          "  NR tracking symbol nulls DC");
+  }
+
   std::printf("\nRESULT: %s (%d failure(s))\n", g_fail ? "FAIL" : "PASS", g_fail);
   return g_fail ? 1 : 0;
 }
