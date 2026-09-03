@@ -61,6 +61,16 @@ RE_LEVEL = re.compile(r"\b(WARNG|WARNING|ERROR)\b[]:]?\s*(.*)")
 RE_STACK = re.compile(r"Node stack (BS|UE) ([\d.]+): .*?fpga_commit=(\S+) .*?"
                       r"device_build=(\S+) .*?host_build=(\S+)\b")
 RE_BEACON = re.compile(r"Beacon: type (\S+), core (\d+) samples")
+# EVERY resync detection, accepted or not, with the SNR the index implies.
+# THIS IS THE COLUMN THAT SEPARATES A GOOD INDEX FROM A BAD ONE, and it was
+# missing. A wrong index puts the SNR window off the beacon, so the reading
+# collapses from ~48 dB to 10-20 and the 30 dB floor rejects it -- but the client
+# just retries inside the same period, so accepted counts, escalations and
+# residual spread all stay normal. Measured 2026-09-02: an arm with 55 % of its
+# detections false-locking passed a gate on those three metrics (8.129/8.130).
+RE_DETECT = re.compile(r"detection idx (-?\d+) snr ([-\d.]+) dB")
+# The shipped HOUDINI_SYNC_SNR_DB. A detection under this is rejected.
+SNR_FLOOR_DB = 30.0
 
 
 def sd(xs):
@@ -75,7 +85,8 @@ def analyse(path):
          "reanchor_failed": 0, "starved": 0, "innov_rejected": 0,
          "cns_total": 0, "cns_low": 0, "acq": None, "geometry": None,
          "tracker": None, "cadence_ms": None, "levels": Counter(),
-         "level_samples": {}, "stack": {}, "beacon": None}
+         "level_samples": {}, "stack": {}, "beacon": None,
+         "det_snr": []}
     with open(path, "r", errors="replace") as f:
         for line in f:
             m = RE_ALIVE.search(line)
@@ -127,6 +138,9 @@ def analyse(path):
             m = RE_TRACKER.search(line)
             if m:
                 r["tracker"] = m.group(1)
+            m = RE_DETECT.search(line)
+            if m:
+                r["det_snr"].append(float(m.group(2)))
             m = RE_STACK.search(line)
             if m:
                 r["stack"][m.group(1)] = {"ip": m.group(2), "fpga": m.group(3),
@@ -203,16 +217,33 @@ def check_stacks(rs):
 def report(rs):
     ok_stack = check_stacks(rs)
     print()
-    print("%-22s %7s %6s %7s %7s %8s %8s %7s %9s"
-          % ("run", "accept", "esc", "offgrid", "sd", "max|r|", "starved",
-             "innovRej", "CNS low"))
+    print("%-20s %6s %5s %7s %6s %6s %7s %7s %7s %8s"
+          % ("run", "accept", "esc", "offgrid", "sd", "max|r|", "det",
+             "lowSNR", "starved", "CNS low"))
+    bad_snr = 0
     for r in rs:
-        res = r["resid"]
-        print("%-22s %7d %6d %7d %7.2f %8d %8d %7d  %d/%d"
+        res, det = r["resid"], r["det_snr"]
+        low = sum(1 for v in det if v < SNR_FLOOR_DB)
+        if low:
+            bad_snr += 1
+        print("%-20s %6d %5d %7d %6.2f %6d %7d %7s %7d %8s"
               % (r["log"].split("/")[-1], len(res), r["escalations"],
                  len(r["offgrid"]), sd(res), max([abs(x) for x in res] or [0]),
-                 r["starved"], r["innov_rejected"], r["cns_low"],
-                 r["cns_total"]))
+                 len(det),
+                 ("%d/%d" % (low, len(det))) if det else "-",
+                 r["starved"], "%d/%d" % (r["cns_low"], r["cns_total"])))
+    if bad_snr:
+        print()
+        print("lowSNR = resync detections whose in-window SNR is under %.0f dB, "
+              "i.e. the" % SNR_FLOOR_DB)
+        print("floor rejected them. NOT a weak link -- a good index reads ~48 dB "
+              "on this bench.")
+        print("It is the SNR window landing off the beacon, which is what a WRONG "
+              "INDEX does.")
+        print("The client retries inside the same period, so accept counts, "
+              "escalations and")
+        print("residual spread stay normal while a majority of detections are "
+              "wrong (8.129).")
     print()
     for r in rs:
         g, name = r["geometry"], r["log"].split("/")[-1]
