@@ -22,8 +22,6 @@ class Config;
 class IBaseRadioSet {
  public:
   virtual ~IBaseRadioSet() = default;
-  virtual void radioTx(const void* const* buffs) = 0;
-  virtual void radioRx(void* const* buffs) = 0;
   virtual int radioTx(size_t radio_id, size_t cell_id, const void* const* buffs, int flags,
                       long long& frameTime) = 0;
   virtual int radioRx(size_t radio_id, size_t cell_id, void* const* buffs,

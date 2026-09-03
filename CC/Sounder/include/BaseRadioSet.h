@@ -21,8 +21,8 @@ class BaseRadioSet : public IBaseRadioSet {
  public:
   BaseRadioSet(Config* cfg, const bool calibrate_proc);
   ~BaseRadioSet(void) override;
-  void radioTx(const void* const* buffs) override;
-  void radioRx(void* const* buffs) override;
+  void radioTx(const void* const* buffs);
+  void radioRx(void* const* buffs);
   int radioTx(size_t radio_id, size_t cell_id, const void* const* buffs,
               int flags, long long& frameTime) override;
   int radioRx(size_t radio_id, size_t cell_id, void* const* buffs,

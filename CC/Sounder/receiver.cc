@@ -104,6 +104,18 @@ Receiver::Receiver(
   } catch (std::exception& e) {
     throw ReceiverException(e.what());
   }
+  // Anything below that throws leaves the sets to their destructors, which
+  // release the devices but do not run the framer teardown (the Houdini
+  // ladder): stop them first, then rethrow (S3 review, item 5).
+  struct StopOnThrow {
+    Receiver* self;
+    bool armed = true;
+    ~StopOnThrow() {
+      if (!armed) return;
+      if (self->base_radio_set_ != nullptr) self->base_radio_set_->radioStop();
+      if (self->client_radio_set_ != nullptr) self->client_radio_set_->radioStop();
+    }
+  } stop_on_throw{this};
 
   // The sync library objects (docs/SYNC_LIBRARY_ARCHITECTURE.md, phase P1).
   // Built ONCE from the configured beacon shape and the validated sync block,
@@ -122,7 +134,7 @@ Receiver::Receiver(
     // The matched-NCO R2C RX mixer delivers baseband CONJUGATED on Houdini, so
     // the estimator undoes the sign there (AP-30 verified the sign and scale).
     cfo_estimator_ = std::make_unique<houdini::sync::RepetitionPhaseEstimator>(
-        g, sc.cfo.window_margin, config_->is_houdini());
+        g, sc.cfo.window_margin, config_->rx_path_fixes().conjugate);
     if (!g.usable()) {
       MLPD_WARN(
           "beacon CFO: beacon '%s' has no usable repeated field (core %d, fine "
@@ -135,6 +147,7 @@ Receiver::Receiver(
   MLPD_TRACE("Receiver Construction -- number radios %zu\n",
              config_->num_bs_sdrs_all());
 
+  stop_on_throw.armed = false;  // the throwing part is over; the checks below manage the sets themselves
   if (((this->base_radio_set_ != nullptr) &&
        (this->base_radio_set_->getRadioNotFound())) ||
       ((this->client_radio_set_ != nullptr) &&
@@ -879,7 +892,7 @@ void Receiver::clientTxPilots(size_t user_id, long long base_time,
   }();
   const int horizon =
       horizon_env >= 0 ? horizon_env : config_->ue_pilot_horizon();
-  if (horizon > 0 && config_->is_houdini() && config_->cl_sdr_ch() == 1) {
+  if (horizon > 0 && stampAnchored() && config_->cl_sdr_ch() == 1) {
     // AP-31(c). This ladder used to step by samps_per_frame, on the assumption
     // stated in the comment above -- "with the boards frequency-locked (CFO ~0,
     // no drift) the pilot offset is stable". On free-running clocks it is not,
@@ -1347,7 +1360,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   // State the resulting geometry at bring-up. This is the number that decides
   // whether the UE ever LOOKS for the beacon, and a zero here is the silent
   // failure, so it must be visible without the reader computing it.
-  if (!config_->is_houdini()) {
+  if (!stampAnchored()) {
     // The slice geometry drives the targeted resync, which only Houdini runs.
   } else if (!geom.usable) {
     MLPD_ERROR(
@@ -1364,7 +1377,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
         kScatterTol / config_->rate() * 1e6, geom.confirm_tol);
   }
 
-  const size_t beacon_detect_window = config_->is_houdini()
+  const size_t beacon_detect_window = stampAnchored()
       ? config_->samps_per_frame()
       : static_cast<size_t>(static_cast<float>(config_->samps_per_slot()) *
                             kBeaconDetectWindowScaler);
@@ -1378,7 +1391,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   bool houdini_anchored = false;
   // Seeded by the acquisition confirm (AP-31b bootstrap); nominal until then.
   double houdini_boot_period = static_cast<double>(config_->samps_per_frame());
-  if (config_->is_houdini()) {
+  if (stampAnchored()) {
     houdini_anchored = houdiniAcquireAnchor(
         tid, beacon_detect_window, geom, houdini_anchor, &houdini_boot_period);
     if (!houdini_anchored && config_->running()) {
@@ -1522,7 +1535,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   // below reads its verdicts; nothing here counts anything itself.
   houdini::sync::ResyncPolicyConfig policy_cfg;
   policy_cfg.enabled = (config_->frame_mode() == "continuous_resync");
-  policy_cfg.timed = config_->is_houdini();
+  policy_cfg.timed = stampAnchored();
   policy_cfg.interval_s = resync_interval_s;
   policy_cfg.period_frames = resync_period;
   policy_cfg.retry_max = static_cast<size_t>(config_->sync().resync.retry_max);
@@ -1809,7 +1822,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
       config_->running(false);
       break;
     }
-    if (config_->ul_data_slot_present() == true && !config_->is_houdini()) {
+    if (config_->ul_data_slot_present() == true && !stampAnchored()) {
       // Notify new frame (file-based UL data path; Houdini uses the self-contained
       // continuous P+U burst in clientTxPilots instead).
       this->notifyPacket(kClient, frame_id + this->txFrameDelta_, 0, tid,
@@ -1817,7 +1830,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
     }
 
     // The clock is read only where the cadence is timed (Houdini).
-    if (policy.due(frame_id, config_->is_houdini() ? std::chrono::steady_clock::now()
+    if (policy.due(frame_id, stampAnchored() ? std::chrono::steady_clock::now()
                                                    : std::chrono::steady_clock::time_point{})) {
       MLPD_TRACE("Enable resyncing at frame %zu\n", frame_id);
     }
@@ -1825,7 +1838,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
       ssize_t sync_index = -1;
       bool resync_attempted = true;
       houdini::sync::Detection resync_det;  // the targeted search's evidence
-      if (config_->is_houdini() && houdini_pilot_ref_valid) {
+      if (stampAnchored() && houdini_pilot_ref_valid) {
         // TARGETED liveness check: the anchored grid predicts exactly where
         // the beacon END lands in this (drained, random-phase) window, so
         // only attempt when it is inside (~1.4% of frames at kLead=1280 -- the others count
@@ -1906,7 +1919,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
             request_samples, resyncScale(policy.retries()),
             houdini::sync::PickRule::kFirstCrossing);
       }
-      if (sync_index >= 0 && config_->is_houdini() &&
+      if (sync_index >= 0 && stampAnchored() &&
           houdini_pilot_ref_valid) {
         // Liveness verdict on the targeted detection: SNR floor first, then
         // the grid residual (alive within scatter / moved beyond it).
@@ -2168,7 +2181,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
             static_cast<int>(sync_index - config_->shape().expectedEndOffset());
         //Adjust tx time
         rx_beacon_time += new_rx_offset;
-        if (config_->is_houdini() && !houdini_pilot_ref_valid) {
+        if (stampAnchored() && !houdini_pilot_ref_valid) {
           houdini_pilot_ref = rx_beacon_time;
           houdini_pilot_ref_valid = true;
         }
@@ -2189,7 +2202,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
       }
       if (sync_index < 0 && resync_attempted) {
         const houdini::sync::ResyncAction act =
-            policy.onMiss(config_->is_houdini() && houdini_pilot_ref_valid);
+            policy.onMiss(stampAnchored() && houdini_pilot_ref_valid);
         if (act == houdini::sync::ResyncAction::kExhausted ||
             act == houdini::sync::ResyncAction::kEscalate) {
           // Under recvHoudini's drain the per-frame slot-0 window carries
@@ -2225,7 +2238,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
     // Houdini always uses the continuous P(+U) burst below (clientTxPilots now
     // transmits the uplink-data slot too); the file-based clientTxData path is for
     // Iris/UHD.
-    if (config_->ul_data_slot_present() == true && !config_->is_houdini()) {
+    if (config_->ul_data_slot_present() == true && !stampAnchored()) {
       int tx_return = 0;
       while (tx_return >= 0) {
         tx_return = this->clientTxData(tid, frame_id, rx_beacon_time);
@@ -2238,7 +2251,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
         // real-time tracking (the loop rate != real-time because of the drain) AND
         // a constant frame phase, so the pilot lands at the same BS-frame position.
         long long pilot_base = rx_beacon_time;
-        if (config_->is_houdini() && houdini_pilot_ref_valid) {
+        if (stampAnchored() && houdini_pilot_ref_valid) {
           // Snap to the TRACKED grid, not a nominal-period one: on free-running
           // clocks a nominal snap drifts out of the BS rx_gate at the same
           // 1.047 samples per frame the beacon does.
@@ -2289,7 +2302,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
           buffer_offset++;
           buffer_offset %= buffer_chunk_size;
         }
-      } else if (coalesce_throwaway && config_->is_houdini()) {
+      } else if (coalesce_throwaway && stampAnchored()) {
         // Consume a RUN of consecutive discarded slots in ONE read.
         //
         // radioRx costs 855 us fixed + 0.0037 us/sample (measured), so 30 calls
@@ -2600,7 +2613,7 @@ ssize_t Receiver::clientSyncBeacon(size_t radio_id, size_t sample_window,
         // SNR floor: a correlation crossing at noise level is the artifact
         // class, not the beacon (measured: real ~45 dB, artifacts ~0 dB).
         // Reject and keep hunting rather than anchor on it.
-        if (config_->is_houdini() && sync_index >= 0) {
+        if (stampAnchored() && sync_index >= 0) {
           const double snr = sync_guard_->snrDb(
               syncbuffmem.at(kSyncDetectChannel).data(), sample_window,
               sync_index);

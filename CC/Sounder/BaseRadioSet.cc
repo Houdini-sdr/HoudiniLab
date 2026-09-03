@@ -44,7 +44,7 @@ BaseRadioSet::BaseRadioSet(Config* cfg, const bool calibrate_proc) : _cfg(cfg) {
 
   for (size_t c = 0; c < _cfg->num_cells(); c++) {
     size_t num_radios = _cfg->n_bs_sdrs()[c];
-      MLPD_TRACE("Setting up radio: %zu, cells: %zu\n", num_radios,
+    MLPD_TRACE("Setting up radio: %zu, cells: %zu\n", num_radios,
                _cfg->num_cells());
 
     // TODO: we can handle this better!
@@ -175,8 +175,14 @@ BaseRadioSet::BaseRadioSet(Config* cfg, const bool calibrate_proc) : _cfg(cfg) {
     // used to reach an out-of-range index here; it is skipped.)
     if (!bsRadios.at(c).empty() && bsRadios.at(c).front()->hasHardwareTrigger()) {
       ensureFramer();
+      // hasHardwareTrigger() is the gate (Iris only), so the framer is the
+      // Iris one; the check makes that an error rather than an assumption.
       auto* iris = dynamic_cast<IrisFramer*>(framer_.get());
-      if (iris != nullptr) iris->syncDelays(c);
+      if (iris != nullptr) {
+        iris->syncDelays(c);
+      } else {
+        MLPD_ERROR("cell %zu: a radio reports a hardware trigger but the framer is not the Iris one\n", c);
+      }
     }
   }
 
@@ -356,7 +362,17 @@ int BaseRadioSet::radioTx(size_t radio_id, size_t cell_id,
                           long long& frameTime) {
   // The per-frame beacon transmission is the framer's: a software TX on
   // Iris, a no-op that reports the slot as sent on Houdini (device replay).
-  if (framer_ == nullptr) return 0;
+  if (framer_ == nullptr) {
+    // Unreachable from the receiver today (the only path that leaves the
+    // framer unbuilt never constructs one); loud if a future set gets here,
+    // and negative so the caller treats it as an error, not a short write.
+    static bool said = false;
+    if (!said) {
+      said = true;
+      MLPD_ERROR("BaseRadioSet::radioTx with no framer: nothing transmitted\n");
+    }
+    return -1;
+  }
   return framer_->txBeacon(radio_id, cell_id, buffs, flags, frameTime);
 }
 

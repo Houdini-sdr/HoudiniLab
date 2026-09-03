@@ -108,6 +108,7 @@ if(RADIO_TYPE STREQUAL PURE_UHD)
   add_definitions(-DUSE_UHD)
   # Adding dependency of UHD and boost external libraries
   find_package(UHD "3.15.0" REQUIRED)
+  include_directories(${UHD_INCLUDE_DIRS})
   message(STATUS "Using UHD Version: ${UHD_VERSION}")
 
   ########################################################################

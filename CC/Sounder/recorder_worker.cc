@@ -92,7 +92,9 @@ void RecorderWorker::initCsi(void) {
   double fps = 30.0;
   if (const char* f = std::getenv("HOUDINI_CSI_FPS")) fps = std::max(0.5, atof(f));
   csi_throttle_ns_ = 1e9 / fps;
-  rx_conj_ = cfg_->is_houdini();  // undo the R2C mixer's spectral inversion (RFSoC only)
+  // What the platform's receive path does to the samples (sync/rx_path_fixes.h).
+  const houdini::sync::RxPathFixes fixes = cfg_->rx_path_fixes();
+  rx_conj_ = fixes.conjugate;  // undo the R2C mixer's spectral inversion (RFSoC only)
   if (std::getenv("HOUDINI_RX_NOCONJ")) rx_conj_ = false;  // A/B override (before/after)
   // Symbol-0 start: default the FFT window HALF A CP earlier than the nominal prefix.
   // The cyclic-prefix guard is one-sided -- a window placed early (within the CP) is a
@@ -107,12 +109,12 @@ void RecorderWorker::initCsi(void) {
   if (const char* sym_env = std::getenv("HOUDINI_CSI_SYM_START"))
     csi_sym_start_ = (std::string(sym_env) == "auto") ? -1 : std::atoi(sym_env);
   // Per-frame pilot-vs-data timing re-align (Houdini framer jitter). Default on for Houdini.
-  csi_timing_fix_ = cfg_->is_houdini();
+  csi_timing_fix_ = fixes.csi_timing;
   if (std::getenv("HOUDINI_CSI_NO_TIMING_FIX")) csi_timing_fix_ = false;
   // Per-symbol pilot common-phase (AP-38). Default on for Houdini; the env is
   // the A/B lever, since the whole point is that it should be invisible when
   // the carrier offset is small and decisive when it is not.
-  csi_phase_fix_ = cfg_->is_houdini();
+  csi_phase_fix_ = fixes.csi_phase;
   if (std::getenv("HOUDINI_CSI_NO_PHASE_FIX")) csi_phase_fix_ = false;
   view_mode_ = true;
   MLPD_INFO("CSI view mode: streaming to %s:%d (%d subcarriers, ~%.0f fps/ant, rx_conj=%d, "
@@ -1154,7 +1156,8 @@ void RecorderWorker::finalize(void) {
     // the file closes. start_time_ns is relative to the RX stream start (0-anchored);
     // the parser tools (gap_forensics.py) key off the gap sizes + spacing, not an
     // absolute wall-clock. Single receiving stream assumed (see rx_gap_sink.h).
-    if (this->cfg_->is_houdini()) {
+    // The gap ledger is a fact of the Houdini receive path (rx_gap_sink.h).
+    if (this->cfg_->platform() == houdini::sync::Platform::kHoudini) {
       const std::vector<Sounder::GapExtent> gaps =
           Sounder::RxGapSink::instance().drain();
       if (gaps.empty() == false) {

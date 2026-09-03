@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "sync/beacon_shape.h"
+#include "sync/rx_path_fixes.h"
 #include "sync/sync_config.h"
 
 class Config {
@@ -155,6 +156,22 @@ class Config {
   inline houdini::sync::Platform platform(void) const {
     return is_houdini() ? houdini::sync::Platform::kHoudini
                         : houdini::sync::Platform::kIrisUhd;
+  }
+  /// The client's synchronisation model, which is what the receiver's
+  /// remaining platform branches are about (seam step S4): the Iris/UHD
+  /// framer triggers the client and the base station transmits the beacon
+  /// and the uplink data from files per frame; the Houdini client anchors a
+  /// tracked frame grid on beacon timestamps, composes its bursts in
+  /// process, and resyncs on a wall-clock cadence. Two algorithms, not two
+  /// devices; unifying them is a later phase.
+  enum class SyncModel { kTriggerFramed, kStampAnchored };
+  inline SyncModel sync_model(void) const {
+    return is_houdini() ? SyncModel::kStampAnchored : SyncModel::kTriggerFramed;
+  }
+  /// What the platform's receive path does to the samples (the mixer
+  /// conjugation, the CSI fixes), for the consumers that undo it.
+  inline houdini::sync::RxPathFixes rx_path_fixes(void) const {
+    return houdini::sync::RxPathFixes::forPlatform(platform());
   }
   inline const std::string& pilot_seq(void) const { return this->pilot_seq_; }
   inline const std::string& data_mod(void) const { return this->data_mod_; }
