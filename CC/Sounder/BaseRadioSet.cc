@@ -451,6 +451,7 @@ void BaseRadioSet::buildHoudiniBeacon(std::vector<int16_t>& iq) {
   // clamp never fires, and if it ever did the beacon would clip rather than
   // wrap (the same rule as Utils::saturateToInt16).
   const auto clamp16 = [](double v) {
+    if (v != v) return static_cast<int16_t>(0);
     return static_cast<int16_t>(std::lround(std::max(-32768.0, std::min(32767.0, v))));
   };
   for (size_t k = 0; k < n_load; ++k) {

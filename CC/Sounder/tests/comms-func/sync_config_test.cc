@@ -374,6 +374,18 @@ int main(int argc, char** argv) {
     bool multi_noted2 = false;
     for (const auto& w : mc2.warnings()) multi_noted2 |= (w.find("2 clients") != std::string::npos);
     check(!multi_noted2, "resolve: the multi-client note fires only when the sync BLOCK set a bar, not for the arrays");
+    // The fact is recorded by load(): a resolve() with no adoption at all
+    // still notes it, and a repeated adoption cannot fake it.
+    auto lr = SyncConfig::load(std::string(R"({"detector": {"corr_scale": 25}})"));
+    lr.resolve(rc2);
+    bool lr_noted = false;
+    for (const auto& w : lr.warnings()) lr_noted |= (w.find("2 clients") != std::string::npos);
+    check(lr_noted, "load + resolve without adoption still notes a block-set bar with 2 clients");
+    mc2.adoptLegacyThreshold(25.0, 25.0, true, false);
+    mc2.resolve(rc2);
+    bool re_noted = false;
+    for (const auto& w : mc2.warnings()) re_noted |= (w.find("2 clients") != std::string::npos);
+    check(!re_noted, "a repeated adoption of the array does not turn into a block-set note");
     auto ih = SyncConfig::loadFromText(R"({"sync": {"detector": {"pick": "first_crossing"}}})");
     houdini::sync::ResolveContext rch;
     rch.replica_len = 128; rch.prefix_samples = 160; rch.platform = houdini::sync::Platform::kHoudini;

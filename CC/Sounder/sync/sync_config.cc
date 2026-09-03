@@ -379,7 +379,6 @@ SyncConfig SyncConfig::loadFromText(const std::string& root_json_text) {
 
 void SyncConfig::adoptLegacyThreshold(double corr_scale, double corr_scale_init,
                                       bool corr_scale_in_file, bool corr_scale_init_in_file) {
-  block_sets_threshold_ = wasSet("detector.corr_scale") || wasSet("detector.corr_scale_init");
   auto adopt = [this](const char* path, double v, bool in_file, const char* what) {
     if (provenanceOf(path) == Source::kJson) return;  // the sync block wins
     std::string note;
@@ -439,6 +438,11 @@ SyncConfig SyncConfig::load(const std::optional<std::string>& sync_block_json,
       c.setProvenance("beacon.type", Source::kJson);
     }
   }
+  // Whether the BLOCK set a bar is a fact of the load, recorded here once so
+  // a later adoption (which stamps the array's values as json too) cannot
+  // change it, and a repeated adoption cannot re-derive it.
+  c.block_sets_threshold_ =
+      c.wasSet("detector.corr_scale") || c.wasSet("detector.corr_scale_init");
   // corr_scale_init follows corr_scale unless set (the sounder's own rule).
   if (c.provenanceOf("detector.corr_scale_init") == Source::kDefault &&
       c.provenanceOf("detector.corr_scale") != Source::kDefault) {

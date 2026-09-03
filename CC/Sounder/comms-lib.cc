@@ -19,14 +19,12 @@
 
 #include "include/comms-lib.h"
 
-#include <limits.h>
 
 #include <queue>
 
 #include "include/constants.h"
 #include "include/utils.h"
 
-static constexpr float kShortMaxFloat = SHRT_MAX;
 
 int CommsLib::findLTS(const std::vector<std::complex<float>>& iq, int seqLen) {
   /*

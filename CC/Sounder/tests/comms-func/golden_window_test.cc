@@ -228,6 +228,17 @@ int main(int argc, char** argv) {
     SnrWindowGuard guard(d.coreLen(), rcfg.confirm.snr_floor_db,
                          SnrWindowGuard::guardFor(det.firstPathWindow()));
     houdini::sync::RepetitionPhaseEstimator cfo(d.geometry(), rcfg.cfo.window_margin, true);
+    if (!det.backendAppliesConfig()) {
+      // A backend that ignores the configured form and pick (CUDA) cannot
+      // reproduce windows recorded by the one that applies them: the golden
+      // replay has NO coverage under such a build, and says so once per shape
+      // rather than passing vacuously (the counts below still hold).
+      std::printf("SKIP  %s: backend %s does not apply the configuration; %d windows counted, none replayed\n",
+                  shape, det.backendName(), kExpected.at(shape));
+      windows += kExpected.at(shape);
+      per_shape[shape] += kExpected.at(shape);
+      continue;
+    }
     // 00-05 recorded 2026-09-03 morning (index and SNR); 06-11 that afternoon
     // by the review-fix build, which also records the statistic and the bar.
     for (int i = 0; i < 12; ++i) {
@@ -237,15 +248,6 @@ int main(int argc, char** argv) {
       std::vector<std::complex<int16_t>> w;
       if (!readWindow(base + ".bin", &w)) continue;
       const auto meta = readMeta(base + ".txt");
-      if (!det.backendAppliesConfig()) {
-        // A backend that ignores the configured form and pick (CUDA) cannot
-        // reproduce windows recorded by the one that applies them.
-        ++windows;
-        ++per_shape[shape];
-        std::printf("SKIP  %s window %d: backend %s does not apply the configuration\n", shape, i,
-                    det.backendName());
-        continue;
-      }
       ++windows;
       ++per_shape[shape];
       if (!meta.has("sync_index") || !meta.has("snr")) {

@@ -49,8 +49,6 @@ unsigned ResolveThreads(unsigned requested) {
   return from_env;
 }
 
-
-
 // Persistent fork-join pool: worker threads are created once and reused, so
 // per-frame correlation pays no thread-creation cost (the per-call std::thread
 // spawn it replaces made threading a net loss on the rig host). Not reentrant
