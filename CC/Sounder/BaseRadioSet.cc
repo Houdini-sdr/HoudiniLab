@@ -429,18 +429,13 @@ void BaseRadioSet::buildHoudiniBeacon(std::vector<int16_t>& iq) {
   // loss on a cabled bench. Clamped to (0, 1] because above 1.0 the lround
   // saturates into a clipped, spectrally-splattered beacon that would measure
   // the clipping rather than the level.
-  float fs_frac = 0.6f;
-  if (const char* e = std::getenv("HOUDINI_BEACON_FS")) {
-    const float v = std::strtof(e, nullptr);
-    if (std::isfinite(v) && v > 0.0f && v <= 1.0f) {
-      fs_frac = v;
-      MLPD_WARN("HOUDINI_BEACON_FS=%g: beacon transmitted at %.1f%% of full "
-                "scale instead of the default 60%%. Diagnostic setting.\n",
-                static_cast<double>(v), static_cast<double>(v) * 100.0);
-    } else {
-      MLPD_WARN("HOUDINI_BEACON_FS=\"%s\" is not in (0, 1] -- keeping %.2f\n",
-                e, static_cast<double>(fs_frac));
-    }
+  // sync.beacon.tx_full_scale (HOUDINI_BEACON_FS as a logged override while
+  // allow_env_overrides holds), range-checked by SyncConfig to (0.001, 1].
+  const float fs_frac = static_cast<float>(_cfg->sync().beacon.tx_full_scale);
+  if (fs_frac != 0.6f) {
+    MLPD_WARN("beacon transmitted at %.1f%% of full scale instead of the "
+              "default 60%% (sync.beacon.tx_full_scale). Diagnostic setting.\n",
+              static_cast<double>(fs_frac) * 100.0);
   }
   const size_t n_load = loop.size();
   iq.assign(n_load * 2, 0);

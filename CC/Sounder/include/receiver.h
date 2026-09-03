@@ -29,6 +29,9 @@
 #endif
 #include "concurrentqueue.h"
 #include "config.h"
+#include "sync/cfo_estimator.h"
+#include "sync/confirm.h"
+#include "sync/detector.h"
 #include "sync_geometry.h"
 #include "macros.h"
 
@@ -113,6 +116,13 @@ class Receiver {
 
  private:
   Config* config_;
+  // The sync library objects, built once in the constructor from the
+  // configured beacon shape and the sync block. Every beacon search, every
+  // SNR confirm and every beacon carrier read in this class goes through them,
+  // so a run has one detector, one guard and one estimator, all describable.
+  std::unique_ptr<houdini::sync::Detector> sync_detector_;
+  std::unique_ptr<houdini::sync::SnrWindowGuard> sync_guard_;
+  std::unique_ptr<houdini::sync::RepetitionPhaseEstimator> cfo_estimator_;
 
 #if defined(USE_UHD)
   ClientRadioSetUHD* client_radio_set_;

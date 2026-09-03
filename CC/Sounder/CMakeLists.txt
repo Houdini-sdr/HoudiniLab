@@ -224,7 +224,7 @@ else()
         ${CMAKE_SOURCE_DIR}/mufft/libmuFFT-avx.a)
 endif()
 
-target_link_libraries(sounder -lpthread --enable-threadsafe ${GFLAGS_LIBRARIES} ${UHD_LIBRARIES}
+target_link_libraries(sounder houdini_sync -lpthread --enable-threadsafe ${GFLAGS_LIBRARIES} ${UHD_LIBRARIES}
     ${SoapySDR_LIBRARIES}
     ${HDF5_LIBRARIES}
     ${MUFFT_LIBRARIES})
@@ -232,7 +232,7 @@ target_link_libraries(sounder -lpthread --enable-threadsafe ${GFLAGS_LIBRARIES} 
 add_library(sounder_module MODULE
     ${SOUNDER_SOURCES})
 
-target_link_libraries(sounder_module -lpthread --enable-threadsafe ${GFLAGS_LIBRARIES} ${UHD_LIBRARIES}
+target_link_libraries(sounder_module houdini_sync -lpthread --enable-threadsafe ${GFLAGS_LIBRARIES} ${UHD_LIBRARIES}
     -Wl,--whole-archive
     ${MUFFT_LIBRARIES}
     -Wl,--no-whole-archive
@@ -260,6 +260,9 @@ target_link_libraries(houdini_sync PUBLIC ${MUFFT_LIBRARIES})
 add_executable(sync_config_test tests/comms-func/sync_config_test.cc)
 target_link_libraries(sync_config_test houdini_sync -lpthread)
 add_test(NAME sync_config COMMAND sync_config_test)
+
+add_executable(sync_config_schema tests/comms-func/sync_config_schema.cc)
+target_link_libraries(sync_config_schema houdini_sync -lpthread)
 
 add_executable(golden_window_test tests/comms-func/golden_window_test.cc)
 target_link_libraries(golden_window_test houdini_sync -lpthread)

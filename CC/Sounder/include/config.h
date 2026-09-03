@@ -17,6 +17,8 @@
 #include <atomic>
 #include <vector>
 
+#include "sync/sync_config.h"
+
 class Config {
  public:
   Config(const std::string&, const std::string&, const bool, const bool,
@@ -145,6 +147,10 @@ class Config {
   // only offset anyone needs and AP-34(a)'s "re-derive the convention" caveat is
   // discharged rather than parameterised.
   inline const std::string& beacon_type(void) const { return beacon_type_; }
+  /// The UE synchronisation configuration: the JSON `sync` block, validated,
+  /// with every value's provenance (sync/sync_config.h). One home for what
+  /// used to be thirty HOUDINI_* environment reads.
+  inline const houdini::sync::SyncConfig& sync(void) const { return sync_; }
   inline size_t beacon_fine_off(void) const { return beacon_fine_off_; }
   inline size_t beacon_fine_len(void) const { return beacon_fine_len_; }
   inline size_t beacon_fine_reps(void) const { return beacon_fine_reps_; }
@@ -382,6 +388,7 @@ class Config {
   std::string pilot_seq_;
   std::string beacon_seq_;
   std::string beacon_type_;
+  houdini::sync::SyncConfig sync_;
   size_t beacon_fine_off_ = 0, beacon_fine_len_ = 0, beacon_fine_reps_ = 0;
   size_t beacon_coarse_off_ = 0, beacon_coarse_len_ = 0, beacon_coarse_reps_ = 0;
   size_t beacon_replica_tail_ = 0, beacon_replica_reps_ = 0;

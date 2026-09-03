@@ -34,6 +34,11 @@ Config::Config(const std::string& jsonfile, const std::string& directory,
   Utils::loadTDDConfig(jsonfile, conf_str);
   // Enable comments in json file
   const auto tddConf = json::parse(conf_str, nullptr, true, true);
+  // The sync block, loaded and validated as ONE struct with provenance. Throws
+  // std::invalid_argument on an unknown key or an out-of-range value, which
+  // main.cc reports as a configuration error rather than a crash.
+  sync_ = houdini::sync::SyncConfig::load(conf_str);
+  MLPD_INFO("%s", sync_.describe().c_str());
   std::stringstream ss;
   ss << "  Config: " << tddConf << "\n" << std::endl;
   MLPD_INFO("\nInput config:\n\n%s", ss.str().c_str());
@@ -127,7 +132,9 @@ Config::Config(const std::string& jsonfile, const std::string& directory,
   // WHICH beacon waveform. Parsed here because this is where tddConf lives;
   // genPilots builds from it. Unknown names throw there rather than falling
   // back, so a typo cannot quietly ship the old beacon.
-  beacon_type_ = tddConf.value("beacon_type", std::string("legacy"));
+  // sync.beacon.type, or the legacy top-level "beacon_type" (SyncConfig
+  // accepts either and refuses the two disagreeing).
+  beacon_type_ = sync_.beacon.type;
   beacon_ant_ = tddConf.value("beacon_antenna", 0);
   beacon_radio_ = beacon_ant_ / bs_sdr_ch_;
   beacon_ch_ = beacon_ant_ % bs_sdr_ch_;

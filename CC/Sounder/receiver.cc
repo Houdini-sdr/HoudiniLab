@@ -54,14 +54,6 @@ static constexpr int kGoldLen = 128;
 // Beacon CFO logs at ~9/s; print 1 in N so a long run does not add millions of
 // lines. The panel gets every sample regardless. HOUDINI_CFO_LOG_EVERY=1 makes
 // it dense, which is what a calibration run wants.
-static size_t cfoLogEvery(void) {
-  static const size_t n = [] {
-    const char* e = std::getenv("HOUDINI_CFO_LOG_EVERY");
-    const long v = (e != nullptr) ? std::strtol(e, nullptr, 10) : 10;
-    return static_cast<size_t>(v > 0 ? v : 1);
-  }();
-  return n;
-}
 
 // Where the beacon END sits relative to the slot-0 start, per the
 // TRANSMITTED layout -- the constant the UE subtracts from sync_index to
@@ -75,97 +67,14 @@ static size_t cfoLogEvery(void) {
 // which is exactly what tx_advance / ue_tx_advance_ticks calibrate.
 static constexpr ssize_t kHoudiniStrobeOffsTicks = 384;
 
-// Which crossing the TARGETED resync search returns. Default kFirstPath;
-// HOUDINI_BEACON_PICK=first selects the pre-2026-09-02 kFirstCrossing so a gate
-// can run both rules on ONE binary. Read once: a rule that changed mid-run would
-// make the residual distribution a mixture of two populations, which is exactly
-// the sort of data that gets averaged and believed.
-// DEFAULT SINCE 2026-09-02: first-path with a normalised cross-correlation.
-// The selection is recorded here because it was made from a matrix, not a
-// preference. Across 4 beacons x 7 received levels x 8 noise draws, plus six
-// synthetic multipath channels at 8.5 ppm CFO:
-//
-//   combination        index exact    multipath    corr_scale spread
-//   power + first       6 of 28        correct        10001x     <- pre-today
-//   power + argmax     28 of 28        BIASED         10001x     <- this morning
-//   xcorr + first       7 of 28        correct             1x
-//   xcorr + argmax     28 of 28        BIASED              1x
-//   xcorr + first-path 28 of 28        correct             1x     <- default
-//   no-lag + first-path  fails draws   correct             1x     <- NR-style
-//
-// ON SILICON THE CHOICE IS NOT VISIBLE, and that is stated rather than hidden:
-// six interleaved pairs across two clock offsets and four transmit levels give
-// 15-19 accepts and ZERO false locks for BOTH forms, with residual spreads that
-// overlap. Every advantage the default has is a property this cabled,
-// sub-ppm-when-calibrated, single-path bench cannot exercise. It is chosen for
-// the stated target -- over the air on free-running clocks -- where a
-// level-dependent threshold and a timing reference that hops between multipath
-// components are both real, and neither is reachable here.
-static CommsLib::BeaconPick resyncPickFromEnv() {
-  const char* e = std::getenv("HOUDINI_BEACON_PICK");
-  if (e != nullptr && std::string(e) == "argmax") {
-    MLPD_WARN(
-        "HOUDINI_BEACON_PICK=argmax: strongest crossing, no first-path search. "
-        "Correct on a single-path link and BIASED on multipath -- it returns "
-        "the strongest path, which is often a reflection, and which path is "
-        "strongest changes as the channel fades.\n");
-    return CommsLib::BeaconPick::kTargetedArgmax;
-  }
-  if (e != nullptr && std::string(e) == "firstpath") {
-    MLPD_WARN(
-        "HOUDINI_BEACON_PICK=firstpath: targeted resync takes the strongest "
-        "crossing and then walks back to the earliest path within a "
-        "delay-spread window. This is the OVER-THE-AIR rule -- the strongest "
-        "path is frequently a reflection, and which path is strongest CHANGES "
-        "as the channel fades, so a grid tracked off it hops. Degenerates to "
-        "argmax on a single-path link. EXPERIMENTAL.\n");
-    return CommsLib::BeaconPick::kFirstPath;  // the default; explicit is fine
-  }
-  if (e != nullptr && std::string(e) == "first") {
-    MLPD_WARN(
-        "HOUDINI_BEACON_PICK=first: targeted resync uses the EARLIEST crossing "
-        "(pre-2026-09-02). This is a diagnostic setting -- it false-locks to the "
-        "STS preamble a few hundred samples early once the link is strong "
-        "enough, which is why the default changed.\n");
-    return CommsLib::BeaconPick::kFirstCrossing;
-  }
-  return CommsLib::BeaconPick::kFirstPath;
-}
-static const CommsLib::BeaconPick kResyncPick = resyncPickFromEnv();
-
-// Which FORM the detection threshold takes. DEFAULT kNormalizedXCorr, the
-// normalised cross-correlation, whose threshold is level-invariant: the smallest
-// working corr_scale is 3.16 at every level and for every beacon shape, against
-// a power-ratio form whose working value moves 10000x across a 64x level sweep.
-// HOUDINI_BEACON_THRESH=power restores the pre-2026-09-02 statistic.
-static CommsLib::BeaconThresh resyncThreshFromEnv() {
-  const char* e = std::getenv("HOUDINI_BEACON_THRESH");
-  if (e != nullptr && std::string(e) == "power") {
-    MLPD_WARN(
-        "HOUDINI_BEACON_THRESH=power: the pre-2026-09-02 statistic, 4th order "
-        "in received amplitude over 2nd. corr_scale is then a different test at "
-        "every level -- measured, the smallest working value moves 10000x over "
-        "a 64x level sweep.\n");
-    return CommsLib::BeaconThresh::kPowerRatio;
-  }
-  if (e != nullptr && std::string(e) == "nolag") {
-    MLPD_WARN(
-        "HOUDINI_BEACON_THRESH=nolag: NR-style, matched filter with no repeat "
-        "check. Measurably less robust on THIS beacon, which has a repeated "
-        "field worth using.\n");
-    return CommsLib::BeaconThresh::kXCorrNoLag;
-  }
-  if (e != nullptr && std::string(e) == "xcorr") {
-    MLPD_WARN(
-        "HOUDINI_BEACON_THRESH=xcorr: detection uses the normalised "
-        "cross-correlation. corr_scale becomes a level-invariant fraction "
-        "(bar = 1/corr_scale against a peak statistic of ~0.32); the shipped "
-        "values 10 and 100 stay well inside range. EXPERIMENTAL, not gated.\n");
-    return CommsLib::BeaconThresh::kNormalizedXCorr;  // the default
-  }
-  return CommsLib::BeaconThresh::kNormalizedXCorr;
-}
-static const CommsLib::BeaconThresh kResyncThresh = resyncThreshFromEnv();
+// The detector's threshold form and pick rule are configuration now
+// (sync.detector.threshold / sync.detector.pick, with HOUDINI_BEACON_THRESH and
+// HOUDINI_BEACON_PICK as logged overrides while allow_env_overrides holds) and
+// are resolved ONCE into sync_detector_ in the constructor. The reasoning that
+// used to live here -- why first-crossing false-locks on a strong link, why the
+// power-ratio form is a different test at every level, why a single-copy
+// replica forces the coherence form -- is in sync/detector.h,
+// CommsLib::BeaconPick / BeaconThresh and DEMO_VERIFICATION 8.138-8.154.
 static ssize_t houdiniBeaconEnd(Config* cfg) {
   if (cfg->is_houdini()) {
     return kHoudiniStrobeOffsTicks + static_cast<ssize_t>(cfg->beacon_size());
@@ -173,104 +82,15 @@ static ssize_t houdiniBeaconEnd(Config* cfg) {
   return static_cast<ssize_t>(cfg->beacon_size() + cfg->prefix());
 }
 
-// In-window SNR of a claimed beacon detection: energy of the presumed core
-// [end_idx - core_len, end_idx) against the rest of the window. On this bench
-// a real beacon measures ~45 dB and the noise-window artifact class that
-// crosses the correlation threshold (DEMO_VERIFICATION.md 4.25) measures
-// ~0 dB, so the floor separates them by orders of magnitude. [user 2026-08-30:
-// "keep the sync snr about 30 dB or so" -- default 20 leaves margin both
-// ways; HOUDINI_SYNC_SNR_DB overrides for bench tuning.]
-// Mirror of CommsLib's first-path back window, for the SNR guard below. Kept as
-// one expression so the two cannot drift: a guard smaller than the window is the
-// bug this exists to prevent.
-static ssize_t firstPathBackWindow() {
-  const char* e = std::getenv("HOUDINI_FIRST_PATH_WIN");
-  if (e != nullptr) {
-    char* end = nullptr;
-    const long v = std::strtol(e, &end, 10);
-    if (end != e && *end == '\0' && v >= 0 && v < 4096) return v;
-  }
-  return 64;  // CommsLib's default: seqLen/2 at the shipped gold length of 128
-}
-
-static double beaconSnrDb(const std::complex<int16_t>* w, size_t n,
-                          ssize_t end_idx, size_t core_len) {
-  const ssize_t lo = end_idx - static_cast<ssize_t>(core_len);
-  if (lo < 0 || end_idx > static_cast<ssize_t>(n) || core_len == 0) return -99.0;
-  // Guard band around the core: the detector index jitters 1-2 samples about
-  // the true core end (measured -1/-2 on 6/6 dumped windows, ledger 4.42),
-  // and with a slot-length window each core sample leaking into the rest-mean
-  // costs ~8 dB (sweep on a ~46 dB wire: 0/-1/-2 -> 45.8/37.5/31.6 dB), so
-  // the reported SNR tracked detector jitter, not the link. Excluding a few
-  // samples on each side of the core from BOTH sums makes the number read
-  // the link: a bias up to +-8 samples now costs <0.1 dB instead of ~14.
-  // THE GUARD MUST COVER THE FIRST-PATH BACK WINDOW, OR THE MULTIPATH FIX
-  // RE-ARMS AP-34(a)'s LIVENESS FAILURE. When first-path correctly returns the
-  // DIRECT path and the strongest energy sits a delay later, that echo lands
-  // OUTSIDE [lo, end_idx) and, with an 8-sample guard, inside `rest`. A 1.4x
-  // echo 24 samples late then drags the reported SNR to ~20 dB, the 30 dB floor
-  // rejects the detection, and resync escalates -- exactly the chain that cost a
-  // bench session, re-armed by the rule meant to handle multipath, and invisible
-  // on a cabled bench where first-path degenerates to argmax. So the guard is at
-  // least the back window: energy between the direct path and a later echo is
-  // excluded from BOTH sums rather than counted as noise.
-  const ssize_t kGuard = std::max<ssize_t>(8, firstPathBackWindow());
-  double core = 0, rest = 0;
-  size_t nrest = 0;
-  for (size_t i = 0; i < n; ++i) {
-    const double re = w[i].real(), im = w[i].imag();
-    const double e = re * re + im * im;
-    const ssize_t si = static_cast<ssize_t>(i);
-    if (si >= lo && si < end_idx) {
-      core += e;
-    } else if (si < lo - kGuard || si >= end_idx + kGuard) {
-      rest += e;
-      ++nrest;
-    }
-  }
-  if (nrest == 0 || rest <= 0.0) return 99.0;
-  return 10.0 * std::log10((core / core_len) / (rest / nrest) + 1e-30);
-}
+// The in-window SNR confirm is sync::SnrWindowGuard (sync/confirm.h), built
+// once in the constructor with the configured floor and a guard that covers the
+// first-path back window (8.151). Reached through sync_guard_.
 
 // Env override for a tunable double, with the compiled default when unset.
 // The AP-31 tracker gains are the first users: they need to be sweepable on a
 // live bench without a rebuild, since the right damping depends on the arrival
 // jitter and the detection rate, both of which are bench properties.
-static double envDouble(const char* name, double dflt) {
-  const char* e = getenv(name);
-  if (e == nullptr) return dflt;
-  char* end = nullptr;
-  const double v = std::strtod(e, &end);
-  // strtod ACCEPTS "nan" and "inf" with end != e, so a typo or a stale export
-  // reaches consumers that feed llround / static_cast<long long> (undefined
-  // behaviour) or that use the value in a clamp, where a NaN makes every
-  // comparison false and disables the guard with no symptom. Reject non-finite
-  // once here rather than at each of the ten call sites.
-  // Finite is not enough. 1e30 passes isfinite and still overflows the
-  // static_cast<long long> at the three call sites that take one -- the exact
-  // undefined behaviour this guard exists to close. Bound the magnitude to
-  // something no tuning knob here could legitimately want.
-  constexpr double kEnvMax = 1e9;
-  if (end == e || !std::isfinite(v) || std::fabs(v) > kEnvMax) {
-    MLPD_WARN(
-        "%s=\"%s\" is not a finite number below %g -- using the default %g\n",
-        name, e, kEnvMax, dflt);
-    return dflt;
-  }
-  return v;
-}
 
-static double syncSnrFloorDb() {
-  // [user 2026-08-30]: "keep the sync snr about 30 dB or so". The earlier
-  // default of 20 compensated for the pre-guard-band metric under-reading by
-  // ~14 dB (ledger 4.42); with the metric now reading true link dB (47.6
-  // measured live on the bench wire), 30 is the intended floor with margin.
-  static const double v = [] {
-    const char* e = getenv("HOUDINI_SYNC_SNR_DB");
-    return e ? atof(e) : 30.0;
-  }();
-  return v;
-}
 
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
@@ -306,6 +126,40 @@ Receiver::Receiver(
 #endif
   } catch (std::exception& e) {
     throw ReceiverException(e.what());
+  }
+
+  // The sync library objects (docs/SYNC_LIBRARY_ARCHITECTURE.md, phase P1).
+  // Built ONCE from the configured beacon shape and the validated sync block,
+  // so a run cannot mix two detector populations and the log can say exactly
+  // which rule produced its numbers.
+  {
+    const auto& sc = config_->sync();
+    sync_detector_ = std::make_unique<houdini::sync::Detector>(
+        config_->gold_cf32(), config_->beacon_replica_reps(),
+        config_->beacon_replica_tail(), sc.detector, config_->is_houdini());
+    // THE GUARD MUST COVER THE FIRST-PATH BACK WINDOW (8.151), and at least 8.
+    sync_guard_ = std::make_unique<houdini::sync::SnrWindowGuard>(
+        sc.confirm.snr_floor_db,
+        static_cast<size_t>(std::max(8, sc.detector.first_path_window)));
+    houdini::sync::FieldGeometry g;
+    g.core_len = static_cast<int>(config_->beacon_size());
+    g.fine_off = static_cast<int>(config_->beacon_fine_off());
+    g.fine_len = static_cast<int>(config_->beacon_fine_len());
+    g.fine_reps = static_cast<int>(config_->beacon_fine_reps());
+    g.coarse_off = static_cast<int>(config_->beacon_coarse_off());
+    g.coarse_len = static_cast<int>(config_->beacon_coarse_len());
+    g.coarse_reps = static_cast<int>(config_->beacon_coarse_reps());
+    // The matched-NCO R2C RX mixer delivers baseband CONJUGATED on Houdini, so
+    // the estimator undoes the sign there (AP-30 verified the sign and scale).
+    cfo_estimator_ = std::make_unique<houdini::sync::RepetitionPhaseEstimator>(
+        g, sc.cfo.window_margin, config_->is_houdini());
+    if (!g.usable()) {
+      MLPD_WARN(
+          "estimateCFO: beacon '%s' has no usable repeated field (core %d, fine "
+          "%d x %d at %d) -- the beacon CFO reading will be NaN\n",
+          config_->beacon_type().c_str(), g.core_len, g.fine_reps, g.fine_len,
+          g.fine_off);
+    }
   }
 
   MLPD_TRACE("Receiver Construction -- number radios %zu\n",
@@ -1231,59 +1085,27 @@ int Receiver::clientTxData(int tid, int frame_id, long long base_time) {
 ssize_t Receiver::syncSearch(const std::complex<int16_t>* check_data,
                              size_t search_window, float corr_scale,
                              CommsLib::BeaconPick pick) {
-  // One form for BOTH search paths: acquisition and resync must agree about
-  // what the threshold means, or the anchor and the tracking gate are measured
-  // against different statistics.
-  ssize_t sync_index(-1);
+  // One detector for BOTH search paths: acquisition and resync agree about what
+  // the threshold means, which form the replica supports, and where the beacon
+  // END sits relative to the correlator's index (the replica tail) -- all
+  // resolved once in the constructor (sync/detector.h). The CUDA path is not
+  // wired through the library yet: it still returns the first crossing and
+  // needs the argmax-by-ratio change before it can serve acquisition.
   assert(search_window <= config_->samps_per_frame());
 #if defined(USE_CUDA)
   const char* kPath = "cuda";
-  sync_index = CommsLib::find_beacon_cuda(check_data, config_->gold_cf32(),
-                                          search_window, corr_scale);
-#else
-  // portable find_beacon_avx works on x86 and aarch64 (see comms-lib-portable.cc)
-  const char* kPath = "avx";
-  // SCOPED TO HOUDINI, exactly as the pick rule is. The untargeted branch and
-  // the Iris/UHD configs were deliberately left on the old PICK rule because
-  // this bench cannot exercise that hardware; the identical objection applies to
-  // the threshold FORM, and applying it everywhere silently redefined
-  // corr_scale for files/1u-pilot-dl.json and powder-1u-pilot-dl.json (16 ->
-  // bar 0.0625 against a statistic that reads ~0.32, so ~5x margin where the
-  // power form had orders of magnitude). Their tuning notes also document the
-  // power-form populations, which would no longer describe what the code does.
-  //
-  // A NON-REPEATING REPLICA HAS NO LAG PRODUCT TO TAKE. The NR PSS (`nr_pss`)
-  // appears once in its core, so the repeat-check forms would multiply the
-  // true peak by the correlation one replica length EARLIER -- the silence
-  // before the beacon -- and score zero at the right index. The plain matched
-  // filter is the only form that describes such a replica, so it is selected
-  // by the replica and not by the environment; HOUDINI_BEACON_THRESH keeps its
-  // meaning for every shape that does repeat.
-  const bool single_copy = config_->beacon_replica_reps() < 2;
-  const CommsLib::BeaconThresh thresh_form =
-      !config_->is_houdini() ? CommsLib::BeaconThresh::kPowerRatio
-      : single_copy          ? CommsLib::BeaconThresh::kXCorrNoLag
-                             : kResyncThresh;
-  sync_index = CommsLib::find_beacon_avx(check_data, config_->gold_cf32(),
-                                         search_window, corr_scale, pick,
-                                         thresh_form);
-#endif
-  // THE DETECTOR REPORTS THE LAST SAMPLE OF THE MATCHED FIELD, and every
-  // consumer of sync_index wants the beacon END. For the shipped shapes those
-  // coincide because the replica is the trailing fine field; for `nr_pss` the
-  // replica is the LEADING PSS and the end sits beacon_replica_tail() later.
-  // Applied here, in the one place both search paths pass through, so the
-  // acquisition anchor, the resync residual, the SNR window and the CFO index
-  // all see one convention and nothing downstream learns a second one. A
-  // detection whose implied end would fall outside the window is reported as
-  // none: the SNR guard could not measure it anyway.
+  ssize_t sync_index = CommsLib::find_beacon_cuda(
+      check_data, config_->gold_cf32(), search_window, corr_scale);
   if (sync_index >= 0 && config_->is_houdini()) {
     const ssize_t tail = static_cast<ssize_t>(config_->beacon_replica_tail());
-    if (tail > 0) {
-      if (sync_index + tail >= static_cast<ssize_t>(search_window)) return -1;
-      sync_index += tail;
-    }
+    if (sync_index + tail >= static_cast<ssize_t>(search_window)) sync_index = -1;
+    else sync_index += tail;
   }
+#else
+  const char* kPath = "avx";
+  const ssize_t sync_index =
+      sync_detector_->run(check_data, search_window, corr_scale, pick).index;
+#endif
   if (std::getenv("HOUDINI_SYNC_DEBUG") != nullptr) {
     static std::atomic<int> c{0};
     if ((c.fetch_add(1) % 20) == 0) {  // braces load-bearing (macro)
@@ -1398,124 +1220,14 @@ static void sendSyncTelemetry(size_t frame, int tid, uint32_t state,
   (void)::send(fd, buf, sizeof(buf), 0);
 }
 
-// Two-stage beacon CFO estimate, normalized (cycles/sample); multiply by the
-// sample rate for Hz.
-//
-// The beacon core is 15 x STS(16) followed by 2 x gold(128) = 496 samples
-// (Config::genBeacon, config.cc), so it carries TWO independent repetition
-// structures and therefore two estimators:
-//
-//   coarse  consecutive STS blocks, lag 16   -> unambiguous to +-rate/32
-//   fine    gold rep2 against rep1, lag 128  -> unambiguous to +-rate/256,
-//                                               8x finer resolution
-//
-// The coarse stage resolves the fine stage's 1/128 ambiguity, so the result
-// keeps the fine resolution across the coarse range. Both stages are plain
-// repetition correlations: for x[n] = s[n]*exp(j2*pi*f*n) with s[n+N] = s[n],
-// sum conj(x[n])*x[n+N] has argument 2*pi*f*N.
-//
-// The PREVIOUS implementation split the core in half and correlated
-// half against half. That split falls INSIDE the structure (240 STS + 8 gold
-// against 120 gold + 128 gold), correlating two uncorrelated sequences, so it
-// returned noise. That is why kEnableCfo was false and why no CFO line has
-// ever appeared in a run log.
-//
-// `sync_index` is the beacon END (syncSearch convention), so the core occupies
-// [sync_index - beacon_size, sync_index) -- for EVERY shape. That the convention
-// is shape-independent is measured, not assumed: with the targeted resync rule
-// all four candidates return the beacon end at every received level
-// (beacon_geometry_test), which discharges AP-34(a)'s condition that the index
-// convention and tx_advance be re-derived together before any shape change.
-// EVERY FAILURE PATH RETURNS NaN, NOT ZERO. A failed estimate is not a
-// measurement of zero offset, and the caller cannot tell the two apart from a
-// float. That mattered only for a log line while this value was print-only; it
-// now rides SYN1 as the independent beacon reading, where a fabricated 0 Hz
-// would be averaged into the panel's beacon figure and pull it toward zero with
-// no symptom. NaN propagates: the log prints "nan", the wire field is dropped
-// by the page rather than plotted.
+// The beacon's own carrier-offset estimate is sync::RepetitionPhaseEstimator
+// (sync/cfo_estimator.h): the two repetition correlations on the shape's
+// geometry, NaN on every failure path, the Houdini mixer's conjugation undone.
+// The window placement rules and their measured consequences (AP-39, 8.164) are
+// documented there. `sync_index` is the beacon END, as everywhere in this file.
 float Receiver::estimateCFO(const std::complex<int16_t>* buf, size_t buf_len,
                             int sync_index) const {
-  const float kNoEstimate = std::numeric_limits<float>::quiet_NaN();
-  if (buf == nullptr) return kNoEstimate;
-  // GEOMETRY COMES FROM THE CONFIGURED BEACON SHAPE, not from constants. This
-  // used to hard-code the STS+gold layout and disable itself on anything else,
-  // which was the right guard while the shape was fixed; now that `beacon_type`
-  // selects it, refusing to estimate would silently drop the SYN1 beacon field
-  // for three of the four shapes.
-  const int core_len = static_cast<int>(config_->beacon_size());
-  const int fine_off = static_cast<int>(config_->beacon_fine_off());
-  const int fine_len = static_cast<int>(config_->beacon_fine_len());
-  const int fine_reps = static_cast<int>(config_->beacon_fine_reps());
-  const int coarse_off = static_cast<int>(config_->beacon_coarse_off());
-  const int coarse_len = static_cast<int>(config_->beacon_coarse_len());
-  const int coarse_reps = static_cast<int>(config_->beacon_coarse_reps());
-  if (fine_len <= 0 || fine_reps < 2 ||
-      fine_off + fine_len * fine_reps > core_len) {
-    static std::atomic<bool> warned{false};
-    if (warned.exchange(true) == false) {  // braces load-bearing (macro)
-      MLPD_WARN(
-          "estimateCFO: beacon '%s' has no usable repeated field (core %d, "
-          "fine %d x %d at %d) -- CFO estimation disabled\n",
-          config_->beacon_type().c_str(), core_len, fine_reps, fine_len,
-          fine_off);
-    }
-    return kNoEstimate;
-  }
-  const int start = sync_index - core_len;
-  if (start < 0 || sync_index < 0 ||
-      static_cast<size_t>(sync_index) > buf_len) {
-    return kNoEstimate;
-  }
-
-  auto at = [buf](int i) {
-    return std::complex<double>(static_cast<double>(buf[i].real()),
-                                static_cast<double>(buf[i].imag()));
-  };
-
-  // Fine: repetition 2 against repetition 1, at lag fine_len.
-  const int g1 = start + fine_off;
-  const int g2 = g1 + fine_len;
-  std::complex<double> r_fine(0.0, 0.0);
-  for (int i = 0; i < fine_len; ++i) r_fine += std::conj(at(g1 + i)) * at(g2 + i);
-  if (std::abs(r_fine) == 0.0) return kNoEstimate;
-
-  const double f_fine = std::arg(r_fine) / (2.0 * M_PI * fine_len);
-  double f = f_fine;
-
-  // Coarse: every consecutive pair of the acquisition field, at lag coarse_len,
-  // summed coherently, used ONLY to unwrap the fine stage.
-  //
-  // A SHAPE WITHOUT A COARSE FIELD IS NOT A DEFECT, AND THE ARITHMETIC SAYS SO.
-  // The fine stage alone is unambiguous to +-rate/(2*fine_len): 480 kHz at
-  // fine_len 128, 960 kHz at 64. This link's CFO cannot exceed 8.5 ppm of
-  // 500 MHz = 4.25 kHz, two orders of magnitude inside either. So the NR shape,
-  // whose PSS is a single non-repeating symbol, skips the unwrap rather than
-  // being refused an estimate.
-  if (coarse_reps >= 2 && coarse_len > 0 &&
-      coarse_off + coarse_len * coarse_reps <= core_len) {
-    std::complex<double> r_coarse(0.0, 0.0);
-    for (int k = 0; k + 1 < coarse_reps; ++k) {
-      for (int i = 0; i < coarse_len; ++i) {
-        r_coarse += std::conj(at(start + coarse_off + k * coarse_len + i)) *
-                    at(start + coarse_off + (k + 1) * coarse_len + i);
-      }
-    }
-    if (std::abs(r_coarse) == 0.0) return kNoEstimate;
-    const double f_coarse = std::arg(r_coarse) / (2.0 * M_PI * coarse_len);
-    const double ambiguity = 1.0 / fine_len;
-    f = f_fine + std::round((f_coarse - f_fine) / ambiguity) * ambiguity;
-  }
-  // The matched-NCO R2C RX mixer delivers baseband CONJUGATED (the same
-  // inversion recorder_worker undoes via rx_conj_ for CSI). Sync runs on RAW
-  // samples, so a +f carrier offset reads as -f here; undo it so the sign is
-  // physical. Sign and scale VERIFIED against deliberate injection (AP-30).
-  // Not yet checked against a truth the estimator cannot infer: on a link with
-  // the sample clocks shared -- where the arrival ramp measures eps = 0 exactly
-  // -- this reads +353 Hz, so it carries a zero-point offset of that order
-  // (2026-09-01, clock_drift_probe.py leg A). AP-34(b) is the fix: precision
-  // scales with lag, and the bias is a fixed phase divided by a short one.
-  if (config_->is_houdini()) f = -f;
-  return static_cast<float>(f);
+  return cfo_estimator_->estimate(buf, buf_len, sync_index);
 }
 
 void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
@@ -1612,16 +1324,18 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   // detections against the baseline's 91 -- because a tighter tolerance shrinks
   // kLead/kTail and therefore WIDENS the accept window, 42.2 % of the slot to
   // 80.2 %. Tighter still would be untested, which is the argument against it.
-  const double kScatterTolUs = envDouble("HOUDINI_SCATTER_TOL_US", 2.0);
+  const double kScatterTolUs = config_->sync().resync.scatter_tol_us;
   // The same argument that made kScatterTol a TIME (AP-40): what the
   // acquisition gate admits is detector scatter plus path, both properties of
   // the correlator and the cable measured in microseconds, so a fixed sample
   // count silently retunes it at every rate while the tracking gate scales.
   // 5.2083 us reproduces the old 640 samples exactly at 122.88 MSPS.
-  const double kConfirmTolUs = envDouble("HOUDINI_CONFIRM_TOL_US", 5.2083);
+  const double kConfirmTolUs = config_->sync().resync.confirm_tol_us;
+  // NaN in the config means "derive it": a quarter of the OFDM zero prefix.
   double sync_tol_samples =
-      envDouble("HOUDINI_SYNC_TOL_SAMPLES",
-                static_cast<double>(config_->prefix()) / 4.0);
+      std::isnan(config_->sync().resync.sync_tol_samples)
+          ? static_cast<double>(config_->prefix()) / 4.0
+          : config_->sync().resync.sync_tol_samples;
   // DEFAULT LOWERED 1.0 -> 0.1 ppm [user 2026-09-02, "a conservative value,
   // maybe 10x"]. This is the assumed worst-case clock error AFTER tracking, and
   // it sets the cadence: 1.0 ppm gave a 260 ms resync, which AP-53(a) showed is
@@ -1637,7 +1351,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   // measured margin would be 0.01 ppm and a 26 s cadence; that is deliberately
   // NOT taken, because 20 s is where the ADEV data ends and beyond it we would
   // be extrapolating.
-  double sync_residual_ppm = envDouble("HOUDINI_SYNC_RESIDUAL_PPM", 0.1);
+  double sync_residual_ppm = config_->sync().resync.residual_ppm;
   // Both inputs are validated: a zero or negative ppm makes the cadence
   // quotient infinite, and a config without `ofdm_tx_zero_prefix` gives a zero
   // tolerance and a resync attempt every single frame. Neither should degrade
@@ -1750,8 +1464,8 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   // retuning it wants an A/B on live silicon rather than a guess here. Knobs,
   // shipped at the values that were gated, so the default build is unchanged
   // and the sweep costs no rebuild.
-  size_t resync_retry_max = static_cast<size_t>(
-      std::max(1.0, envDouble("HOUDINI_RESYNC_RETRY_MAX", 100.0)));
+  size_t resync_retry_max =
+      static_cast<size_t>(std::max(1, config_->sync().resync.retry_max));
   size_t resync_success(0);
   size_t cfo_log_cnt = 0;  // throttles the beacon-CFO line (kCfoLogEvery)
   // Liveness accept/reject half-width. Shipped ON THE WIRE so the panel draws
@@ -1799,12 +1513,12 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
                       static_cast<float>(config_->freq()),
                       static_cast<uint32_t>(kScatterTol), cfo_beacon_hz);
   };
-  const double kGridAlpha = envDouble("HOUDINI_GRID_ALPHA", 0.5);
-  const double kGridBeta = envDouble("HOUDINI_GRID_BETA", 0.1);
+  const double kGridAlpha = config_->sync().tracker.alpha;
+  const double kGridBeta = config_->sync().tracker.beta;
   // Per-update slew limit on the rate estimate, distinct from the absolute
   // plausibility band further down: see the note at the update site for why
   // that band alone cannot reject an outlier.
-  const double kGridStepPpm = envDouble("HOUDINI_GRID_STEP_PPM", 0.5);
+  const double kGridStepPpm = config_->sync().tracker.step_ppm;
   // How often to LOOK at the beacon, derived rather than hardcoded (see
   // sync_geometry.h for the derivation and the test that covers it).
   //
@@ -1907,8 +1621,8 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   // +-100 ppm bound is generous against any crystal pair (our measured pair is
   // 8.5 ppm) and exists only to stop a single bad observation from parking the
   // rate somewhere it can never recover from.
-  const double kGridMaxPpm = envDouble("HOUDINI_GRID_MAX_PPM", 100.0);
-  const double kGridTrustPpm = envDouble("HOUDINI_GRID_TRUST_PPM", 1.0);
+  const double kGridMaxPpm = config_->sync().tracker.max_ppm;
+  const double kGridTrustPpm = config_->sync().tracker.trust_ppm;
   const double kGridPeriodLo =
       static_cast<double>(config_->samps_per_frame()) * (1.0 - kGridMaxPpm * 1e-6);
   const double kGridPeriodHi =
@@ -1939,35 +1653,41 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   // not an optional extra, it is what makes this arm worth running.
   Sounder::TrackerConfig tracker_cfg;
   {
-    const char* tk = getenv("HOUDINI_TRACKER");
-    const bool want_kf =
-        tk != nullptr && (tk[0] == 'k' || tk[0] == 'K' || tk[0] == '1');
-    tracker_cfg.kind = want_kf ? Sounder::TrackerKind::kKalman
-                               : Sounder::TrackerKind::kAlphaBeta;
+    tracker_cfg.kind =
+        config_->sync().tracker.type == houdini::sync::TrackerType::kKalman
+            ? Sounder::TrackerKind::kKalman
+            : Sounder::TrackerKind::kAlphaBeta;
     tracker_cfg.alpha = kGridAlpha;
     tracker_cfg.beta = kGridBeta;
     tracker_cfg.step_limit =
         kGridStepPpm * 1e-6 * static_cast<double>(config_->samps_per_frame());
-    tracker_cfg.meas_var = envDouble("HOUDINI_KF_MEAS_VAR", 0.5);
-    tracker_cfg.rate_rw = envDouble("HOUDINI_KF_RATE_RW", 1e-9);
-    tracker_cfg.innov_gate = envDouble("HOUDINI_KF_INNOV_GATE", 4.0);
+    tracker_cfg.meas_var = config_->sync().tracker.kf_meas_var;
+    tracker_cfg.rate_rw = config_->sync().tracker.kf_rate_rw;
+    tracker_cfg.innov_gate = config_->sync().tracker.kf_innov_gate;
     // THE ACTIVE DETECTOR, ON EVERY RUN. The env overrides each warn when set,
     // so taking the same values BY DEFAULT logged nothing at all and a run's
     // log carried no record of which rule produced its numbers -- in a change
     // whose other half exists because a run's identity was not recorded.
-    MLPD_INFO(
-        "Beacon detector: threshold %s, resync pick %s, acquisition pick %s "
-        "(first-path back window %lld samples)\n",
-        kResyncThresh == CommsLib::BeaconThresh::kNormalizedXCorr ? "xcorr"
-        : kResyncThresh == CommsLib::BeaconThresh::kXCorrNoLag    ? "nolag"
-        : kResyncThresh == CommsLib::BeaconThresh::kNormalized    ? "norm"
-                                                                  : "power",
-        kResyncPick == CommsLib::BeaconPick::kFirstPath        ? "first-path"
-        : kResyncPick == CommsLib::BeaconPick::kTargetedArgmax ? "argmax"
-        : kResyncPick == CommsLib::BeaconPick::kFirstCrossing  ? "first-crossing"
-                                                               : "refined",
-        config_->is_houdini() ? "same as resync" : "first-cluster-refined",
-        static_cast<long long>(firstPathBackWindow()));
+    {
+      const auto f = sync_detector_->form();
+      const auto pk = sync_detector_->pick();
+      MLPD_INFO(
+          "Beacon detector: threshold %s, resync pick %s, acquisition pick %s "
+          "(first-path back window %d samples, floor %.1f dB); SNR floor %.1f "
+          "dB; CFO guard %d margin %d\n",
+          f == CommsLib::BeaconThresh::kNormalizedXCorr ? "xcorr"
+          : f == CommsLib::BeaconThresh::kXCorrNoLag    ? "coherence"
+          : f == CommsLib::BeaconThresh::kNormalized    ? "norm"
+                                                        : "power",
+          pk == CommsLib::BeaconPick::kFirstPath        ? "first-path"
+          : pk == CommsLib::BeaconPick::kTargetedArgmax ? "argmax"
+          : pk == CommsLib::BeaconPick::kFirstCrossing  ? "first-crossing"
+                                                        : "refined",
+          config_->is_houdini() ? "same as resync" : "first-cluster-refined",
+          sync_detector_->firstPathWindow(), sync_detector_->firstPathFloorDb(),
+          sync_guard_->floorDb(), config_->sync().cfo.index_guard,
+          cfo_estimator_->margin());
+    }
     if (config_->beacon_replica_reps() < 2) {
       MLPD_INFO(
           "Beacon replica is a single copy (%s): threshold form forced to "
@@ -2010,13 +1730,13 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   // described the pre-targeting whole-window search). Hold-off itself
   // already covers the beacon-MOVED case; this covers beacon-LOST.
   const size_t kEscalateExhaustedEpisodes = static_cast<size_t>(
-      std::max(1.0, envDouble("HOUDINI_ESCALATE_EPISODES", 2.0)));
+      std::max(1, config_->sync().resync.escalate_episodes));
   // How many consecutive off-grid detections before the beacon counts as
   // MOVED. One is scatter (ledger 4.18); the shipped rule is two. Steered, an
   // off-grid detection is far more surprising than it was, so this is the
   // other half of the AP-52 retune and it sweeps with the same A/B.
-  const size_t kHoldOffGridCount = static_cast<size_t>(
-      std::max(1.0, envDouble("HOUDINI_HOLD_OFFGRID", 2.0)));
+  const size_t kHoldOffGridCount =
+      static_cast<size_t>(std::max(1, config_->sync().resync.hold_offgrid));
   size_t resync_offgrid_streak = 0;
   size_t resync_exhausted_streak = 0;
   const size_t beacon_detect_window_esc = static_cast<size_t>(
@@ -2216,7 +1936,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
           // with this set to `first` and the false lock appears on silicon.
           const ssize_t idx = this->syncSearch(
               base + s0, static_cast<size_t>(slice_len),
-              config_->corr_scale(tid) + resync_retry_cnt, kResyncPick);
+              config_->corr_scale(tid) + resync_retry_cnt, sync_detector_->pick());
           if (idx >= 0) sync_index = s0 + idx;
         } else {
           resync_attempted = false;  // beacon not due in this window
@@ -2240,7 +1960,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
           houdini_pilot_ref_valid) {
         // Liveness verdict on the targeted detection: SNR floor first, then
         // the grid residual (alive within scatter / moved beyond it).
-        const double snr = beaconSnrDb(
+        const double snr = sync_guard_->snrDb(
             reinterpret_cast<std::complex<int16_t>*>(
                 rxbuff.at(kSyncDetectChannel)),
             static_cast<size_t>(request_samples), sync_index,
@@ -2276,7 +1996,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
             }
           }
         }
-        if (snr < syncSnrFloorDb()) {
+        if (!sync_guard_->accept(snr)) {
           // Report it: without this a WEAK beacon is indistinguishable from no
           // beacon on the panel, and they call for different operator actions.
           emitSync(kSyncWeak, 0, 0.0, snr, 0);
@@ -2313,7 +2033,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
           // measured), and the guard then biases what is left onto the harmless
           // side. Modelled: mean error +1487.5 Hz -> -31.8 Hz.
           const long long cfo_guard =
-              static_cast<long long>(envDouble("HOUDINI_CFO_INDEX_GUARD", 8.0));
+              static_cast<long long>(config_->sync().cfo.index_guard);
           long long cfo_index = sync_index - resid + cfo_guard;
           // BOTH bounds. An out-of-range index would otherwise cost the
           // estimate entirely (estimateCFO now returns NaN rather than a
@@ -2368,7 +2088,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
                          houdini_frame_period - 1.0)
                   : 0.0;
           const double cfo_tracked_hz = eps_tracked * config_->freq();
-          if ((cfo_log_cnt++ % cfoLogEvery()) == 0) {
+          if ((cfo_log_cnt++ % static_cast<size_t>(std::max(1, config_->sync().cfo.log_every))) == 0) {
             MLPD_INFO(
                 "Beacon CFO frame %zu: tracked %+.1f Hz (%+.4f ppm) | beacon "
                 "%+.1f Hz (%+.3f ppm), delta %+.1f Hz, resid %+lld, "
@@ -2782,8 +2502,8 @@ bool Receiver::houdiniAcquireAnchor(int tid, size_t detect_window,
   // detect window would otherwise SHORTEN the span: today's k of 17-37 is an
   // accident of the hunt needing ~13.6 windowed reads to find the beacon at
   // all, and a guaranteed first hit removes exactly that accident.
-  const long long kRefineSpan = static_cast<long long>(
-      envDouble("HOUDINI_ACQ_REFINE_SPAN", 200.0));
+  const long long kRefineSpan =
+      static_cast<long long>(config_->sync().resync.acq_refine_span);
   // Budget must scale with the span it now has to reach. With a full-frame
   // window every hunt is a near-certain hit, so k advances only by the wall
   // time of one read (a few frames) per hunt -- the old flat 200 could expire
@@ -2797,7 +2517,7 @@ bool Receiver::houdiniAcquireAnchor(int tid, size_t detect_window,
   int confirms = 0;
   int hunts = 0;
   int consecutive_fails = 0;
-  const double kAcqMaxPpm = envDouble("HOUDINI_ACQ_MAX_PPM", 100.0);
+  const double kAcqMaxPpm = config_->sync().resync.acq_max_ppm;
   double period = static_cast<double>(fr);  // coarse after stage 2, fine after 3
   while (config_->running()) {
     if (++hunts > kMaxHunts) {
@@ -2937,23 +2657,23 @@ ssize_t Receiver::clientSyncBeacon(size_t radio_id, size_t sample_window,
                                 sample_window,
                                 config_->corr_scale_init(radio_id),
                                 config_->is_houdini()
-                                    ? kResyncPick
+                                    ? sync_detector_->pick()
                                     : CommsLib::BeaconPick::kFirstClusterRefined);
         // SNR floor: a correlation crossing at noise level is the artifact
         // class, not the beacon (measured: real ~45 dB, artifacts ~0 dB).
         // Reject and keep hunting rather than anchor on it.
         if (config_->is_houdini() && sync_index >= 0) {
-          const double snr =
-              beaconSnrDb(syncbuffmem.at(kSyncDetectChannel).data(),
-                          sample_window, sync_index, config_->beacon_size());
-          if (snr < syncSnrFloorDb()) {
+          const double snr = sync_guard_->snrDb(
+              syncbuffmem.at(kSyncDetectChannel).data(), sample_window,
+              sync_index, config_->beacon_size());
+          if (!sync_guard_->accept(snr)) {
             static std::atomic<int> rej{0};
             const int nrej = rej.fetch_add(1);
             if ((nrej % 16) == 0) {
               MLPD_INFO(
                   "clientSyncBeacon [%zu]: rejected low-SNR detection "
                   "(idx %ld, %.1f dB < %.1f dB floor), count %d\n",
-                  radio_id, sync_index, snr, syncSnrFloorDb(), nrej + 1);
+                  radio_id, sync_index, snr, sync_guard_->floorDb(), nrej + 1);
             }
             sync_index = -1;
           } else if (window_time != nullptr) {
