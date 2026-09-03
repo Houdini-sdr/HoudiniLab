@@ -18,7 +18,6 @@
 #include <memory>
 #include <vector>
 
-#include "comms-lib.h"  // CommsLib::BeaconPick, named in syncSearch's signature
 
 #if defined(USE_UHD)
 #include "BaseRadioSetUHD.h"
@@ -29,6 +28,7 @@
 #endif
 #include "concurrentqueue.h"
 #include "config.h"
+#include "sync/beacon_shape.h"
 #include "sync/cfo_estimator.h"
 #include "sync/confirm.h"
 #include "sync/detector.h"
@@ -86,10 +86,11 @@ class Receiver {
   // Re-sync searches a targeted lead+tail slice that cannot hold two copies, so
   // it takes the strongest crossing: there the earliest one is the beacon's own
   // lag-128 self-coherent STS preamble, hundreds of samples early, and whether
-  // it wins depends on received level. See CommsLib::BeaconPick.
+  // it wins depends on received level. See houdini::sync::PickRule.
   ssize_t syncSearch(const std::complex<int16_t>* check_data,
                      size_t search_window, float corr_scale,
-                     CommsLib::BeaconPick pick);
+                     houdini::sync::PickRule pick,
+                     houdini::sync::Detection* detection = nullptr);
 
   // Two-stage beacon CFO estimate, normalized (cycles/sample); multiply by
   // the sample rate for Hz. Pointer form so both the vector-backed legacy

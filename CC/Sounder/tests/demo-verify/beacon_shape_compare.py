@@ -98,9 +98,9 @@ def core_off(geom):
     return ro + geom["replica_len"] * (rr - 1)
 
 
-def find_beacon_nolag(raw, rep, corr_scale):
+def find_beacon_coherence(raw, rep, corr_scale):
     """Plain matched filter, NO repeat check: the NR form, for a replica that
-    appears once in the burst (nr_pss). Mirrors CommsLib's kXCorrNoLag: the
+    appears once in the burst (nr_pss). Mirrors CommsLib's kCoherence: the
     statistic is |gc|^2 / (E_raw * E_rep), a coherence in [0, 1], level
     invariant, and the bar is 1/corr_scale exactly as in C++. Returns the index
     of the START of the matched field (this file's convention) and the
@@ -126,9 +126,15 @@ def find_beacon_nolag(raw, rep, corr_scale):
 
 
 def detect(raw, rep, geom, corr_scale):
-    """The detector the shape would actually run with (see syncSearch)."""
-    if geom.get("replica_reps", 2) < 2:
-        return find_beacon_nolag(raw, rep, corr_scale)
+    """The detector the shape would actually run with. The dumper writes the
+    RESOLVED form into shapes.json ("form": coherence | xcorr | power), so
+    this reads the decision rather than re-deriving it; a dump from before
+    2026-09-03 falls back to the replica-count rule."""
+    form = geom.get("form")
+    if form is None:
+        form = "coherence" if geom.get("replica_reps", 2) < 2 else "xcorr"
+    if form == "coherence":
+        return find_beacon_coherence(raw, rep, corr_scale)
     return tn.find_beacon(raw, rep, corr_scale)
 
 

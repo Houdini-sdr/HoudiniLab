@@ -71,6 +71,13 @@ enum class PickRule : int { kFirstCrossing = 0, kClusterRefined, kArgmax, kFirst
 
 enum class TrackerType : int { kAlphaBeta = 0, kKalman };
 
+/// The hardware family the sounder runs on. It selects DEFAULT policies the
+/// shapes predate (the Iris/UHD framer's first-crossing pick and power-ratio
+/// form, SyncConfig::resolve) and the beacon-end convention (BeaconShape);
+/// never a code path inside the library.
+enum class Platform { kHoudini, kIrisUhd };
+const char* name(Platform p);
+
 /// Where a value came from.
 enum class Source { kDefault, kJson, kEnv, kDerived };
 const char* name(Source s);
@@ -93,6 +100,14 @@ struct ThresholdPolicy {
   double corr_scale_init = 10.0;  ///< acquisition bar = 1 / corr_scale_init
   /// The scale to apply at resync attempt `attempt` (0 = first look).
   double relaxed(int attempt) const { return corr_scale + static_cast<double>(attempt); }
+  /// The bar for the coherence form at `replica_len` taps and a per-window
+  /// false-alarm probability over `window_samples` (8.163): a pure-noise
+  /// window's coherence against an L-tap replica is Beta(1, L-1), so
+  /// P(coh > bar) per index is (1 - bar)^(L-1) and
+  /// bar = 1 - (pfa_per_window / window_samples)^(1/(L-1)). Measured against
+  /// its prediction in beacon_geometry_test. RESERVED for P3 with
+  /// DetectorConfig::pfa_per_window; not applied by the detector yet.
+  static double coherenceBar(size_t replica_len, double pfa_per_window, size_t window_samples);
 };
 
 struct DetectorConfig {
@@ -102,6 +117,8 @@ struct DetectorConfig {
   /// the detector still uses `bar` for every form, and validate() says so
   /// when a value is given.
   double pfa_per_window = 1e-3;
+  /// The Houdini default. On Iris/UHD resolve() derives first_crossing, the
+  /// rule that framer has always run, unless the JSON sets one.
   PickRule pick = PickRule::kFirstPath;
   /// Samples of back-search from the peak. -1 (the default) means "half the
   /// replica length", which is what the pre-library code derived: 64 for a
@@ -153,6 +170,7 @@ struct ResyncConfig {
 struct ResolveContext {
   size_t replica_len = 0;      ///< taps in the correlator replica
   double prefix_samples = 0.0; ///< the OFDM zero prefix, samples
+  Platform platform = Platform::kHoudini;
 };
 
 struct SyncConfig {
@@ -226,8 +244,10 @@ struct SyncConfig {
   /// which the block and the legacy keys are taken.
   static SyncConfig loadFromText(const std::string& root_json_text);
   /// Fill the sentinels (first_path_window, sync_tol_samples) from the shape
-  /// and slot layout, marking them kDerived, so describe() prints the values
-  /// actually used. Idempotent; an explicit value is left alone.
+  /// and slot layout, and the platform defaults (detector.pick and
+  /// detector.threshold on Iris/UHD, whose framer predates the shapes), all
+  /// marked kDerived, so describe() prints the values actually used.
+  /// Idempotent; an explicit value is left alone.
   void resolve(const ResolveContext& ctx);
 
   /// Effective values with provenance, one line per knob.

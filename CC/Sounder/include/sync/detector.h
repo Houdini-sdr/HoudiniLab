@@ -1,15 +1,20 @@
 /**
  * @file sync/detector.h
- * @brief The beacon detector as one object: replica, threshold form, pick
- *        rule and the replica-tail index convention, resolved once.
+ * @brief The beacon detector as one object: shape, threshold form, pick rule
+ *        and first-path knobs, resolved once.
  *
- * Wraps CommsLib::find_beacon_avx with the decisions receiver.cc used to make
- * at its call sites (DEMO_VERIFICATION 8.138 to 8.154): which threshold form a
- * replica supports, which crossing to return, how far the first-path search
- * looks back and how much weaker a path may be, and how far the beacon END
- * sits past the index the correlator reports. All of it is fixed at
- * construction from the shape and the configuration, so a run cannot mix two
- * populations and a test can build the same detector the receiver runs.
+ * Wraps the correlator (CommsLib::find_beacon_ex, or find_beacon_cuda under
+ * USE_CUDA) with the decisions receiver.cc used to make at its call sites
+ * (DEMO_VERIFICATION 8.138 to 8.154): which threshold form the replica
+ * supports, which crossing to return, how far the first-path search looks
+ * back and how much weaker a path may be. The index convention belongs to the
+ * BeaconShape and is applied here in one place for every backend. All of it is
+ * fixed at construction, so a run cannot mix two populations and a test can
+ * build the same detector the receiver runs.
+ *
+ * The API speaks the library's own vocabulary (ThresholdForm, PickRule); the
+ * correlator's enums stay inside detector.cc, so a consumer of this header
+ * links no FFT library for an enum.
  */
 #pragma once
 
@@ -17,73 +22,76 @@
 #include <cstddef>
 #include <cstdint>
 #include <sys/types.h>
-#include <vector>
 
-#include "comms-lib.h"
+#include "sync/beacon_shape.h"
 #include "sync/sync_config.h"
 
 namespace houdini {
 namespace sync {
 
 struct Detection {
-  /// The correlator's index in the searched window with the replica tail
-  /// applied: the LAST sample of the beacon core. Every consumer (the SNR
-  /// guard's [index - core_len, index) span, the CFO estimator, receiver.cc's
-  /// frame arithmetic) treats it as the beacon END, one past the core; the
-  /// one-sample difference is a fixed convention absorbed by tx_advance and
-  /// asserted by beacon_geometry_test's kEndConvention (8.154). -1 when
-  /// nothing crossed.
-  ssize_t index = -1;
-  bool found() const { return index >= 0; }
+  /// The beacon END per BeaconShape's convention (the correlator's index plus
+  /// the replica tail), or -1 when nothing crossed or the implied end fell
+  /// outside the window.
+  ssize_t end_index = -1;
+  /// The decision statistic at the correlator's index, in the form's units
+  /// (a coherence in [0, 1] for the normalised forms, a power ratio for
+  /// kPowerRatio), and the bar it cleared. Zero when nothing crossed.
+  double statistic = 0.0;
+  double bar = 0.0;
+  ThresholdForm form = ThresholdForm::kAuto;
+  /// The correlator output at the index: the matched field's complex peak,
+  /// which a phase tracker reads (architecture plan, P5).
+  std::complex<float> peak{0.0f, 0.0f};
+  bool found() const { return end_index >= 0; }
 };
+
+enum class DetectorBackend { kPortable, kCuda };
 
 class Detector {
  public:
-  /// @param replica       the matched-filter reference (Config::gold_cf32)
-  /// @param replica_reps  copies of it in the core; 1 forces the coherence form
-  /// @param replica_tail  samples from the replica's end to the core's end
-  /// @param cfg           threshold form (kAuto resolves here), pick, first-path
-  ///                      (a negative first_path_window resolves to half the
-  ///                      replica length, the pre-library derivation)
-  /// @param houdini       false keeps the Iris/UHD path on the power-ratio form,
-  ///                      the cluster-refined pick and no replica tail, untouched.
-  Detector(const std::vector<std::complex<float>>& replica, size_t replica_reps,
-           size_t replica_tail, const DetectorConfig& cfg, bool houdini);
+  /// @param shape  the configured beacon (copied: the detector owns what it
+  ///               needs and outlives nothing)
+  /// @param cfg    the RESOLVED detector configuration (SyncConfig::resolve);
+  ///               an unresolved first_path_window (-1) falls back to the
+  ///               shape's default, an explicit value is bounded at twice the
+  ///               replica, the correlator's own limit
+  Detector(const BeaconShape& shape, const DetectorConfig& cfg);
 
-  /// Search `n` samples. `corr_scale` keeps its historical meaning for the
-  /// legacy forms (the bar is 1/corr_scale); for the coherence form it is
-  /// also the bar's reciprocal, so the caller may pass the value the
-  /// configuration derives from pfa. `pick` overrides the configured rule for
-  /// callers that search a window which may hold several copies.
-  Detection run(const std::complex<int16_t>* samples, size_t n,
-                float corr_scale) const;
-  Detection run(const std::complex<int16_t>* samples, size_t n,
-                float corr_scale, CommsLib::BeaconPick pick) const;
+  /// Search `n` samples with the bar 1/corr_scale (ThresholdPolicy). `pick`
+  /// overrides the configured rule for a caller whose window may hold several
+  /// beacon copies.
+  Detection run(const std::complex<int16_t>* samples, size_t n, float corr_scale) const;
+  Detection run(const std::complex<int16_t>* samples, size_t n, float corr_scale,
+                PickRule pick) const;
 
-  CommsLib::BeaconThresh form() const { return form_; }
-  CommsLib::BeaconPick pick() const { return pick_; }
-  /// Samples the beacon END sits past the correlator's index; 0 off Houdini.
-  size_t replicaTail() const { return tail_; }
-  bool singleCopy() const { return single_copy_; }
+  ThresholdForm form() const { return form_; }
+  PickRule pick() const { return pick_; }
+  size_t replicaTail() const { return shape_.replicaTail(); }
+  bool singleCopy() const { return shape_.singleCopy(); }
   int firstPathWindow() const { return first_path_window_; }
   double firstPathFloorDb() const { return first_path_floor_db_; }
-  /// The bar for the coherence form at this replica length and the configured
-  /// per-window false-alarm probability over `window_samples` (8.163):
-  /// bar = 1 - pfa_index^(1/(L-1)), pfa_index = pfa_window / window_samples.
-  double coherenceBar(double pfa_per_window, size_t window_samples) const;
+  const BeaconShape& shape() const { return shape_; }
 
-  static CommsLib::BeaconThresh resolveForm(ThresholdForm f, bool single_copy,
-                                            bool houdini);
-  static CommsLib::BeaconPick resolvePick(PickRule p);
+  DetectorBackend backend() const { return backend_; }
+  const char* backendName() const;
+  /// False for a backend that ignores the configured form, pick and
+  /// first-path knobs (the CUDA correlator: first crossing, power ratio).
+  bool backendAppliesConfig() const { return backend_ == DetectorBackend::kPortable; }
+
+  /// kAuto resolves to the normalised cross-correlation; a single-copy
+  /// replica takes the coherence form whatever was asked (8.154). The
+  /// platform default for Iris/UHD (the power-ratio form) is the
+  /// configuration's business: SyncConfig::resolve.
+  static ThresholdForm resolveForm(ThresholdForm requested, bool single_copy);
 
  private:
-  std::vector<std::complex<float>> replica_;
-  bool single_copy_;
-  size_t tail_;
-  CommsLib::BeaconThresh form_;
-  CommsLib::BeaconPick pick_;
+  const BeaconShape shape_;
+  ThresholdForm form_;
+  PickRule pick_;
   int first_path_window_;
   double first_path_floor_db_;
+  DetectorBackend backend_;
 };
 
 }  // namespace sync

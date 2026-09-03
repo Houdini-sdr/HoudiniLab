@@ -64,7 +64,7 @@ struct Desc {
   //     threshold forms multiply the peak by the correlation one replica
   //     length earlier, which for such a reference is the silence before the
   //     beacon, so they score zero at the right index. Only the plain matched
-  //     filter (BeaconThresh::kXCorrNoLag) describes it, and consumers select
+  //     filter (BeaconThresh::kCoherence) describes it, and consumers select
   //     that form from this field rather than from the environment.
   size_t replica_off = 0, replica_reps = 0;
   size_t replica_tail() const {

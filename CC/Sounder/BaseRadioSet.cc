@@ -494,10 +494,10 @@ void BaseRadioSet::activateHoudiniRx(void) {
 // ---- Houdini native-TDD framer (bs_hw_framer + radio_type=houdini) ----------
 namespace {
 // 3.125 us anchor/strobe grid. NB the same driver constant appears as
-// kHoudiniStrobeOffsTicks (receiver.cc), a local kTddGridTicks in
+// houdini::sync::kHoudiniStrobeOffsetTicks (the one definition), a local kTddGridTicks in
 // clientTxPilots, and 3125 ns in ClientRadioSet::radioTx -- all four must
 // move together if the driver grid ever changes (Opus review LOW).
-constexpr long long kTddGridTicks = 384;
+constexpr long long kTddGridTicks = houdini::sync::kHoudiniStrobeOffsetTicks;
 constexpr long long kTddArmMargin = 36864000;  // ~300 ms of ticks
 }  // namespace
 

@@ -5,6 +5,7 @@
  */
 #include "sync/sync_config.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -24,6 +25,7 @@ const char* const kPickNames[] = {"first_crossing", "cluster_refined", "argmax",
                                   nullptr};
 const char* const kTrackerNames[] = {"alpha_beta", "kalman", nullptr};
 const char* const kSourceNames[] = {"default", "json", "env", "derived"};
+const char* const kPlatformNames[] = {"houdini", "iris_uhd"};
 
 // The environment spellings that predate the table.
 struct EnvAlias {
@@ -202,6 +204,7 @@ using EP = SyncConfig::EnvPolicy;
 }  // namespace
 
 const char* name(Source s) { return kSourceNames[static_cast<int>(s)]; }
+const char* name(Platform p) { return kPlatformNames[static_cast<int>(p)]; }
 const char* name(ThresholdForm f) { return kThresholdNames[static_cast<int>(f)]; }
 const char* name(PickRule p) { return kPickNames[static_cast<int>(p)]; }
 const char* name(TrackerType t) { return kTrackerNames[static_cast<int>(t)]; }
@@ -217,13 +220,13 @@ const std::vector<SyncConfig::Spec>& SyncConfig::schema() {
        KNOB_ACCESS(double, beacon.tx_full_scale), nullptr, EP::kIgnoreOutOfRange},
       // detector
       {"detector.threshold", "HOUDINI_BEACON_THRESH", 0, 0,
-       "Decision statistic: auto picks coherence for a single-copy replica and the normalised cross-correlation otherwise; power is the pre-2026-09 form.",
+       "Decision statistic: auto picks coherence for a single-copy replica and the normalised cross-correlation otherwise; power is the pre-2026-09 form and the Iris/UHD default.",
        KNOB_ACCESS(ThresholdForm, detector.threshold), kThresholdNames, EP::kClamp},
       {"detector.pfa_per_window", nullptr, 1e-9, 0.5,
        "RESERVED (phase P3), not applied yet: the false-alarm probability per search window the coherence form's bar will be derived from.",
        KNOB_ACCESS(double, detector.pfa_per_window), nullptr, EP::kClamp},
       {"detector.pick", "HOUDINI_BEACON_PICK", 0, 0,
-       "Which crossing is returned: first_path (shipped), argmax, cluster_refined, or first_crossing (unsafe on a strong link).",
+       "Which crossing is returned: first_path (the Houdini default), argmax, cluster_refined, or first_crossing (the Iris/UHD default; unsafe on a strong link).",
        KNOB_ACCESS(PickRule, detector.pick), kPickNames, EP::kClamp},
       {"detector.first_path_window", "HOUDINI_FIRST_PATH_WIN", -1, 4095,
        "Samples the first-path search looks back from the peak; -1 (default) means half the replica length. Must stay inside the preamble's self-coherent plateau.",
@@ -468,6 +471,29 @@ void SyncConfig::resolve(const ResolveContext& ctx) {
     const auto* s = spec("resync.sync_tol_samples");
     setProvenance(static_cast<size_t>(s - schema().data()), Source::kDerived);
   }
+  // The Iris/UHD defaults are the rules that framer has always run (master
+  // returned the first threshold crossing under the power-ratio form); the
+  // Houdini defaults are the measured ones. A value the JSON sets is honoured
+  // on either platform, which is what makes the change a choice.
+  if (ctx.platform == Platform::kIrisUhd) {
+    if (!wasSet("detector.pick")) {
+      detector.pick = PickRule::kFirstCrossing;
+      setProvenance(static_cast<size_t>(spec("detector.pick") - schema().data()), Source::kDerived);
+    }
+    if (!wasSet("detector.threshold")) {
+      detector.threshold = ThresholdForm::kPowerRatio;
+      setProvenance(static_cast<size_t>(spec("detector.threshold") - schema().data()),
+                    Source::kDerived);
+    }
+  }
+}
+
+double ThresholdPolicy::coherenceBar(size_t replica_len, double pfa_per_window,
+                                     size_t window_samples) {
+  const double L = static_cast<double>(std::max<size_t>(2, replica_len));
+  const double pw = std::min(0.5, std::max(1e-12, pfa_per_window));
+  const double pidx = pw / static_cast<double>(std::max<size_t>(1, window_samples));
+  return 1.0 - std::pow(pidx, 1.0 / (L - 1.0));
 }
 
 void SyncConfig::validate() {

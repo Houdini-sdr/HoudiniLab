@@ -26,6 +26,9 @@
 #include <vector>
 
 #include "include/beacon_shapes.h"
+#include "sync/beacon_shape.h"
+#include "sync/confirm.h"
+#include "sync/detector.h"
 
 int main(int argc, char** argv) {
   std::string out = ".";
@@ -68,17 +71,35 @@ int main(int argc, char** argv) {
     }
     std::fclose(f);
 
-    char buf[512];
+    // The RESOLVED decisions the sounder would run this shape with, at the
+    // shipped defaults on Houdini, so the Python probes read a number instead
+    // of re-deriving the rule (a mismatch is then a JSON key, not a silent
+    // divergence): the threshold form, the pick, the replica tail, the
+    // first-path window, the SNR guard, the expected end, and the coherence
+    // bar at the reserved pfa over a 4096-sample window.
+    const auto shape = houdini::sync::BeaconShape::fromDesc(d, houdini::sync::Platform::kHoudini, 160);
+    auto cfg = houdini::sync::SyncConfig::defaults();
+    cfg.resolve({shape.replicaLen(), 160.0, houdini::sync::Platform::kHoudini});
+    const houdini::sync::Detector det(shape, cfg.detector);
+    char buf[1024];
     std::snprintf(buf, sizeof buf,
                   "%s    \"%s\": {\"core_len\": %zu, \"replica_len\": %zu, "
                   "\"replica_off\": %zu, \"replica_reps\": %zu, "
                   "\"fine_off\": %zu, \"fine_len\": %zu, \"fine_reps\": %zu, "
                   "\"guard_len\": %zu, \"coarse_off\": %zu, \"coarse_len\": %zu, "
-                  "\"coarse_reps\": %zu, \"papr_db\": %.3f}",
+                  "\"coarse_reps\": %zu, \"papr_db\": %.3f, "
+                  "\"form\": \"%s\", \"pick\": \"%s\", \"replica_tail\": %zu, "
+                  "\"first_path_window\": %d, \"first_path_floor_db\": %.1f, "
+                  "\"snr_guard\": %zu, \"end_offset_houdini\": %zd, "
+                  "\"coherence_bar_pfa%.0e_4096\": %.6f}",
                   first ? "" : ",\n", d.name.c_str(), d.core.size(),
                   d.replica.size(), d.replica_off, d.replica_reps, d.fine_off, d.fine_len, d.fine_reps,
                   d.guard_len, d.coarse_off, d.coarse_len, d.coarse_reps,
-                  d.papr_db());
+                  d.papr_db(), houdini::sync::name(det.form()), houdini::sync::name(det.pick()),
+                  shape.replicaTail(), det.firstPathWindow(), det.firstPathFloorDb(),
+                  houdini::sync::SnrWindowGuard::guardFor(det.firstPathWindow()),
+                  shape.expectedEndOffset(), cfg.detector.pfa_per_window,
+                  houdini::sync::ThresholdPolicy::coherenceBar(shape.replicaLen(), cfg.detector.pfa_per_window, 4096));
     js += buf;
     first = false;
     std::printf("%-13s core %4zu  replica %3zu  fine@%zu x%zu  guard %zu  PAPR %.2f dB\n",

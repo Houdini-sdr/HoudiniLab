@@ -337,14 +337,14 @@ static double kFirstPathDbLazy() {
 // THE FLOOR DEPENDS ON THE STATISTIC'S ORDER, AND THE FIRST VERSION SQUARED IT
 // UNCONDITIONALLY. kPowerRatio, kNormalized and kNormalizedXCorr are all 4th
 // order in path AMPLITUDE, so a path at x times the peak's POWER scores x^2 and
-// the floor is 10^(db/10) squared. kXCorrNoLag is |gc|^2/(E*E_rep) -- 2nd order
+// the floor is 10^(db/10) squared. kCoherence is |gc|^2/(E*E_rep) -- 2nd order
 // in amplitude, FIRST order in power -- so squaring makes a nominal -9 dB floor
 // an actual -18 dB one, and a sidelobe 18 dB down gets promoted to "first path".
 // Measured: nolag+first-path read -190 samples on a SINGLE-PATH channel with the
 // squared floor and -129 with the corrected one.
 static double firstPathFloorFrac(CommsLib::BeaconThresh form, double db) {
   const double p = std::pow(10.0, db / 10.0);
-  return form == CommsLib::BeaconThresh::kXCorrNoLag ? p : p * p;
+  return form == CommsLib::BeaconThresh::kCoherence ? p : p * p;
 }
 // -9 dB is close to the margin: bisected offline, the hardest gated multipath
 // case (weak direct, echo +40, stronger) flips from correct to +39 between
@@ -365,7 +365,7 @@ int CommsLib::find_beacon_avx(
                          kFirstPathDbLazy());
 }
 
-int CommsLib::find_beacon_avx(
+CommsLib::BeaconResult CommsLib::find_beacon_ex(
     const std::vector<std::complex<float>>& raw_samples,
     const std::vector<std::complex<float>>& match_samples, float corr_scale,
     BeaconPick pick, BeaconThresh thresh_form, int first_path_window,
@@ -397,7 +397,7 @@ int CommsLib::find_beacon_avx(
   // ~1e-20 on this bench, and 1e-40 is a denormal), and an underflowed
   // denominator would admit every index instead of none.
   const bool normalized = thresh_form == BeaconThresh::kNormalized;
-  const bool nolag = thresh_form == BeaconThresh::kXCorrNoLag;
+  const bool nolag = thresh_form == BeaconThresh::kCoherence;
   const bool xcorr = thresh_form == BeaconThresh::kNormalizedXCorr || nolag;
   // For kNormalizedXCorr: trailing energy of the RAW samples, and the replica's
   // energy. |gc[i]|^2 / (E_raw[i] * E_rep) is the normalised cross-correlation,
@@ -453,6 +453,17 @@ int CommsLib::find_beacon_avx(
     return static_cast<double>(peak_metric[i]) / (den + 1e-30);
   };
   const double bar = 1.0 / static_cast<double>(corr_scale);
+  // The result carries the evidence at the index: the statistic the pick
+  // rule ranked and the correlator output there.
+  const auto result = [&](int i) {
+    BeaconResult r;
+    r.index = i;
+    if (i >= 0 && static_cast<size_t>(i) < gold_corr.size()) {
+      r.statistic = ranking(static_cast<size_t>(i));
+      r.peak = gold_corr[static_cast<size_t>(i)];
+    }
+    return r;
+  };
   std::queue<int> valid_peaks;
   for (size_t i = 0; i < peak_metric.size(); ++i) {
     if (ranking(i) > bar) {
@@ -485,8 +496,8 @@ int CommsLib::find_beacon_avx(
             << "Threshold took " << us(t2, t3) << " usec\n"
             << "PeakDetect took " << us(t3, t4) << " usec" << std::endl;
 #endif
-  if (valid_peaks.empty()) return -1;
-  if (pick == BeaconPick::kFirstCrossing) return valid_peaks.front();
+  if (valid_peaks.empty()) return BeaconResult{};
+  if (pick == BeaconPick::kFirstCrossing) return result(valid_peaks.front());
   if (pick == BeaconPick::kTargetedArgmax) {
     // The caller has asserted the window cannot hold two beacon copies, so there
     // is no copy ambiguity to be repeatable ABOUT and the strongest crossing is
@@ -501,7 +512,7 @@ int CommsLib::find_beacon_avx(
       const double r = ranking(i);
       if (r > best_ratio) { best_ratio = r; best = i; }
     }
-    return best;
+    return result(best);
   }
   if (pick == BeaconPick::kFirstPath) {
     // Peak first, exactly as kTargetedArgmax.
@@ -526,7 +537,7 @@ int CommsLib::find_beacon_avx(
     for (int i = std::max(0, best - win); i < best; ++i) {
       if (ranking(static_cast<size_t>(i)) >= floor_ratio) { first = i; break; }
     }
-    return first;
+    return result(first);
   }
   // valid_peaks is built in increasing index order, so front() is the earliest
   // crossing and therefore selects the earliest beacon copy in the window. Refine
@@ -542,7 +553,17 @@ int CommsLib::find_beacon_avx(
     const double r = ranking(i);
     if (r > best_ratio) { best_ratio = r; best = i; }
   }
-  return best;
+  return result(best);
+}
+
+int CommsLib::find_beacon_avx(
+    const std::vector<std::complex<float>>& raw_samples,
+    const std::vector<std::complex<float>>& match_samples, float corr_scale,
+    BeaconPick pick, BeaconThresh thresh_form, int first_path_window,
+    double first_path_db) {
+  return static_cast<int>(find_beacon_ex(raw_samples, match_samples, corr_scale, pick,
+                                         thresh_form, first_path_window, first_path_db)
+                              .index);
 }
 
 // Real-time entry: cint16 samples straight from the radio -> cfloat -> detect.
@@ -571,6 +592,22 @@ ssize_t CommsLib::find_beacon_avx(
   return CommsLib::find_beacon_avx(sync_compare, match_samples, corr_scale,
                                    pick, thresh_form, first_path_window,
                                    first_path_db);
+}
+
+CommsLib::BeaconResult CommsLib::find_beacon_ex(
+    const std::complex<int16_t>* raw_samples,
+    const std::vector<std::complex<float>>& match_samples, size_t check_window,
+    float corr_scale, BeaconPick pick, BeaconThresh thresh_form,
+    int first_path_window, double first_path_db) {
+  static constexpr float kShortMaxFloat = 32767.0f;
+  std::vector<std::complex<float>> sync_compare(check_window);
+  for (size_t i = 0; i < check_window; ++i) {
+    sync_compare[i] = std::complex<float>(
+        static_cast<float>(raw_samples[i].real()) / kShortMaxFloat,
+        static_cast<float>(raw_samples[i].imag()) / kShortMaxFloat);
+  }
+  return find_beacon_ex(sync_compare, match_samples, corr_scale, pick, thresh_form,
+                        first_path_window, first_path_db);
 }
 
 // Element-wise complex multiply, portable equivalent of the float

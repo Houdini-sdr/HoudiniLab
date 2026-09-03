@@ -238,7 +238,7 @@ class CommsLib {
     // The other trade is discrimination against the preamble: the lag product
     // puts the preamble plateau ~1/L^2 below the peak, and without it the
     // separation is only ~1/L, 21 dB instead of 42.
-    kXCorrNoLag,
+    kCoherence,  // (was kXCorrNoLag; "nolag" survives only as the env alias)
   };
 
   // Functions using AVX
@@ -271,6 +271,24 @@ class CommsLib {
       BeaconPick pick, BeaconThresh thresh_form, int first_path_window,
       double first_path_db);
   static ssize_t find_beacon_avx(
+      const std::complex<int16_t>* raw_samples,
+      const std::vector<std::complex<float>>& match_samples,
+      size_t check_window, float corr_scale, BeaconPick pick,
+      BeaconThresh thresh_form, int first_path_window, double first_path_db);
+  // The detection with its evidence: the index, the decision statistic at it
+  // (in the form's units) and the correlator output there (the matched
+  // field's complex peak). The find_beacon_avx overloads return .index.
+  struct BeaconResult {
+    ssize_t index = -1;
+    double statistic = 0.0;
+    std::complex<float> peak{0.0f, 0.0f};
+  };
+  static BeaconResult find_beacon_ex(
+      const std::vector<std::complex<float>>& raw_samples,
+      const std::vector<std::complex<float>>& match_samples, float corr_scale,
+      BeaconPick pick, BeaconThresh thresh_form, int first_path_window,
+      double first_path_db);
+  static BeaconResult find_beacon_ex(
       const std::complex<int16_t>* raw_samples,
       const std::vector<std::complex<float>>& match_samples,
       size_t check_window, float corr_scale, BeaconPick pick,

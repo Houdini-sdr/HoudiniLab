@@ -249,7 +249,8 @@ enable_testing()
 # tool all take them from this library, so there is one find_beacon_avx in
 # the tree (review rounds 2 and 3).
 add_library(houdini_sync STATIC
-    sync/sync_config.cc
+  sync/sync_config.cc
+  sync/beacon_shape.cc
     sync/detector.cc
     comms-lib.cc comms-lib-avx.cc comms-lib-portable.cc utils.cc)
 target_include_directories(houdini_sync PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}

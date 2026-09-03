@@ -815,23 +815,14 @@ void Config::genPilots() {
   // it measured the best detection margin of the four and every prior result in
   // DEMO_VERIFICATION was taken against it. See 8.111-8.116 for the comparison.
   srand(time(NULL));
-  beacon_shapes::Shape shape;
-  if (beacon_shapes::parse(beacon_type_, &shape) == false) {
-    // Do NOT fall back. A typo that quietly ships the old beacon is exactly the
-    // failure this parameter exists to make visible.
-    throw std::invalid_argument(
-        "unknown beacon_type \"" + beacon_type_ +
-        "\" -- expected legacy, legacy_guard, dot11, nr or nr_pss");
-  }
-  const auto shape_desc = beacon_shapes::make(shape);
-  beacon_fine_off_ = shape_desc.fine_off;
-  beacon_fine_len_ = shape_desc.fine_len;
-  beacon_fine_reps_ = shape_desc.fine_reps;
-  beacon_coarse_off_ = shape_desc.coarse_off;
-  beacon_coarse_len_ = shape_desc.coarse_len;
-  beacon_coarse_reps_ = shape_desc.coarse_reps;
-  beacon_replica_tail_ = shape_desc.replica_tail();
-  beacon_replica_reps_ = shape_desc.replica_reps;
+  // The configured beacon as ONE object (sync/beacon_shape.h): waveform,
+  // replica, field geometry and the index convention every consumer rests
+  // on. An unknown name throws, naming the valid ones: a typo that quietly
+  // ships the old beacon is exactly the failure this parameter exists to
+  // make visible.
+  shape_ = std::make_unique<houdini::sync::BeaconShape>(houdini::sync::BeaconShape::make(
+      beacon_type_, platform(), static_cast<size_t>(prefix_)));
+  const houdini::sync::BeaconShape& shape = *shape_;
 
   // NOTE THE REPLICA'S SCALE IS LOAD-BEARING, and do not "tidy" it to unit
   // power. find_beacon's test is `corr_scale * |gc|^2|gc_lag|^2 > sum|gc|^2`,
@@ -839,22 +830,22 @@ void Config::genPilots() {
   // by k^2. Every detector ratio in DEMO_VERIFICATION 8.112 was measured with
   // the replica exactly as it comes out of beacon_shapes, and renormalising it
   // would move every threshold without touching a threshold.
-  auto gold_ifft_ci16 = Utils::cfloat_to_cint16(shape_desc.replica);
-  gold_cf32_.assign(shape_desc.replica.begin(), shape_desc.replica.end());
+  auto gold_ifft_ci16 = Utils::cfloat_to_cint16(shape.replica());
+  gold_cf32_.assign(shape.replica().begin(), shape.replica().end());
   // The sentinels resolve against the shape and the slot layout now that both
   // are known; what is printed here is the configuration actually used.
-  sync_.resolve({gold_cf32_.size(), static_cast<double>(prefix_)});
+  sync_.resolve({shape.replicaLen(), static_cast<double>(prefix_), platform()});
   MLPD_INFO("%s", sync_.describe().c_str());
-  std::cout << "Beacon: type " << beacon_type_ << ", core " << shape_desc.core.size()
-            << " samples, matched field " << shape_desc.replica_reps << " x "
-            << shape_desc.replica.size() << " at offset "
-            << shape_desc.replica_off << " (beacon end = index + "
-            << shape_desc.replica_tail() << ")"
-            << (shape_desc.guard_len ? " (cyclic guard " : " (no guard")
-            << (shape_desc.guard_len
-                    ? std::to_string(shape_desc.guard_len) + ")"
+  std::cout << "Beacon: type " << beacon_type_ << ", core " << shape.coreLen()
+            << " samples, matched field " << shape.replicaReps() << " x "
+            << shape.replicaLen() << " at offset "
+            << shape.replicaOff() << " (beacon end = index + "
+            << shape.replicaTail() << ")"
+            << (shape.guardLen() ? " (cyclic guard " : " (no guard")
+            << (shape.guardLen()
+                    ? std::to_string(shape.guardLen()) + ")"
                     : ")")
-            << ", PAPR " << shape_desc.papr_db() << " dB" << std::endl;
+            << ", PAPR " << shape.paprDb() << " dB" << std::endl;
 
   if (getenv("HOUDINI_DUMP_GOLD") != nullptr) {  // the exact find_beacon match
     FILE* f = std::fopen("/tmp/gold.bin", "wb");
@@ -883,7 +874,7 @@ void Config::genPilots() {
   // guard only lowered the level at which that happens. Fixed 2026-09-02 by
   // CommsLib::BeaconPick::kTargetedArgmax; `legacy_guard` is now a selectable
   // shape and measures the same index as every other. See BACKLOG AP-34.
-  beacon_ci16_ = Utils::cfloat_to_cint16(shape_desc.core);
+  beacon_ci16_ = Utils::cfloat_to_cint16(shape.core());
   beacon_size_ = beacon_ci16_.size();
   if (getenv("HOUDINI_DUMP_GOLD") != nullptr) {
     // The beacon core for the CONFIGURED shape (pre-prefix, unconjugated, at

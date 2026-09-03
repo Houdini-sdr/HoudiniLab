@@ -36,25 +36,26 @@ class SnrWindowGuard {
   ///                   guard, inside the noise sum -- a 1.4x echo 24 samples
   ///                   late then reads ~20 dB, the floor rejects, and resync
   ///                   escalates (8.151). Use guardFor() to derive it.
-  SnrWindowGuard(double floor_db, size_t guard)
-      : floor_db_(floor_db), guard_(std::max<size_t>(8, guard)) {}
+  /// @param core_len  the beacon core length (BeaconShape::coreLen)
+  /// @param floor_db  the in-window SNR a detection must clear
+  /// @param guard     samples excluded either side of the core (guardFor)
+  SnrWindowGuard(size_t core_len, double floor_db, size_t guard)
+      : core_len_(core_len), floor_db_(floor_db), guard_(std::max<size_t>(8, guard)) {}
 
-  /// The guard the pre-library receiver used, kept exactly: the CONFIGURED
-  /// first-path window when one is given, else 64 regardless of replica
-  /// length (receiver.cc firstPathBackWindow at 3ca16fe) -- and never
-  /// narrower than the detector's RESOLVED window, which is the 8.151 rule.
-  /// Identical to the old value for every shape in the tree (the derived
-  /// window is at most 64 there).
-  static size_t guardFor(int configured_window, int resolved_window) {
-    const int base = configured_window >= 0 ? configured_window : 64;
-    return static_cast<size_t>(std::max(8, std::max(base, resolved_window)));
+  /// THE GUARD COVERS THE FIRST-PATH BACK WINDOW (8.151): the noise estimate
+  /// must not include the samples the detector may have skipped in front of
+  /// the peak. One rule, from the detector's RESOLVED window, never below 8.
+  /// (The pre-library guard was 64 whatever the replica, which coincided with
+  /// this for the two fixtured shapes; for a 64-tap replica this is 32.)
+  static size_t guardFor(int resolved_first_path_window) {
+    return static_cast<size_t>(std::max(8, resolved_first_path_window));
   }
 
   /// Energy of the presumed core [end_idx - core_len, end_idx) against the
   /// rest of the window, in dB. Returns -99 for an impossible span and +99 for
   /// a window with no noise samples left to compare against.
-  double snrDb(const std::complex<int16_t>* w, size_t n, ssize_t end_idx,
-               size_t core_len) const {
+  double snrDb(const std::complex<int16_t>* w, size_t n, ssize_t end_idx) const {
+    const size_t core_len = core_len_;
     const ssize_t lo = end_idx - static_cast<ssize_t>(core_len);
     if (lo < 0 || end_idx > static_cast<ssize_t>(n) || core_len == 0) return -99.0;
     const ssize_t g = static_cast<ssize_t>(guard_);
@@ -78,8 +79,10 @@ class SnrWindowGuard {
   bool accept(double snr_db) const { return snr_db >= floor_db_; }
   double floorDb() const { return floor_db_; }
   size_t guard() const { return guard_; }
+  size_t coreLen() const { return core_len_; }
 
  private:
+  size_t core_len_;
   double floor_db_;
   size_t guard_;
 };

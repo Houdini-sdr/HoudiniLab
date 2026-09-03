@@ -64,7 +64,7 @@ static constexpr int kGoldLen = 128;
 // to absorb (DEMO_VERIFICATION.md 4.28/4.29). The residual after this fix is
 // pure pipeline/path latency (~1 us class, measured ~122 samples on-board),
 // which is exactly what tx_advance / ue_tx_advance_ticks calibrate.
-static constexpr ssize_t kHoudiniStrobeOffsTicks = 384;
+// (The 384-tick strobe offset is houdini::sync::kHoudiniStrobeOffsetTicks.)
 
 // The detector's threshold form and pick rule are configuration now
 // (sync.detector.threshold / sync.detector.pick, with HOUDINI_BEACON_THRESH and
@@ -74,12 +74,9 @@ static constexpr ssize_t kHoudiniStrobeOffsTicks = 384;
 // power-ratio form is a different test at every level, why a single-copy
 // replica forces the coherence form -- is in sync/detector.h,
 // CommsLib::BeaconPick / BeaconThresh and DEMO_VERIFICATION 8.138-8.154.
-static ssize_t houdiniBeaconEnd(Config* cfg) {
-  if (cfg->is_houdini()) {
-    return kHoudiniStrobeOffsTicks + static_cast<ssize_t>(cfg->beacon_size());
-  }
-  return static_cast<ssize_t>(cfg->beacon_size() + cfg->prefix());
-}
+// The expected beacon end in a slot-aligned window is
+// config_->shape().expectedEndOffset(): the strobe offset + core on Houdini,
+// core + prefix on Iris/UHD. One definition, in sync/beacon_shape.h.
 
 // The in-window SNR confirm is sync::SnrWindowGuard (sync/confirm.h), built
 // once in the constructor with the configured floor and a guard that covers the
@@ -130,24 +127,14 @@ Receiver::Receiver(
   // which rule produced its numbers.
   {
     const auto& sc = config_->sync();
-    sync_detector_ = std::make_unique<houdini::sync::Detector>(
-        config_->gold_cf32(), config_->beacon_replica_reps(),
-        config_->beacon_replica_tail(), sc.detector, config_->is_houdini());
-    // THE GUARD MUST COVER THE FIRST-PATH BACK WINDOW (8.151), and it stays
-    // the pre-library value (64 unless configured) so no shape's in-window SNR
-    // moves: SnrWindowGuard::guardFor.
+    const auto& shape = config_->shape();
+    sync_detector_ = std::make_unique<houdini::sync::Detector>(shape, sc.detector);
+    // THE GUARD COVERS THE FIRST-PATH BACK WINDOW (8.151): one rule, from the
+    // detector's resolved window (SnrWindowGuard::guardFor).
     sync_guard_ = std::make_unique<houdini::sync::SnrWindowGuard>(
-        sc.confirm.snr_floor_db,
-        houdini::sync::SnrWindowGuard::guardFor(sc.detector.first_path_window,
-                                                sync_detector_->firstPathWindow()));
-    houdini::sync::FieldGeometry g;
-    g.core_len = static_cast<int>(config_->beacon_size());
-    g.fine_off = static_cast<int>(config_->beacon_fine_off());
-    g.fine_len = static_cast<int>(config_->beacon_fine_len());
-    g.fine_reps = static_cast<int>(config_->beacon_fine_reps());
-    g.coarse_off = static_cast<int>(config_->beacon_coarse_off());
-    g.coarse_len = static_cast<int>(config_->beacon_coarse_len());
-    g.coarse_reps = static_cast<int>(config_->beacon_coarse_reps());
+        shape.coreLen(), sc.confirm.snr_floor_db,
+        houdini::sync::SnrWindowGuard::guardFor(sync_detector_->firstPathWindow()));
+    const houdini::sync::FieldGeometry& g = shape.geometry();
     // The matched-NCO R2C RX mixer delivers baseband CONJUGATED on Houdini, so
     // the estimator undoes the sign there (AP-30 verified the sign and scale).
     cfo_estimator_ = std::make_unique<houdini::sync::RepetitionPhaseEstimator>(
@@ -941,7 +928,7 @@ void Receiver::clientTxPilots(size_t user_id, long long base_time,
     // one: the assign plus two memcpys run per scheduled frame rather than once
     // per run. Still correct, and measured cost is what decides whether it is
     // worth caching by pad (AP-54); do not re-assert the old property.
-    constexpr long long kTddGridTicks = 384;
+    constexpr long long kTddGridTicks = houdini::sync::kHoudiniStrobeOffsetTicks;
     thread_local long long pilot_cursor = 0;  // last-scheduled txTime (samples)
     thread_local std::vector<std::complex<int16_t>> burst;
     thread_local long long burst_pad = -1;
@@ -1083,7 +1070,8 @@ int Receiver::clientTxData(int tid, int frame_id, long long base_time) {
 
 ssize_t Receiver::syncSearch(const std::complex<int16_t>* check_data,
                              size_t search_window, float corr_scale,
-                             CommsLib::BeaconPick pick) {
+                             houdini::sync::PickRule pick,
+                             houdini::sync::Detection* detection) {
   // One detector for BOTH search paths: acquisition and resync agree about what
   // the threshold means, which form the replica supports, and where the beacon
   // END sits relative to the correlator's index (the replica tail) -- all
@@ -1091,23 +1079,13 @@ ssize_t Receiver::syncSearch(const std::complex<int16_t>* check_data,
   // wired through the library yet: it still returns the first crossing and
   // needs the argmax-by-ratio change before it can serve acquisition.
   assert(search_window <= config_->samps_per_frame());
-#if defined(USE_CUDA)
-  // NOT the configured detector: the CUDA correlator still returns the first
-  // crossing under the power-ratio form and knows nothing of the pick rule or
-  // the first-path knobs. The startup log says so under this build.
-  const char* kPath = "cuda";
-  ssize_t sync_index = CommsLib::find_beacon_cuda(
-      check_data, config_->gold_cf32(), search_window, corr_scale);
-  if (sync_index >= 0 && config_->is_houdini()) {
-    const ssize_t tail = static_cast<ssize_t>(config_->beacon_replica_tail());
-    if (sync_index + tail >= static_cast<ssize_t>(search_window)) sync_index = -1;
-    else sync_index += tail;
-  }
-#else
-  const char* kPath = "avx";
-  const ssize_t sync_index =
-      sync_detector_->run(check_data, search_window, corr_scale, pick).index;
-#endif
+  // One detector for every backend: the CUDA correlator (USE_CUDA) is a
+  // backend inside it, and the index convention is applied in one place.
+  const char* kPath = sync_detector_->backendName();
+  const houdini::sync::Detection det =
+      sync_detector_->run(check_data, search_window, corr_scale, pick);
+  const ssize_t sync_index = det.end_index;
+  if (detection != nullptr) *detection = det;
   if (std::getenv("HOUDINI_SYNC_DEBUG") != nullptr) {
     static std::atomic<int> c{0};
     if ((c.fetch_add(1) % 20) == 0) {  // braces load-bearing (macro)
@@ -1424,7 +1402,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
     while ((sync_count < kTargetSyncCount) && config_->running()) {
       const ssize_t sync_index = clientSyncBeacon(tid, beacon_detect_window);
       if (sync_index >= 0) {
-        const ssize_t adjust = sync_index - houdiniBeaconEnd(config_);
+        const ssize_t adjust = sync_index - config_->shape().expectedEndOffset();
         const size_t alignment_samples =
             config_->samps_per_frame() - beacon_detect_window;
         MLPD_INFO(
@@ -1680,37 +1658,30 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
     // log carried no record of which rule produced its numbers -- in a change
     // whose other half exists because a run's identity was not recorded.
     {
-      const auto f = sync_detector_->form();
-      const auto pk = sync_detector_->pick();
       MLPD_INFO(
-          "Beacon detector: threshold %s, resync pick %s, acquisition pick %s "
-          "(first-path back window %d samples, floor %.1f dB); SNR floor %.1f "
-          "dB, SNR guard %zu samples; CFO guard %d margin %d\n",
-          f == CommsLib::BeaconThresh::kNormalizedXCorr ? "xcorr"
-          : f == CommsLib::BeaconThresh::kXCorrNoLag    ? "coherence"
-          : f == CommsLib::BeaconThresh::kNormalized    ? "norm"
-                                                        : "power",
-          pk == CommsLib::BeaconPick::kFirstPath        ? "first-path"
-          : pk == CommsLib::BeaconPick::kTargetedArgmax ? "argmax"
-          : pk == CommsLib::BeaconPick::kFirstCrossing  ? "first-crossing"
-                                                        : "refined",
-          config_->is_houdini() ? "same as resync" : "first-cluster-refined",
+          "Beacon detector [%s]: threshold %s, resync pick %s, acquisition pick "
+          "%s (first-path back window %d samples, floor %.1f dB); SNR floor "
+          "%.1f dB, SNR guard %zu samples; CFO guard %d margin %d\n",
+          sync_detector_->backendName(), houdini::sync::name(sync_detector_->form()),
+          houdini::sync::name(sync_detector_->pick()),
+          houdini::sync::name(sync_detector_->pick()),
           sync_detector_->firstPathWindow(), sync_detector_->firstPathFloorDb(),
           sync_guard_->floorDb(), sync_guard_->guard(),
           config_->sync().cfo.index_guard, cfo_estimator_->margin());
     }
-#if defined(USE_CUDA)
-    MLPD_WARN(
-        "USE_CUDA build: syncSearch runs find_beacon_cuda (first crossing, "
-        "power ratio); the configured detector.threshold / pick / first-path "
-        "knobs above are NOT applied\n");
-#endif
-    if (config_->beacon_replica_reps() < 2) {
+    if (!sync_detector_->backendAppliesConfig()) {
+      MLPD_WARN(
+          "Detector backend %s returns the first crossing under the power-ratio "
+          "form; the configured detector.threshold / pick / first-path knobs "
+          "above are NOT applied\n",
+          sync_detector_->backendName());
+    }
+    if (config_->shape().singleCopy()) {
       MLPD_INFO(
           "Beacon replica is a single copy (%s): threshold form forced to "
-          "nolag (plain matched filter, no repeat check); beacon end = "
+          "coherence (plain matched filter, no repeat check); beacon end = "
           "detector index + %zu\n",
-          config_->beacon_type().c_str(), config_->beacon_replica_tail());
+          config_->beacon_type().c_str(), config_->shape().replicaTail());
     }
     MLPD_INFO(
         "Grid tracker: %s (alpha %.3f beta %.3f step limit %.3f ppm; kalman "
@@ -1891,6 +1862,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
     if (resync == true) {
       ssize_t sync_index = -1;
       bool resync_attempted = true;
+      houdini::sync::Detection resync_det;  // the targeted search's evidence
       if (config_->is_houdini() && houdini_pilot_ref_valid) {
         // TARGETED liveness check: the anchored grid predicts exactly where
         // the beacon END lands in this (drained, random-phase) window, so
@@ -1908,7 +1880,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
         // period == nominal -- on free-running clocks that walks off the beacon
         // within a second and the tracker then never gets another observation.
         const long long beacon_end =
-            static_cast<long long>(houdiniBeaconEnd(config_));
+            static_cast<long long>(config_->shape().expectedEndOffset());
         const double n_due =
             std::ceil(static_cast<double>(rx_beacon_time - houdini_pilot_ref -
                                           beacon_end) /
@@ -1952,7 +1924,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
           // with this set to `first` and the false lock appears on silicon.
           const ssize_t idx = this->syncSearch(
               base + s0, static_cast<size_t>(slice_len),
-              resyncScale(resync_retry_cnt), sync_detector_->pick());
+              resyncScale(resync_retry_cnt), sync_detector_->pick(), &resync_det);
           if (idx >= 0) sync_index = s0 + idx;
         } else {
           resync_attempted = false;  // beacon not due in this window
@@ -1970,7 +1942,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
             reinterpret_cast<std::complex<int16_t>*>(
                 rxbuff.at(kSyncDetectChannel)),
             request_samples, resyncScale(resync_retry_cnt),
-            CommsLib::BeaconPick::kFirstCrossing);
+            houdini::sync::PickRule::kFirstCrossing);
       }
       if (sync_index >= 0 && config_->is_houdini() &&
           houdini_pilot_ref_valid) {
@@ -1979,8 +1951,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
         const double snr = sync_guard_->snrDb(
             reinterpret_cast<std::complex<int16_t>*>(
                 rxbuff.at(kSyncDetectChannel)),
-            static_cast<size_t>(request_samples), sync_index,
-            config_->beacon_size());
+            static_cast<size_t>(request_samples), sync_index);
         MLPD_INFO("Re-sync frame %zu: detection idx %ld snr %.1f dB, tid %d\n",
                   frame_id, sync_index, snr, tid);
         // Ledger 4.42 instrument: dump this window + the verdict inputs so the
@@ -2007,19 +1978,21 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
               fprintf(fg,
                       "n %d\nsync_index %zd\nsnr %.2f\nframe %zu\n"
                       "rx_beacon_time %lld\npilot_ref %lld\nbeacon_end %lld\n"
-                      "corr_scale %.6g\nthresh %d\npick %d\nfirst_path_window %d\n"
+                      "corr_scale %.6g\nthresh %s\npick %s\nfirst_path_window %d\n"
                       "first_path_floor_db %.3f\nsnr_floor_db %.3f\n"
-                      "snr_guard %zu\nreplica_tail %zu\nbeacon_type %s\n",
+                      "snr_guard %zu\nreplica_tail %zu\nbeacon_type %s\n"
+                      "statistic %.6g\nbar %.6g\n",
                       request_samples, sync_index, snr, frame_id,
                       rx_beacon_time, houdini_pilot_ref,
-                      static_cast<long long>(houdiniBeaconEnd(config_)),
+                      static_cast<long long>(config_->shape().expectedEndOffset()),
                       static_cast<double>(resyncScale(resync_retry_cnt)),
-                      static_cast<int>(sync_detector_->form()),
-                      static_cast<int>(sync_detector_->pick()),
+                      houdini::sync::name(sync_detector_->form()),
+                      houdini::sync::name(sync_detector_->pick()),
                       sync_detector_->firstPathWindow(),
                       sync_detector_->firstPathFloorDb(), sync_guard_->floorDb(),
                       sync_guard_->guard(), sync_detector_->replicaTail(),
-                      config_->beacon_type().c_str());
+                      config_->beacon_type().c_str(), resync_det.statistic,
+                      resync_det.bar);
               fclose(fg);
             }
           }
@@ -2032,7 +2005,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
         } else {
           const long long abs_end = rx_beacon_time + sync_index;
           const long long beacon_end =
-              static_cast<long long>(houdiniBeaconEnd(config_));
+              static_cast<long long>(config_->shape().expectedEndOffset());
           const long long kf = houdiniGridIndex(abs_end - beacon_end);
           const long long resid =
               abs_end - (houdiniGridStart(kf) + beacon_end);
@@ -2241,7 +2214,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
         }
       } else if (sync_index >= 0) {
         const int new_rx_offset =
-            static_cast<int>(sync_index - houdiniBeaconEnd(config_));
+            static_cast<int>(sync_index - config_->shape().expectedEndOffset());
         //Adjust tx time
         rx_beacon_time += new_rx_offset;
         if (config_->is_houdini() && !houdini_pilot_ref_valid) {
@@ -2592,7 +2565,7 @@ bool Receiver::houdiniAcquireAnchor(int tid, size_t detect_window,
       period = std::min(hi, std::max(lo, cand));
       consecutive_fails = 0;
       if (confirms >= 2 && k >= kRefineSpan) {
-        anchor_out = first_abs - houdiniBeaconEnd(config_);
+        anchor_out = first_abs - config_->shape().expectedEndOffset();
         if (period_out != nullptr) *period_out = period;
         MLPD_INFO(
             "houdiniAcquireAnchor [%d]: lock CONFIRMED (resid %lld over "
@@ -2694,7 +2667,7 @@ ssize_t Receiver::clientSyncBeacon(size_t radio_id, size_t sample_window,
         if (config_->is_houdini() && sync_index >= 0) {
           const double snr = sync_guard_->snrDb(
               syncbuffmem.at(kSyncDetectChannel).data(), sample_window,
-              sync_index, config_->beacon_size());
+              sync_index);
           if (!sync_guard_->accept(snr)) {
             static std::atomic<int> rej{0};
             const int nrej = rej.fetch_add(1);

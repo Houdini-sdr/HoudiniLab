@@ -131,7 +131,7 @@ long long residualCh(const Desc& b, double peak_counts, double snr_db,
   // A single-copy replica (nr_pss) has no repeat to check: the receiver forces
   // the plain matched filter for it (syncSearch), and so does this test, so
   // every column below measures the form the shape would actually run with.
-  if (b.replica_reps < 2) thresh_form = Thr::kXCorrNoLag;
+  if (b.replica_reps < 2) thresh_form = Thr::kCoherence;
   const ssize_t idx =
       CommsLib::find_beacon_avx(buf.data(), b.replica, n, corr_scale, pick,
                                 thresh_form);
@@ -198,7 +198,7 @@ long long residual(const Desc& b, double peak_counts, double snr_db,
         static_cast<int16_t>(std::max(-32000.0, std::min(32000.0, re))),
         static_cast<int16_t>(std::max(-32000.0, std::min(32000.0, im))));
   }
-  if (b.replica_reps < 2) thresh_form = Thr::kXCorrNoLag;  // see residualCh
+  if (b.replica_reps < 2) thresh_form = Thr::kCoherence;  // see residualCh
   const ssize_t idx = CommsLib::find_beacon_avx(buf.data(), b.replica, n,
                                                corr_scale, pick, thresh_form);
   const long long rep_tail = static_cast<long long>(b.replica_tail());
@@ -429,8 +429,8 @@ int main() {
                             {Thr::kNormalizedXCorr, Pick::kFirstCrossing},
                             {Thr::kNormalizedXCorr, Pick::kTargetedArgmax},
                             {Thr::kNormalizedXCorr, Pick::kFirstPath},
-                            {Thr::kXCorrNoLag, Pick::kFirstCrossing},
-                            {Thr::kXCorrNoLag, Pick::kFirstPath}};
+                            {Thr::kCoherence, Pick::kFirstCrossing},
+                            {Thr::kCoherence, Pick::kFirstPath}};
     for (const auto& cb : combos) {
       {
         const Thr tf = cb.tf; const Pick pk = cb.pk;
@@ -455,7 +455,7 @@ int main() {
           power_first_bad += nlev - exact;
         // nr_pss runs nolag in EVERY column (residual() forces it), so it must
         // not be counted as evidence about the repeat check on the others.
-        if (tf == Thr::kXCorrNoLag && pk == Pick::kFirstPath) {
+        if (tf == Thr::kCoherence && pk == Pick::kFirstPath) {
           if (b.replica_reps < 2) nrpss_bad += nlev - exact;
           else nolag_bad += nlev - exact;
         }
@@ -511,11 +511,11 @@ int main() {
   std::printf("   spread\n");
   for (const auto& b : ds) {
     for (const auto tf : {Thr::kPowerRatio, Thr::kNormalizedXCorr,
-                          Thr::kXCorrNoLag}) {
+                          Thr::kCoherence}) {
       // A single-copy replica runs nolag whatever is asked (residual() forces
       // it, as syncSearch does), so its other two rows would be duplicates
       // printed under the wrong name.
-      if (b.replica_reps < 2 && tf != Thr::kXCorrNoLag) continue;
+      if (b.replica_reps < 2 && tf != Thr::kCoherence) continue;
       std::printf("%-14s %-10s", b.name.c_str(),
                   tf == Thr::kPowerRatio ? "power"
                       : tf == Thr::kNormalizedXCorr ? "xcorr" : "nolag");
@@ -563,7 +563,7 @@ int main() {
   // channel, not of the replica.
   struct Ota { Shape shape; Thr tf; const char* label; };
   const Ota otas[] = {{Shape::kLegacy, Thr::kNormalizedXCorr, "legacy beacon, xcorr threshold"},
-                      {Shape::kNrPss, Thr::kXCorrNoLag, "nr_pss beacon, nolag threshold"}};
+                      {Shape::kNrPss, Thr::kCoherence, "nr_pss beacon, nolag threshold"}};
   for (const auto& ota : otas) {
     std::printf("\n=== over-the-air channels, %s ===\n", ota.label);
     const auto b = beacon_shapes::make(ota.shape);
@@ -575,7 +575,7 @@ int main() {
         {{{0, 1.0}, {24, 1.4}}, 4250.0, "echo +24 samp, STRONGER"},
         {{{0, 0.5}, {40, 1.4}}, 4250.0, "weak direct, echo +40 STRONGER"},
     };
-    const bool nolag_only = ota.tf == Thr::kXCorrNoLag;
+    const bool nolag_only = ota.tf == Thr::kCoherence;
     std::printf("%-30s %13s %13s %13s %13s\n", "channel",
                 nolag_only ? "nolag+first" : "xc+first",
                 nolag_only ? "nolag+argmax" : "xc+argmax",
@@ -588,7 +588,7 @@ int main() {
       const MC mcs[] = {{ota.tf, Pick::kFirstCrossing},
                         {ota.tf, Pick::kTargetedArgmax},
                         {ota.tf, Pick::kFirstPath},
-                        {Thr::kXCorrNoLag, Pick::kFirstPath}};
+                        {Thr::kCoherence, Pick::kFirstPath}};
       for (const auto& mc : mcs) {
         const Pick pk = mc.pk;
         long long lo = 1LL << 40, hi = -(1LL << 40);
@@ -758,7 +758,7 @@ int main() {
           const ssize_t idx = CommsLib::find_beacon_avx(
               buf.data(), nolag ? pss.replica : leg.replica, buf.size(), cs,
               Pick::kFirstClusterRefined,
-              nolag ? Thr::kXCorrNoLag : Thr::kNormalizedXCorr);
+              nolag ? Thr::kCoherence : Thr::kNormalizedXCorr);
           if (idx >= 0) ++crossed;
         }
         std::printf("%-10.0f %-8s %10d %10d\n", cs, nolag ? "nolag" : "xcorr",
@@ -833,7 +833,7 @@ int main() {
                 static_cast<int16_t>(v.real() * scale + gauss() * ns * scale),
                 static_cast<int16_t>(v.imag() * scale + gauss() * ns * scale));
           }
-          const Thr tf = b.replica_reps < 2 ? Thr::kXCorrNoLag : Thr::kNormalizedXCorr;
+          const Thr tf = b.replica_reps < 2 ? Thr::kCoherence : Thr::kNormalizedXCorr;
           const ssize_t idx = CommsLib::find_beacon_avx(buf.data(), b.replica, n,
                                                         kResyncCorrScale,
                                                         Pick::kFirstPath, tf);

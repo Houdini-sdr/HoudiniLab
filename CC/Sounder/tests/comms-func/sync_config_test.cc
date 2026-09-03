@@ -315,6 +315,26 @@ int main(int argc, char** argv) {
           "sync.detector.corr_scale wins over the legacy array; init still follows");
     check(SyncConfig::defaults().detector.bar.corr_scale == 10.0, "default corr_scale is 10");
   }
+  // 15. Platform defaults derive on Iris/UHD only, and the coherence bar
+  //     formula is what 8.163 measured.
+  {
+    auto i = SyncConfig::loadFromText("{}");
+    i.resolve({128, 160.0, houdini::sync::Platform::kIrisUhd});
+    check(i.detector.pick == PickRule::kFirstCrossing && i.detector.threshold == ThresholdForm::kPowerRatio &&
+              i.provenanceOf("detector.pick") == Source::kDerived &&
+              i.provenanceOf("detector.threshold") == Source::kDerived,
+          "resolve: Iris/UHD derives first_crossing and power (the framer's old rules)");
+    auto h = SyncConfig::loadFromText("{}");
+    h.resolve({128, 160.0, houdini::sync::Platform::kHoudini});
+    check(h.detector.pick == PickRule::kFirstPath && h.detector.threshold == ThresholdForm::kAuto &&
+              h.provenanceOf("detector.pick") == Source::kDefault,
+          "resolve: Houdini keeps the shipped defaults");
+    const double bar = houdini::sync::ThresholdPolicy::coherenceBar(128, 1e-3, 4096);
+    const double want = 1.0 - std::pow(1e-3 / 4096.0, 1.0 / 127.0);
+    check(std::fabs(bar - want) < 1e-12 && bar > 0.09 && bar < 0.13,
+          "coherenceBar: 1 - (pfa/window)^(1/(L-1)), about 0.11 at 128 taps, 1e-3 over 4096");
+    check(std::string(houdini::sync::name(houdini::sync::Platform::kIrisUhd)) == "iris_uhd", "Platform names");
+  }
   // 14. The schema is static and const-correct: a spec is found by path, and a
   //     const object can be read through it.
   {
