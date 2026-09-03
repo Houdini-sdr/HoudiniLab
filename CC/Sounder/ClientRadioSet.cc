@@ -14,6 +14,9 @@
 #include "SoapySDR/Errors.hpp"
 #include "SoapySDR/Formats.hpp"
 #include "SoapySDR/Time.hpp"
+#include "SoapySDR/Device.hpp"
+#include "SoapySDR/Formats.hpp"
+#include "SoapySDR/Time.hpp"
 #include "include/Radio.h"
 #include "include/comms-lib.h"
 #include "include/logger.h"
@@ -26,14 +29,6 @@ using json = nlohmann::json;
 
 static void initAGC(SoapySDR::Device* dev, Config* cfg);
 
-static void freeRadios(std::vector<Radio*>& radios) {
-  for (size_t i = 0; i < radios.size(); i++) {
-    if (radios.at(i) != nullptr) {
-      delete radios.at(i);
-      radios.at(i) = nullptr;
-    }
-  }
-}
 
 // Deliberate UE carrier detune for CFO-estimator validation (AP-33/AP-34).
 // Both boards share a 10 MHz reference, so there is no natural CFO to measure
@@ -90,12 +85,12 @@ ClientRadioSet::ClientRadioSet(Config* cfg) : _cfg(cfg) {
     if (radios.at(i) == nullptr) {
       radioNotFound = true;
       radioSerialNotFound.push_back(_cfg->cl_sdr_ids().at(i));
-      while (num_radios != 0 && radios.at(num_radios - 1) == NULL) {
+      while (num_radios != 0 && radios.at(num_radios - 1) == nullptr) {
         --num_radios;
         radios.pop_back();
       }
       if (i < num_radios) {
-        radios.at(i) = radios.at(--num_radios);
+        radios.at(i) = std::move(radios.at(--num_radios));
         radios.pop_back();
       }
     }
@@ -103,78 +98,7 @@ ClientRadioSet::ClientRadioSet(Config* cfg) : _cfg(cfg) {
   radios.shrink_to_fit();
 
   for (size_t i = 0; i < radios.size(); i++) {
-    auto* dev = radios.at(i)->RawDev();
-    if (_cfg->is_houdini()) {
-      // Houdini has no CBRS/UHF front end or LNA/PGA/TIA gain stages to report.
-      std::cout << _cfg->cl_sdr_ids().at(i) << ": Houdini RFSoC, RX rate "
-                << (dev->getSampleRate(SOAPY_SDR_RX, channels.at(0)) / 1e6)
-                << " MSPS" << std::endl;
-      Sounder::NodeVersions::instance().add(
-          "UE " + _cfg->cl_sdr_ids().at(i), dev->getHardwareInfo());
-      continue;
-    }
-    std::cout << _cfg->cl_sdr_ids().at(i) << ": Front end "
-              << dev->getHardwareInfo()["frontend"] << std::endl;
-    for (auto ch : channels) {
-      if (ch < dev->getNumChannels(SOAPY_SDR_RX)) {
-        printf("RX Channel %zu\n", ch);
-        printf("Actual RX sample rate: %fMSps...\n",
-               (dev->getSampleRate(SOAPY_SDR_RX, ch) / 1e6));
-        printf("Actual RX frequency: %fGHz...\n",
-               (dev->getFrequency(SOAPY_SDR_RX, ch) / 1e9));
-        printf("Actual RX gain: %f...\n", (dev->getGain(SOAPY_SDR_RX, ch)));
-        if (!kUseSoapyUHD) {
-          printf("Actual RX LNA gain: %f...\n",
-                 (dev->getGain(SOAPY_SDR_RX, ch, "LNA")));
-          printf("Actual RX PGA gain: %f...\n",
-                 (dev->getGain(SOAPY_SDR_RX, ch, "PGA")));
-          printf("Actual RX TIA gain: %f...\n",
-                 (dev->getGain(SOAPY_SDR_RX, ch, "TIA")));
-          if (dev->getHardwareInfo()["frontend"].find("CBRS") !=
-              std::string::npos) {
-            printf("Actual RX LNA1 gain: %f...\n",
-                   (dev->getGain(SOAPY_SDR_RX, ch, "LNA1")));
-            printf("Actual RX LNA2 gain: %f...\n",
-                   (dev->getGain(SOAPY_SDR_RX, ch, "LNA2")));
-          }
-        }
-        printf("Actual RX bandwidth: %fM...\n",
-               (dev->getBandwidth(SOAPY_SDR_RX, ch) / 1e6));
-        printf("Actual RX antenna: %s...\n",
-               (dev->getAntenna(SOAPY_SDR_RX, ch).c_str()));
-      }
-    }
-
-    for (auto ch : channels) {
-      if (ch < dev->getNumChannels(SOAPY_SDR_TX)) {
-        printf("TX Channel %zu\n", ch);
-        printf("Actual TX sample rate: %fMSps...\n",
-               (dev->getSampleRate(SOAPY_SDR_TX, ch) / 1e6));
-        printf("Actual TX frequency: %fGHz...\n",
-               (dev->getFrequency(SOAPY_SDR_TX, ch) / 1e9));
-        printf("Actual TX gain: %f...\n", (dev->getGain(SOAPY_SDR_TX, ch)));
-        if (!kUseSoapyUHD) {
-          printf("Actual TX PAD gain: %f...\n",
-                 (dev->getGain(SOAPY_SDR_TX, ch, "PAD")));
-          printf("Actual TX IAMP gain: %f...\n",
-                 (dev->getGain(SOAPY_SDR_TX, ch, "IAMP")));
-          if (dev->getHardwareInfo()["frontend"].find("CBRS") !=
-              std::string::npos) {
-            printf("Actual TX PA1 gain: %f...\n",
-                   (dev->getGain(SOAPY_SDR_TX, ch, "PA1")));
-            printf("Actual TX PA2 gain: %f...\n",
-                   (dev->getGain(SOAPY_SDR_TX, ch, "PA2")));
-            printf("Actual TX PA3 gain: %f...\n",
-                   (dev->getGain(SOAPY_SDR_TX, ch, "PA3")));
-          }
-        }
-        printf("Actual TX bandwidth: %fM...\n",
-               (dev->getBandwidth(SOAPY_SDR_TX, ch) / 1e6));
-        printf("Actual TX antenna: %s...\n",
-               (dev->getAntenna(SOAPY_SDR_TX, ch).c_str()));
-      }
-    }
-    std::cout << std::endl;
+    radios.at(i)->printSettings();
   }
   if (radioNotFound == true) {
     for (auto st = radioSerialNotFound.begin(); st != radioSerialNotFound.end();
@@ -264,16 +188,16 @@ ClientRadioSet::ClientRadioSet(Config* cfg) : _cfg(cfg) {
           dev->writeSetting("CORR_START",
                             (_cfg->cl_channel() == "B") ? "B" : "A");
       } else {
-        if (_cfg->is_houdini()) {
-          // Houdini has no HW trigger/correlator block -- software beacon sync
-          // (find_beacon in receiver.cc) drives acquisition. Just start streams.
-          radios.at(i)->activateRecv();
-          radios.at(i)->activateXmit();
-        } else if (!kUseSoapyUHD) {
+        if (radios.at(i)->hasHardwareTrigger()) {
           dev->setHardwareTime(0, "TRIGGER");
           radios.at(i)->activateRecv();
           radios.at(i)->activateXmit();
           dev->writeSetting("TRIGGER_GEN", "");
+        } else if (radios.at(i)->type() != Radio::Type::kSoapyUhd) {
+          // No hardware trigger or correlator block (Houdini): software beacon
+          // sync (the receiver's search) drives acquisition. Just start streams.
+          radios.at(i)->activateRecv();
+          radios.at(i)->activateXmit();
         } else {
           // For USRP clients always use the internal clock
           dev->setTimeSource("internal");
@@ -306,68 +230,37 @@ void ClientRadioSet::init(ClientRadioContext* context) {
   auto channels = Utils::strToChannels(_cfg->cl_channel());
   MLPD_TRACE("ClientRadioSet setting up radio: %d : %zu\n", (i + 1),
              _cfg->num_cl_sdrs());
-  SoapySDR::Kwargs args;
-  SoapySDR::Kwargs rx_stream_args;
-  SoapySDR::Kwargs tx_stream_args;
-  args["timeout"] = "1000000";
-  if (_cfg->is_houdini()) {
-    // SoapyHoudiniSDR remote device: cl_sdr_ids() holds the board IP. C++
-    // SoapyRemote auto-discovery is unreliable here, so address the remote
-    // node directly (matches SoapySDRUtil's enumerated kwargs).
-    args["driver"] = "houdinisdr";
-    args["remote"] =
-        "tcp://" + _cfg->cl_sdr_ids().at(i) + ":" + _cfg->remote_port();
-    args["remote:driver"] = "houdinisdr-device";
-    args["remote:type"] = "houdinisdr";
-    // RX host UDP port, one per radio; UE feeds pilots live -> host-fed streaming
-    // TX (SH-183). ue_tdd_pilot -> `tdd=1`: the TxTickAnchor accepts HAS_TIME
-    // starts on the 3.125 us TDD window grid (SH-248/SH-301) instead of whole-ms,
-    // so the pilot places finely with no ms drift-cliff.
-    rx_stream_args["local_port"] = std::to_string(10002 + i);
-    // Break-at-gap (SH-253), for the same reason as the BS side: recvHoudini's
-    // continuity check only sees read boundaries, so an intra-buffer splice would
-    // slip past it. Driver-default ON; asked for explicitly (AP-10).
-    rx_stream_args["rx_gap_break"] = "1";
-    tx_stream_args["tx_mode"] = "stream";
-    if (_cfg->ue_tdd_pilot()) tx_stream_args["tdd"] = "1";
-    // MTS (AP-23), same rationale as the BS side: pin the bring-up latency
-    // and align the ADC/DAC tiles the beacon-anchor -> pilot-TX arithmetic
-    // crosses. Radio.cc opens TX before RX for houdini (first-up rule).
-    rx_stream_args["mts"] = "true";
-    tx_stream_args["mts"] = "true";
-  } else if (kUseSoapyUHD == false) {
-    args["driver"] = "iris";
-    args["serial"] = _cfg->cl_sdr_ids().at(i);
-  } else {
-    args["driver"] = "uhd";
-    args["addr"] = _cfg->cl_sdr_ids().at(i);
-  }
+  // What this radio needs to open, as a value (the radio never sees Config);
+  // the factory is the only place that knows which backend a type is.
+  RadioParams p;
+  p.id = _cfg->cl_sdr_ids().at(i);
+  p.label = "UE " + p.id;
+  p.remote_port = _cfg->remote_port();
+  p.channels = channels;
+  p.rate_hz = _cfg->rate();
+  p.nco_hz = _cfg->nco();
+  p.rf_freq_hz = _cfg->radio_rf_freq();
+  p.bw_filter_hz = _cfg->bw_filter();
+  p.single_gain = _cfg->single_gain();
+  p.rx_freq_offset_hz = ueRxFreqOffsetHz();
+  p.tx_freq_offset_hz = ueTxFreqOffsetHz();
+  // Houdini UE: one RX host port per radio; the UE feeds pilots live, so
+  // host-fed streaming TX (SH-183); ue_tdd_pilot asks for the driver's TDD
+  // tick anchor (SH-248/SH-301).
+  p.rx_local_port = 10002 + i;
+  p.tx_mode = "stream";
+  p.tdd = _cfg->ue_tdd_pilot();
+  const Radio::Type type = radioTypeFor(*_cfg);
   try {
-    radios.at(i) = nullptr;
-    // Houdini needs rate+NCO set before the stream opens; Iris passes 0 and
-    // keeps configuring in dev_init. UE streams RX and TX at the app rate.
-    radios.at(i) = new Radio(args, SOAPY_SDR_CS16, channels, rx_stream_args,
-                             tx_stream_args,
-                             _cfg->is_houdini() ? _cfg->rate() : 0.0,
-                             _cfg->is_houdini() ? _cfg->rate() : 0.0,
-                             _cfg->is_houdini() ? _cfg->nco() : 0.0,
-                             ueRxFreqOffsetHz(), ueTxFreqOffsetHz());
+    radios.at(i) = Radio::create(type, p);
   } catch (std::runtime_error& err) {
     has_runtime_error = true;
-    MLPD_WARN("ClientRadioSet radio %d (%s) setup failed: %s\n", i,
-              _cfg->cl_sdr_ids().at(i).c_str(), err.what());
-
-    if (radios.at(i) != nullptr) {
-      MLPD_TRACE("Radio not used due to exception\n");
-      delete radios.at(i);
-      radios.at(i) = nullptr;
-    }
+    MLPD_WARN("ClientRadioSet radio %d (%s, %s) setup failed: %s\n", i, p.id.c_str(),
+              Radio::name(type), err.what());
+    radios.at(i).reset();
   } catch (...) {
     MLPD_WARN("Unknown exception\n");
-    if (radios.at(i) != nullptr) {
-      delete radios.at(i);
-      radios.at(i) = nullptr;
-    }
+    radios.at(i).reset();
     throw;
   }
   if (has_runtime_error == false) {
@@ -379,11 +272,11 @@ void ClientRadioSet::init(ClientRadioContext* context) {
           i);  // w/CBRS 3.6GHz [0:105], 2.5GHZ [0:108]
       double txgain = _cfg->cl_txgain_vec().at(ch).at(
           i);  // w/CBRS 3.6GHz [0:105], 2.5GHZ [0:105]
-      radios.at(i)->dev_init(_cfg, ch, rxgain, txgain);
+      radios.at(i)->setup(ch, rxgain, txgain);
     }
 
-    // Init AGC only for Iris device (Houdini has no AGC_CONFIG setting)
-    if (kUseSoapyUHD == false && !_cfg->is_houdini()) {
+    // The AGC block is an Iris feature (a capability, not a platform test).
+    if (radios.at(i)->hasAgc()) {
       initAGC(dev, _cfg);
     }
   }
@@ -392,13 +285,13 @@ void ClientRadioSet::init(ClientRadioContext* context) {
   thread_count->store(thread_count->load() - 1);
 }
 
-ClientRadioSet::~ClientRadioSet(void) { freeRadios(radios); }
+ClientRadioSet::~ClientRadioSet(void) { radios.clear(); }
 
 void ClientRadioSet::radioStop(void) {
   if (_cfg->hw_framer()) {
     std::string corrConfStr = "{\"corr_enabled\":false}";
     std::string tddConfStr = "{\"tdd_enabled\":false}";
-    for (Radio* stop_radio : radios) {
+    for (auto& stop_radio : radios) {
       auto* dev = stop_radio->RawDev();
       dev->writeSetting("CORR_CONFIG", corrConfStr);
       const auto timeStamp =
@@ -411,7 +304,7 @@ void ClientRadioSet::radioStop(void) {
       stop_radio->reset_DATA_clk_domain();
     }
   } else {
-    for (Radio* stop_radio : radios) {
+    for (auto& stop_radio : radios) {
       stop_radio->deactivateRecv();
       MLPD_TRACE("Stopping radio...\n");
     }
@@ -459,16 +352,10 @@ int ClientRadioSet::radioTx(size_t radio_id, const void* const* buffs,
     // the whole-ms fallback, with NO 1 ms drift-cliff. ue_tx_advance_ticks is a
     // fine calibration (ticks) added before the snap. Non-TDD Houdini keeps the
     // whole-ms fallback.
-    long long ft = frameTime;
-    if (_cfg->is_houdini() && _cfg->ue_tdd_pilot())
-      ft += _cfg->ue_tx_advance_ticks();
-    long long frameTimeNs = SoapySDR::ticksToTimeNs(ft, _cfg->rate());
-    if (_cfg->is_houdini()) {
-      constexpr long long kTddGridNs = 3125;    // 384 ticks, the TDD window grid
-      constexpr long long kNsPerMs = 1000000LL;
-      const long long q = _cfg->ue_tdd_pilot() ? kTddGridNs : kNsPerMs;
-      frameTimeNs = ((frameTimeNs + q / 2) / q) * q;  // snap to the accepted grid
-    }
+    // The transmit time grid is the backend's (RadioHoudini snaps to its TDD
+    // window grid after the tick advance; the others convert plainly).
+    long long frameTimeNs = radios.at(radio_id)->txTimeNs(
+        frameTime, _cfg->rate(), _cfg->ue_tdd_pilot(), _cfg->ue_tx_advance_ticks());
     const int r = radios.at(radio_id)->xmit(buffs, numSamps, flags, frameTimeNs);
     static const bool kTxDebug = std::getenv("HOUDINI_UE_TX_DEBUG") != nullptr;  // read once
     if (kTxDebug) {

@@ -327,7 +327,7 @@ void BaseRadioSet::dciqCalibrationProc(size_t channel) {
   size_t radioSize = _cfg->n_bs_sdrs().at(0);
 
   size_t referenceRadio = _cfg->cal_ref_sdr_id();  //radioSize / 2;
-  Radio* refRadio = bsRadios[0][referenceRadio];
+  Radio* refRadio = bsRadios[0][referenceRadio].get();
   auto* refDev = refRadio->RawDev();
 
   /* 
@@ -340,7 +340,7 @@ void BaseRadioSet::dciqCalibrationProc(size_t channel) {
   std::vector<SoapySDR::Device*> allButRefDevs;
   for (size_t r = 0; r < radioSize; r++) {
     if (r == referenceRadio) continue;
-    Radio* bsRadio = bsRadios[0][r];
+    Radio* bsRadio = bsRadios[0][r].get();
     auto* dev = bsRadio->RawDev();
     // must set TX "RF" Freq to make sure, we continue using the same LO for rx cal
     dev->setFrequency(SOAPY_SDR_TX, channel, "RF", centerRfFreq);

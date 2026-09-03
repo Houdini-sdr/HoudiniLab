@@ -91,15 +91,15 @@ BaseRadioSet::BaseRadioSet(Config* cfg, const bool calibrate_proc) : _cfg(cfg) {
 
     // Strip out broken radios.
     for (size_t i = 0; i < num_radios; i++) {
-      if (bsRadios.at(c).at(i) == NULL) {
+      if (bsRadios.at(c).at(i) == nullptr) {
         radioNotFound = true;
         radio_serial_not_found.push_back(_cfg->bs_sdr_ids().at(c).at(i));
-        while (num_radios != 0 && bsRadios.at(c).at(num_radios - 1) == NULL) {
+        while (num_radios != 0 && bsRadios.at(c).at(num_radios - 1) == nullptr) {
           --num_radios;
           bsRadios.at(c).pop_back();
         }
         if (i < num_radios) {
-          bsRadios.at(c).at(i) = bsRadios.at(c).at(--num_radios);
+          bsRadios.at(c).at(i) = std::move(bsRadios.at(c).at(--num_radios));
           bsRadios.at(c).pop_back();
         }
       }
@@ -167,86 +167,12 @@ BaseRadioSet::BaseRadioSet(Config* cfg, const bool calibrate_proc) : _cfg(cfg) {
     while (thread_count.load() > 0) {
     }
 
-    auto channels = Utils::strToChannels(_cfg->bs_channel());
-
     for (size_t i = 0; i < bsRadios.at(c).size(); i++) {
-      auto* dev = bsRadios.at(c).at(i)->RawDev();
-      if (_cfg->is_houdini()) {
-        // Houdini has no CBRS/UHF front end or LNA/PGA/TIA gain stages.
-        std::cout << _cfg->bs_sdr_ids().at(c).at(i) << ": Houdini RFSoC BS, TX "
-                  << (dev->getSampleRate(SOAPY_SDR_TX, channels.at(0)) / 1e6)
-                  << " MSPS" << std::endl;
-        // Register this node's gateware/firmware/host stack for the cross-node
-        // skew check the Receiver runs once every radio set is up.
-        Sounder::NodeVersions::instance().add(
-            "BS " + _cfg->bs_sdr_ids().at(c).at(i), dev->getHardwareInfo());
-        continue;
-      }
-      std::cout << _cfg->bs_sdr_ids().at(c).at(i) << ": Front end "
-                << dev->getHardwareInfo()["frontend"] << std::endl;
-      for (auto ch : channels) {
-        if (ch < dev->getNumChannels(SOAPY_SDR_RX)) {
-          printf("RX Channel %zu\n", ch);
-          printf("Actual RX sample rate: %fMSps...\n",
-                 (dev->getSampleRate(SOAPY_SDR_RX, ch) / 1e6));
-          printf("Actual RX frequency: %fGHz...\n",
-                 (dev->getFrequency(SOAPY_SDR_RX, ch) / 1e9));
-          printf("Actual RX gain: %f...\n", (dev->getGain(SOAPY_SDR_RX, ch)));
-          if (!kUseSoapyUHD) {
-            printf("Actual RX LNA gain: %f...\n",
-                   (dev->getGain(SOAPY_SDR_RX, ch, "LNA")));
-            printf("Actual RX PGA gain: %f...\n",
-                   (dev->getGain(SOAPY_SDR_RX, ch, "PGA")));
-            printf("Actual RX TIA gain: %f...\n",
-                   (dev->getGain(SOAPY_SDR_RX, ch, "TIA")));
-            if (dev->getHardwareInfo()["frontend"].find("CBRS") !=
-                std::string::npos) {
-              printf("Actual RX LNA1 gain: %f...\n",
-                     (dev->getGain(SOAPY_SDR_RX, ch, "LNA1")));
-              printf("Actual RX LNA2 gain: %f...\n",
-                     (dev->getGain(SOAPY_SDR_RX, ch, "LNA2")));
-            }
-          }
-          printf("Actual RX bandwidth: %fM...\n",
-                 (dev->getBandwidth(SOAPY_SDR_RX, ch) / 1e6));
-          printf("Actual RX antenna: %s...\n",
-                 (dev->getAntenna(SOAPY_SDR_RX, ch).c_str()));
-        }
-      }
-
-      for (auto ch : channels) {
-        if (ch < dev->getNumChannels(SOAPY_SDR_TX)) {
-          printf("TX Channel %zu\n", ch);
-          printf("Actual TX sample rate: %fMSps...\n",
-                 (dev->getSampleRate(SOAPY_SDR_TX, ch) / 1e6));
-          printf("Actual TX frequency: %fGHz...\n",
-                 (dev->getFrequency(SOAPY_SDR_TX, ch) / 1e9));
-          printf("Actual TX gain: %f...\n", (dev->getGain(SOAPY_SDR_TX, ch)));
-          if (!kUseSoapyUHD) {
-            printf("Actual TX PAD gain: %f...\n",
-                   (dev->getGain(SOAPY_SDR_TX, ch, "PAD")));
-            printf("Actual TX IAMP gain: %f...\n",
-                   (dev->getGain(SOAPY_SDR_TX, ch, "IAMP")));
-            if (dev->getHardwareInfo()["frontend"].find("CBRS") !=
-                std::string::npos) {
-              printf("Actual TX PA1 gain: %f...\n",
-                     (dev->getGain(SOAPY_SDR_TX, ch, "PA1")));
-              printf("Actual TX PA2 gain: %f...\n",
-                     (dev->getGain(SOAPY_SDR_TX, ch, "PA2")));
-              printf("Actual TX PA3 gain: %f...\n",
-                     (dev->getGain(SOAPY_SDR_TX, ch, "PA3")));
-            }
-          }
-          printf("Actual TX bandwidth: %fM...\n",
-                 (dev->getBandwidth(SOAPY_SDR_TX, ch) / 1e6));
-          printf("Actual TX antenna: %s...\n",
-                 (dev->getAntenna(SOAPY_SDR_TX, ch).c_str()));
-        }
-      }
-      std::cout << std::endl;
+      bsRadios.at(c).at(i)->printSettings();
     }
-    // Measure Sync Delays now! (Iris trigger-based; Houdini has no such block)
-    if (kUseSoapyUHD == false && _cfg->is_houdini() == false) {
+    // Measure Sync Delays now: a trigger-block operation, so only a backend
+    // with the hardware trigger (Iris).
+    if (!bsRadios.at(c).empty() && bsRadios.at(c).front()->hasHardwareTrigger()) {
       sync_delays(c);
     }
   }
@@ -487,7 +413,7 @@ void BaseRadioSet::armHoudiniBeacon(void) {
   for (size_t c = 0; c < bsRadios.size(); ++c) {
     for (size_t i = 0; i < bsRadios.at(c).size(); ++i) {
       if (i != _cfg->beacon_radio()) continue;
-      Radio* r = bsRadios.at(c).at(i);
+      Radio* r = bsRadios.at(c).at(i).get();
       r->xmit(buffs, static_cast<int>(n_load), 0, t0);  // load replay RAM
       r->activateXmit();                                // arm free-running loop
       MLPD_INFO(
@@ -612,7 +538,7 @@ void BaseRadioSet::armHoudiniTdd(void) {
   for (size_t c = 0; c < bsRadios.size(); ++c) {
     for (size_t i = 0; i < bsRadios.at(c).size(); ++i) {
       if (i != _cfg->beacon_radio()) continue;
-      Radio* r = bsRadios.at(c).at(i);
+      Radio* r = bsRadios.at(c).at(i).get();
       auto* dev = r->RawDev();
       houdiniTddLadder(dev);  // full ladder, never abort alone (3.2 + 4.24)
 
@@ -725,7 +651,7 @@ int BaseRadioSet::houdiniTddRx(size_t radio_id, void* const* buffs,
   // running(false) and shut down cleanly.
   const long long max_frame = static_cast<long long>(_cfg->max_frame());
   if (max_frame > 0 && htdd_frame_counter_ >= max_frame) return -1;
-  Radio* r = bsRadios.at(0).at(radio_id);
+  Radio* r = bsRadios.at(0).at(radio_id).get();
   const int n = static_cast<int>(_cfg->samps_per_slot());
   const size_t K = htdd_rx_slots_.size();  // rx slots/frame (pilot P + uplink U...)
   const size_t cur = htdd_rx_cursor_;
@@ -1046,7 +972,7 @@ BaseRadioSet::~BaseRadioSet(void) {
   // ctor) while the vector holds only the radios actually constructed.
   for (unsigned int c = 0; c < _cfg->num_cells(); c++)
     for (size_t i = 0; i < bsRadios.at(c).size(); i++)
-      delete bsRadios.at(c).at(i);
+      bsRadios.at(c).at(i).reset();
 }
 
 void* BaseRadioSet::init_launch(void* in_context) {
@@ -1063,59 +989,26 @@ void BaseRadioSet::init(BaseRadioContext* context) {
 
   MLPD_TRACE("Deleting context for tid: %d\n", i);
 
-  auto channels = Utils::strToChannels(_cfg->bs_channel());
-  SoapySDR::Kwargs args;
-  SoapySDR::Kwargs rx_stream_args;
-  SoapySDR::Kwargs tx_stream_args;
-  if (_cfg->is_houdini()) {
-    // SoapyHoudiniSDR BS node: bs_sdr_ids() holds the board IP. Address the
-    // remote node directly (C++ auto-discovery is unreliable). RX host port
-    // 10100+ keeps it clear of the UE stream (10002+); the beacon is device
-    // BRAM replay (tx_mode=replay), so the TX rate is the DAC max (see below).
-    args["driver"] = "houdinisdr";
-    args["remote"] =
-        "tcp://" + _cfg->bs_sdr_ids().at(c).at(i) + ":" + _cfg->remote_port();
-    args["remote:driver"] = "houdinisdr-device";
-    args["remote:type"] = "houdinisdr";
-    // The FPGA egresses RX to the fixed fpga_port (10002 for ch1); the host must
-    // bind that same port. The BS and UE are on different interface IPs, so both
-    // can bind 10002 without colliding.
-    rx_stream_args["local_port"] = "10002";
-    // Break-at-gap (SH-253). The driver defaults this ON, but our whole gap
-    // account depends on it: recvHoudini only compares timestamps BETWEEN reads,
-    // so a splice INSIDE one returned buffer would be invisible to us. Ask for it
-    // explicitly rather than inheriting a default another repo owns (AP-10).
-    rx_stream_args["rx_gap_break"] = "1";
-    tx_stream_args["tx_mode"] = "replay";
-    // MTS (AP-23): pin the converter bring-up latency (measured 1-5 samples
-    // per boot without it, ledger 4.23) and align the ADC/DAC tiles that the
-    // RX-stamp -> TX-time arithmetic crosses. Radio.cc opens TX before RX
-    // for houdini so DAC tile 0 (the SYSREF receiver) is up first.
-    rx_stream_args["mts"] = "true";
-    tx_stream_args["mts"] = "true";
-  } else if (kUseSoapyUHD == false) {
-    args["driver"] = "iris";
-    args["serial"] = _cfg->bs_sdr_ids().at(c).at(i);
-  } else {
-    args["driver"] = "uhd";
-    args["addr"] = _cfg->bs_sdr_ids().at(c).at(i);
-    std::cout << "Init bsRadios: " << args["addr"] << std::endl;
-  }
-  args["timeout"] = "1000000";
+  // What this radio needs to open, as a value (the radio never sees Config);
+  // the factory is the only place that knows which backend a type is.
+  RadioParams p;
+  p.id = _cfg->bs_sdr_ids().at(c).at(i);
+  p.label = "BS " + p.id;
+  p.remote_port = _cfg->remote_port();
+  p.channels = Utils::strToChannels(_cfg->bs_channel());
+  p.rate_hz = _cfg->rate();
+  p.nco_hz = _cfg->nco();
+  p.rf_freq_hz = _cfg->radio_rf_freq();
+  p.bw_filter_hz = _cfg->bw_filter();
+  p.single_gain = _cfg->single_gain();
+  // Houdini BS: the RX host port 10002 (the FPGA egresses ch1 there; the BS
+  // and UE are on different interface IPs, so both can bind it), and the
+  // beacon is device BRAM replay (tx_mode=replay).
+  p.rx_local_port = 10002;
+  p.tx_mode = "replay";
+  const Radio::Type type = radioTypeFor(*_cfg);
   try {
-    bsRadios.at(c).at(i) = nullptr;
-    // Houdini: RX + TX both at the app rate, tuned to the NCO -- all before
-    // setupStream (Houdini forbids a live rate change). The beacon replay RAM
-    // plays out at THIS configured rate and the RFDC does its own interpolation
-    // up to the DAC (streaming.cpp: "the replay RAM plays out at this fabric
-    // rate"); there is NO need to clock replay at the DAC max and pre-upsample
-    // the beacon on the host (the old -1 sentinel did that and made the beacon
-    // recur every 512 samples -- dense -- which buried find_beacon's 2-rep peak).
-    bsRadios.at(c).at(i) =
-        new Radio(args, SOAPY_SDR_CS16, channels, rx_stream_args, tx_stream_args,
-                  _cfg->is_houdini() ? _cfg->rate() : 0.0,
-                  _cfg->is_houdini() ? _cfg->rate() : 0.0,
-                  _cfg->is_houdini() ? _cfg->nco() : 0.0);
+    bsRadios.at(c).at(i) = Radio::create(type, p);
   } catch (std::runtime_error& err) {
     // Name the radio by what it actually is, and SAY WHY it was dropped. This
     // used to print "Ignoring iris <addr>" (upstream RENEWLab hardware we do not
@@ -1124,16 +1017,9 @@ void BaseRadioSet::init(BaseRadioContext* context) {
     // network" -- which sends you to check discovery when the real cause was in
     // the exception all along (a missing data-plane route, a busy stream). The
     // client path already logs its reason; this matches it.
-    const char* kind = kUseSoapyUHD ? "uhd device"
-                                    : (_cfg->is_houdini() ? "houdini radio"
-                                                          : "iris");
-    std::cerr << "Ignoring " << kind << " " << _cfg->bs_sdr_ids().at(c).at(i)
-              << ": " << err.what() << std::endl;
-    if (bsRadios.at(c).at(i) != nullptr) {
-      MLPD_TRACE("Deleting radio ptr due to exception\n");
-      delete bsRadios.at(c).at(i);
-      bsRadios.at(c).at(i) = nullptr;
-    }
+    std::cerr << "Ignoring " << Radio::name(type) << " " << p.id << ": " << err.what()
+              << std::endl;
+    bsRadios.at(c).at(i).reset();
   }
   MLPD_TRACE("BaseRadioSet: Init complete\n");
   assert(thread_count->load() != 0);
@@ -1154,13 +1040,10 @@ void BaseRadioSet::configure(BaseRadioContext* context) {
 
   //load channels
   auto channels = Utils::strToChannels(_cfg->bs_channel());
-  Radio* bsRadio = bsRadios.at(c).at(i);
-  auto* dev = bsRadio->RawDev();
-  SoapySDR::Kwargs info = dev->getHardwareInfo();
   for (auto ch : channels) {
     double rxgain = _cfg->rx_gain().at(ch);
     double txgain = _cfg->tx_gain().at(ch);
-    bsRadios.at(c).at(i)->dev_init(_cfg, ch, rxgain, txgain);
+    bsRadios.at(c).at(i)->setup(ch, rxgain, txgain);
   }
 
   assert(thread_count->load() != 0);

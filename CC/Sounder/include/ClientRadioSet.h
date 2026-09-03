@@ -7,6 +7,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <memory>
 
 #include "Radio.h"
 #include "config.h"
@@ -35,7 +36,7 @@ class ClientRadioSet {
   static void* init_launch(void* in_context);
 
   Config* _cfg;
-  std::vector<Radio*> radios;
+  std::vector<std::unique_ptr<Radio>> radios;
   bool radioNotFound;
 };
 

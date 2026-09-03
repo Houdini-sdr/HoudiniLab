@@ -8,6 +8,7 @@
 #include <atomic>
 #include <cstddef>
 #include <functional>
+#include <memory>
 #include <vector>
 
 #include "Radio.h"
@@ -81,7 +82,7 @@ class BaseRadioSet {
 
   Config* _cfg;
   std::vector<SoapySDR::Device*> hubs;
-  std::vector<std::vector<Radio*>> bsRadios;  // [cell, iris]
+  std::vector<std::vector<std::unique_ptr<Radio>>> bsRadios;  // [cell, radio]
   std::vector<int> trigger_offsets_;
   bool radioNotFound;
 

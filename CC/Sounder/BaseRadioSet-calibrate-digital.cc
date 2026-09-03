@@ -50,7 +50,7 @@ int BaseRadioSet::syncTimeOffset() {
   long long txTime(0);
   long long rxTime(0);
 
-  Radio* ref_radio = bsRadios.at(0).back();
+  Radio* ref_radio = bsRadios.at(0).back().get();
   auto* ref_dev = ref_radio->RawDev();
 
   int offset_diff = num_samps;
@@ -113,7 +113,7 @@ int BaseRadioSet::syncTimeOffset() {
   ref_radio->deactivateXmit();
   ref_dev->setGain(SOAPY_SDR_TX, 0, "PAD", _cfg->tx_gain().at(0));
   for (int i = 0; i < num_radios; i++) {
-    Radio* bsRadio = bsRadios.at(0).at(i);
+    Radio* bsRadio = bsRadios.at(0).at(i).get();
     bsRadio->deactivateRecv();
     bsRadio->drain_buffers(dummybuffs, num_samps);
   }
