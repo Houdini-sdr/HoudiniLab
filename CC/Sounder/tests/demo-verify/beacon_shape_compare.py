@@ -92,6 +92,25 @@ def core_off(geom):
     return geom["fine_off"] + geom["fine_len"]
 
 
+def synth_beacon(core_ci16, geom, cfo_hz, snr_db_want, n, pos, seed):
+    """A synthetic capture with a KNOWN CFO at a KNOWN position.
+
+    The instrument gets validated against a known-good case before its output is
+    believed. The first version of the reader below returned a wrong answer with
+    a circular resultant of exactly 1.000 -- maximum apparent confidence.
+    """
+    rng = np.random.default_rng(seed)
+    core = (core_ci16[0::2].astype(np.float64)
+            + 1j * core_ci16[1::2].astype(np.float64)) / 32767.0
+    core = core[:geom["core_len"]]
+    sig_p = float(np.mean(np.abs(core) ** 2))
+    c = (rng.standard_normal(n) + 1j * rng.standard_normal(n)) / np.sqrt(2.0)
+    c *= np.sqrt(sig_p / (10 ** (snr_db_want / 10.0)))
+    t = np.arange(len(core))
+    c[pos:pos + len(core)] += core * np.exp(2j * np.pi * cfo_hz * t / RATE)
+    return c
+
+
 def cfo_from_fine(c, core_start, geom, conj_sense):
     """CFO in Hz from the fine field's repeated pair.
 
@@ -184,7 +203,13 @@ def run_one(ue, rep, geom, corr_scale, matches, max_windows):
         resids.append(meas - pred)
         ks.append(k)
         ratios.append(rr)
-        cs = lo + idx - off2                       # core start inside the slice
+        # Core start INSIDE THE SLICE. `meas` is an absolute tick and `lo` is the
+        # slice origin, so the slice-relative index is idx - off2 and NOT
+        # lo + idx - off2, which is the index into the parent window. Passing the
+        # latter alongside the slice fed the CFO and SNR readers a location
+        # thousands of samples from the beacon. They did not fail; they returned
+        # +682844 Hz with a circular resultant of exactly 1.000.
+        cs = idx - off2
         hz, rm = cfo_from_fine(sl, cs, geom, conj_sense)
         cfos.append(hz)
         rmags.append(rm)
@@ -236,6 +261,9 @@ def main():
     ap.add_argument("--tx-ch", type=int, default=1)
     ap.add_argument("--rx-ch", type=int, default=1)
     ap.add_argument("--out", default="beacon_shape_compare.json")
+    ap.add_argument("--self-test", action="store_true",
+                    help="validate the CFO and SNR readers against synthetic "
+                         "captures with known answers, then exit. No hardware.")
     args = ap.parse_args()
     tn.DEADLINE[0] = time.time() + args.budget
     tn.MIN_RATIO[0] = args.min_ratio
@@ -248,6 +276,36 @@ def main():
             print("no geometry for shape %r in shapes.json" % n)
             return 2
     loaded = {n: load_shape(args.shapes_dir, n, shapes_json[n]) for n in names}
+
+    if args.self_test:
+        bad = 0
+        print("\nself-test: known CFO and SNR injected, no hardware\n")
+        print("%-13s %10s %10s %8s %7s %9s %8s" %
+              ("shape", "CFO want", "CFO got", "err Hz", "R", "SNR want", "SNR got"))
+        for nm in names:
+            g = shapes_json[nm]
+            core = np.fromfile(os.path.join(args.shapes_dir, "%s_core.bin" % nm),
+                               dtype=np.int16)
+            for want_hz in (0.0, 250.0, -1200.0, 4250.0):
+                for want_snr in (45.0, 20.0):
+                    pos = 700
+                    c = synth_beacon(core, g, want_hz, want_snr, 4096, pos, 12345)
+                    hz, r = cfo_from_fine(c, pos, g, False)
+                    sn = snr_db(c, pos, g)
+                    err = hz - want_hz
+                    # The estimator's own noise floor scales as 1/fine_len, so
+                    # tens of Hz at 20 dB with a 64-sample pair is expected. This
+                    # bound is a sanity gate, not a spec.
+                    ok_cfo = abs(err) < 60.0
+                    ok_snr = abs(sn - want_snr) < 3.0
+                    if not (ok_cfo and ok_snr):
+                        bad += 1
+                    print("%-13s %10.1f %10.1f %8.1f %7.3f %9.1f %8.1f  %s%s"
+                          % (nm, want_hz, hz, err, r, want_snr, sn,
+                             "" if ok_cfo else "CFO-FAIL ",
+                             "" if ok_snr else "SNR-FAIL"))
+        print("\nself-test: %s (%d failure(s))" % ("PASS" if not bad else "FAIL", bad))
+        return 1 if bad else 0
     for n in names:
         g = shapes_json[n]
         print("%-13s core %4d  replica %3d  fine@%d x%d  index off %d  PAPR %.2f dB"
