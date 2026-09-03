@@ -133,9 +133,12 @@ Rules:
   inside the preamble's self-coherent plateau for the chosen shape, a
   `snr_floor_db` above the shape's expected in-window SNR at `tx_full_scale`
   is a warning with the number (8.157).
-- `threshold: auto` picks the form from the replica (single copy: coherence)
-  and derives the bar from `pfa_per_window` and L; `corr_scale` is read only
-  when a legacy form is named explicitly.
+- `threshold: auto` picks the form from the replica (single copy: coherence;
+  otherwise the normalised cross-correlation). AS LANDED (P3), the bar is
+  `corr_scale` for every form unless a configuration SETS `pfa_per_window`,
+  in which case the coherence form takes the bar that probability implies;
+  the plan's original "pfa by default under auto" was not adopted, so the
+  shipped configurations are unchanged.
 - `allow_env_overrides` defaults to FALSE since 2026-09-03 (seam step S0,
   decided with the user): the JSON is the configuration and the bench
   scripts sweep through the campaign overlay. A config can turn the
