@@ -73,11 +73,16 @@ void leaves(const nlohmann::json& j, const std::string& prefix, std::vector<std:
     return;
   }
   for (auto it = j.begin(); it != j.end(); ++it) {
-    // A key that itself contains a dot ("detector.threshold" as ONE key) can
-    // never be reached by the dotted walker, so it must not pass as known:
-    // mark it with a leading "!" so the unknown-key check names it.
-    const std::string key = it.key().find('.') == std::string::npos ? it.key() : "!" + it.key();
-    const std::string p = prefix.empty() ? key : prefix + "." + key;
+    // A comment key is skipped on the RAW key, dot or no dot. A non-comment
+    // key that itself contains a dot ("detector.threshold" as ONE key) can
+    // never be reached by the dotted walker, so it is refused with a reason
+    // rather than passing as known.
+    if (!it.key().empty() && it.key()[0] == '_') continue;
+    if (it.key().find('.') != std::string::npos) {
+      throw std::invalid_argument("sync." + (prefix.empty() ? "" : prefix + ".") + it.key() +
+                                  ": the key contains a dot; nest it as objects instead");
+    }
+    const std::string p = prefix.empty() ? it.key() : prefix + "." + it.key();
     if (it.value().is_object()) leaves(it.value(), p, out);
     else out->push_back(p);
   }
@@ -292,7 +297,7 @@ std::vector<SyncConfig::Knob> SyncConfig::knobs() {
        "Plausibility band applied to a rate that acquisition hands back, ppm.", &resync.acq_max_ppm,
        nullptr},
       {"allow_env_overrides", nullptr, 0, 0,
-       "Whether HOUDINI_* environment variables may override these values (each override is logged, out-of-range numbers clamped). Default true this release.",
+       "Whether HOUDINI_* environment variables may override these values (each override is logged; see the policy column). Default true this release.",
        &allow_env_overrides, nullptr},
   };
 }
@@ -350,9 +355,10 @@ SyncConfig SyncConfig::load(const std::string& root_json_text) {
       c.provenance["beacon.type"] = "json";
     }
   }
-  // Environment overrides, when allowed: range-checked like JSON, but an
-  // out-of-range number is CLAMPED and reported (the old readers clamped),
-  // garbage is refused and reported, and every override is recorded.
+  // Environment overrides, when allowed: range-checked like JSON, then the
+  // knob's policy decides what an out-of-range number does (clamp, or keep
+  // the value already in place, each with a note); garbage is refused and
+  // reported; every override is recorded.
   for (auto& k : ks) {
     if (k.env == nullptr) continue;
     const char* e = std::getenv(k.env);
@@ -379,7 +385,9 @@ SyncConfig SyncConfig::load(const std::string& root_json_text) {
     const std::string err = assign(k, v, true, clamp, &note);
     if (!err.empty()) {
       c.warnings.push_back(std::string(k.env) + "=\"" + e + "\": " + err +
-                           (clamp ? " -- ignored" : " -- ignored, default kept (as the old reader did)"));
+                           (clamp ? " -- ignored"
+                                  : " -- ignored, the value already in place (" +
+                                        valueText(k) + ") kept, as the old reader did"));
       continue;
     }
     c.provenance[k.path] = "env";
@@ -464,7 +472,7 @@ std::string SyncConfig::describe() const {
 std::string SyncConfig::schemaMarkdown() {
   SyncConfig c = defaults();
   std::ostringstream o;
-  o << "| key | default | was | range | what it does |\n| --- | --- | --- | --- | --- |\n";
+  o << "| key | default | was | range | env out of range | what it does |\n| --- | --- | --- | --- | --- | --- |\n";
   for (const auto& k : c.knobs()) {
     o << "| `sync." << k.path << "` | ";
     const std::string v = valueText(k);
@@ -474,6 +482,11 @@ std::string SyncConfig::schemaMarkdown() {
     if (k.isNumeric()) o << k.lo << " to " << k.hi;
     else if (k.isEnum()) {
       for (int j = 0; k.enum_names[j]; ++j) o << (j ? ", " : "") << k.enum_names[j];
+    }
+    o << " | ";
+    if (k.env != nullptr) {
+      if (!k.isNumeric()) o << "refused";
+      else o << (k.env_policy == EnvPolicy::kClamp ? "clamped" : "ignored, value kept");
     }
     o << " | " << k.doc << " |\n";
   }

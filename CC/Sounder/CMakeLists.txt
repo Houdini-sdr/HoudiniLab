@@ -188,10 +188,6 @@ set(SOUNDER_SOURCES ${PURE_UHD_SOURCES}
     BaseRadioSet.cc
     BaseRadioSet-calibrate-digital.cc
     BaseRadioSet-calibrate-analog.cc
-   
-   
-   
-   
     signalHandler.cpp)
 
 # Optional GPU beacon correlator (DGX Spark / GB10). find_beacon_cuda.cu runs
@@ -249,8 +245,9 @@ enable_testing()
 # estimator and their configuration (docs/SYNC_LIBRARY_ARCHITECTURE.md). Static,
 # portable (x86 and aarch64), no dependency beyond what the sounder links.
 # comms-lib and utils are compiled HERE and nowhere else: the sounder, the
-# module and the sync tools all take them from this library, so there is one
-# find_beacon_avx in the tree (review round 2, item 6).
+# module, the two HIL tools, the geometry test, the dumper and the beacon TX
+# tool all take them from this library, so there is one find_beacon_avx in
+# the tree (review rounds 2 and 3).
 add_library(houdini_sync STATIC
     sync/sync_config.cc
     sync/detector.cc
@@ -287,28 +284,22 @@ add_test(NAME grid_tracker COMMAND grid_tracker_test)
 # The index-convention check AP-34(a) did not have. Links the real CommsLib so
 # it exercises the REAL detector; a replica would agree with itself.
 add_executable(beacon_geometry_test
-    tests/comms-func/beacon_geometry_test.cc
-    comms-lib.cc comms-lib-avx.cc comms-lib-portable.cc utils.cc)
+    tests/comms-func/beacon_geometry_test.cc)
 target_include_directories(beacon_geometry_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(beacon_geometry_test -lpthread ${MUFFT_LIBRARIES})
+target_link_libraries(beacon_geometry_test houdini_sync -lpthread ${MUFFT_LIBRARIES})
 add_test(NAME beacon_geometry COMMAND beacon_geometry_test)
 
 # HIL helper: transmit the real Gold beacon from a Houdini board so a Houdini UE
 # running the unmodified receiver.cc client-sync path can acquire it.
 add_executable(beacon_shape_dump
-    tests/comms-func/beacon_shape_dump.cc
-    comms-lib.cc comms-lib-portable.cc utils.cc)
+    tests/comms-func/beacon_shape_dump.cc)
 target_include_directories(beacon_shape_dump PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(beacon_shape_dump -lpthread ${MUFFT_LIBRARIES})
+target_link_libraries(beacon_shape_dump houdini_sync -lpthread ${MUFFT_LIBRARIES})
 
 add_executable(beacon_tx_gold
-    tests/comms-func/beacon_tx_gold.cc
-    comms-lib.cc
-    comms-lib-avx.cc
-    comms-lib-portable.cc
-    utils.cc)
+    tests/comms-func/beacon_tx_gold.cc)
 target_include_directories(beacon_tx_gold PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(beacon_tx_gold -lpthread
+target_link_libraries(beacon_tx_gold houdini_sync -lpthread
     ${SoapySDR_LIBRARIES}
     ${MUFFT_LIBRARIES})
 

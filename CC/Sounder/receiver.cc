@@ -2003,7 +2003,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
                       "rx_beacon_time %lld\npilot_ref %lld\nbeacon_end %lld\n"
                       "corr_scale %.6g\nthresh %d\npick %d\nfirst_path_window %d\n"
                       "first_path_floor_db %.3f\nsnr_floor_db %.3f\n"
-                      "replica_tail %zu\nbeacon_type %s\n",
+                      "snr_guard %zu\nreplica_tail %zu\nbeacon_type %s\n",
                       request_samples, sync_index, snr, frame_id,
                       rx_beacon_time, houdini_pilot_ref,
                       static_cast<long long>(houdiniBeaconEnd(config_)),
@@ -2012,7 +2012,8 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
                       static_cast<int>(sync_detector_->pick()),
                       sync_detector_->firstPathWindow(),
                       sync_detector_->firstPathFloorDb(), sync_guard_->floorDb(),
-                      sync_detector_->replicaTail(), config_->beacon_type().c_str());
+                      sync_guard_->guard(), sync_detector_->replicaTail(),
+                      config_->beacon_type().c_str());
               fclose(fg);
             }
           }

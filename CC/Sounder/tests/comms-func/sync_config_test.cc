@@ -210,6 +210,14 @@ int main() {
     check(j.beacon.tx_full_scale == 0.6 && j.detector.first_path_floor_db == -9.0 &&
               j.detector.first_path_window == -1,
           "env: BEACON_FS=0, FIRST_PATH_DB=3, FIRST_PATH_WIN=5000 keep their defaults (as before)");
+    int ignored_notes = 0;
+    for (const auto& w : j.warnings) ignored_notes += (w.find("kept, as the old reader did") != std::string::npos);
+    check(ignored_notes == 3, "env: each ignored override is reported (" + std::to_string(ignored_notes) + " of 3)");
+    check(j.provenance.at("beacon.tx_full_scale") == "default" &&
+              j.provenance.at("detector.first_path_floor_db") == "default" &&
+              j.provenance.at("detector.first_path_window") == "default",
+          "env: an ignored override leaves provenance at default");
+    check(!throws(R"({"sync": {"_note.v2": "x"}})"), "a comment key with a dot is still a comment");
     check(j.tracker.alpha == 1.0, "env: GRID_ALPHA=50 clamps to 1 (it used to pass through, AP-56)");
     const std::string dj = j.describe();
     check(dj.find("tracker.alpha = 1  [env]") != std::string::npos, "describe shows [env] for an override");

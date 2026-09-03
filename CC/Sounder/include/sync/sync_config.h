@@ -30,8 +30,9 @@
  * passed anything finite through with no range at all -- which is what AP-56
  * complained about. Now: a knob with policy kClamp pulls the value to the
  * nearest bound with a note (the four ints as before, the formerly unbounded
- * knobs as the AP-56 fix); a knob with policy kIgnoreOutOfRange keeps its
- * default with a note (the three that always did). Garbage is always refused.
+ * knobs as the AP-56 fix); a knob with policy kIgnoreOutOfRange keeps the
+ * value already in place -- the default, or what the JSON set -- with a note
+ * (the three that always did). Garbage is always refused.
  *
  * The struct itself has no JSON dependency; `load()` in sync_config.cc does.
  */

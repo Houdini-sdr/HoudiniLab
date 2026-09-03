@@ -12,7 +12,13 @@
  * numbers is a behaviour change and has to say so.
  *
  * Fixture layout: <dir>/<shape>/resyncwin_NN.bin (complex<int16>, n samples)
- * and resyncwin_NN.txt (key value lines: n, sync_index, snr, ...).
+ * and resyncwin_NN.txt (key value lines: n, sync_index, snr, ...). Windows
+ * dumped after 2026-09-03 also carry the detector settings they were taken
+ * under (corr_scale, thresh, pick, first_path_window, first_path_floor_db,
+ * snr_floor_db, snr_guard, replica_tail, beacon_type), asserted below when
+ * present. `cfo_hz` is NOT written by the sounder: it is a baseline added by
+ * hand from the library at commit 10d0fe0, so the estimator has an identity
+ * check rather than a plausibility band.
  */
 #include <cmath>
 #include <cstdio>
@@ -21,7 +27,6 @@
 #include <fstream>
 #include <map>
 #include <sstream>
-#include <vector>
 #include <string>
 #include <vector>
 
@@ -124,8 +129,13 @@ int main(int argc, char** argv) {
     for (size_t i = 0; i < d.core.size(); ++i)
       tiny[i + 8] = std::complex<int16_t>(static_cast<int16_t>(d.core[i].real() * 8000),
                                           static_cast<int16_t>(d.core[i].imag() * 8000));
-    // The PSS ends 144 samples before the core end; a window that stops at the
-    // PSS end + 100 cannot hold the implied core end.
+    // Positive control first: on the full buffer the detector finds the core
+    // end where it was placed (8 + core_len - 1).
+    const auto full = det.run(tiny.data(), tiny.size(), 10.0f);
+    check(full.index == static_cast<ssize_t>(8 + d.core.size() - 1),
+          "positive control: the placed core is found at its end (" + std::to_string(full.index) + ")");
+    // Then the PSS ends 144 samples before the core end; a window that stops at
+    // the PSS end + 100 cannot hold the implied core end.
     const auto r = det.run(tiny.data(), 8 + 128 + 100, 10.0f);
     check(!r.found(), "a detection whose implied core end falls outside the window is reported as none");
     // guardFor: the pre-library guard (64 unless configured), never narrower
