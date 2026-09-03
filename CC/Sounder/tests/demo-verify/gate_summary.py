@@ -17,6 +17,7 @@ while logging something new that nobody looked at.
 import argparse
 import json
 import math
+import os
 import re
 import sys
 from collections import Counter
@@ -52,6 +53,14 @@ RE_GEOM = re.compile(r"Beacon accept window (\d+) samples of a (\d+)-sample "
 RE_TRACKER = re.compile(r"Grid tracker: (\S+)")
 RE_CADENCE = re.compile(r"resync every ([\d.]+) ms")
 RE_LEVEL = re.compile(r"\b(WARNG|WARNING|ERROR)\b[]:]?\s*(.*)")
+# THE STACK EACH RUN ACTUALLY RAN AGAINST. Added 2026-09-02 after a gate was
+# invalidated without failing: the software lane rolled a device+host build onto
+# the boards between run 2 and run 3 of an interleaved PRE/POST comparison, so
+# the two arms differed in software as well as in the thing under test. Every
+# run stayed green. A pass/fail reading would have shipped it.
+RE_STACK = re.compile(r"Node stack (BS|UE) ([\d.]+): .*?fpga_commit=(\S+) .*?"
+                      r"device_build=(\S+) .*?host_build=(\S+)\b")
+RE_BEACON = re.compile(r"Beacon: type (\S+), core (\d+) samples")
 
 
 def sd(xs):
@@ -66,7 +75,7 @@ def analyse(path):
          "reanchor_failed": 0, "starved": 0, "innov_rejected": 0,
          "cns_total": 0, "cns_low": 0, "acq": None, "geometry": None,
          "tracker": None, "cadence_ms": None, "levels": Counter(),
-         "level_samples": {}}
+         "level_samples": {}, "stack": {}, "beacon": None}
     with open(path, "r", errors="replace") as f:
         for line in f:
             m = RE_ALIVE.search(line)
@@ -118,6 +127,14 @@ def analyse(path):
             m = RE_TRACKER.search(line)
             if m:
                 r["tracker"] = m.group(1)
+            m = RE_STACK.search(line)
+            if m:
+                r["stack"][m.group(1)] = {"ip": m.group(2), "fpga": m.group(3),
+                                          "device": m.group(4),
+                                          "host": m.group(5)}
+            m = RE_BEACON.search(line)
+            if m:
+                r["beacon"] = (m.group(1), int(m.group(2)))
             m = RE_CADENCE.search(line)
             if m:
                 r["cadence_ms"] = float(m.group(1))
@@ -131,7 +148,61 @@ def analyse(path):
     return r
 
 
+def stack_key(r):
+    """One hashable identity for the node software a run executed against."""
+    return tuple(sorted((n, d["fpga"], d["device"], d["host"])
+                        for n, d in r.get("stack", {}).items()))
+
+
+def check_stacks(rs):
+    """Refuse to aggregate runs that ran against different node software.
+
+    NOT a warning. A gate is a comparison, and comparing arms that differ in
+    more than the thing under test is not a weaker result -- it is a different
+    experiment reported under the wrong name. This exists because it happened:
+    on 2026-09-02 the software lane rolled a device+host build onto the boards
+    between run 2 and run 3 of an interleaved PRE/POST gate. Every run stayed
+    green. Nothing in the output said the baseline had moved underneath it.
+    """
+    seen = {}
+    for r in rs:
+        seen.setdefault(stack_key(r), []).append(os.path.basename(r["log"]))
+    unknown = [n for k, v in seen.items() if not k for n in v]
+    known = {k: v for k, v in seen.items() if k}
+    if unknown:
+        print("WARNING: no node-stack line in %d run(s): %s"
+              % (len(unknown), ", ".join(sorted(unknown))))
+        print("  the build those runs used cannot be verified, so they cannot")
+        print("  be compared against anything.")
+    ok = True
+    if len(known) > 1:
+        print()
+        print("REFUSING TO AGGREGATE: these runs did not share one node stack.")
+        for k, v in sorted(known.items()):
+            print("  %s" % ", ".join(sorted(v)))
+            for node, fpga, dev, host in k:
+                print("      %-3s fpga %s device %s host %s" % (node, fpga, dev, host))
+        print()
+        print("A gate compares arms differing ONLY in the thing under test.")
+        print("Re-run every arm against one stack; do not merge these.")
+        ok = False
+    else:
+        for k in known:
+            for node, fpga, dev, host in k:
+                print("stack %-3s fpga %s device %s host %s" % (node, fpga, dev, host))
+    beacons = {r["beacon"] for r in rs if r.get("beacon")}
+    if len(beacons) > 1:
+        print("REFUSING TO AGGREGATE: runs used different beacons: %s"
+              % ", ".join("%s(%d)" % b for b in sorted(beacons)))
+        ok = False
+    for b in sorted(beacons):
+        print("beacon %s, core %d samples" % b)
+    return ok
+
+
 def report(rs):
+    ok_stack = check_stacks(rs)
+    print()
     print("%-22s %7s %6s %7s %7s %8s %8s %7s %9s"
           % ("run", "accept", "esc", "offgrid", "sd", "max|r|", "starved",
              "innovRej", "CNS low"))
@@ -177,7 +248,7 @@ def report(rs):
         print("  none")
     for (lvl, kind), n in agg.most_common(20):
         print("  %-6s %5d  %s" % (lvl, n, samples.get(kind, kind)))
-
+    return ok_stack
 
 def main():
     ap = argparse.ArgumentParser()
@@ -185,7 +256,7 @@ def main():
     ap.add_argument("--json")
     a = ap.parse_args()
     rs = [analyse(p) for p in a.logs]
-    report(rs)
+    ok = report(rs)
     if a.json:
         out = []
         for r in rs:
@@ -198,7 +269,10 @@ def main():
         with open(a.json, "w") as f:
             json.dump(out, f, indent=1)
         print("\nwrote", a.json)
-    return 0
+    # NON-ZERO when the runs did not share one node stack. A caller that only
+    # reads the table would otherwise aggregate arms that ran against different
+    # software, which is how a gate gets invalidated without failing.
+    return 0 if ok else 3
 
 
 if __name__ == "__main__":

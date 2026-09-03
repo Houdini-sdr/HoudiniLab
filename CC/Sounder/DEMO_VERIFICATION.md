@@ -560,9 +560,29 @@ available and demanding it would fail a healthy run.
 | G1 | 0 escalations, 0 off-grid detections, 0 BAD Receive, in every run | absolute; unaffected by how many detections a run collects |
 | G2 | acquisition confirms in every run, confirm residual within +-3 samples | acquisition is untouched by all three changes, so a change here is a regression |
 | G3 | accepted detections between 8 and 40 per 60 s run | brackets the ~18 the geometry predicts. Fails BOTH ways on purpose: far fewer means resync is not firing, far more means the cadence did not actually change |
-| G4 | max abs(residual) <= 6 samples in every run | the pre-change measured worst case across ~20 runs. Absolute, and it is the number the 246-sample gate has to cover |
+| G4 | max abs(residual) <= 60 samples in every run, AND consistent with eps x cadence | **CORRECTED before the clean gate ran, see below** |
 | G5 | residual sd within a factor of 2 of the PRE arm's, per-run | a factor, not a decimal, because n ~ 20 |
 | G6 | PRE and POST arms interleaved, >= 3 runs each, ONE binary | this bench drifts; a two-build gate confounds the change with the day |
+
+**G4 WAS WRONG WHEN FIRST WRITTEN, AND THE ERROR WAS IN THE DERIVATION.** The
+6-sample figure came from the worst residual measured across ~20 runs -- all of
+them on the 260 ms cadence. The residual between two looks is the drift that
+accumulates between them, so it scales with the cadence, and a 10x slower
+cadence makes it 10x larger by arithmetic. At the measured per-leg eps range of
+-0.078 to +0.064 ppm (8.113) a 2.6 s coast is 0.078e-6 x 2.6 x 122.88e6 = **25
+samples**, so the original G4 would have failed every healthy run. Corrected to
+60 samples, which is ~2.4x that worst case and still 4x inside the 246-sample
+scatter gate, plus the real check: the observed maximum must be CONSISTENT with
+the run's own eps and the cadence, because a residual far below the predicted
+drift would mean the cadence is not actually what the log says.
+
+This correction is recorded rather than quietly applied. It was made after
+seeing five runs from the INVALIDATED gate report max residuals of 7 to 20, and
+before the clean gate ran. Pre-registration is worth nothing if criteria get
+rewritten to fit results, so the standard applied here is: a criterion may be
+corrected when the correction follows from arithmetic that was available before
+the run and does not depend on the run's outcome. This one does -- eps and the
+cadence were both already measured and written down in 8.107 and 8.113.
 
 **G6 is now possible because of `HOUDINI_BEACON_PICK`.** The crossing rule can be
 switched at runtime, so PRE and POST differ in one environment variable rather
