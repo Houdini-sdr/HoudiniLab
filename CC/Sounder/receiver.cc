@@ -82,6 +82,16 @@ static constexpr ssize_t kHoudiniStrobeOffsTicks = 384;
 // the sort of data that gets averaged and believed.
 static CommsLib::BeaconPick resyncPickFromEnv() {
   const char* e = std::getenv("HOUDINI_BEACON_PICK");
+  if (e != nullptr && std::string(e) == "firstpath") {
+    MLPD_WARN(
+        "HOUDINI_BEACON_PICK=firstpath: targeted resync takes the strongest "
+        "crossing and then walks back to the earliest path within a "
+        "delay-spread window. This is the OVER-THE-AIR rule -- the strongest "
+        "path is frequently a reflection, and which path is strongest CHANGES "
+        "as the channel fades, so a grid tracked off it hops. Degenerates to "
+        "argmax on a single-path link. EXPERIMENTAL.\n");
+    return CommsLib::BeaconPick::kFirstPath;
+  }
   if (e != nullptr && std::string(e) == "first") {
     MLPD_WARN(
         "HOUDINI_BEACON_PICK=first: targeted resync uses the EARLIEST crossing "

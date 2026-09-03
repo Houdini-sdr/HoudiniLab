@@ -61,6 +61,7 @@ using beacon_shapes::cf;
 using beacon_shapes::Desc;
 using beacon_shapes::Shape;
 using Pick = CommsLib::BeaconPick;
+using Thr = CommsLib::BeaconThresh;
 
 int g_fail = 0;
 
@@ -74,7 +75,64 @@ void check(bool ok, const std::string& what) {
 /// nothing, which is the whole reason AP-34(a) needed silicon to find its bug.
 /// Returns the returned index MINUS the true beacon end, or kMiss.
 constexpr long long kMiss = -1000000;
-using Thr = CommsLib::BeaconThresh;
+
+/// A channel: taps at given delays, plus a carrier offset.
+///
+/// OVER THE AIR THE TRUTH IS THE FIRST PATH, NOT THE STRONGEST. A frame grid
+/// wants a timing reference that is physically meaningful and, more
+/// importantly, STABLE. The strongest path changes as the channel fades; the
+/// first path does not. So `residual` below is measured against the DIRECT
+/// path's beacon end even when a later tap is stronger, and a rule that returns
+/// the late tap scores as biased, which is what it is.
+struct Channel {
+  std::vector<std::pair<int, double>> taps{{0, 1.0}};  // (delay, amplitude)
+  double cfo_hz = 0.0;
+  const char* name = "1 path";
+};
+
+/// Residual with a channel and a carrier offset applied.
+long long residualCh(const Desc& b, double peak_counts, double snr_db,
+                     long long lead, long long tail, float corr_scale, Pick pick,
+                     unsigned seed, Thr thresh_form, const Channel& ch) {
+  const long long len = static_cast<long long>(b.core.size());
+  std::mt19937 g(seed);
+  auto u01 = [&g]() { return (static_cast<double>(g()) + 0.5) / 4294967296.0; };
+  auto gauss = [&]() {
+    return std::sqrt(-2.0 * std::log(u01())) * std::cos(2.0 * M_PI * u01());
+  };
+  double mean_p = 0.0, peak_p = 0.0;
+  for (const auto& v : b.core) {
+    mean_p += std::norm(v);
+    peak_p = std::max(peak_p, static_cast<double>(std::norm(v)));
+  }
+  mean_p /= static_cast<double>(len);
+  const double scale = peak_counts / std::sqrt(peak_p);
+  const double ns = std::sqrt((mean_p / std::pow(10.0, snr_db / 10.0)) / 2.0);
+
+  const long long pos = 4000, end = pos + len, s0 = end - lead, n = lead + tail;
+  std::vector<std::complex<double>> sig(n, {0.0, 0.0});
+  for (const auto& tp : ch.taps) {
+    for (long long k = 0; k < len; ++k) {
+      const long long a = pos + tp.first + k - s0;
+      if (a < 0 || a >= n) continue;
+      const double ph = 2.0 * M_PI * ch.cfo_hz * static_cast<double>(k) / 122.88e6;
+      sig[a] += tp.second * std::complex<double>(b.core[k].real(), b.core[k].imag()) *
+                std::exp(std::complex<double>(0.0, ph));
+    }
+  }
+  std::vector<std::complex<int16_t>> buf(n);
+  for (long long i = 0; i < n; ++i) {
+    const double re = sig[i].real() * scale + gauss() * ns * scale;
+    const double im = sig[i].imag() * scale + gauss() * ns * scale;
+    buf[i] = std::complex<int16_t>(
+        static_cast<int16_t>(std::max(-32000.0, std::min(32000.0, re))),
+        static_cast<int16_t>(std::max(-32000.0, std::min(32000.0, im))));
+  }
+  const ssize_t idx =
+      CommsLib::find_beacon_avx(buf.data(), b.replica, n, corr_scale, pick,
+                                thresh_form);
+  return idx < 0 ? kMiss : s0 + idx - end;   // vs the DIRECT path's beacon end
+}
 long long residual(const Desc& b, double peak_counts, double snr_db,
                    long long lead, long long tail, float corr_scale, Pick pick,
                    unsigned seed, Thr thresh_form = Thr::kPowerRatio) {
@@ -309,18 +367,19 @@ int main() {
   std::printf("\n=== threshold form x pick rule, over the level sweep ===\n");
   std::printf("cells: levels (of %zu) whose index is exact / levels that MISS\n",
               sizeof(kLevels) / sizeof(*kLevels));
-  std::printf("%-14s %13s %13s %13s %13s %13s\n", "shape",
-              "power+first", "power+argmax", "norm+argmax", "xcorr+first",
-              "xcorr+argmax");
+  std::printf("%-13s %12s %12s %12s %12s %12s %12s\n", "shape",
+              "pow+first", "pow+argmax", "pow+1stpath", "xc+first",
+              "xc+argmax", "xc+1stpath");
   int norm_first_bad = 0, norm_argmax_bad = 0, power_first_bad = 0;
   for (const auto& b : ds) {
     std::printf("%-14s", b.name.c_str());
     struct Combo { Thr tf; Pick pk; };
     const Combo combos[] = {{Thr::kPowerRatio, Pick::kFirstCrossing},
                             {Thr::kPowerRatio, Pick::kTargetedArgmax},
-                            {Thr::kNormalized, Pick::kTargetedArgmax},
+                            {Thr::kPowerRatio, Pick::kFirstPath},
                             {Thr::kNormalizedXCorr, Pick::kFirstCrossing},
-                            {Thr::kNormalizedXCorr, Pick::kTargetedArgmax}};
+                            {Thr::kNormalizedXCorr, Pick::kTargetedArgmax},
+                            {Thr::kNormalizedXCorr, Pick::kFirstPath}};
     for (const auto& cb : combos) {
       {
         const Thr tf = cb.tf; const Pick pk = cb.pk;
@@ -339,13 +398,13 @@ int main() {
         const int nlev = static_cast<int>(sizeof(kLevels) / sizeof(*kLevels));
         if (tf == Thr::kNormalizedXCorr && pk == Pick::kFirstCrossing)
           norm_first_bad += nlev - exact;
-        if (tf == Thr::kNormalizedXCorr && pk == Pick::kTargetedArgmax)
+        if (tf == Thr::kNormalizedXCorr && pk == Pick::kFirstPath)
           norm_argmax_bad += nlev - exact;
         if (tf == Thr::kPowerRatio && pk == Pick::kFirstCrossing)
           power_first_bad += nlev - exact;
         char c[32];
-        std::snprintf(c, sizeof c, "%d ex/%d miss", exact, miss);
-        std::printf(" %13s", c);
+        std::snprintf(c, sizeof c, "%d ex/%d ms", exact, miss);
+        std::printf(" %12s", c);
       }
     }
     std::printf("\n");
@@ -353,7 +412,7 @@ int main() {
   check(power_first_bad > 0,
         "  power+first still fails somewhere (the comparison is not a no-op)");
   check(norm_argmax_bad == 0,
-        "  xcorr + argmax is exact at every level, every shape");
+        "  xcorr + FIRST-PATH is exact at every level, every shape");
   // Reported, not gated, because it is the claim under test rather than a
   // requirement: if normalising alone were enough, the selection rule would be
   // belt-and-braces rather than load-bearing.
@@ -388,7 +447,7 @@ int main() {
           for (unsigned sd = 1; sd <= 4 && ok; ++sd) {
             const long long v = residual(b, lv, kSnrDb, kLead, kTail,
                                          static_cast<float>(cs),
-                                         Pick::kTargetedArgmax, sd, tf);
+                                         Pick::kFirstPath, sd, tf);
             if (v != kEndConvention) ok = false;
           }
           if (ok) edge = cs; else if (edge > 0.0) break;
@@ -402,6 +461,65 @@ int main() {
   std::printf("\nA constant row means one threshold works at every level.\n");
   std::printf("A row falling as 1/level^2 means the knob is a different test\n");
   std::printf("at every level, which is what the shipped form does.\n");
+
+  // ---------------------------------------------------------------------
+  // OVER THE AIR: MULTIPATH AND A CARRIER OFFSET.
+  //
+  // The bench is one cabled path with a sub-ppm clock pair. Neither holds over
+  // the air on free-running clocks, and the two departures pull in OPPOSITE
+  // directions on the pick rule: multipath is the case where kTargetedArgmax
+  // returns the wrong path, and it is the case kFirstCrossing was originally
+  // written for. Measured against the DIRECT path's beacon end, so returning a
+  // stronger later tap scores as the bias it is.
+  //
+  // CFO here is 4.25 kHz = 8.5 ppm of 500 MHz, the measured free-running offset
+  // between these two boards on internal clocks.
+  std::printf("\n=== over-the-air channels, legacy beacon, xcorr threshold ===\n");
+  {
+    const auto b = beacon_shapes::make(Shape::kLegacy);
+    const Channel chans[] = {
+        {{{0, 1.0}}, 0.0, "1 path, no CFO"},
+        {{{0, 1.0}}, 4250.0, "1 path, 8.5 ppm CFO"},
+        {{{0, 1.0}, {8, 0.7}}, 4250.0, "echo +8 samp, -3 dB"},
+        {{{0, 1.0}, {8, 1.4}}, 4250.0, "echo +8 samp, STRONGER"},
+        {{{0, 1.0}, {24, 1.4}}, 4250.0, "echo +24 samp, STRONGER"},
+        {{{0, 0.5}, {40, 1.4}}, 4250.0, "weak direct, echo +40 STRONGER"},
+    };
+    std::printf("%-30s %14s %14s %14s\n", "channel", "first-crossing",
+                "argmax", "first-path");
+    int argmax_bias = 0, firstpath_bias = 0;
+    for (const auto& ch : chans) {
+      std::printf("%-30s", ch.name);
+      for (const auto pk :
+           {Pick::kFirstCrossing, Pick::kTargetedArgmax, Pick::kFirstPath}) {
+        long long lo = 1LL << 40, hi = -(1LL << 40);
+        int miss = 0;
+        for (unsigned sd = 1; sd <= 6; ++sd) {
+          const long long v =
+              residualCh(b, 1600.0, kSnrDb, kLead, kTail, kResyncCorrScale, pk,
+                         sd, Thr::kNormalizedXCorr, ch);
+          if (v == kMiss) { ++miss; continue; }
+          lo = std::min(lo, v); hi = std::max(hi, v);
+        }
+        char c[32];
+        if (miss == 6) std::snprintf(c, sizeof c, "MISS");
+        else if (lo == hi) std::snprintf(c, sizeof c, "%+lld", lo);
+        else std::snprintf(c, sizeof c, "%+lld..%+lld", lo, hi);
+        std::printf(" %14s", c);
+        const long long worst = std::max(std::llabs(lo - kEndConvention),
+                                         std::llabs(hi - kEndConvention));
+        if (miss < 6 && worst > 4) {
+          if (pk == Pick::kTargetedArgmax) ++argmax_bias;
+          if (pk == Pick::kFirstPath) ++firstpath_bias;
+        }
+      }
+      std::printf("\n");
+    }
+    std::printf("\n  channels where the rule is >4 samples off the DIRECT path:"
+                "  argmax %d, first-path %d\n", argmax_bias, firstpath_bias);
+    check(firstpath_bias <= argmax_bias,
+          "  first-path is no worse than argmax on multipath");
+  }
 
   std::printf("\nRESULT: %s (%d failure(s))\n", g_fail ? "FAIL" : "PASS", g_fail);
   return g_fail ? 1 : 0;

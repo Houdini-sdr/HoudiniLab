@@ -267,6 +267,46 @@ std::vector<float> TrailingWindowSum(const std::vector<float>& f,
 //
 // So: take the earliest crossing, then refine within one sequence length of it. That
 // is deterministic across runs and still lands on the peak rather than its skirt.
+// How far back kFirstPath looks, and how strong an earlier path must be.
+//
+// THE WINDOW MUST STAY INSIDE THE PREAMBLE PLATEAU. The shipped beacon's STS
+// field manufactures crossings ~365 samples before the true peak; a back window
+// anywhere near that reintroduces the fault kTargetedArgmax removes. Half a
+// sequence length (64 samples at L=128) is 0.52 us, which covers indoor excess
+// delay (RMS spread 20-100 ns) with margin and is 5x inside the plateau. An
+// outdoor channel with 1-2 us of spread needs a longer window AND a preamble
+// whose plateau is further away than that; do not raise one without the other.
+static int firstPathWindow(int seq_len) {
+  if (const char* e = std::getenv("HOUDINI_FIRST_PATH_WIN")) {
+    const int v = std::atoi(e);
+    if (v >= 0 && v < seq_len * 2) return v;
+  }
+  return seq_len / 2;
+}
+// How far below the peak an earlier path may be and still be taken as the first
+// path, in dB of PATH POWER.
+//
+// THE CONVERSION IS THE WHOLE POINT AND I GOT IT WRONG FIRST TIME. The ranking
+// statistic is |gc[i]|^2 * |gc[i-L]|^2, which is 4th order in path AMPLITUDE,
+// so a path whose POWER is x times the peak's scores x^2 -- not x. Setting the
+// floor to 0.25 "for 6 dB" therefore demanded a path only 1.5 dB down, and the
+// back-search never fired on any multipath channel: measured +7, +23 and +39
+// samples of bias, identical to plain argmax, which is what a rule that never
+// fires looks like.
+static double firstPathFloorFrac() {
+  double db = -9.0;
+  if (const char* e = std::getenv("HOUDINI_FIRST_PATH_DB")) {
+    const double v = std::strtod(e, nullptr);
+    if (std::isfinite(v) && v <= 0.0 && v >= -30.0) db = v;
+  }
+  // power ratio 10^(db/10), and the statistic goes as its SQUARE.
+  return std::pow(10.0, db / 10.0) * std::pow(10.0, db / 10.0);
+}
+// -9 dB admits a direct path well under half the echo's power, and still sits
+// ~80x above the preamble plateau's level-independent floor of 1/L^2, so it
+// cannot promote the preamble to "first path".
+static const double kFirstPathFrac = firstPathFloorFrac();
+
 int CommsLib::find_beacon_avx(
     const std::vector<std::complex<float>>& raw_samples,
     const std::vector<std::complex<float>>& match_samples, float corr_scale,
@@ -394,6 +434,29 @@ int CommsLib::find_beacon_avx(
       if (r > best_ratio) { best_ratio = r; best = i; }
     }
     return best;
+  }
+  if (pick == BeaconPick::kFirstPath) {
+    // Peak first, exactly as kTargetedArgmax.
+    int best = valid_peaks.front();
+    double best_ratio = -1.0;
+    while (!valid_peaks.empty()) {
+      const int i = valid_peaks.front();
+      valid_peaks.pop();
+      const double r = ranking(i);
+      if (r > best_ratio) { best_ratio = r; best = i; }
+    }
+    // Then the earliest index within the delay-spread window that still clears
+    // `kFirstPathFrac` of the peak. Searched over ALL indices, not only the
+    // threshold crossings: a weak first path can sit under the absolute bar
+    // while being unambiguous relative to the peak beside it, which is the
+    // whole reason the test is a FRACTION of the peak.
+    const int win = firstPathWindow(seqLen);
+    const double floor_ratio = kFirstPathFrac * best_ratio;
+    int first = best;
+    for (int i = std::max(0, best - win); i < best; ++i) {
+      if (ranking(static_cast<size_t>(i)) >= floor_ratio) { first = i; break; }
+    }
+    return first;
   }
   // valid_peaks is built in increasing index order, so front() is the earliest
   // crossing and therefore selects the earliest beacon copy in the window. Refine

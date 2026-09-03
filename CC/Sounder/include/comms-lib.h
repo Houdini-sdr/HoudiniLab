@@ -155,6 +155,25 @@ class CommsLib {
     // change. Measured: the shipped beacon flips from -1 to -363 samples between
     // 1600 and 3200 counts RMS (beacon_geometry_test).
     kTargetedArgmax,
+    // FIRST PATH: argmax, then walk BACK to the earliest crossing still within
+    // `frac` of the peak, bounded by a delay-spread window.
+    //
+    // WHY kTargetedArgmax IS NOT THE RIGHT RULE OVER THE AIR. On a cabled bench
+    // there is one path, so the strongest crossing IS the beacon. In a
+    // multipath channel the matched filter has one peak per path, and the
+    // strongest is frequently a reflection arriving after the direct one. Two
+    // things follow, and the second is worse than the first: the timing
+    // reference is biased late by the excess delay, and -- because which path
+    // is strongest CHANGES as the channel fades -- the reference JUMPS between
+    // paths. A frame grid tracked off a reference that hops is worse than one
+    // tracked off a slightly late but stable reference.
+    //
+    // First-path detection is the standard answer and it degenerates to argmax
+    // when there is only one path, so it is safe on this bench too. The back
+    // window must stay well inside the preamble's self-coherent plateau (~365
+    // samples early for the shipped beacon) or it reintroduces exactly the
+    // failure kTargetedArgmax exists to remove.
+    kFirstPath,
   };
 
   // WHICH FORM THE DETECTION THRESHOLD TAKES. This is the difference between a
