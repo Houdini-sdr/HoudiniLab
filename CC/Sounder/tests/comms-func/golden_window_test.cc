@@ -68,8 +68,11 @@ int main(int argc, char** argv) {
   // The pre-library correlator did exactly this (comms-lib-portable.cc
   // firstPathWindow), and a fixed 64 would have doubled dot11's and nr's.
   for (const char* shape : {"dot11", "nr", "legacy", "nr_pss"}) {
-    beacon_shapes::Shape sh;
-    beacon_shapes::parse(shape, &sh);
+    beacon_shapes::Shape sh = beacon_shapes::Shape::kLegacy;
+    if (!beacon_shapes::parse(shape, &sh)) {
+      check(false, std::string("parse ") + shape);
+      continue;
+    }
     const auto d = beacon_shapes::make(sh);
     houdini::sync::Detector det(d.replica, d.replica_reps, d.replica_tail(),
                                 houdini::sync::SyncConfig::defaults().detector, true);
