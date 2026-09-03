@@ -35,6 +35,7 @@ import SoapySDR
 from SoapySDR import SOAPY_SDR_CS16, SOAPY_SDR_RX
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import two_node_beacon_arrival as tn  # noqa: E402
 from two_node_beacon_arrival import Bs  # noqa: E402
 from cfo_ladder_probe import (RPC_TIMEOUT_US, RATE, FRAME, GOLD_L,  # noqa: E402
                               CORE_OFF_2NDREP, find_beacon, mf_peak, capture)
@@ -91,7 +92,7 @@ def main():
     dev = SoapySDR.Device(dict(driver="houdinisdr", remote="tcp://%s:55132" % a.ue,
                                timeout=RPC_TIMEOUT_US))
     dev.setSampleRate(SOAPY_SDR_RX, a.ch, RATE)
-    dev.setFrequency(SOAPY_SDR_RX, a.ch, a.freq)
+    tn.tune(dev, SOAPY_SDR_RX, a.ch, a.freq)
     rxs = dev.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CS16, [a.ch],
                           dict(local_port=str(10001 + a.ch), rx_gap_break="1"))
     dev.activateStream(rxs)
@@ -101,6 +102,8 @@ def main():
     all_resid = []
     all_resid_i = []   # the same pairs, fractional-peak phase
     image_ratios = []  # wrong-sense over right-sense peak, per beacon
+    spectra = []       # (centroid MHz, low-minus-high edge dB) per window
+    core_off_2nd = CORE_OFF_2NDREP
     iq_stats = []      # (Q/I rms ratio, normalised <IQ>) per window
     lobe_steps = []    # phase(strong neighbour) - phase(peak), per beacon
     all_recs = []
@@ -188,6 +191,23 @@ def main():
                          float(np.angle(vp)) if ap_ else 0.0, tau,
                          float(np.angle(vi))))
         all_recs.extend(recs)
+        # THE TRANSMITTED BEACON'S SPECTRUM, replica-free: a 512-point FFT of
+        # the first detected core in this window. Centroid in MHz and the
+        # low-edge minus high-edge band power in dB. A flat beacon reads
+        # centroid ~0 and tilt ~0; the 2026-09-03 hop run read +22 MHz and
+        # -13 dB while its noise floor stayed flat (8.169), and ten plain runs
+        # spread from -6 to +13 MHz. The tuning calls are the sounder's, so the
+        # variation is in the base station's transmit chain per arm.
+        if pos:
+            j0 = pos[0] - core_off_2nd
+            seg = np.array(c[j0:j0 + 496], dtype=np.complex128)
+            if len(seg) == 496:
+                X = np.fft.fftshift(np.fft.fft(seg, 512))
+                P = np.abs(X) ** 2
+                f = (np.arange(512) - 256) * (RATE / 512) / 1e6
+                cen = float(np.sum(P * f) / np.sum(P))
+                lo = float(np.sum(P[16:96])); hi = float(np.sum(P[416:496]))
+                spectra.append((cen, 10 * math.log10(lo / hi) if lo > 0 and hi > 0 else 0.0))
         for k in range(len(ipeaks) - 1):
             lag = pos[k+1] - pos[k]
             if 0.9*FRAME < lag < 1.1*FRAME:
@@ -241,6 +261,10 @@ def main():
               % (Ri, sdi, " ".join("%d" % h for h in hi_)))
         print("  (integer-peak R above %.4f; a large gap says the integer peak"
               " wanders between samples)" % R)
+    if spectra:
+        print("  transmitted-beacon spectrum: centroid %+.1f..%+.1f MHz, low-edge minus high-edge %+.1f..%+.1f dB over %d windows"
+              % (min(x[0] for x in spectra), max(x[0] for x in spectra),
+                 min(x[1] for x in spectra), max(x[1] for x in spectra), len(spectra)))
     if iq_stats:
         qi = [x[0] for x in iq_stats]; xc = [x[1] for x in iq_stats]; dc = [x[2] for x in iq_stats]
         print("  raw I/Q (means removed): Q/I rms %.4f..%.4f, corr %+.4f..%+.4f, DC offset %.3f..%.3f of rms, %d windows"

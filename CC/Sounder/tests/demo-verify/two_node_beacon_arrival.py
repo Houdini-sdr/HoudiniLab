@@ -108,7 +108,7 @@ class Ue:
                                             timeout=RPC_TIMEOUT_US))
             ident(self.dev, ip, "UE")
             self.dev.setSampleRate(SOAPY_SDR_RX, ch, RATE)
-            self.dev.setFrequency(SOAPY_SDR_RX, ch, 500e6)
+            tune(self.dev, SOAPY_SDR_RX, ch, 500e6)
             self.rxs = self.dev.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CS16, [ch],
                                             dict(local_port=str(10001 + ch),
                                                  rx_gap_break="1"))
@@ -146,6 +146,17 @@ class Ue:
             self.dev.closeStream(self.rxs)
         except Exception:  # noqa: BLE001
             pass
+
+
+# HOW THE RADIO IS TUNED. The plugin exposes ONE tunable element, "RF", whose
+# range is +-983.04 MHz: it is the RFDC NCO, and there is no "BB" element
+# (asked 2026-09-03: "unknown tunable element 'BB'"). The sounder's Houdini
+# path (Radio.cc constructor) makes exactly these calls -- setSampleRate then a
+# plain setFrequency(dir, ch, nco) -- so the probes and the sounder tune the
+# radios identically. The Iris-era "RF"/"BB" split in Radio::dev_init is not
+# reached on Houdini.
+def tune(dev, direction, ch, freq_hz):
+    dev.setFrequency(direction, ch, freq_hz)
 
 
 class Bs:
@@ -188,10 +199,10 @@ class Bs:
                                             timeout=RPC_TIMEOUT_US))
             ident(self.dev, self.ip, "BS")
             self.dev.setSampleRate(SOAPY_SDR_TX, self.ch, RATE)
-            self.dev.setFrequency(SOAPY_SDR_TX, self.ch, 500e6)
+            tune(self.dev, SOAPY_SDR_TX, self.ch, 500e6)
             if not tx_only:
                 self.dev.setSampleRate(SOAPY_SDR_RX, self.ch, RATE)
-                self.dev.setFrequency(SOAPY_SDR_RX, self.ch, 500e6)
+                tune(self.dev, SOAPY_SDR_RX, self.ch, 500e6)
             if not tx_only:
                 self.rxs = self.dev.setupStream(
                     SOAPY_SDR_RX, SOAPY_SDR_CS16, [self.ch],
