@@ -73,6 +73,25 @@ static size_t cfoLogEvery(void) {
 // pure pipeline/path latency (~1 us class, measured ~122 samples on-board),
 // which is exactly what tx_advance / ue_tx_advance_ticks calibrate.
 static constexpr ssize_t kHoudiniStrobeOffsTicks = 384;
+
+// Which crossing the TARGETED resync search returns. Default kTargetedArgmax;
+// HOUDINI_BEACON_PICK=first selects the pre-2026-09-02 kFirstCrossing so a gate
+// can run both rules on ONE binary. Read once: a rule that changed mid-run would
+// make the residual distribution a mixture of two populations, which is exactly
+// the sort of data that gets averaged and believed.
+static CommsLib::BeaconPick resyncPickFromEnv() {
+  const char* e = std::getenv("HOUDINI_BEACON_PICK");
+  if (e != nullptr && std::string(e) == "first") {
+    MLPD_WARN(
+        "HOUDINI_BEACON_PICK=first: targeted resync uses the EARLIEST crossing "
+        "(pre-2026-09-02). This is a diagnostic setting -- it false-locks to the "
+        "STS preamble a few hundred samples early once the link is strong "
+        "enough, which is why the default changed.\n");
+    return CommsLib::BeaconPick::kFirstCrossing;
+  }
+  return CommsLib::BeaconPick::kTargetedArgmax;
+}
+static const CommsLib::BeaconPick kResyncPick = resyncPickFromEnv();
 static ssize_t houdiniBeaconEnd(Config* cfg) {
   if (cfg->is_houdini()) {
     return kHoudiniStrobeOffsTicks + static_cast<ssize_t>(cfg->beacon_size());
@@ -1996,10 +2015,20 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
           // TARGETED slice: lead+tail is far shorter than the 4096-sample
           // beacon copy spacing, so the strongest crossing is unambiguous and
           // the earliest one is the STS preamble. See CommsLib::BeaconPick.
+          //
+          // HOUDINI_BEACON_PICK=first restores the pre-2026-09-02 rule ON THE
+          // SAME BINARY. That is not a compatibility escape hatch, it is what
+          // makes the fix gateable: PRE and POST on one build removes the
+          // "different binary, different day" confound that a two-build gate
+          // carries, and it is the only way this bench can show the OLD rule
+          // failing at all. The bench runs below the level where kFirstCrossing
+          // breaks, but the threshold test is `corr_scale * peak > energy`, so
+          // raising corr_scale is arithmetically identical to raising the
+          // received level -- and corr_scale is already a config knob. Sweep it
+          // with this set to `first` and the false lock appears on silicon.
           const ssize_t idx = this->syncSearch(
               base + s0, static_cast<size_t>(slice_len),
-              config_->corr_scale(tid) + resync_retry_cnt,
-              CommsLib::BeaconPick::kTargetedArgmax);
+              config_->corr_scale(tid) + resync_retry_cnt, kResyncPick);
           if (idx >= 0) sync_index = s0 + idx;
         } else {
           resync_attempted = false;  // beacon not due in this window
