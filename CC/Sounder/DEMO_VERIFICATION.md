@@ -607,6 +607,19 @@ acceptance is gated by detectability; the noise-window artifacts of 8.155 read
 force. P6 is evaluated on the amended runs only; the shipped-floor round is
 kept as its own row.
 
+**Second amendment, written 08:16 rig time, after the amended campaign B and
+BEFORE the runs it governs.** At the 6 dB floor, 0.07 and 0.06 FS are still
+ABOVE the detectability edge for all three shapes: every run locks and every
+shape takes 22 or 23 accepts (details in the rows below), so P6 cannot be read
+there either way, and its letter ("nr_pss >= nr in every round") turns on a
+single accept, which at saturation is read-phase quantisation (8.150: legacy
+alone reads 18 / 19 / 19). The edge 8.145 bracketed lies between 0.06 and
+0.04. Campaign B is extended to `HOUDINI_BEACON_FS` 0.05 and 0.045 at the
+6 dB floor, two rounds each, same Latin square. P6 is read on the FIRST level
+at which any shape drops below 15 accepts or fails to lock; if no level does,
+P6 is recorded as undecided on this cable and the margin question stays with
+the offline processing-gain numbers (37.8 / 37.7 / 31.8 dB).
+
 **What changes the default.** Nothing in this campaign: `legacy` stays. What
 the campaign settles is AP-66's question -- whether the NR deficit measured in
 8.134 was the waveform or the detector it was run through -- and therefore
