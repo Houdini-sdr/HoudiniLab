@@ -26,11 +26,13 @@ namespace houdini {
 namespace sync {
 
 struct Detection {
-  /// The detector's index in the searched window: the last sample of the
-  /// beacon core, i.e. the correlator's last-sample-of-the-matched-field index
-  /// with the replica tail applied. receiver.cc's frame arithmetic treats it
-  /// as the beacon end (houdiniBeaconEnd), which is the convention every
-  /// shape holds (8.154). -1 when nothing crossed.
+  /// The correlator's index in the searched window with the replica tail
+  /// applied: the LAST sample of the beacon core. Every consumer (the SNR
+  /// guard's [index - core_len, index) span, the CFO estimator, receiver.cc's
+  /// frame arithmetic) treats it as the beacon END, one past the core; the
+  /// one-sample difference is a fixed convention absorbed by tx_advance and
+  /// asserted by beacon_geometry_test's kEndConvention (8.154). -1 when
+  /// nothing crossed.
   ssize_t index = -1;
   bool found() const { return index >= 0; }
 };

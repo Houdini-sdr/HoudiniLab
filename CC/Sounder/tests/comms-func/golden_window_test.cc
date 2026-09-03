@@ -21,6 +21,7 @@
 #include <fstream>
 #include <map>
 #include <sstream>
+#include <vector>
 #include <string>
 #include <vector>
 
@@ -36,12 +37,27 @@ void check(bool ok, const std::string& what) {
   std::printf("%s  %s\n", ok ? "PASS" : "FAIL", what.c_str());
   if (!ok) ++g_fail;
 }
-std::map<std::string, double> readMeta(const std::string& path) {
-  std::map<std::string, double> m;
+// Line-wise: "key value". Numeric values land in the map; a non-numeric value
+// (beacon_type legacy) is kept as text and does not stop the parse.
+struct Meta {
+  std::map<std::string, double> num;
+  std::map<std::string, std::string> text;
+  bool has(const std::string& k) const { return num.count(k) != 0; }
+  double at(const std::string& k) const { return num.at(k); }
+};
+Meta readMeta(const std::string& path) {
+  Meta m;
   std::ifstream f(path);
-  std::string k;
-  double v;
-  while (f >> k >> v) m[k] = v;
+  std::string line;
+  while (std::getline(f, line)) {
+    std::istringstream ls(line);
+    std::string k, v;
+    if (!(ls >> k >> v)) continue;
+    char* end = nullptr;
+    const double d = std::strtod(v.c_str(), &end);
+    if (end != v.c_str() && *end == '\0') m.num[k] = d;
+    else m.text[k] = v;
+  }
   return m;
 }
 bool readWindow(const std::string& path, std::vector<std::complex<int16_t>>* out) {
@@ -83,6 +99,43 @@ int main(int argc, char** argv) {
   // The configuration the windows were recorded under: shipped defaults, so
   // xcorr + first-path for legacy and coherence + first-path for nr_pss, the
   // 30 dB floor, corr_scale 10 (files/houdini-ul.json).
+  // Detector behaviour that the fixtures exercise only indirectly.
+  {
+    using houdini::sync::Detector;
+    using houdini::sync::ThresholdForm;
+    check(Detector::resolveForm(ThresholdForm::kAuto, false, false) == CommsLib::BeaconThresh::kPowerRatio &&
+              Detector::resolveForm(ThresholdForm::kCoherence, false, false) == CommsLib::BeaconThresh::kPowerRatio,
+          "resolveForm: the Iris/UHD path keeps the power-ratio form whatever is asked");
+    check(Detector::resolveForm(ThresholdForm::kNormalizedXCorr, true, true) == CommsLib::BeaconThresh::kXCorrNoLag,
+          "resolveForm: a single-copy replica forces the coherence form");
+    beacon_shapes::Shape sh = beacon_shapes::Shape::kNrPss;
+    const auto d = beacon_shapes::make(sh);
+    houdini::sync::DetectorConfig dc;
+    dc.first_path_window = 4095;
+    Detector capped(d.replica, d.replica_reps, d.replica_tail(), dc, true);
+    check(capped.firstPathWindow() == 2 * static_cast<int>(d.replica.size()),
+          "an explicit first-path window is capped at twice the replica (" + std::to_string(capped.firstPathWindow()) + ")");
+    Detector iris(d.replica, d.replica_reps, d.replica_tail(), houdini::sync::DetectorConfig{}, false);
+    check(iris.replicaTail() == 0 && iris.pick() == CommsLib::BeaconPick::kFirstClusterRefined,
+          "off Houdini: no replica tail, cluster-refined pick");
+    // The tail pushes an end past the window: reported as no detection.
+    Detector det(d.replica, d.replica_reps, d.replica_tail(), houdini::sync::DetectorConfig{}, true);
+    std::vector<std::complex<int16_t>> tiny(d.core.size() + 8, std::complex<int16_t>(0, 0));
+    for (size_t i = 0; i < d.core.size(); ++i)
+      tiny[i + 8] = std::complex<int16_t>(static_cast<int16_t>(d.core[i].real() * 8000),
+                                          static_cast<int16_t>(d.core[i].imag() * 8000));
+    // The PSS ends 144 samples before the core end; a window that stops at the
+    // PSS end + 100 cannot hold the implied core end.
+    const auto r = det.run(tiny.data(), 8 + 128 + 100, 10.0f);
+    check(!r.found(), "a detection whose implied core end falls outside the window is reported as none");
+    // guardFor: the pre-library guard (64 unless configured), never narrower
+    // than the resolved window.
+    using houdini::sync::SnrWindowGuard;
+    check(SnrWindowGuard::guardFor(-1, 32) == 64 && SnrWindowGuard::guardFor(-1, 64) == 64 &&
+              SnrWindowGuard::guardFor(16, 32) == 32 && SnrWindowGuard::guardFor(100, 32) == 100 &&
+              SnrWindowGuard::guardFor(0, 4) == 8,
+          "guardFor: 64 by default, the configured value when given, never below the window or 8");
+  }
   const auto cfg = houdini::sync::SyncConfig::load("{}");
   const float kCorrScale = 10.0f;
   int windows = 0;
@@ -91,8 +144,10 @@ int main(int argc, char** argv) {
     if (!beacon_shapes::parse(shape, &sh)) { check(false, std::string("parse ") + shape); continue; }
     const auto d = beacon_shapes::make(sh);
     houdini::sync::Detector det(d.replica, d.replica_reps, d.replica_tail(), cfg.detector, true);
-    houdini::sync::SnrWindowGuard guard(cfg.confirm.snr_floor_db,
-                                        static_cast<size_t>(det.firstPathWindow()));
+    houdini::sync::SnrWindowGuard guard(
+        cfg.confirm.snr_floor_db,
+        houdini::sync::SnrWindowGuard::guardFor(cfg.detector.first_path_window,
+                                                det.firstPathWindow()));
     houdini::sync::FieldGeometry g;
     g.core_len = static_cast<int>(d.core.size());
     g.fine_off = static_cast<int>(d.fine_off); g.fine_len = static_cast<int>(d.fine_len);
@@ -108,22 +163,31 @@ int main(int argc, char** argv) {
       if (!readWindow(base + ".bin", &w)) continue;
       const auto meta = readMeta(base + ".txt");
       ++windows;
-      if (meta.count("sync_index") == 0 || meta.count("snr") == 0) {
+      if (!meta.has("sync_index") || !meta.has("snr")) {
         check(false, std::string(shape) + " window " + std::to_string(i) + ": fixture txt lacks sync_index/snr");
         continue;
       }
       // Fixtures recorded after 2026-09-03 carry the settings they were taken
       // under; when present they must match what this test runs.
       float corr_scale = kCorrScale;
-      if (meta.count("corr_scale")) corr_scale = static_cast<float>(meta.at("corr_scale"));
-      if (meta.count("thresh")) {
-        check(static_cast<int>(det.form()) == static_cast<int>(meta.at("thresh")),
-              std::string(shape) + " window " + std::to_string(i) + ": recorded threshold form matches");
-      }
-      if (meta.count("first_path_window")) {
-        check(det.firstPathWindow() == static_cast<int>(meta.at("first_path_window")),
-              std::string(shape) + " window " + std::to_string(i) + ": recorded first-path window matches");
-      }
+      if (meta.has("corr_scale")) corr_scale = static_cast<float>(meta.at("corr_scale"));
+      // Every recorded setting that moves the index or the SNR must match
+      // what this test runs, or the comparison is between two configurations.
+      const std::string tag = std::string(shape) + " window " + std::to_string(i);
+      if (meta.has("thresh"))
+        check(static_cast<int>(det.form()) == static_cast<int>(meta.at("thresh")), tag + ": recorded threshold form matches");
+      if (meta.has("pick"))
+        check(static_cast<int>(det.pick()) == static_cast<int>(meta.at("pick")), tag + ": recorded pick rule matches");
+      if (meta.has("first_path_window"))
+        check(det.firstPathWindow() == static_cast<int>(meta.at("first_path_window")), tag + ": recorded first-path window matches");
+      if (meta.has("first_path_floor_db"))
+        check(std::fabs(det.firstPathFloorDb() - meta.at("first_path_floor_db")) < 1e-6, tag + ": recorded first-path floor matches");
+      if (meta.has("snr_floor_db"))
+        check(std::fabs(guard.floorDb() - meta.at("snr_floor_db")) < 1e-6, tag + ": recorded SNR floor matches");
+      if (meta.has("snr_guard"))
+        check(guard.guard() == static_cast<size_t>(meta.at("snr_guard")), tag + ": recorded SNR guard matches");
+      if (meta.has("replica_tail"))
+        check(det.replicaTail() == static_cast<size_t>(meta.at("replica_tail")), tag + ": recorded replica tail matches");
       const auto det_res = det.run(w.data(), w.size(), corr_scale);
       const long long want = static_cast<long long>(meta.at("sync_index"));
       char what[160];
@@ -139,12 +203,12 @@ int main(int argc, char** argv) {
       const float f = cfo.estimate(w.data(), w.size(),
                                    static_cast<int>(det_res.index + cfg.cfo.index_guard));
       const double hz = static_cast<double>(f) * 122.88e6;
-      if (meta.count("cfo_hz")) {
+      if (meta.has("cfo_hz")) {
         std::snprintf(what, sizeof what, "%s window %d: beacon cfo %+.0f Hz (recorded %+.0f)",
                       shape, i, hz, meta.at("cfo_hz"));
         check(std::fabs(hz - meta.at("cfo_hz")) < 1.0, what);
       } else {
-        std::snprintf(what, sizeof what, "%s window %d: beacon cfo %+.0f Hz finite and plausible",
+        std::snprintf(what, sizeof what, "%s window %d: beacon cfo %+.3f Hz finite and plausible",
                       shape, i, hz);
         check(std::isfinite(f) && std::fabs(hz) < 50e3, what);
       }

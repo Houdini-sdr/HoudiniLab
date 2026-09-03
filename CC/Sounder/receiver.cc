@@ -133,11 +133,13 @@ Receiver::Receiver(
     sync_detector_ = std::make_unique<houdini::sync::Detector>(
         config_->gold_cf32(), config_->beacon_replica_reps(),
         config_->beacon_replica_tail(), sc.detector, config_->is_houdini());
-    // THE GUARD MUST COVER THE FIRST-PATH BACK WINDOW (8.151): the detector's
-    // RESOLVED window, which may be derived from the replica length.
+    // THE GUARD MUST COVER THE FIRST-PATH BACK WINDOW (8.151), and it stays
+    // the pre-library value (64 unless configured) so no shape's in-window SNR
+    // moves: SnrWindowGuard::guardFor.
     sync_guard_ = std::make_unique<houdini::sync::SnrWindowGuard>(
         sc.confirm.snr_floor_db,
-        static_cast<size_t>(sync_detector_->firstPathWindow()));
+        houdini::sync::SnrWindowGuard::guardFor(sc.detector.first_path_window,
+                                                sync_detector_->firstPathWindow()));
     houdini::sync::FieldGeometry g;
     g.core_len = static_cast<int>(config_->beacon_size());
     g.fine_off = static_cast<int>(config_->beacon_fine_off());
@@ -1676,7 +1678,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
       MLPD_INFO(
           "Beacon detector: threshold %s, resync pick %s, acquisition pick %s "
           "(first-path back window %d samples, floor %.1f dB); SNR floor %.1f "
-          "dB; CFO guard %d margin %d\n",
+          "dB, SNR guard %zu samples; CFO guard %d margin %d\n",
           f == CommsLib::BeaconThresh::kNormalizedXCorr ? "xcorr"
           : f == CommsLib::BeaconThresh::kXCorrNoLag    ? "coherence"
           : f == CommsLib::BeaconThresh::kNormalized    ? "norm"
@@ -1687,8 +1689,8 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
                                                         : "refined",
           config_->is_houdini() ? "same as resync" : "first-cluster-refined",
           sync_detector_->firstPathWindow(), sync_detector_->firstPathFloorDb(),
-          sync_guard_->floorDb(), config_->sync().cfo.index_guard,
-          cfo_estimator_->margin());
+          sync_guard_->floorDb(), sync_guard_->guard(),
+          config_->sync().cfo.index_guard, cfo_estimator_->margin());
     }
 #if defined(USE_CUDA)
     MLPD_WARN(

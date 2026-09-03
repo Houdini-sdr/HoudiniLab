@@ -32,7 +32,6 @@ struct EnvAlias {
 };
 const EnvAlias kEnumAliases[] = {
     {"HOUDINI_BEACON_THRESH", "nolag", "coherence"},
-    {"HOUDINI_BEACON_THRESH", "norm", "xcorr"},
     {"HOUDINI_BEACON_PICK", "first", "first_crossing"},
     {"HOUDINI_BEACON_PICK", "firstpath", "first_path"},
     {"HOUDINI_BEACON_PICK", "first-path", "first_path"},
@@ -74,7 +73,11 @@ void leaves(const nlohmann::json& j, const std::string& prefix, std::vector<std:
     return;
   }
   for (auto it = j.begin(); it != j.end(); ++it) {
-    const std::string p = prefix.empty() ? it.key() : prefix + "." + it.key();
+    // A key that itself contains a dot ("detector.threshold" as ONE key) can
+    // never be reached by the dotted walker, so it must not pass as known:
+    // mark it with a leading "!" so the unknown-key check names it.
+    const std::string key = it.key().find('.') == std::string::npos ? it.key() : "!" + it.key();
+    const std::string p = prefix.empty() ? key : prefix + "." + key;
     if (it.value().is_object()) leaves(it.value(), p, out);
     else out->push_back(p);
   }
@@ -204,7 +207,7 @@ std::vector<SyncConfig::Knob> SyncConfig::knobs() {
        &beacon.type, nullptr},
       {"beacon.tx_full_scale", "HOUDINI_BEACON_FS", 1e-3, 1.0,
        "Transmit peak of the beacon as a fraction of DAC full scale. 0.6 shipped; lower it to stand in for path loss on a cable.",
-       &beacon.tx_full_scale, nullptr},
+       &beacon.tx_full_scale, nullptr, EnvPolicy::kIgnoreOutOfRange},
       // detector
       {"detector.threshold", "HOUDINI_BEACON_THRESH", 0, 0,
        "Decision statistic: auto picks coherence for a single-copy replica and the normalised cross-correlation otherwise; power is the pre-2026-09 form.",
@@ -217,10 +220,10 @@ std::vector<SyncConfig::Knob> SyncConfig::knobs() {
        &detector.pick, kPickNames},
       {"detector.first_path_window", "HOUDINI_FIRST_PATH_WIN", -1, 4095,
        "Samples the first-path search looks back from the peak; -1 (default) means half the replica length. Must stay inside the preamble's self-coherent plateau.",
-       &detector.first_path_window, nullptr},
+       &detector.first_path_window, nullptr, EnvPolicy::kIgnoreOutOfRange},
       {"detector.first_path_floor_db", "HOUDINI_FIRST_PATH_DB", -30.0, 0.0,
        "How much weaker, in dB of path power, an earlier arrival may be and still be taken as the first path.",
-       &detector.first_path_floor_db, nullptr},
+       &detector.first_path_floor_db, nullptr, EnvPolicy::kIgnoreOutOfRange},
       // confirm
       {"confirm.snr_floor_db", "HOUDINI_SYNC_SNR_DB", -10.0, 80.0,
        "In-window SNR a detection must clear. A property of the link and the waveform: re-derive it when either changes.",
@@ -372,9 +375,11 @@ SyncConfig SyncConfig::load(const std::string& root_json_text) {
       v = std::string(e);
     }
     std::string note;
-    const std::string err = assign(k, v, true, true, &note);
+    const bool clamp = k.env_policy == EnvPolicy::kClamp;
+    const std::string err = assign(k, v, true, clamp, &note);
     if (!err.empty()) {
-      c.warnings.push_back(std::string(k.env) + "=\"" + e + "\": " + err + " -- ignored");
+      c.warnings.push_back(std::string(k.env) + "=\"" + e + "\": " + err +
+                           (clamp ? " -- ignored" : " -- ignored, default kept (as the old reader did)"));
       continue;
     }
     c.provenance[k.path] = "env";
@@ -395,6 +400,10 @@ void SyncConfig::validate() {
     warnings.push_back("detector.pick first_crossing false-locks on the beacon's own preamble "
                        "once the link is strong (AP-34); diagnostic only");
   }
+  if (detector.pick == PickRule::kArgmax) {
+    warnings.push_back("detector.pick argmax returns the STRONGEST path, which over the air is "
+                       "often a reflection that hops as the channel fades (8.143); diagnostic only");
+  }
   if (detector.threshold == ThresholdForm::kPowerRatio) {
     warnings.push_back("detector.threshold power is a different test at every received level "
                        "(8.138); diagnostic only");
@@ -404,14 +413,18 @@ void SyncConfig::validate() {
                        "and widens the SNR guard to most of a slot; CommsLib caps it at twice "
                        "the replica length");
   }
-  if (provenance["detector.pfa_per_window"] != "default") {
+  const auto prov = [this](const char* key) {
+    const auto it = provenance.find(key);
+    return it == provenance.end() ? std::string("default") : it->second;
+  };
+  if (prov("detector.pfa_per_window") != "default") {
     warnings.push_back("detector.pfa_per_window is RESERVED (phase P3) and not applied: the "
                        "detector still uses the config's corr_scale for every form");
   }
   if (tracker.type == TrackerType::kAlphaBeta && tracker.alpha == 0.0 && tracker.beta == 0.0) {
     warnings.push_back("tracker alpha and beta are both 0: the grid is fixed-period");
   }
-  if (beacon.type != "legacy" && provenance["confirm.snr_floor_db"] == "default") {
+  if (beacon.type != "legacy" && prov("confirm.snr_floor_db") == "default") {
     warnings.push_back("confirm.snr_floor_db is the legacy default with beacon.type \"" +
                        beacon.type + "\": a quieter waveform is rejected wholesale at a level "
                        "legacy clears (8.157); derive the floor from this beacon's in-window SNR");

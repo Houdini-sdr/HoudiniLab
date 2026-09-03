@@ -188,10 +188,10 @@ set(SOUNDER_SOURCES ${PURE_UHD_SOURCES}
     BaseRadioSet.cc
     BaseRadioSet-calibrate-digital.cc
     BaseRadioSet-calibrate-analog.cc
-    comms-lib.cc
-    comms-lib-avx.cc
-    comms-lib-portable.cc
-    utils.cc
+   
+   
+   
+   
     signalHandler.cpp)
 
 # Optional GPU beacon correlator (DGX Spark / GB10). find_beacon_cuda.cu runs
@@ -248,6 +248,9 @@ enable_testing()
 # One classed home for the beacon shapes, the detector, the confirm, the carrier
 # estimator and their configuration (docs/SYNC_LIBRARY_ARCHITECTURE.md). Static,
 # portable (x86 and aarch64), no dependency beyond what the sounder links.
+# comms-lib and utils are compiled HERE and nowhere else: the sounder, the
+# module and the sync tools all take them from this library, so there is one
+# find_beacon_avx in the tree (review round 2, item 6).
 add_library(houdini_sync STATIC
     sync/sync_config.cc
     sync/detector.cc
@@ -316,7 +319,7 @@ add_executable(houdini_bs_ue_sync
     tests/comms-func/houdini_bs_ue_sync.cc
     ${SOUNDER_SOURCES})
 target_include_directories(houdini_bs_ue_sync PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(houdini_bs_ue_sync -lpthread --enable-threadsafe ${GFLAGS_LIBRARIES} ${UHD_LIBRARIES}
+target_link_libraries(houdini_bs_ue_sync houdini_sync -lpthread --enable-threadsafe ${GFLAGS_LIBRARIES} ${UHD_LIBRARIES}
     ${SoapySDR_LIBRARIES}
     ${HDF5_LIBRARIES}
     ${MUFFT_LIBRARIES})
@@ -327,7 +330,7 @@ add_executable(houdini_loopback
     tests/comms-func/houdini_loopback.cc
     ${SOUNDER_SOURCES})
 target_include_directories(houdini_loopback PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(houdini_loopback -lpthread --enable-threadsafe ${GFLAGS_LIBRARIES} ${UHD_LIBRARIES}
+target_link_libraries(houdini_loopback houdini_sync -lpthread --enable-threadsafe ${GFLAGS_LIBRARIES} ${UHD_LIBRARIES}
     ${SoapySDR_LIBRARIES}
     ${HDF5_LIBRARIES}
     ${MUFFT_LIBRARIES})

@@ -17,11 +17,21 @@
  *
  * ENVIRONMENT OVERRIDES ARE A MIGRATION AID. `allow_env_overrides` defaults to
  * true for this release because the bench scripts in tests/demo-verify still
- * drive sweeps through the environment; every override is logged, an
- * out-of-range numeric override is CLAMPED into the knob's range with a note
- * (the old readers clamped too, so a script's `=0` keeps meaning "the minimum"),
- * and a JSON config can set the flag false. The plan is to flip the default
- * next release and remove the path after (architecture plan, sections 5 and 8).
+ * drive sweeps through the environment; every override is logged, and a JSON
+ * config can set the flag false. The plan is to flip the default next release
+ * and remove the path after (architecture plan, sections 5 and 8).
+ *
+ * WHAT AN OUT-OF-RANGE ENVIRONMENT VALUE DOES, knob by knob, because the old
+ * readers were not uniform: four integer knobs (`resync.retry_max`,
+ * `resync.escalate_episodes`, `resync.hold_offgrid`, `cfo.log_every`) were
+ * clamped to at least 1, three knobs (`beacon.tx_full_scale`,
+ * `detector.first_path_floor_db`, `detector.first_path_window`) IGNORED a value
+ * outside their range and kept the default, and every other numeric knob
+ * passed anything finite through with no range at all -- which is what AP-56
+ * complained about. Now: a knob with policy kClamp pulls the value to the
+ * nearest bound with a note (the four ints as before, the formerly unbounded
+ * knobs as the AP-56 fix); a knob with policy kIgnoreOutOfRange keeps its
+ * default with a note (the three that always did). Garbage is always refused.
  *
  * The struct itself has no JSON dependency; `load()` in sync_config.cc does.
  */
@@ -127,6 +137,9 @@ struct SyncConfig {
   using Target = std::variant<double*, int*, bool*, std::string*, ThresholdForm*,
                               PickRule*, TrackerType*>;
 
+  /// What an out-of-range ENVIRONMENT value does (JSON is always strict).
+  enum class EnvPolicy { kClamp, kIgnoreOutOfRange };
+
   /// One knob: how it is named, bounded and stored. `target` points INTO the
   /// SyncConfig that produced the table, so a table is only valid for that
   /// object's lifetime and must be taken from the object it will modify.
@@ -137,12 +150,14 @@ struct SyncConfig {
     const char* doc;    ///< one sentence, for the generated table
     Target target;
     const char* const* enum_names;  ///< enum kinds: nullptr-terminated names
+    EnvPolicy env_policy = EnvPolicy::kClamp;
     bool isNumeric() const {
       return std::holds_alternative<double*>(target) || std::holds_alternative<int*>(target);
     }
     bool isEnum() const {
-      return !std::holds_alternative<double*>(target) && !std::holds_alternative<int*>(target) &&
-             !std::holds_alternative<bool*>(target) && !std::holds_alternative<std::string*>(target);
+      return std::holds_alternative<ThresholdForm*>(target) ||
+             std::holds_alternative<PickRule*>(target) ||
+             std::holds_alternative<TrackerType*>(target);
     }
   };
   std::vector<Knob> knobs();

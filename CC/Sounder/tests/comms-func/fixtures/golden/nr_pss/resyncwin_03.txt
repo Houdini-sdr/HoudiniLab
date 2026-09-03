@@ -5,3 +5,13 @@ frame 3403
 rx_beacon_time 1150642056
 pilot_ref 820834144
 beacon_end 656
+corr_scale 10
+thresh 3
+pick 3
+first_path_window 64
+first_path_floor_db -9.0
+snr_floor_db 30.0
+snr_guard 64
+replica_tail 144
+beacon_type nr_pss
+cfo_hz -3207.059

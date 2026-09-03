@@ -28,16 +28,27 @@ namespace sync {
 class SnrWindowGuard {
  public:
   /// @param floor_db   the SNR a detection must clear
-  /// @param first_path_window  the detector's RESOLVED back window. The guard
-  ///                   excluded either side of the core from BOTH sums is
-  ///                   max(8, that): it MUST cover the first-path back window,
-  ///                   because when first-path returns the direct path and a
-  ///                   stronger echo sits a delay later, that echo lands
-  ///                   outside the core span and, with a small guard, inside
-  ///                   the noise sum -- a 1.4x echo 24 samples late then reads
-  ///                   ~20 dB, the floor rejects, and resync escalates (8.151).
-  SnrWindowGuard(double floor_db, size_t first_path_window)
-      : floor_db_(floor_db), guard_(std::max<size_t>(8, first_path_window)) {}
+  /// @param guard      samples excluded either side of the core from BOTH
+  ///                   sums; at least 8 is applied here. It MUST cover the
+  ///                   first-path back window: when first-path returns the
+  ///                   direct path and a stronger echo sits a delay later,
+  ///                   that echo lands outside the core span and, with a small
+  ///                   guard, inside the noise sum -- a 1.4x echo 24 samples
+  ///                   late then reads ~20 dB, the floor rejects, and resync
+  ///                   escalates (8.151). Use guardFor() to derive it.
+  SnrWindowGuard(double floor_db, size_t guard)
+      : floor_db_(floor_db), guard_(std::max<size_t>(8, guard)) {}
+
+  /// The guard the pre-library receiver used, kept exactly: the CONFIGURED
+  /// first-path window when one is given, else 64 regardless of replica
+  /// length (receiver.cc firstPathBackWindow at 3ca16fe) -- and never
+  /// narrower than the detector's RESOLVED window, which is the 8.151 rule.
+  /// Identical to the old value for every shape in the tree (the derived
+  /// window is at most 64 there).
+  static size_t guardFor(int configured_window, int resolved_window) {
+    const int base = configured_window >= 0 ? configured_window : 64;
+    return static_cast<size_t>(std::max(8, std::max(base, resolved_window)));
+  }
 
   /// Energy of the presumed core [end_idx - core_len, end_idx) against the
   /// rest of the window, in dB. Returns -99 for an impossible span and +99 for

@@ -653,10 +653,12 @@ Three things to know:
    its default.
 3. The `was` column is the environment variable each knob replaces. It is
    still honoured this release while `sync.allow_env_overrides` is true (the
-   default), every override is logged, and a number outside a knob's range is
-   pulled to the nearest bound with a note, as the old readers did; set it
-   false in the JSON to refuse them. The plan is to remove the environment
-   path next release.
+   default) and every override is logged. A number outside a knob's range is
+   pulled to the nearest bound with a note, except for the three knobs whose
+   old readers ignored such a value (`beacon.tx_full_scale`,
+   `detector.first_path_window`, `detector.first_path_floor_db`), which keep
+   their default with a note, as before. Set the flag false in the JSON to
+   refuse overrides. The plan is to remove the environment path next release.
 
 Example, in `files/houdini-ul.json`:
 
