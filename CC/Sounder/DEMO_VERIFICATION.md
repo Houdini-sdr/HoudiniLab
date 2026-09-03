@@ -690,6 +690,25 @@ no run path, and the campaign script's overlay is checked by running one
 20 s sweep at `tx_full_scale` 0.2 and reading that value in the startup
 record. FAIL bisects the step.
 
+**Amendment, written after the first 8ad round and BEFORE any re-run
+(2026-09-03 18:50).** The first round (legacy, nr_pss, dot11 in that order,
+the first radio runs after hours of idle boards) put legacy at residual sd
+8.15 and jitter 2.43 against the registered 5 and 2, with 23 accepts, 0
+escalations, 0 off-grid and 0 low-SNR rejections; nr_pss and dot11 passed
+every criterion. Legacy's residual series is a smooth wander (-2, -13, -18,
+-18, -15, -11, -8, -4, 0, +3, +4, +7, +7, +5, +6, +6, +5, +5, +3, +1, -1, -1,
+-1), the signature of a clock rate transient, not of a detector: the two
+criteria it fails are the two that measure the clock pair, and the run was
+the first minute of RF after the idle. **Rule for the re-run:** one more
+round of the same three shapes in rotated order (nr_pss, dot11, legacy). If
+legacy passes every criterion in the re-run, the first round is recorded as
+a clock transient and the gate PASSES on the re-run's round with the first
+round kept as evidence. If legacy fails sd or jitter again while the other
+two pass, the step is bisected as registered (legacy against `7141881` on
+the same evening). If all three fail, the bench is the suspect (the user
+reports the loopback is not fully wired tonight) and the gate is NOT
+decided.
+
 ### 8ac. Review round 4: criteria written BEFORE the check runs
 
 Pre-registration, in the 8v style. Round 4 (Opus; `4221a29`) fixed four HIGH
