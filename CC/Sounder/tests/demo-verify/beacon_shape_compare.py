@@ -244,8 +244,17 @@ def run_one(ue, rep, geom, corr_scale, matches, max_windows, dwell_s):
         out["resid_max"] = float(np.max(np.abs(r)))
         # ppm: residual grows by (eps * FRAME) samples per frame, and k counts
         # frames. Positive slope = the UE clock is SLOW relative to the BS.
-        sl_, _ = np.polyfit(kk, r, 1)
+        sl_, ic_ = np.polyfit(kk, r, 1)
         out["eps_ppm"] = float(sl_ / FRAME * 1e6)
+        # THE BEACON'S OWN TIMING QUALITY IS THE SCATTER ABOUT THE RAMP, NOT THE
+        # RAW SPREAD. The raw spread is dominated by the clock ramp across the
+        # leg: measured on this bench, eps -0.0007 / +0.0008 / +0.0102 / +0.0343
+        # ppm over four sequential 20 s legs gives 1.7 / 2.0 / 25 / 84 samples of
+        # drift, and the raw sd and max reproduced exactly that ordering. Reading
+        # it as a beacon property would have ranked the candidates by which
+        # minute of the session they happened to run in.
+        out["resid_sd_detrended"] = float(np.std(r - (sl_ * kk + ic_)))
+        out["resid_max_detrended"] = float(np.max(np.abs(r - (sl_ * kk + ic_))))
         fin = [x for x in cfos if not np.isnan(x)]
         if fin:
             out["cfo_hz_mean"] = float(np.mean(fin))
@@ -395,12 +404,12 @@ def main():
                 if not r.get("locked"):
                     print("  %-13s NO LOCK in %d windows" % (nm, r["acq_windows"]))
                     continue
-                print("  %-13s n=%-4d %5.1fs det=%4.0f%%  resid sd %5.2f max %3.0f  "
+                print("  %-13s n=%-4d %5.1fs det=%4.0f%%  jitter sd %5.2f max %4.0f  "
                       "eps %+.4f ppm  CFO %+8.1f Hz (sd %6.1f r %.4f)  "
                       "ratio med %6.2f min %6.2f  SNR %5.1f dB  acq %d win"
                       % (nm, r["n"], r.get("span_s", 0.0), 100 * r["detect_frac"],
-                         r.get("resid_sd", float("nan")),
-                         r.get("resid_max", float("nan")),
+                         r.get("resid_sd_detrended", float("nan")),
+                         r.get("resid_max_detrended", float("nan")),
                          r.get("eps_ppm", float("nan")),
                          r.get("cfo_hz_mean", float("nan")),
                          r.get("cfo_hz_sd", float("nan")),
@@ -422,9 +431,11 @@ def main():
     # Summary across rounds. Reported per shape with the ROUND-TO-ROUND spread
     # beside every mean, because a single round is one sample and this bench has
     # already produced one confident conclusion from an unreplicated pair.
-    print("\n%-13s %6s %6s %7s %8s %8s %10s %9s %8s %8s %7s" %
-          ("shape", "rounds", "n", "span s", "resid sd", "resid max", "eps ppm",
-           "CFO sd", "pair r", "SNR dB", "det %"))
+    print("\njitter = residual scatter about the fitted clock ramp: the beacon's")
+    print("own timing quality. eps = that ramp, a clock property the legs share.\n")
+    print("%-13s %6s %6s %7s %9s %9s %10s %9s %8s %8s %7s" %
+          ("shape", "rounds", "n", "span s", "jitter sd", "jitter max",
+           "eps ppm", "CFO sd", "pair r", "SNR dB", "det %"))
     for nm in names:
         rs = [r[nm] for r in out["rounds"] if nm in r and r[nm].get("n", 0) >= 3]
         if not rs:
@@ -433,13 +444,14 @@ def main():
         def col(k):
             v = [x[k] for x in rs if k in x]
             return (np.mean(v), np.std(v)) if v else (float("nan"),) * 2
-        sd = col("resid_sd"); mx = col("resid_max"); ep = col("eps_ppm")
+        sd = col("resid_sd_detrended"); mx = col("resid_max_detrended")
+        ep = col("eps_ppm")
         cs = col("cfo_hz_sd"); cr = col("cfo_R"); df = col("detect_frac")
         sp = col("span_s"); sn = col("snr_med")
-        print("%-13s %6d %6d %7.1f %8.2f %8.0f %+10.4f %9.1f %8.4f %8.1f %7.0f"
+        print("%-13s %6d %6d %7.1f %9.2f %9.1f %+10.4f %9.1f %8.4f %8.1f %7.0f"
               % (nm, len(rs), int(np.sum([x["n"] for x in rs])), sp[0], sd[0],
                  mx[0], ep[0], cs[0], cr[0], sn[0], 100 * df[0]))
-        print("%-13s %6s %6s %7.1f %8.2f %8.0f %10.4f %9.1f %8.4f %8.1f %7.0f   (spread)"
+        print("%-13s %6s %6s %7.1f %9.2f %9.1f %10.4f %9.1f %8.4f %8.1f %7.0f   (spread)"
               % ("", "", "", sp[1], sd[1], mx[1], ep[1], cs[1], cr[1], sn[1],
                  100 * df[1]))
     return rc
