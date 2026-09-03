@@ -211,6 +211,20 @@ class CommsLib {
     // received amplitude. The repeat check is then the product of the two
     // coherences, which is still in [0,1].
     kNormalizedXCorr,
+    // NR-SHAPED: normalised matched filter with NO lag product at all.
+    //
+    // Our detector is 802.11-shaped -- a repeated-pair autocorrelation stacked
+    // on a matched filter -- and that lag product is exactly what lets a
+    // 16-periodic preamble alias into a 128-sample lag. NR does not have the
+    // failure class: PSS is a NON-REPEATING m-sequence found by a plain matched
+    // filter, and the peak is the peak. This is that detector.
+    //
+    // The trade is discrimination against the preamble. The lag product puts
+    // the preamble plateau ~1/L^2 below the peak; without it the separation is
+    // only ~1/L, 21 dB instead of 42. It also drops the repeat check, which is
+    // what rejects a lone noise spike, so it should be more false-alarm prone
+    // at low SNR. Both predictions are measured rather than assumed.
+    kXCorrNoLag,
   };
 
   // Functions using AVX

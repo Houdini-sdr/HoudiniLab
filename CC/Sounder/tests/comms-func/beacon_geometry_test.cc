@@ -367,10 +367,11 @@ int main() {
   std::printf("\n=== threshold form x pick rule, over the level sweep ===\n");
   std::printf("cells: levels (of %zu) whose index is exact / levels that MISS\n",
               sizeof(kLevels) / sizeof(*kLevels));
-  std::printf("%-13s %12s %12s %12s %12s %12s %12s\n", "shape",
-              "pow+first", "pow+argmax", "pow+1stpath", "xc+first",
-              "xc+argmax", "xc+1stpath");
+  std::printf("%-13s %11s %11s %11s %11s %11s %11s %11s %11s\n", "shape",
+              "pow+first", "pow+argmx", "pow+1stpth", "xc+first",
+              "xc+argmx", "xc+1stpth", "nolag+frst", "nolag+1stp");
   int norm_first_bad = 0, norm_argmax_bad = 0, power_first_bad = 0;
+  int nolag_bad = 0;
   for (const auto& b : ds) {
     std::printf("%-14s", b.name.c_str());
     struct Combo { Thr tf; Pick pk; };
@@ -379,7 +380,9 @@ int main() {
                             {Thr::kPowerRatio, Pick::kFirstPath},
                             {Thr::kNormalizedXCorr, Pick::kFirstCrossing},
                             {Thr::kNormalizedXCorr, Pick::kTargetedArgmax},
-                            {Thr::kNormalizedXCorr, Pick::kFirstPath}};
+                            {Thr::kNormalizedXCorr, Pick::kFirstPath},
+                            {Thr::kXCorrNoLag, Pick::kFirstCrossing},
+                            {Thr::kXCorrNoLag, Pick::kFirstPath}};
     for (const auto& cb : combos) {
       {
         const Thr tf = cb.tf; const Pick pk = cb.pk;
@@ -402,9 +405,11 @@ int main() {
           norm_argmax_bad += nlev - exact;
         if (tf == Thr::kPowerRatio && pk == Pick::kFirstCrossing)
           power_first_bad += nlev - exact;
+        if (tf == Thr::kXCorrNoLag && pk == Pick::kFirstPath)
+          nolag_bad += nlev - exact;
         char c[32];
-        std::snprintf(c, sizeof c, "%d ex/%d ms", exact, miss);
-        std::printf(" %12s", c);
+        std::snprintf(c, sizeof c, "%dex/%dms", exact, miss);
+        std::printf(" %11s", c);
       }
     }
     std::printf("\n");
@@ -413,6 +418,17 @@ int main() {
         "  power+first still fails somewhere (the comparison is not a no-op)");
   check(norm_argmax_bad == 0,
         "  xcorr + FIRST-PATH is exact at every level, every shape");
+  // THE NR-STYLE DETECTOR IS MEASURABLY WORSE HERE, AND THAT IS THE RESULT.
+  // Dropping the lag product removes the repeat check, which is what rejects a
+  // lone noise spike or sidelobe. Measured at corr_scale 100, 8 noise draws:
+  // legacy and legacy_guard each lose one draw (-190 and -129 samples), dot11
+  // loses six of eight, nr four of eight; xcorr+first-path is exact on all 32.
+  // NR uses a plain matched filter because PSS does NOT repeat. Our beacon DOES
+  // have a repeated field, so using it buys real robustness -- follow NR's
+  // ARCHITECTURE (acquisition field, then pilots for fine tracking) and keep the
+  // 802.11-style detector that the waveform actually supports.
+  check(nolag_bad > 0,
+        "  no-lag (NR-style) is worse: the repeat check is load-bearing");
   // Reported, not gated, because it is the claim under test rather than a
   // requirement: if normalising alone were enough, the selection rule would be
   // belt-and-braces rather than load-bearing.
@@ -434,9 +450,11 @@ int main() {
   for (const double lv : kLevels) std::printf(" %8.0f", lv);
   std::printf("   spread\n");
   for (const auto& b : ds) {
-    for (const auto tf : {Thr::kPowerRatio, Thr::kNormalizedXCorr}) {
+    for (const auto tf : {Thr::kPowerRatio, Thr::kNormalizedXCorr,
+                          Thr::kXCorrNoLag}) {
       std::printf("%-14s %-10s", b.name.c_str(),
-                  tf == Thr::kPowerRatio ? "power" : "xcorr");
+                  tf == Thr::kPowerRatio ? "power"
+                      : tf == Thr::kNormalizedXCorr ? "xcorr" : "nolag");
       double lo = 1e300, hi = 0.0;
       for (const double lv : kLevels) {
         // Walk corr_scale down in half-decades until the index stops being
@@ -485,19 +503,24 @@ int main() {
         {{{0, 1.0}, {24, 1.4}}, 4250.0, "echo +24 samp, STRONGER"},
         {{{0, 0.5}, {40, 1.4}}, 4250.0, "weak direct, echo +40 STRONGER"},
     };
-    std::printf("%-30s %14s %14s %14s\n", "channel", "first-crossing",
-                "argmax", "first-path");
+    std::printf("%-30s %13s %13s %13s %13s\n", "channel", "xc+first",
+                "xc+argmax", "xc+1stpath", "nolag+1stpath");
     int argmax_bias = 0, firstpath_bias = 0;
     for (const auto& ch : chans) {
       std::printf("%-30s", ch.name);
-      for (const auto pk :
-           {Pick::kFirstCrossing, Pick::kTargetedArgmax, Pick::kFirstPath}) {
+      struct MC { Thr tf; Pick pk; };
+      const MC mcs[] = {{Thr::kNormalizedXCorr, Pick::kFirstCrossing},
+                        {Thr::kNormalizedXCorr, Pick::kTargetedArgmax},
+                        {Thr::kNormalizedXCorr, Pick::kFirstPath},
+                        {Thr::kXCorrNoLag, Pick::kFirstPath}};
+      for (const auto& mc : mcs) {
+        const Pick pk = mc.pk;
         long long lo = 1LL << 40, hi = -(1LL << 40);
         int miss = 0;
         for (unsigned sd = 1; sd <= 6; ++sd) {
           const long long v =
               residualCh(b, 1600.0, kSnrDb, kLead, kTail, kResyncCorrScale, pk,
-                         sd, Thr::kNormalizedXCorr, ch);
+                         sd, mc.tf, ch);
           if (v == kMiss) { ++miss; continue; }
           lo = std::min(lo, v); hi = std::max(hi, v);
         }
@@ -505,7 +528,7 @@ int main() {
         if (miss == 6) std::snprintf(c, sizeof c, "MISS");
         else if (lo == hi) std::snprintf(c, sizeof c, "%+lld", lo);
         else std::snprintf(c, sizeof c, "%+lld..%+lld", lo, hi);
-        std::printf(" %14s", c);
+        std::printf(" %13s", c);
         const long long worst = std::max(std::llabs(lo - kEndConvention),
                                          std::llabs(hi - kEndConvention));
         if (miss < 6 && worst > 4) {

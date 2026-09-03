@@ -338,7 +338,8 @@ int CommsLib::find_beacon_avx(
   // ~1e-20 on this bench, and 1e-40 is a denormal), and an underflowed
   // denominator would admit every index instead of none.
   const bool normalized = thresh_form == BeaconThresh::kNormalized;
-  const bool xcorr = thresh_form == BeaconThresh::kNormalizedXCorr;
+  const bool nolag = thresh_form == BeaconThresh::kXCorrNoLag;
+  const bool xcorr = thresh_form == BeaconThresh::kNormalizedXCorr || nolag;
   // For kNormalizedXCorr: trailing energy of the RAW samples, and the replica's
   // energy. |gc[i]|^2 / (E_raw[i] * E_rep) is the normalised cross-correlation,
   // 2nd order over 2nd order, so it is a coherence in [0,1] and does not move
@@ -370,6 +371,14 @@ int CommsLib::find_beacon_avx(
   }
   auto ranking = [&](size_t i) {
     const double t = static_cast<double>(thresh[i]);
+    if (nolag) {
+      // |gc[i]|^2 / (E_raw[i] * E_rep): a coherence in [0,1]. No second window,
+      // so no repeat check -- the peak stands on its own.
+      if (i >= raw_energy.size() || i >= corr_abs.size()) return 0.0;
+      const double e = raw_energy[i] * rep_energy;
+      if (e <= 0.0) return 0.0;
+      return static_cast<double>(corr_abs[i]) / e;
+    }
     if (xcorr) {
       // peak_metric[i] = |gc[i]|^2 * |gc[i-L]|^2, so normalising it needs BOTH
       // windows' energies. Below the lag there is no second window and the
