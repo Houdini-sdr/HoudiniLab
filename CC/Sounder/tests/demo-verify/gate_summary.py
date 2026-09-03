@@ -183,12 +183,18 @@ def check_stacks(rs):
         seen.setdefault(stack_key(r), []).append(os.path.basename(r["log"]))
     unknown = [n for k, v in seen.items() if not k for n in v]
     known = {k: v for k, v in seen.items() if k}
-    if unknown:
-        print("WARNING: no node-stack line in %d run(s): %s"
-              % (len(unknown), ", ".join(sorted(unknown))))
-        print("  the build those runs used cannot be verified, so they cannot")
-        print("  be compared against anything.")
     ok = True
+    if unknown:
+        # AND THIS MUST FAIL, NOT WARN. The docstring says an unverifiable run
+        # "cannot be compared against anything" and the code then aggregated it
+        # and exited 0 -- so a set with no stack line at all, or one known stack
+        # plus several unknown, passed silently. That is the same hole this
+        # check was written to close.
+        print("REFUSING TO AGGREGATE: no node-stack line in %d run(s): %s"
+              % (len(unknown), ", ".join(sorted(unknown))))
+        print("  The build those runs used cannot be verified, so they cannot be")
+        print("  compared against anything. Re-run them with the debug exports.")
+        ok = False
     if len(known) > 1:
         print()
         print("REFUSING TO AGGREGATE: these runs did not share one node stack.")

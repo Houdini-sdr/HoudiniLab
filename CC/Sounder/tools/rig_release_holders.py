@@ -19,7 +19,10 @@ the stream, which is what this does.
 """
 import os, signal, sys, time
 
-MARKERS = ("build/sounder", "csi_gui/csi_server.py", "for a in 1 2 3 4")
+# The third marker was "for a in 1 2 3 4", copied from csi_server.py's retry
+# loop -- change that loop's bounds and this silently stops matching and leaves
+# the orphan alive. Match the teardown call the loop always makes instead.
+MARKERS = ("build/sounder", "csi_gui/csi_server.py", "csi_gui/teardown_framer.py")
 
 
 def ancestry(pid):
@@ -51,21 +54,41 @@ def main():
             continue
         if any(m in cmd for m in MARKERS):
             victims.append((pid, cmd[:90]))
+    def still_ours(pid, cmd):
+        """Is `pid` STILL the process we decided to kill?
+
+        A pid captured before a 4-second wait can be recycled, and this tool
+        exists because pattern-matching kills have already hit the wrong process
+        twice today. Re-read the cmdline before escalating to SIGKILL.
+        """
+        try:
+            with open("/proc/%d/cmdline" % pid, "rb") as f:
+                now = f.read().replace(b"\0", b" ").decode("utf-8", "replace")
+        except Exception:
+            return False
+        return now.startswith(cmd[:40])
+
+    killed = []
     for pid, cmd in victims:
-        print("kill %d  %s" % (pid, cmd))
         try:
             os.kill(pid, signal.SIGINT)
-        except Exception:
-            pass
-    if victims:
+        except Exception as exc:  # noqa: BLE001 -- report, never claim success
+            print("could not signal %d (%s): %s" % (pid, cmd[:40], exc))
+            continue
+        killed.append((pid, cmd))
+        print("SIGINT %d  %s" % (pid, cmd))
+    if killed:
         time.sleep(4)
-        for pid, _ in victims:
+        for pid, cmd in killed:
+            if not still_ours(pid, cmd):
+                continue          # exited already, or the pid was recycled
             try:
                 os.kill(pid, signal.SIGKILL)
+                print("SIGKILL %d" % pid)
             except Exception:
                 pass
         time.sleep(2)
-    print("cleaned %d process(es)" % len(victims))
+    print("cleaned %d process(es)" % len(killed))
     return 0
 
 

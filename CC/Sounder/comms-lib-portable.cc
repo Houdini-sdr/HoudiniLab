@@ -277,10 +277,25 @@ std::vector<float> TrailingWindowSum(const std::vector<float>& f,
 // outdoor channel with 1-2 us of spread needs a longer window AND a preamble
 // whose plateau is further away than that; do not raise one without the other.
 static int firstPathWindow(int seq_len) {
-  if (const char* e = std::getenv("HOUDINI_FIRST_PATH_WIN")) {
-    const int v = std::atoi(e);
-    if (v >= 0 && v < seq_len * 2) return v;
-  }
+  // Read ONCE. Re-reading getenv per call would let the window change mid-run,
+  // making the residual distribution a mixture of two populations -- the same
+  // argument that makes the pick rule a read-once constant in receiver.cc, not
+  // honoured here until now.
+  static const int cached = [] {
+    const char* e = std::getenv("HOUDINI_FIRST_PATH_WIN");
+    if (e == nullptr) return -1;
+    char* end = nullptr;
+    const long v = std::strtol(e, &end, 10);
+    if (end != e && *end == '\0' && v >= 0 && v < 4096) {
+      return static_cast<int>(v);
+    }
+    // atoi("64x") returns 0, which silently DISABLED the back-search.
+    std::fprintf(stderr,
+                 "[find_beacon] HOUDINI_FIRST_PATH_WIN=\"%s\" is not an integer "
+                 "in [0, 4096) -- using the default\n", e);
+    return -1;
+  }();
+  if (cached >= 0) return std::min(cached, seq_len * 2);
   return seq_len / 2;
 }
 // How far below the peak an earlier path may be and still be taken as the first
@@ -293,19 +308,44 @@ static int firstPathWindow(int seq_len) {
 // back-search never fired on any multipath channel: measured +7, +23 and +39
 // samples of bias, identical to plain argmax, which is what a rule that never
 // fires looks like.
-static double firstPathFloorFrac() {
+static double firstPathDb() {
   double db = -9.0;
   if (const char* e = std::getenv("HOUDINI_FIRST_PATH_DB")) {
-    const double v = std::strtod(e, nullptr);
-    if (std::isfinite(v) && v <= 0.0 && v >= -30.0) db = v;
+    char* end = nullptr;
+    const double v = std::strtod(e, &end);
+    if (end != e && *end == '\0' && std::isfinite(v) && v <= 0.0 && v >= -30.0) {
+      db = v;
+    } else {
+      // FAIL LOUD. strtod("abc") returns 0.0, which passed the old range test
+      // and set the floor to 1.0 -- silently disabling the back-search in the
+      // rule this knob exists to tune.
+      std::fprintf(stderr,
+                   "[find_beacon] HOUDINI_FIRST_PATH_DB=\"%s\" is not a number "
+                   "in [-30, 0] -- using %g dB\n", e, db);
+    }
   }
-  // power ratio 10^(db/10), and the statistic goes as its SQUARE.
-  return std::pow(10.0, db / 10.0) * std::pow(10.0, db / 10.0);
+  return db;
 }
-// -9 dB admits a direct path well under half the echo's power, and still sits
-// ~80x above the preamble plateau's level-independent floor of 1/L^2, so it
-// cannot promote the preamble to "first path".
-static const double kFirstPathFrac = firstPathFloorFrac();
+static const double kFirstPathDb = firstPathDb();
+
+// THE FLOOR DEPENDS ON THE STATISTIC'S ORDER, AND THE FIRST VERSION SQUARED IT
+// UNCONDITIONALLY. kPowerRatio, kNormalized and kNormalizedXCorr are all 4th
+// order in path AMPLITUDE, so a path at x times the peak's POWER scores x^2 and
+// the floor is 10^(db/10) squared. kXCorrNoLag is |gc|^2/(E*E_rep) -- 2nd order
+// in amplitude, FIRST order in power -- so squaring makes a nominal -9 dB floor
+// an actual -18 dB one, and a sidelobe 18 dB down gets promoted to "first path".
+// Measured: nolag+first-path read -190 samples on a SINGLE-PATH channel with the
+// squared floor and -129 with the corrected one.
+static double firstPathFloorFrac(CommsLib::BeaconThresh form) {
+  const double p = std::pow(10.0, kFirstPathDb / 10.0);
+  return form == CommsLib::BeaconThresh::kXCorrNoLag ? p : p * p;
+}
+// -9 dB is close to the margin: bisected offline, the hardest gated multipath
+// case (weak direct, echo +40, stronger) flips from correct to +39 between
+// -8.8 dB and -8.0 dB. So the shipped default clears it by under 1 dB, which is
+// thin -- an earlier comment here claimed it "admits a direct path well under
+// half the echo's power" and that was wishful. Widen with HOUDINI_FIRST_PATH_DB
+// if a channel needs it, and re-run beacon_geometry_test when you do.
 
 int CommsLib::find_beacon_avx(
     const std::vector<std::complex<float>>& raw_samples,
@@ -460,7 +500,7 @@ int CommsLib::find_beacon_avx(
     // while being unambiguous relative to the peak beside it, which is the
     // whole reason the test is a FRACTION of the peak.
     const int win = firstPathWindow(seqLen);
-    const double floor_ratio = kFirstPathFrac * best_ratio;
+    const double floor_ratio = firstPathFloorFrac(thresh_form) * best_ratio;
     int first = best;
     for (int i = std::max(0, best - win); i < best; ++i) {
       if (ranking(static_cast<size_t>(i)) >= floor_ratio) { first = i; break; }

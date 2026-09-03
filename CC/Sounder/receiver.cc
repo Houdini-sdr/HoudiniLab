@@ -75,7 +75,7 @@ static size_t cfoLogEvery(void) {
 // which is exactly what tx_advance / ue_tx_advance_ticks calibrate.
 static constexpr ssize_t kHoudiniStrobeOffsTicks = 384;
 
-// Which crossing the TARGETED resync search returns. Default kTargetedArgmax;
+// Which crossing the TARGETED resync search returns. Default kFirstPath;
 // HOUDINI_BEACON_PICK=first selects the pre-2026-09-02 kFirstCrossing so a gate
 // can run both rules on ONE binary. Read once: a rule that changed mid-run would
 // make the residual distribution a mixture of two populations, which is exactly
@@ -133,13 +133,11 @@ static CommsLib::BeaconPick resyncPickFromEnv() {
 }
 static const CommsLib::BeaconPick kResyncPick = resyncPickFromEnv();
 
-// Which FORM the detection threshold takes. Default is the shipped power ratio;
-// HOUDINI_BEACON_THRESH=xcorr selects the normalised cross-correlation, whose
-// threshold is level-invariant. EXPERIMENTAL: the offline evidence is strong
-// (exact index at every level for all four beacons, and the smallest working
-// corr_scale is 3.16 at EVERY level and for EVERY shape, against a shipped form
-// whose working value moves 10000x across the same sweep) but it has not been
-// gated on silicon, so it is opt-in.
+// Which FORM the detection threshold takes. DEFAULT kNormalizedXCorr, the
+// normalised cross-correlation, whose threshold is level-invariant: the smallest
+// working corr_scale is 3.16 at every level and for every beacon shape, against
+// a power-ratio form whose working value moves 10000x across a 64x level sweep.
+// HOUDINI_BEACON_THRESH=power restores the pre-2026-09-02 statistic.
 static CommsLib::BeaconThresh resyncThreshFromEnv() {
   const char* e = std::getenv("HOUDINI_BEACON_THRESH");
   if (e != nullptr && std::string(e) == "power") {
@@ -182,6 +180,19 @@ static ssize_t houdiniBeaconEnd(Config* cfg) {
 // ~0 dB, so the floor separates them by orders of magnitude. [user 2026-08-30:
 // "keep the sync snr about 30 dB or so" -- default 20 leaves margin both
 // ways; HOUDINI_SYNC_SNR_DB overrides for bench tuning.]
+// Mirror of CommsLib's first-path back window, for the SNR guard below. Kept as
+// one expression so the two cannot drift: a guard smaller than the window is the
+// bug this exists to prevent.
+static ssize_t firstPathBackWindow() {
+  const char* e = std::getenv("HOUDINI_FIRST_PATH_WIN");
+  if (e != nullptr) {
+    char* end = nullptr;
+    const long v = std::strtol(e, &end, 10);
+    if (end != e && *end == '\0' && v >= 0 && v < 4096) return v;
+  }
+  return 64;  // CommsLib's default: seqLen/2 at the shipped gold length of 128
+}
+
 static double beaconSnrDb(const std::complex<int16_t>* w, size_t n,
                           ssize_t end_idx, size_t core_len) {
   const ssize_t lo = end_idx - static_cast<ssize_t>(core_len);
@@ -193,7 +204,17 @@ static double beaconSnrDb(const std::complex<int16_t>* w, size_t n,
   // the reported SNR tracked detector jitter, not the link. Excluding a few
   // samples on each side of the core from BOTH sums makes the number read
   // the link: a bias up to +-8 samples now costs <0.1 dB instead of ~14.
-  constexpr ssize_t kGuard = 8;
+  // THE GUARD MUST COVER THE FIRST-PATH BACK WINDOW, OR THE MULTIPATH FIX
+  // RE-ARMS AP-34(a)'s LIVENESS FAILURE. When first-path correctly returns the
+  // DIRECT path and the strongest energy sits a delay later, that echo lands
+  // OUTSIDE [lo, end_idx) and, with an 8-sample guard, inside `rest`. A 1.4x
+  // echo 24 samples late then drags the reported SNR to ~20 dB, the 30 dB floor
+  // rejects the detection, and resync escalates -- exactly the chain that cost a
+  // bench session, re-armed by the rule meant to handle multipath, and invisible
+  // on a cabled bench where first-path degenerates to argmax. So the guard is at
+  // least the back window: energy between the direct path and a later echo is
+  // excluded from BOTH sums rather than counted as noise.
+  const ssize_t kGuard = std::max<ssize_t>(8, firstPathBackWindow());
   double core = 0, rest = 0;
   size_t nrest = 0;
   for (size_t i = 0; i < n; ++i) {
@@ -1222,9 +1243,19 @@ ssize_t Receiver::syncSearch(const std::complex<int16_t>* check_data,
 #else
   // portable find_beacon_avx works on x86 and aarch64 (see comms-lib-portable.cc)
   const char* kPath = "avx";
+  // SCOPED TO HOUDINI, exactly as the pick rule is. The untargeted branch and
+  // the Iris/UHD configs were deliberately left on the old PICK rule because
+  // this bench cannot exercise that hardware; the identical objection applies to
+  // the threshold FORM, and applying it everywhere silently redefined
+  // corr_scale for files/1u-pilot-dl.json and powder-1u-pilot-dl.json (16 ->
+  // bar 0.0625 against a statistic that reads ~0.32, so ~5x margin where the
+  // power form had orders of magnitude). Their tuning notes also document the
+  // power-form populations, which would no longer describe what the code does.
+  const CommsLib::BeaconThresh thresh_form =
+      config_->is_houdini() ? kResyncThresh : CommsLib::BeaconThresh::kPowerRatio;
   sync_index = CommsLib::find_beacon_avx(check_data, config_->gold_cf32(),
                                          search_window, corr_scale, pick,
-                                         kResyncThresh);
+                                         thresh_form);
 #endif
   if (std::getenv("HOUDINI_SYNC_DEBUG") != nullptr) {
     static std::atomic<int> c{0};
@@ -1893,6 +1924,23 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
     tracker_cfg.meas_var = envDouble("HOUDINI_KF_MEAS_VAR", 0.5);
     tracker_cfg.rate_rw = envDouble("HOUDINI_KF_RATE_RW", 1e-9);
     tracker_cfg.innov_gate = envDouble("HOUDINI_KF_INNOV_GATE", 4.0);
+    // THE ACTIVE DETECTOR, ON EVERY RUN. The env overrides each warn when set,
+    // so taking the same values BY DEFAULT logged nothing at all and a run's
+    // log carried no record of which rule produced its numbers -- in a change
+    // whose other half exists because a run's identity was not recorded.
+    MLPD_INFO(
+        "Beacon detector: threshold %s, resync pick %s, acquisition pick %s "
+        "(first-path back window %lld samples)\n",
+        kResyncThresh == CommsLib::BeaconThresh::kNormalizedXCorr ? "xcorr"
+        : kResyncThresh == CommsLib::BeaconThresh::kXCorrNoLag    ? "nolag"
+        : kResyncThresh == CommsLib::BeaconThresh::kNormalized    ? "norm"
+                                                                  : "power",
+        kResyncPick == CommsLib::BeaconPick::kFirstPath        ? "first-path"
+        : kResyncPick == CommsLib::BeaconPick::kTargetedArgmax ? "argmax"
+        : kResyncPick == CommsLib::BeaconPick::kFirstCrossing  ? "first-crossing"
+                                                               : "refined",
+        config_->is_houdini() ? "same as resync" : "first-cluster-refined",
+        static_cast<long long>(firstPathBackWindow()));
     MLPD_INFO(
         "Grid tracker: %s (alpha %.3f beta %.3f step limit %.3f ppm; kalman "
         "R %.3f samp^2, q %.2g, innovation gate %.1f sigma)\n",
@@ -2834,14 +2882,29 @@ ssize_t Receiver::clientSyncBeacon(size_t radio_id, size_t sample_window,
             "clientSyncBeacon - Samples %zu - Window %zu\n",
             new_samples, sample_window);
 
-        // Acquisition: the strict threshold, and the earliest beacon copy refined
-        // to the best index within it. Everything downstream is measured from this
-        // index. NOTE this did NOT resolve the run-to-run constellation split it was
-        // investigated for -- see the corr_scale_init note in config.cc.
+        // Acquisition. Everything downstream is measured from this index, and
+        // unlike a resync it is anchored ONCE and never revisited -- so it is
+        // the one place a false lock is unrecoverable, and it was the one place
+        // the 2026-09-02 fix had not been applied.
+        //
+        // The multi-copy argument for kFirstClusterRefined no longer holds. It
+        // dates from the loops=forever era that filled a symbol with ~15 copies
+        // 4096 apart; the strobe now plays loops=1 once per TDD frame, so copies
+        // are 122880 samples apart while the acquisition window is at most
+        // samps_per_frame (122880) and the escalation window 9543. Both hold at
+        // most ONE copy, so there is no copy ambiguity to be repeatable about
+        // and the targeted rule's precondition holds here too.
+        //
+        // Iris/UHD keeps the old rule: different hardware, different framer, and
+        // this bench cannot exercise it.
+        // NOTE the earlier corr_scale_init change did NOT resolve the run-to-run
+        // constellation split it was investigated for -- see config.cc.
         sync_index = syncSearch(syncbuffmem.at(kSyncDetectChannel).data(),
                                 sample_window,
                                 config_->corr_scale_init(radio_id),
-                                CommsLib::BeaconPick::kFirstClusterRefined);
+                                config_->is_houdini()
+                                    ? kResyncPick
+                                    : CommsLib::BeaconPick::kFirstClusterRefined);
         // SNR floor: a correlation crossing at noise level is the artifact
         // class, not the beacon (measured: real ~45 dB, artifacts ~0 dB).
         // Reject and keep hunting rather than anchor on it.

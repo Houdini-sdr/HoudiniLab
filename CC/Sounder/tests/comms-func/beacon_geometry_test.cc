@@ -189,11 +189,12 @@ struct Row {
   int miss = 0;
 };
 
-Row sweepAt(const Desc& b, double level, Pick pick) {
+Row sweepAt(const Desc& b, double level, Pick pick,
+            Thr tf = Thr::kPowerRatio) {
   Row r;
   for (unsigned s = 1; s <= 8; ++s) {
     const long long v =
-        residual(b, level, kSnrDb, kLead, kTail, kResyncCorrScale, pick, s);
+        residual(b, level, kSnrDb, kLead, kTail, kResyncCorrScale, pick, s, tf);
     if (v == kMiss) {
       ++r.miss;
       continue;
@@ -242,9 +243,14 @@ int main() {
 
   for (const auto pick : {Pick::kFirstCrossing, Pick::kTargetedArgmax}) {
     const bool argmax = pick == Pick::kTargetedArgmax;
-    std::printf("\n=== %s ===\n",
-                argmax ? "kTargetedArgmax (what resync uses)"
-                       : "kFirstCrossing (what resync used before 2026-09-02)");
+    // NB both rows below use the POWER-RATIO threshold, which is no longer the
+    // shipped one -- they compare PICK RULES with the threshold held fixed at
+    // the historical form, which is what makes the pre/post comparison honest.
+    // The shipped combination is xcorr + first-path and it is exercised by the
+    // matrix further down, not here.
+    std::printf("\n=== %s (power-ratio threshold) ===\n",
+                argmax ? "kTargetedArgmax (resync, 2026-09-02 morning)"
+                       : "kFirstCrossing (resync, before 2026-09-02)");
     std::printf("%-12s", "peak counts");
     for (const auto& b : ds) std::printf(" %13s", b.name.c_str());
     std::printf("\n");
@@ -277,7 +283,8 @@ int main() {
   // undetectable. Checked with the rule we actually ship.
   std::printf("\n");
   for (const auto& b : ds) {
-    const Row r = sweepAt(b, 200.0, Pick::kTargetedArgmax);
+    // Sensitivity floor under the SHIPPED combination, not the historical one.
+    const Row r = sweepAt(b, 200.0, Pick::kFirstPath, Thr::kNormalizedXCorr);
     check(r.miss == 0 && r.lo == kEndConvention && r.hi == kEndConvention,
           "  " + b.name + ": detected at 200 counts peak, index exact");
   }
@@ -531,7 +538,11 @@ int main() {
         std::printf(" %13s", c);
         const long long worst = std::max(std::llabs(lo - kEndConvention),
                                          std::llabs(hi - kEndConvention));
-        if (miss < 6 && worst > 4) {
+        // COUNT THE SHIPPED COMBINATION ONLY. Keying on the pick rule alone
+        // lumped xcorr+first-path together with nolag+first-path, and since the
+        // shipped column is exact on every channel it contributed nothing --
+        // so the gate below was silently a statement about the NO-LAG rule.
+        if (miss < 6 && worst > 4 && mc.tf == Thr::kNormalizedXCorr) {
           if (pk == Pick::kTargetedArgmax) ++argmax_bias;
           if (pk == Pick::kFirstPath) ++firstpath_bias;
         }
@@ -540,8 +551,10 @@ int main() {
     }
     std::printf("\n  channels where the rule is >4 samples off the DIRECT path:"
                 "  argmax %d, first-path %d\n", argmax_bias, firstpath_bias);
-    check(firstpath_bias <= argmax_bias,
-          "  first-path is no worse than argmax on multipath");
+    check(argmax_bias > 0,
+          "  argmax IS biased on multipath (the comparison is not a no-op)");
+    check(firstpath_bias == 0,
+          "  the SHIPPED rule (xcorr + first-path) is exact on every channel");
   }
 
   std::printf("\nRESULT: %s (%d failure(s))\n", g_fail ? "FAIL" : "PASS", g_fail);

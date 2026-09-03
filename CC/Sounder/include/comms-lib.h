@@ -152,8 +152,9 @@ class CommsLib {
     // hundred samples before the true peak. Whether they cross is a function of
     // RECEIVED LEVEL, because the test compares a 4th-order quantity against a
     // 2nd-order one, so a link that is fine today false-locks after a gain
-    // change. Measured: the shipped beacon flips from -1 to -363 samples between
-    // 1600 and 3200 counts RMS (beacon_geometry_test).
+    // change. Measured: the shipped beacon flips from -1 to -274..-256 samples
+    // between 1600 and 3200 counts PEAK, reaching -363 by 12800
+    // (beacon_geometry_test; kLevels are peak counts, not rms).
     kTargetedArgmax,
     // FIRST PATH: argmax, then walk BACK to the earliest crossing still within
     // `frac` of the peak, bounded by a delay-spread window.
@@ -217,13 +218,22 @@ class CommsLib {
     // on a matched filter -- and that lag product is exactly what lets a
     // 16-periodic preamble alias into a 128-sample lag. NR does not have the
     // failure class: PSS is a NON-REPEATING m-sequence found by a plain matched
-    // filter, and the peak is the peak. This is that detector.
+    // filter, and the peak is the peak.
     //
-    // The trade is discrimination against the preamble. The lag product puts
-    // the preamble plateau ~1/L^2 below the peak; without it the separation is
-    // only ~1/L, 21 dB instead of 42. It also drops the repeat check, which is
-    // what rejects a lone noise spike, so it should be more false-alarm prone
-    // at low SNR. Both predictions are measured rather than assumed.
+    // THIS IS THAT DETECTOR ONLY HALF-WAY, AND THE LIMIT MATTERS. It drops the
+    // lag product, but the correlator reference stays the FINE field -- the
+    // repeated gold/LTS/TRS symbol -- because that is what Config hands the
+    // detector. So it runs a plain matched filter against a symbol that appears
+    // TWICE, which is precisely the ambiguity NR's non-repeating PSS avoids.
+    // Measured accordingly: with the floor correctly converted for a 2nd-order
+    // statistic the residual is -129 on legacy_guard, exactly one fine_len, so
+    // the failure is rep1/rep2 AMBIGUITY and not the loss of a noise-spike
+    // check. Testing the real NR architecture needs the ACQUISITION field as the
+    // correlator reference, which nothing in this tree does yet.
+    //
+    // The other trade is discrimination against the preamble: the lag product
+    // puts the preamble plateau ~1/L^2 below the peak, and without it the
+    // separation is only ~1/L, 21 dB instead of 42.
     kXCorrNoLag,
   };
 

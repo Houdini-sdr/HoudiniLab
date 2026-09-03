@@ -44,9 +44,21 @@ int main(int argc, char* argv[]) {
   if (FLAGS_view && std::getenv("HOUDINI_CSI_UDP") == nullptr) {
     setenv("HOUDINI_CSI_UDP", "127.0.0.1:9999", 1);
   }
-  auto config =
-      std::make_unique<Config>(FLAGS_conf_file, FLAGS_storepath, FLAGS_bs_only,
-                               FLAGS_client_only, FLAGS_calibrate);
+  // A BAD CONFIG SHOULD SAY SO, NOT ABORT. Config's constructor throws on
+  // invalid input by design (an unknown `beacon_type` must not silently fall
+  // back to the old beacon), but an exception escaping main is std::terminate --
+  // the operator sees "Aborted" and a core, not the sentence explaining what to
+  // fix. Catch here so the design choice reaches the person who has to act on it.
+  std::unique_ptr<Config> config;
+  try {
+    config =
+        std::make_unique<Config>(FLAGS_conf_file, FLAGS_storepath, FLAGS_bs_only,
+                                 FLAGS_client_only, FLAGS_calibrate);
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "\nConfiguration error in %s:\n  %s\n\n",
+                 FLAGS_conf_file.c_str(), e.what());
+    return EXIT_FAILURE;
+  }
   int ret = EXIT_FAILURE;
   if (FLAGS_gen_data_bits) {
     auto dg = std::make_unique<DataGenerator>(config.get());

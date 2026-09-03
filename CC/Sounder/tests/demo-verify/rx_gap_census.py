@@ -111,27 +111,45 @@ def main():
         print("%-8s %-9s %-9s %-7s %-9s %-9s %-10s"
               % ("nsamps", "short %", "min ret", "reads", "gaps", "pairs",
                  "worst gap"))
-        bad = 0
+        bad, unmeasured, total_pairs = 0, 0, 0
         for ns in [int(v) for v in a.sweep_nsamps.split(",") if v.strip()]:
             r = census(a, ns, a.reads)
             if r is None:
                 print("%-8d %s" % (ns, "no reads"))
+                unmeasured += 1
                 continue
             if r["gaps"]:
                 bad += 1
+            if r["pairs"] == 0:
+                unmeasured += 1
+            total_pairs += r["pairs"]
             print("%-8d %-9.1f %-9d %-7d %-9d %-9d %-10d"
                   % (ns, r["short_pct"], r["min"], r["n"], r["gaps"],
                      r["pairs"], r["worst_gap"]))
         print()
+        if unmeasured:
+            # ZERO PAIRS IS NOT ZERO LOSS. `gaps` only counts pairs where both
+            # reads carried SOAPY_SDR_HAS_TIME; if the device never sets it,
+            # pairs == 0 and gaps == 0, and the old verdict printed "zero gaps at
+            # every request size" from a run that measured nothing. That is the
+            # exact "a guard returns something the caller cannot tell from a
+            # measurement" pattern -- in the tool that settled AP-59.
+            print("NO LOSS MEASUREMENT at %d request size(s): no read pair "
+                  "carried a timestamp," % unmeasured)
+            print("so the gap test could not run. This is NOT a zero-loss "
+                  "result. Check that the")
+            print("stream reports SOAPY_SDR_HAS_TIME before reading anything "
+                  "into the rates above.")
+            return 2
         if bad:
             print("SAMPLES WERE LOST at %d request size(s): a short read at "
                   "those sizes is NOT" % bad)
             print("just an early return. That changes AP-59's answer -- report it.")
-        else:
-            print("Zero gaps at every request size: every short read is an "
-                  "early return with")
-            print("nothing missing, so the short-read RATE is not a loss "
-                  "measurement.")
+            return 1
+        print("Zero gaps at every request size, over %d measured pairs: every "
+              "short read is an" % total_pairs)
+        print("early return with nothing missing, so the short-read RATE is not "
+              "a loss measurement.")
         return 0
 
     dev = SoapySDR.Device(dict(driver="houdinisdr",
