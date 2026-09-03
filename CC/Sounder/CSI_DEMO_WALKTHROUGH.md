@@ -167,6 +167,18 @@ You should end up with `build/sounder`. The GPU beacon correlator is a separate
 option, off by default, and the demo does not need it. Leave
 `HOUDINI_USE_CUDA` alone unless you are specifically testing that path.
 
+The build also produces the radio-free tests and bench tools (six `ctest`
+suites: the sync configuration, the golden beacon windows, the resync policy,
+the slice geometry, the grid tracker and the beacon geometry). Run them once
+after building:
+
+```bash
+cd build && ctest
+```
+
+They need no radio and take under a minute. A packager who wants only the
+sounder can configure with `-DSOUNDER_BUILD_TESTS=OFF`.
+
 ### 2.6 Point the demo at your bench
 
 Edit `files/topology-houdini.json` and replace the two addresses with your own.
@@ -716,7 +728,11 @@ Example, in `files/houdini-ul.json`:
 Diagnostics that dump files or print profiles (`HOUDINI_LOOP_PROFILE`,
 `HOUDINI_RX_PROFILE`, `HOUDINI_COALESCE_SLOTS`, `HOUDINI_CSI_NO_PHASE_FIX`,
 `HOUDINI_BS_RX_EVERY`, `HOUDINI_DUMP_*`) stay environment variables: they are
-not configuration, and a dump switch in a shipped JSON is a trap.
+not configuration, and a dump switch in a shipped JSON is a trap. Every
+`HOUDINI_DUMP_*` file lands under `HOUDINI_DUMP_DIR` (default `/tmp`), so a
+bench can keep its dumps out of `/tmp` with one variable. View mode
+(`HOUDINI_CSI_UDP`, set by `--view`) writes NO HDF5 file and now says so at
+startup, so a stray value in your shell cannot silently disable recording.
 
 
 The last four are the escalation net. Their defaults were tuned when the client

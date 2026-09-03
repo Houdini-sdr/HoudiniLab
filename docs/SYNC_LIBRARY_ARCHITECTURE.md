@@ -1,6 +1,6 @@
 # The sync library: architecture and migration plan
 
-Status: PLAN, 2026-09-03. Written after the AP-66 campaign, to roll the beacon,
+Status: P1 LANDED and gated (DEMO_VERIFICATION 8.170), then reworked to the architecture review of 2026-09-03 (8.175): `BeaconShape`, `Detection` with evidence, the schema/values split, `ResyncPolicy`, `sim::Channel` and `Numerology` exist; P3 (the pfa-derived bar) and P5 (`PhaseTracker`) remain. Written 2026-09-03. Written after the AP-66 campaign, to roll the beacon,
 detector, confirm, carrier and grid-tracking code and everything the ledger has
 measured about it into one classed, configured, tested library. Section 8 lists
 the decisions that are the user's to make; everything else is a proposal with a
