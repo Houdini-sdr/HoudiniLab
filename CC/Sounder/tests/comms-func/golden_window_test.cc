@@ -228,16 +228,15 @@ int main(int argc, char** argv) {
     SnrWindowGuard guard(d.coreLen(), rcfg.confirm.snr_floor_db,
                          SnrWindowGuard::guardFor(det.firstPathWindow()));
     houdini::sync::RepetitionPhaseEstimator cfo(d.geometry(), rcfg.cfo.window_margin, true);
-    if (!det.backendAppliesConfig()) {
-      // A backend that ignores the configured form and pick (CUDA) cannot
-      // reproduce windows recorded by the one that applies them: the golden
-      // replay has NO coverage under such a build, and says so once per shape
-      // rather than passing vacuously (the counts below still hold).
-      std::printf("SKIP  %s: backend %s does not apply the configuration; %d windows counted, none replayed\n",
-                  shape, det.backendName(), kExpected.at(shape));
-      windows += kExpected.at(shape);
-      per_shape[shape] += kExpected.at(shape);
-      continue;
+    // A backend that ignores the configured form and pick (CUDA) cannot
+    // reproduce windows recorded by the one that applies them: under such a
+    // build the replay is skipped, said once per shape, but the fixtures are
+    // still OPENED and COUNTED, so a missing or half-populated set fails the
+    // count checks below rather than passing vacuously (round 7).
+    const bool replay = det.backendAppliesConfig();
+    if (!replay) {
+      std::printf("SKIP  %s: backend %s does not apply the configuration; the windows are counted, not replayed\n",
+                  shape, det.backendName());
     }
     // 00-05 recorded 2026-09-03 morning (index and SNR); 06-11 that afternoon
     // by the review-fix build, which also records the statistic and the bar.
@@ -250,6 +249,7 @@ int main(int argc, char** argv) {
       const auto meta = readMeta(base + ".txt");
       ++windows;
       ++per_shape[shape];
+      if (!replay) continue;
       if (!meta.has("sync_index") || !meta.has("snr")) {
         check(false, std::string(shape) + " window " + std::to_string(i) + ": fixture txt lacks sync_index/snr");
         continue;

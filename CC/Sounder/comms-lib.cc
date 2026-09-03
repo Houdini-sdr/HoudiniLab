@@ -19,12 +19,10 @@
 
 #include "include/comms-lib.h"
 
-
 #include <queue>
 
 #include "include/constants.h"
 #include "include/utils.h"
-
 
 int CommsLib::findLTS(const std::vector<std::complex<float>>& iq, int seqLen) {
   /*
