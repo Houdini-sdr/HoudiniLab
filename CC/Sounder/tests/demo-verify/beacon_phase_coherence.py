@@ -33,7 +33,7 @@ import time
 import numpy as np
 
 import SoapySDR
-from SoapySDR import SOAPY_SDR_CS16, SOAPY_SDR_RX
+from SoapySDR import SOAPY_SDR_CS16, SOAPY_SDR_RX, SOAPY_SDR_TX
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import two_node_beacon_arrival as tn  # noqa: E402
@@ -53,6 +53,12 @@ def main():
     ap.add_argument("--frames", type=int, default=16)
     ap.add_argument("--windows", type=int, default=10)
     ap.add_argument("--corr-scale", type=float, default=10.0)
+    ap.add_argument("--ue-mts", default="on", choices=["on", "off"],
+                    help="put the UE's receive stream in the MTS group via a "
+                         "never-activated TX replay stream first, as the "
+                         "sounder's UE does (default on). off reproduces the "
+                         "per-arm converter skew of 8.172: smeared, tilted "
+                         "beacon and phase hops at half-sample timing.")
     ap.add_argument("--mts", default="on", choices=["on", "off", "on-power0"],
                     help="open the streams with mts=true as the sounder does "
                          "(default on). off reproduces the probes' pre-2026-09-03 "
@@ -114,6 +120,19 @@ def main():
                                timeout=RPC_TIMEOUT_US))
     dev.setSampleRate(SOAPY_SDR_RX, a.ch, RATE)
     tn.tune(dev, SOAPY_SDR_RX, a.ch, a.freq)
+    ue_dummy_tx = None
+    if a.ue_mts == "on":
+        # The sounder's UE (ClientRadioSet + Radio.cc): its TX replay stream is
+        # set up first, which acquires the DAC tiles and satisfies the driver's
+        # first-up rule, then its RX stream joins the MTS group. Mirror that
+        # with a never-activated TX replay stream (and the ch0 aux for tile-0
+        # membership, as the Bs class does).
+        if a.ch != 0:
+            ue_aux = dev.setupStream(SOAPY_SDR_TX, SOAPY_SDR_CS16, [0],
+                                     dict(tx_mode="replay", mts="true"))
+        ue_dummy_tx = dev.setupStream(SOAPY_SDR_TX, SOAPY_SDR_CS16, [a.ch],
+                                      dict(tx_mode="replay", mts="true"))
+        tn.STREAM_MTS_RX[0] = True
     rxs = dev.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CS16, [a.ch], tn.rx_stream_args(a.ch))
     dev.activateStream(rxs)
 
@@ -142,8 +161,15 @@ def main():
         # MEANS REMOVED: a DC offset would otherwise read as imbalance and
         # correlation. The offset itself is reported separately, in units of the
         # window's rms, because a per-arm DC offset is a chain state too.
-        mi, mq = float(np.mean(c.real)), float(np.mean(c.imag))
-        ri, rq = c.real - mi, c.imag - mq
+        # BEACON-FREE STRETCHES ONLY. Over a whole window the beacon dominates
+        # (47 dB above noise for 0.4 % of the samples is 200x the noise energy),
+        # so the earlier whole-window version measured the beacon's own I/Q
+        # product at the carrier phase, not the chain. Take the middle 80 % of
+        # each frame, far from any beacon.
+        quiet = np.concatenate([c[k*FRAME + FRAME//10 : k*FRAME + FRAME - FRAME//10]
+                                for k in range(a.frames + 1)])
+        mi, mq = float(np.mean(quiet.real)), float(np.mean(quiet.imag))
+        ri, rq = quiet.real - mi, quiet.imag - mq
         ii = float(np.mean(ri**2)); qq = float(np.mean(rq**2))
         iq = float(np.mean(ri*rq)) / math.sqrt(ii*qq) if ii > 0 and qq > 0 else 0.0
         rms = math.sqrt(ii + qq)
@@ -289,8 +315,8 @@ def main():
         qi = [x[0] for x in iq_stats]; xc = [x[1] for x in iq_stats]; dc = [x[2] for x in iq_stats]
         print("  raw I/Q (means removed): Q/I rms %.4f..%.4f, corr %+.4f..%+.4f, DC offset %.3f..%.3f of rms, %d windows"
               % (min(qi), max(qi), min(xc), max(xc), min(dc), max(dc), len(qi)))
-        print("  (circular noise: Q/I 1.000 +- %.3f, corr 0 +- %.3f at this window length)"
-              % (1.0/math.sqrt(2*len(c)), 1.0/math.sqrt(len(c))))
+        print("  (beacon-free stretches; circular noise: Q/I 1.000 +- %.3f, corr 0 +- %.3f)"
+              % (1.0/math.sqrt(2*len(quiet)), 1.0/math.sqrt(len(quiet))))
     if image_ratios:
         ls = np.array(lobe_steps) if lobe_steps else np.array([0.0])
         print("  receive-chain state: image ratio mean %.3f (min %.3f max %.3f); "
