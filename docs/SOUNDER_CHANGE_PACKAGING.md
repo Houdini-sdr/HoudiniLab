@@ -107,6 +107,15 @@ own. They are the candidate `fix/legacy-sounder` series.
 
 ## 5. Decisions that are the user's
 
+DECIDED 2026-09-03 (recorded in `RADIO_PLATFORM_SEAM.md` section 1): the
+environment-override default flips to off with the bench scripts moved to
+the JSON overlay; the ledger and walkthrough stay and the raw captures and
+superseded probes move out at branch landing; Iris and UHD remain
+inspection-only with a build matrix; the packet width and the portable
+correlator are accepted; Agora's radio abstraction is adopted in shape, not
+in code, for now.
+
+
 - Whether to flip `sync.allow_env_overrides` to false now (the bench scripts
   still sweep through the environment) or next release as planned.
 - Whether the evidence captures (`tests/demo-verify/evidence`, 3.9 MB), the

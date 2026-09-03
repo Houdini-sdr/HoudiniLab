@@ -668,14 +668,17 @@ Three things to know:
 2. A key the loader does not know, or a value outside its range, stops the
    client with a message naming the key. A typo cannot quietly leave a knob at
    its default.
-3. The `was` column is the environment variable each knob replaces. It is
-   still honoured this release while `sync.allow_env_overrides` is true (the
-   default) and every override is logged. A number outside a knob's range is
-   pulled to the nearest bound with a note, except for the three knobs whose
-   old readers ignored such a value (`beacon.tx_full_scale`,
-   `detector.first_path_window`, `detector.first_path_floor_db`), which keep
-   their default with a note, as before. Set the flag false in the JSON to
-   refuse overrides. The plan is to remove the environment path next release.
+3. The `was` column is the environment variable each knob replaces. Those
+   variables are OFF by default: a stale export in your shell is reported as
+   IGNORED at startup and changes nothing. A config that sets
+   `sync.allow_env_overrides` true gets them back, each override logged; a
+   number outside a knob's range is then pulled to the nearest bound with a
+   note, except for the three knobs whose old readers ignored such a value
+   (`beacon.tx_full_scale`, `detector.first_path_window`,
+   `detector.first_path_floor_db`), which keep their default with a note.
+   Bench sweeps go through the JSON: `run_shape_campaign.sh` merges
+   `SYNC_OVERLAY` (a JSON object) into the `sync` block of every config it
+   writes. The environment path is removed next release.
 
 Example, in `files/houdini-ul.json`:
 
@@ -722,7 +725,7 @@ Example, in `files/houdini-ul.json`:
 | `sync.resync.hold_offgrid` | 2 | `HOUDINI_HOLD_OFFGRID` | 1 to 1000 | clamped | Consecutive off-grid detections before the beacon counts as moved. |
 | `sync.resync.acq_refine_span` | 200 | `HOUDINI_ACQ_REFINE_SPAN` | 2 to 100000 | clamped | Frames of baseline acquisition wants before it trusts its rate estimate. |
 | `sync.resync.acq_max_ppm` | 100 | `HOUDINI_ACQ_MAX_PPM` | 0.1 to 10000 | clamped | Plausibility band applied to a rate that acquisition hands back, ppm. |
-| `sync.allow_env_overrides` | true |  |  |  | Whether HOUDINI_* environment variables may override these values (each override is logged; see the policy column). Default true this release. |
+| `sync.allow_env_overrides` | false |  |  |  | Whether HOUDINI_* environment variables may override these values (each override is logged; see the policy column). Off by default: sweep through the JSON overlay instead. |
 <!-- sync-knob-table:end -->
 
 Diagnostics that dump files or print profiles (`HOUDINI_LOOP_PROFILE`,

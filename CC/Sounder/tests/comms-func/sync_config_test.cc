@@ -193,16 +193,23 @@ int main(int argc, char** argv) {
     check(throws(R"({"beacon_type": "dot11", "sync": {"beacon": {"type": "nr"}}})"),
           "top-level and sync beacon types that disagree throw");
   }
-  // 6. Environment overrides: applied and logged when allowed, refused when not.
+  // 6. Environment overrides: applied and logged when a config allows them,
+  //    refused (and reported) by default.
+  const std::string kEnvOn = R"({"sync": {"allow_env_overrides": true}})";
   {
     setenv("HOUDINI_SCATTER_TOL_US", "3.5", 1);
     setenv("HOUDINI_BEACON_THRESH", "nolag", 1);
     setenv("HOUDINI_TRACKER", "kf", 1);
-    const auto c = SyncConfig::loadFromText("{}");
+    const auto c = SyncConfig::loadFromText(kEnvOn);
     check(c.resync.scatter_tol_us == 3.5 && c.provenanceOf("resync.scatter_tol_us") == Source::kEnv,
           "env: numeric override lands with provenance env");
     check(c.detector.threshold == ThresholdForm::kCoherence && c.tracker.type == TrackerType::kKalman,
           "env: legacy spellings nolag and kf map to coherence and kalman");
+    const auto d0 = SyncConfig::loadFromText("{}");
+    bool said0 = false;
+    for (const auto& w : d0.warnings()) said0 |= (w.find("IGNORED") != std::string::npos);
+    check(d0.resync.scatter_tol_us == 2.0 && !d0.allow_env_overrides && said0,
+          "env: refused and reported by DEFAULT (decided 2026-09-03)");
     const auto d = SyncConfig::loadFromText(R"({"sync": {"allow_env_overrides": false}})");
     check(d.resync.scatter_tol_us == 2.0 && d.provenanceOf("resync.scatter_tol_us") == Source::kDefault,
           "env: refused when allow_env_overrides is false");
@@ -210,27 +217,27 @@ int main(int argc, char** argv) {
     for (const auto& w : d.warnings()) said |= (w.find("IGNORED") != std::string::npos);
     check(said, "env: the refusal is reported");
     setenv("HOUDINI_SCATTER_TOL_US", "abc", 1);
-    const auto e = SyncConfig::loadFromText("{}");
+    const auto e = SyncConfig::loadFromText(kEnvOn);
     check(e.resync.scatter_tol_us == 2.0, "env: a non-number is ignored, not zero");
     setenv("HOUDINI_SCATTER_TOL_US", "5000", 1);
-    const auto f = SyncConfig::loadFromText("{}");
+    const auto f = SyncConfig::loadFromText(kEnvOn);
     check(f.resync.scatter_tol_us == 1000.0, "env: an out-of-range value is CLAMPED to the range");
     bool clamped_note = false;
     for (const auto& w : f.warnings()) clamped_note |= (w.find("clamped") != std::string::npos);
     check(clamped_note, "env: the clamp is reported");
     setenv("HOUDINI_ESCALATE_EPISODES", "0", 1);
     setenv("HOUDINI_RESYNC_RETRY_MAX", "2.5", 1);
-    const auto g = SyncConfig::loadFromText("{}");
+    const auto g = SyncConfig::loadFromText(kEnvOn);
     check(g.resync.escalate_episodes == 1 && g.resync.retry_max == 2,
           "env: an int knob at 0 clamps to its minimum and 2.5 floors to 2 (the old readers' meaning)");
     setenv("HOUDINI_BEACON_PICK", "first", 1);
-    const auto h = SyncConfig::loadFromText("{}");
+    const auto h = SyncConfig::loadFromText(kEnvOn);
     check(h.detector.pick == PickRule::kFirstCrossing, "env: the legacy spelling first maps to first_crossing");
     bool noted_first = false;
     for (const auto& w : h.warnings()) noted_first |= (w.find("AP-34") != std::string::npos);
     check(noted_first, "validate: first_crossing is noted as diagnostic only");
     setenv("HOUDINI_BEACON_PICK", "strongest", 1);
-    const auto i = SyncConfig::loadFromText("{}");
+    const auto i = SyncConfig::loadFromText(kEnvOn);
     check(i.detector.pick == PickRule::kFirstPath, "env: an unknown enum name is ignored, not fatal");
     clearEnv();
     // The three knobs whose old readers IGNORED an out-of-range value keep
@@ -239,7 +246,7 @@ int main(int argc, char** argv) {
     setenv("HOUDINI_FIRST_PATH_DB", "3", 1);
     setenv("HOUDINI_FIRST_PATH_WIN", "5000", 1);
     setenv("HOUDINI_GRID_ALPHA", "50", 1);
-    const auto j = SyncConfig::loadFromText("{}");
+    const auto j = SyncConfig::loadFromText(kEnvOn);
     check(j.beacon.tx_full_scale == 0.6 && j.detector.first_path_floor_db == -9.0 &&
               j.detector.first_path_window == -1,
           "env: BEACON_FS=0, FIRST_PATH_DB=3, FIRST_PATH_WIN=5000 keep their defaults (as before)");

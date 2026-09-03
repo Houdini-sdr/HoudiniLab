@@ -54,10 +54,32 @@ declare -A conf_of
 for s in "${shape_arr[@]}"; do
   c="${CONF%.json}-$s.json"
   python3 - "$CONF" "$c" "$s" <<'PY'
-import json, sys
+import json, os, sys
 src, dst, shape = sys.argv[1:4]
 d = json.load(open(src))
 d["beacon_type"] = shape
+# The sweep goes through the JSON, not the environment (overrides are off
+# by default since 2026-09-03): SYNC_OVERLAY is a JSON object merged into
+# the "sync" block, e.g. SYNC_OVERLAY='{"beacon": {"tx_full_scale": 0.2}}'.
+# The two environment names earlier campaigns used are translated for them.
+def merge(dst_obj, src_obj):
+    for k, v in src_obj.items():
+        if isinstance(v, dict) and isinstance(dst_obj.get(k), dict):
+            merge(dst_obj[k], v)
+        else:
+            dst_obj[k] = v
+sync = d.get("sync") or {}
+overlay = json.loads(os.environ.get("SYNC_OVERLAY", "{}"))
+legacy = {}
+if os.environ.get("HOUDINI_BEACON_FS"):
+    legacy.setdefault("beacon", {})["tx_full_scale"] = float(os.environ["HOUDINI_BEACON_FS"])
+if os.environ.get("HOUDINI_SYNC_SNR_DB"):
+    legacy.setdefault("confirm", {})["snr_floor_db"] = float(os.environ["HOUDINI_SYNC_SNR_DB"])
+merge(sync, legacy)
+merge(sync, overlay)
+if sync:
+    d["sync"] = sync
+    print("  sync overlay for %s: %s" % (shape, json.dumps(sync)))
 json.dump(d, open(dst, "w"), indent=4)
 PY
   conf_of[$s]="$c"

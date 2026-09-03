@@ -314,7 +314,7 @@ const std::vector<SyncConfig::Spec>& SyncConfig::schema() {
        "Plausibility band applied to a rate that acquisition hands back, ppm.",
        KNOB_ACCESS(double, resync.acq_max_ppm), nullptr, EP::kClamp},
       {"allow_env_overrides", nullptr, 0, 0,
-       "Whether HOUDINI_* environment variables may override these values (each override is logged; see the policy column). Default true this release.",
+       "Whether HOUDINI_* environment variables may override these values (each override is logged; see the policy column). Off by default: sweep through the JSON overlay instead.",
        KNOB_ACCESS(bool, allow_env_overrides), nullptr, EP::kClamp},
   };
   return kSchema;

@@ -22,11 +22,14 @@
  * let a const reference hand out writable storage; the architecture review of
  * 2026-09-03 called it, and this is the fix.)
  *
- * ENVIRONMENT OVERRIDES ARE A MIGRATION AID. `allow_env_overrides` defaults to
- * true for this release because the bench scripts in tests/demo-verify still
- * drive sweeps through the environment; every override is logged, and a JSON
- * config can set the flag false. The plan is to flip the default next release
- * and remove the path after (architecture plan, sections 5 and 8).
+ * ENVIRONMENT OVERRIDES ARE OFF BY DEFAULT (decided 2026-09-03,
+ * docs/RADIO_PLATFORM_SEAM.md section 1). The JSON is the configuration; the
+ * bench scripts sweep through a JSON overlay (run_shape_campaign.sh,
+ * SYNC_OVERLAY). A config that sets `allow_env_overrides` true gets the old
+ * HOUDINI_* readers back, every override logged; an environment variable seen
+ * while they are off is reported as IGNORED so a stale export cannot pass
+ * silently. The environment path is kept one more release for that reason
+ * and then removed.
  *
  * WHAT AN OUT-OF-RANGE ENVIRONMENT VALUE DOES, knob by knob, because the old
  * readers were not uniform: four integer knobs (`resync.retry_max`,
@@ -185,7 +188,7 @@ struct SyncConfig {
   CfoConfig cfo;
   GridTrackerConfig tracker;
   ResyncConfig resync;
-  bool allow_env_overrides = true;
+  bool allow_env_overrides = false;
 
   /// What an out-of-range ENVIRONMENT value does (JSON is always strict).
   enum class EnvPolicy { kClamp, kIgnoreOutOfRange };
