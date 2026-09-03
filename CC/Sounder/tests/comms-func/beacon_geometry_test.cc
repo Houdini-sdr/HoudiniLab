@@ -141,10 +141,35 @@ long long residualCh(const Desc& b, double peak_counts, double snr_db,
   const long long rep_tail = static_cast<long long>(b.replica_tail());
   return idx < 0 ? kMiss : s0 + idx + rep_tail - end;  // vs the DIRECT path's end
 }
+/// Delay a waveform by a fractional sample with a windowed sinc (33 taps).
+/// Returns len+1 samples so the tail is kept. The bench's link has an
+/// arbitrary fractional timing; the integer placement everywhere else in this
+/// test cannot show what a detector does BETWEEN samples.
+std::vector<cf> fracDelay(const std::vector<cf>& x, double tau) {
+  const int R = 16;
+  std::vector<cf> y(x.size() + 1, cf(0.f, 0.f));
+  for (size_t k = 0; k < y.size(); ++k) {
+    std::complex<double> acc(0.0, 0.0);
+    for (int m = static_cast<int>(k) - R; m <= static_cast<int>(k) + R; ++m) {
+      if (m < 0 || m >= static_cast<int>(x.size())) continue;
+      const double t = static_cast<double>(k) - static_cast<double>(m) - tau;
+      const double sinc = (std::fabs(t) < 1e-9) ? 1.0
+                          : std::sin(M_PI * t) / (M_PI * t);
+      const double w = 0.5 + 0.5 * std::cos(M_PI * t / (R + 1));  // Hann
+      acc += std::complex<double>(x[m].real(), x[m].imag()) * (sinc * w);
+    }
+    y[k] = cf(static_cast<float>(acc.real()), static_cast<float>(acc.imag()));
+  }
+  return y;
+}
+
 long long residual(const Desc& b, double peak_counts, double snr_db,
                    long long lead, long long tail, float corr_scale, Pick pick,
-                   unsigned seed, Thr thresh_form = Thr::kPowerRatio) {
+                   unsigned seed, Thr thresh_form = Thr::kPowerRatio,
+                   double frac = 0.0) {
+  const std::vector<cf> core = frac != 0.0 ? fracDelay(b.core, frac) : b.core;
   const long long len = static_cast<long long>(b.core.size());
+  const long long clen = static_cast<long long>(core.size());
   std::mt19937 g(seed);
   auto u01 = [&g]() { return (static_cast<double>(g()) + 0.5) / 4294967296.0; };
   auto gauss = [&]() {
@@ -167,7 +192,7 @@ long long residual(const Desc& b, double peak_counts, double snr_db,
   for (long long i = 0; i < n; ++i) {
     const long long a = s0 + i;
     cf v(0.f, 0.f);
-    if (a >= pos && a < pos + len) v = b.core[a - pos];
+    if (a >= pos && a < pos + clen) v = core[a - pos];
     const double re = v.real() * scale + gauss() * ns * scale;
     const double im = v.imag() * scale + gauss() * ns * scale;
     buf[i] = std::complex<int16_t>(
@@ -603,6 +628,99 @@ int main() {
     check(firstpath_bias == 0,
           std::string("  ") + b.name +
               ": first-path is exact on every channel");
+  }
+
+  // ---------------------------------------------------------------------
+  // TIMING JITTER AGAINST SNR, FOR THE 8.160 OBSERVATION. On silicon at
+  // reduced transmit level nr_pss's adjacent-difference jitter read 1.3-2.2x
+  // legacy's while at full level the two were indistinguishable. The mechanism
+  // offered there, BEFORE this ran: the first-path walk-back applies its
+  // fraction to a 2nd-order statistic whose near-peak skirt is wider than the
+  // lag product's 4th-order one, so at lower SNR it lands a sample EARLY more
+  // often. PREDICTION, stated first: if that is the mechanism, nr_pss's
+  // residual spread grows faster than legacy's as SNR falls AND its errors are
+  // biased negative (early). If the spread grows but stays symmetric about the
+  // true end, it is plain matched-filter timing noise and the story is wrong.
+  // Reported, not gated: this section exists to test a mechanism, not a
+  // requirement.
+  std::printf("\n=== residual spread against SNR (1600 counts, first-path, 16 draws) ===\n");
+  std::printf("%-8s", "SNR dB");
+  for (const auto& b : ds) std::printf(" %22s", b.name.c_str());
+  std::printf("\n%-8s", "");
+  for (size_t i = 0; i < sizeof(ds) / sizeof(*ds); ++i)
+    std::printf(" %22s", "min..max  mean  sd");
+  std::printf("\n");
+  for (const double snr : {45.0, 25.0, 15.0, 10.0}) {
+    std::printf("%-8.0f", snr);
+    for (const auto& b : ds) {
+      long long lo = 1LL << 40, hi = -(1LL << 40);
+      double sum = 0.0, sum2 = 0.0;
+      int n = 0, miss = 0;
+      for (unsigned sd = 1; sd <= 16; ++sd) {
+        const long long v = residual(b, 1600.0, snr, kLead, kTail,
+                                     kResyncCorrScale, Pick::kFirstPath, sd,
+                                     Thr::kNormalizedXCorr);
+        if (v == kMiss) { ++miss; continue; }
+        const long long e = v - kEndConvention;  // 0 is exact
+        lo = std::min(lo, e); hi = std::max(hi, e);
+        sum += static_cast<double>(e); sum2 += static_cast<double>(e * e);
+        ++n;
+      }
+      char c[48];
+      if (n == 0) {
+        std::snprintf(c, sizeof c, "MISS x%d", miss);
+      } else {
+        const double mean = sum / n;
+        const double var = n > 1 ? (sum2 - n * mean * mean) / (n - 1) : 0.0;
+        std::snprintf(c, sizeof c, "%+lld..%+lld %+5.2f %4.2f%s", lo, hi, mean,
+                      std::sqrt(std::max(0.0, var)), miss ? "*" : "");
+      }
+      std::printf(" %22s", c);
+    }
+    std::printf("\n");
+  }
+  std::printf("(* = some draws missed; nr_pss runs nolag in every column)\n");
+
+  // FRACTIONAL TIMING. The sweep above came back exact for every shape down to
+  // 10 dB, so detector noise is NOT the source of the silicon jitter and the
+  // 8.160 mechanism is wrong as stated. What that sweep never exercised is a
+  // beacon that arrives BETWEEN samples, which a real link always does and
+  // which the free-running clock walks through continuously. PREDICTION,
+  // stated first: every shape's integer index must flip between two adjacent
+  // values somewhere in tau = 0..1 (that is what rounding is); the mechanism
+  // that would explain nr_pss reading more jitter on silicon is a flip that
+  // happens at a DIFFERENT tau than legacy's, or a three-value spread, or a
+  // flip that depends on the noise draw over a wide band of tau (dither).
+  // Same flip point and two clean values for all shapes means the silicon
+  // difference is not in the detector either.
+  std::printf("\n=== returned index against fractional delay (1600 counts, "
+              "first-path, 8 draws; cell = residual min..max) ===\n");
+  for (const double snr : {45.0, 27.0}) {
+    std::printf("SNR %.0f dB\n%-6s", snr, "tau");
+    for (const auto& b : ds) std::printf(" %13s", b.name.c_str());
+    std::printf("\n");
+    for (int t = 0; t <= 10; ++t) {
+      const double tau = 0.1 * t;
+      std::printf("%-6.1f", tau);
+      for (const auto& b : ds) {
+        long long lo = 1LL << 40, hi = -(1LL << 40);
+        int miss = 0;
+        for (unsigned sd = 1; sd <= 8; ++sd) {
+          const long long v = residual(b, 1600.0, snr, kLead, kTail,
+                                       kResyncCorrScale, Pick::kFirstPath, sd,
+                                       Thr::kNormalizedXCorr, tau);
+          if (v == kMiss) { ++miss; continue; }
+          const long long e = v - kEndConvention;
+          lo = std::min(lo, e); hi = std::max(hi, e);
+        }
+        char c[32];
+        if (miss == 8) std::snprintf(c, sizeof c, "MISS");
+        else if (lo == hi) std::snprintf(c, sizeof c, "%+lld", lo);
+        else std::snprintf(c, sizeof c, "%+lld..%+lld", lo, hi);
+        std::printf(" %13s", c);
+      }
+      std::printf("\n");
+    }
   }
 
   std::printf("\nRESULT: %s (%d failure(s))\n", g_fail ? "FAIL" : "PASS", g_fail);
