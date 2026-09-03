@@ -51,6 +51,10 @@ def main():
     ap.add_argument("--frames", type=int, default=16)
     ap.add_argument("--windows", type=int, default=10)
     ap.add_argument("--corr-scale", type=float, default=10.0)
+    ap.add_argument("--lag-max", type=int, default=1,
+                    help="also report the phase INNOVATION at lags 2..lag-max "
+                         "frames (AP-67): how far the beacon phase can be "
+                         "predicted ahead, and how the error grows with time")
     a = ap.parse_args()
 
     gold = np.fromfile(a.gold, dtype=np.complex64).astype(np.complex128)
@@ -78,6 +82,7 @@ def main():
     senses = [("gold", gold), ("conj", np.conj(gold))]
     sense = None
     all_resid = []
+    lag_pairs = []
     nsamps = (a.frames + 1) * FRAME
     for w in range(a.windows):
         c, err, _short = capture(dev, rxs, nsamps)
@@ -113,6 +118,16 @@ def main():
             if not (0.9*FRAME < lag < 1.1*FRAME):
                 continue
             all_resid.append(np.angle(np.conj(peaks[k]) * peaks[k+1]))
+        # AP-67: the same peaks, at every lag up to --lag-max frames. Kept as
+        # (lag_frames, raw phase difference) pairs; the per-frame advance is
+        # removed at the end from the lag-1 population so every lag is
+        # corrected by ONE fitted rate, not by its own.
+        for m in range(2, a.lag_max + 1):
+            for k in range(len(peaks) - m):
+                lag = pos[k+m] - pos[k]
+                if not ((m - 0.1)*FRAME < lag < (m + 0.1)*FRAME):
+                    continue
+                lag_pairs.append((m, np.angle(np.conj(peaks[k]) * peaks[k+m])))
 
     dev.deactivateStream(rxs); dev.closeStream(rxs)
 
@@ -131,6 +146,26 @@ def main():
     hist, _ = np.histogram(ph, bins=8, range=(-math.pi, math.pi))
     print("  phase histogram over (-pi, pi]: %s" % " ".join("%d" % h for h in hist))
     print()
+    if a.lag_max > 1 and lag_pairs:
+        # The per-frame phase advance, from the lag-1 population (circular
+        # mean), removed k times from a lag-k difference. What remains is the
+        # phase the beacon did NOT predict: the innovation a tracker holding
+        # frequency fixed would see after k frames.
+        adv = float(np.angle(np.mean(np.exp(1j*ph))))
+        print("\n=== phase innovation against lag (AP-67): advance/frame %+.4f rad ===" % adv)
+        print("  %-4s %6s %10s %10s %12s" % ("lag", "pairs", "circ sd", "sd deg", "sd/sqrt(lag)"))
+        for m in range(1, a.lag_max + 1):
+            v = ph if m == 1 else np.array([d for (mm, d) in lag_pairs if mm == m])
+            if len(v) < 5:
+                continue
+            inn = np.angle(np.exp(1j*(v - m*adv)))
+            Rm = float(np.abs(np.mean(np.exp(1j*inn))))
+            sdm = float(np.sqrt(-2.0*np.log(Rm))) if Rm > 0 else float("inf")
+            print("  %-4d %6d %10.3f %10.1f %12.3f" % (m, len(v), sdm, math.degrees(sdm),
+                                                      sdm/math.sqrt(m)))
+        print("  a random-walk phase gives sd/sqrt(lag) constant; a frequency error")
+        print("  gives sd growing linearly with lag; the floor at lag 1 is the")
+        print("  estimator's own noise.")
     if R > 0.7:
         print("  VERDICT: COHERENT. Stage 3 is implementable on this beacon, and")
         print("  its ~500 Hz spread on silicon is a BUG to find, not physics.")

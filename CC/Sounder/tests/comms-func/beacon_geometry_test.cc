@@ -145,8 +145,7 @@ long long residualCh(const Desc& b, double peak_counts, double snr_db,
 /// Returns len+1 samples so the tail is kept. The bench's link has an
 /// arbitrary fractional timing; the integer placement everywhere else in this
 /// test cannot show what a detector does BETWEEN samples.
-std::vector<cf> fracDelay(const std::vector<cf>& x, double tau) {
-  const int R = 16;
+std::vector<cf> fracDelay(const std::vector<cf>& x, double tau, int R = 16) {
   std::vector<cf> y(x.size() + 1, cf(0.f, 0.f));
   for (size_t k = 0; k < y.size(); ++k) {
     std::complex<double> acc(0.0, 0.0);
@@ -718,6 +717,147 @@ int main() {
         else if (lo == hi) std::snprintf(c, sizeof c, "%+lld", lo);
         else std::snprintf(c, sizeof c, "%+lld..%+lld", lo, hi);
         std::printf(" %13s", c);
+      }
+      std::printf("\n");
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // THE NO-LAG FALSE-CROSSING RATE ON NOISE, MEASURED AGAINST ITS PREDICTION.
+  // 8.155/8.159 saw one rejected noise-window crossing per acquisition hunt on
+  // nr_pss and predicted it from the statistic: the coherence of a pure-noise
+  // window against an L-tap replica is Beta(1, L-1), so P(coh > bar) per index
+  // is (1 - bar)^(L-1) = 0.9^127 = 1.5e-6 at bar 0.1, and the lag product's
+  // (coh1 * coh2) is far rarer. PREDICTION, stated first: over 16 noise-only
+  // hunt windows of 12288 samples (196608 indices) at bar 0.1 the no-lag
+  // detector crosses about 0.3 times in total and the xcorr form about 0;
+  // at bar 0.01 (corr_scale 100, the resync retry ladder's reach) no-lag
+  // crosses in nearly EVERY window (0.99^127 = 0.28 per index) and xcorr in
+  // almost none. A no-lag rate an order of magnitude off either way means
+  // the mechanism in 8.155 is wrong and the row must be corrected.
+  std::printf("\n=== noise-only hunt windows: how often each form crosses ===\n");
+  std::printf("%-10s %-8s %10s %10s\n", "corr_scale", "form", "windows", "crossed");
+  {
+    const auto pss = beacon_shapes::make(Shape::kNrPss);
+    const auto leg = beacon_shapes::make(Shape::kLegacy);
+    for (const float cs : {10.0f, 100.0f}) {
+      for (int form = 0; form < 2; ++form) {
+        const bool nolag = form == 0;
+        int crossed = 0;
+        const int nwin = 16;
+        for (int w = 0; w < nwin; ++w) {
+          std::mt19937 g(9000u + w);
+          auto u01 = [&g]() { return (static_cast<double>(g()) + 0.5) / 4294967296.0; };
+          std::vector<std::complex<int16_t>> buf(12288);
+          for (auto& v : buf) {
+            const double a = std::sqrt(-2.0 * std::log(u01()));
+            const double ph = 2.0 * M_PI * u01();
+            v = std::complex<int16_t>(static_cast<int16_t>(20.0 * a * std::cos(ph)),
+                                      static_cast<int16_t>(20.0 * a * std::sin(ph)));
+          }
+          const ssize_t idx = CommsLib::find_beacon_avx(
+              buf.data(), nolag ? pss.replica : leg.replica, buf.size(), cs,
+              Pick::kFirstClusterRefined,
+              nolag ? Thr::kXCorrNoLag : Thr::kNormalizedXCorr);
+          if (idx >= 0) ++crossed;
+        }
+        std::printf("%-10.0f %-8s %10d %10d\n", cs, nolag ? "nolag" : "xcorr",
+                    nwin, crossed);
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // THE BEACON CFO ESTIMATOR AGAINST FRACTIONAL DELAY, FOR 8.114. The
+  // per-detection beacon CFO scatter on silicon is 2-10x its thermal floor and
+  // its ordering across shapes is unexplained. One thing the estimator sees on
+  // a real link that the offline model never gave it: a beacon that sits
+  // BETWEEN samples. Then the samples after the last repetition are not zero
+  // but the interpolation tail of the beacon's edge, and any estimator window
+  // that touches that edge multiplies real beacon samples by that tail.
+  //
+  // Three window placements, all Receiver::estimateCFO's arithmetic (rep2
+  // against rep1 at lag fine_len) rebuilt on the shape geometry:
+  //   guard 0   windows exactly on the fine field, index from the detector
+  //   guard +8  the shipped placement (AP-39, HOUDINI_CFO_INDEX_GUARD): both
+  //             windows slid 8 samples LATER, derived on an integer-delay model
+  //             where the trailing samples were exactly zero
+  //   margin 4  windows shrunk 4 samples at BOTH ends, so neither touches an
+  //             edge; the NR/802.11 way of using a cyclic field
+  // PREDICTIONS, stated first. (1) At true CFO 0 the error under "guard +8"
+  // grows with tau and is largest for the short-field shapes (nr, dot11: L 64),
+  // because eight edge samples out of 64 is 1/8 of the sum. (2) "margin 4" is
+  // within the thermal floor at every tau for every shape. (3) If instead all
+  // three read alike, fractional timing is not the 8.114 mechanism. Mean and
+  // sd over 8 noise draws so a bias can be told from the floor.
+  std::printf("\n=== beacon CFO error at true CFO 0 vs fractional delay "
+              "(45 dB, 8 draws, mean/sd Hz) ===\n");
+  // Two interpolation kernels: a 33-tap Hann-windowed sinc (smooth edges, the
+  // gentlest case) and a 129-tap one (a sharper band edge whose ringing
+  // reaches further, closer to what the RFDC decimation filter does to a
+  // hard-edged burst). PREDICTION for the second kernel: the errors grow for
+  // every shape, most for the placements whose windows touch the edge.
+  struct Win { const char* name; int shift; int margin; int R; };
+  const Win wins[] = {{"guard 0, 33-tap", 0, 0, 16}, {"guard +8, 33-tap", 8, 0, 16},
+                      {"margin 4, 33-tap", 0, 4, 16}, {"guard +8, 129-tap", 8, 0, 64},
+                      {"margin 4, 129-tap", 0, 4, 64}, {"margin 12, 129-tap", 0, 12, 64}};
+  for (const auto& w : wins) {
+    std::printf("-- %s\n%-6s", w.name, "tau");
+    for (const auto& b : ds) std::printf(" %15s", b.name.c_str());
+    std::printf("\n");
+    for (int t = 0; t <= 10; t += 2) {
+      const double tau = 0.1 * t;
+      std::printf("%-6.1f", tau);
+      for (const auto& b : ds) {
+        const std::vector<cf> core = tau != 0.0 ? fracDelay(b.core, tau, w.R) : b.core;
+        double pk = 0.0, mean_p = 0.0;
+        for (const auto& v : b.core) {
+          pk = std::max(pk, static_cast<double>(std::norm(v)));
+          mean_p += std::norm(v);
+        }
+        mean_p /= static_cast<double>(b.core.size());
+        const double scale = 1600.0 / std::sqrt(pk);
+        const double ns = std::sqrt((mean_p / std::pow(10.0, 45.0 / 10.0)) / 2.0);
+        const long long pos = 4000, n = 6000;
+        double sum = 0.0, sum2 = 0.0;
+        int cnt = 0;
+        for (unsigned seed = 1; seed <= 8; ++seed) {
+          std::mt19937 g(700u + seed);
+          auto u01 = [&g]() { return (static_cast<double>(g()) + 0.5) / 4294967296.0; };
+          auto gauss = [&]() { return std::sqrt(-2.0 * std::log(u01())) * std::cos(2.0 * M_PI * u01()); };
+          std::vector<std::complex<int16_t>> buf(n);
+          for (long long i = 0; i < n; ++i) {
+            cf v(0.f, 0.f);
+            if (i >= pos && i < pos + static_cast<long long>(core.size())) v = core[i - pos];
+            buf[i] = std::complex<int16_t>(
+                static_cast<int16_t>(v.real() * scale + gauss() * ns * scale),
+                static_cast<int16_t>(v.imag() * scale + gauss() * ns * scale));
+          }
+          const Thr tf = b.replica_reps < 2 ? Thr::kXCorrNoLag : Thr::kNormalizedXCorr;
+          const ssize_t idx = CommsLib::find_beacon_avx(buf.data(), b.replica, n,
+                                                        kResyncCorrScale,
+                                                        Pick::kFirstPath, tf);
+          if (idx < 0) continue;
+          const long long end = idx + static_cast<long long>(b.replica_tail()) + 1;
+          const long long start = end - static_cast<long long>(b.core.size());
+          const long long L = static_cast<long long>(b.fine_len);
+          const long long g1 = start + static_cast<long long>(b.fine_off) + w.shift + w.margin;
+          const long long g2 = g1 + L;
+          std::complex<double> r(0.0, 0.0);
+          for (long long i = 0; i < L - 2 * w.margin; ++i) {
+            const std::complex<double> a(buf[g1 + i].real(), buf[g1 + i].imag());
+            const std::complex<double> c(buf[g2 + i].real(), buf[g2 + i].imag());
+            r += std::conj(a) * c;
+          }
+          const double hz = std::arg(r) / (2.0 * M_PI * L) * 122.88e6;
+          sum += hz; sum2 += hz * hz; ++cnt;
+        }
+        if (cnt == 0) { std::printf(" %15s", "MISS"); continue; }
+        const double mean = sum / cnt;
+        const double var = cnt > 1 ? (sum2 - cnt * mean * mean) / (cnt - 1) : 0.0;
+        char c[32];
+        std::snprintf(c, sizeof c, "%+6.0f/%4.0f", mean, std::sqrt(std::max(0.0, var)));
+        std::printf(" %15s", c);
       }
       std::printf("\n");
     }

@@ -14,6 +14,8 @@
 #   RUN_S=60                    wall seconds per run
 #   CONF=files/houdini-ul.json  base config; a per-shape copy is written beside it
 #   OUT=logs/shape_<date>       log directory
+#   ATTEMPTS=3                  launch attempts per run before giving up (1 for
+#                               a level sweep where "no lock" IS the result)
 #   SOUNDER_DIR / VENV          as run_pad_campaign.sh
 #
 # Output: $OUT/<shape>_r<k>.log per run, $OUT/campaign.log, and a gate_summary
@@ -72,7 +74,7 @@ for ((k = 0; k < ROUNDS; ++k)); do
     f="$OUT/${s}_r$((k + 1)).log"
     echo "[$(date +%T)] round $((k + 1)) shape $s -> $f" | tee -a "$log"
     started=0
-    for attempt in 1 2 3; do
+    for attempt in $(seq 1 "${ATTEMPTS:-3}"); do
       # Release anything a previous run left holding a board, then the framer.
       python3 tools/rig_release_holders.py >> "$log" 2>&1 || true
       # Named so that the campaign's own "*_r*.log" glob (and gate_summary's
