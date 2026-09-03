@@ -228,8 +228,12 @@ class CommsLib {
     // Measured accordingly: with the floor correctly converted for a 2nd-order
     // statistic the residual is -129 on legacy_guard, exactly one fine_len, so
     // the failure is rep1/rep2 AMBIGUITY and not the loss of a noise-spike
-    // check. Testing the real NR architecture needs the ACQUISITION field as the
-    // correlator reference, which nothing in this tree does yet.
+    // check. The real NR architecture -- the non-repeating PSS as the replica --
+    // is the `nr_pss` shape (beacon_shapes.h), which syncSearch runs through
+    // THIS form automatically: exact at every level offline, and on silicon it
+    // acquires and tracks like legacy (DEMO_VERIFICATION 8.154-8.162). Its one
+    // cost is the noise separation below: about one rejected noise-window
+    // crossing per acquisition hunt.
     //
     // The other trade is discrimination against the preamble: the lag product
     // puts the preamble plateau ~1/L^2 below the peak, and without it the
