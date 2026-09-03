@@ -448,6 +448,20 @@ def _launch_sounder(args, udp_dest):
     # retrying the flaky cold-start. Mirrors the HIL test harness. The teardown's
     # output is kept (not sent to /dev/null): it exits non-zero when a radio could
     # not be cleared, and that is usually the reason the sounder then fails.
+    # STATUS 2026-09-02: THIS AUTOMATIC TEARDOWN IS NOT YET VERIFIED WORKING.
+    # Three attempts, each tested on silicon and each still leaving the boards
+    # held after a SIGKILL to this launcher: (1) the between-attempts guard alone
+    # only stopped the NEXT sounder while the running one kept both boards; (2)
+    # the watch captured sed's pid, because bash sets $! to the last element of a
+    # pipeline; (3) with process substitution the pid is right and the watch
+    # still never logged "supervisor gone", cause not yet found -- possibly the
+    # test killed a different csi_server instance, which is why the loop now
+    # echoes the pid it is watching. The code below is kept because it is
+    # correct as far as it goes and harmless, but DO NOT RELY ON IT: the
+    # verified recovery is `python3 tools/rig_release_holders.py`, documented in
+    # CSI_DEMO_WALKTHROUGH section 8.0, which does clear the boards and needs no
+    # sudo. Tracked as its own item.
+    #
     # THE RETRY LOOP MUST NOT OUTLIVE THIS PROCESS. Measured 2026-09-02: kill
     # this launcher and the loop is orphaned, starts ANOTHER sounder, and that
     # sounder holds both boards' RX streams; every later run is then refused at
@@ -467,7 +481,7 @@ def _launch_sounder(args, udp_dest):
         'export LD_LIBRARY_PATH="%s"/lib '
         'SOAPY_SDR_PLUGIN_PATH="%s"/lib/SoapySDR/modules0.8-3; '
         'cd "%s"; '
-        'SUP=%d; '
+        'SUP=%d; echo "[csi] supervisor pid $SUP, retry loop pid $$"; '
         'for a in 1 2 3 4; do '
         '  kill -0 "$SUP" 2>/dev/null || { echo "[sounder] supervisor gone, not retrying"; break; }; '
         '  timeout 60 python3 %s 2>&1 | sed -u "s/^/[teardown] /"; sleep 8; '
