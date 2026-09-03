@@ -49,18 +49,37 @@ def census(a, nsamps, reads):
                                rx_gap_break=a.gap_break))
     dev.activateStream(rxs)
     buf = np.zeros(2 * nsamps, dtype=np.int16)
-    rets = []
+    rets, times = [], []
     for _ in range(reads):
         sr = dev.readStream(rxs, [buf], nsamps, timeoutUs=1000000)
         if sr.ret > 0:
             rets.append(int(sr.ret))
+            times.append(int(round(sr.timeNs * RATE / 1e9))
+                         if (sr.flags & SOAPY_SDR_HAS_TIME) else None)
     dev.deactivateStream(rxs)
     dev.closeStream(rxs)
     if not rets:
         return None
     short = sum(1 for r in rets if r != nsamps)
+    # THE SWEEP MUST CARRY THE GAP COLUMN OR IT CANNOT SETTLE THE QUESTION IT
+    # EXISTS FOR. The first version reported only the short-read RATE, and the
+    # whole point of AP-59 is that a short read is an early return with nothing
+    # missing. A rate that climbs to 96.8 % at 32768 samples means nothing until
+    # you know whether those reads lost anything, and reporting the rate without
+    # the gap invites exactly the reading the row was written to retire.
+    # gap = t[k+1] - (t[k] + ret[k]); zero means nothing was lost, whatever the
+    # read length. [user proposed this test.]
+    gaps, pairs, worst = 0, 0, 0
+    for k in range(len(rets) - 1):
+        if times[k] is None or times[k + 1] is None:
+            continue
+        pairs += 1
+        g = times[k + 1] - (times[k] + rets[k])
+        if g != 0:
+            gaps += 1
+            worst = max(worst, abs(g))
     return {"n": len(rets), "short_pct": 100.0 * short / len(rets),
-            "min": min(rets)}
+            "min": min(rets), "gaps": gaps, "pairs": pairs, "worst_gap": worst}
 
 
 def main():
@@ -89,13 +108,30 @@ def main():
         # discriminate differently -- a rate difference at equal minima is a
         # timing property, while different minima say the batch SIZE
         # distribution differs, not only its cadence.
-        print("%-10s %-14s %-12s %-12s" % ("nsamps", "short %", "min ret", "reads"))
+        print("%-8s %-9s %-9s %-7s %-9s %-9s %-10s"
+              % ("nsamps", "short %", "min ret", "reads", "gaps", "pairs",
+                 "worst gap"))
+        bad = 0
         for ns in [int(v) for v in a.sweep_nsamps.split(",") if v.strip()]:
             r = census(a, ns, a.reads)
             if r is None:
-                print("%-10d %s" % (ns, "no reads"))
+                print("%-8d %s" % (ns, "no reads"))
                 continue
-            print("%-10d %-14.1f %-12d %-12d" % (ns, r["short_pct"], r["min"], r["n"]))
+            if r["gaps"]:
+                bad += 1
+            print("%-8d %-9.1f %-9d %-7d %-9d %-9d %-10d"
+                  % (ns, r["short_pct"], r["min"], r["n"], r["gaps"],
+                     r["pairs"], r["worst_gap"]))
+        print()
+        if bad:
+            print("SAMPLES WERE LOST at %d request size(s): a short read at "
+                  "those sizes is NOT" % bad)
+            print("just an early return. That changes AP-59's answer -- report it.")
+        else:
+            print("Zero gaps at every request size: every short read is an "
+                  "early return with")
+            print("nothing missing, so the short-read RATE is not a loss "
+                  "measurement.")
         return 0
 
     dev = SoapySDR.Device(dict(driver="houdinisdr",
