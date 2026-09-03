@@ -2063,9 +2063,10 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
           const ssize_t s0 = static_cast<ssize_t>(off - kLead);
           const ssize_t slice_len = kLead + kTail;
           prof_sync_searched++;
-          // TARGETED slice: lead+tail is far shorter than the 4096-sample
-          // beacon copy spacing, so the strongest crossing is unambiguous and
-          // the earliest one is the STS preamble. See CommsLib::BeaconPick.
+          // TARGETED slice: lead+tail is far shorter than the beacon copy
+          // spacing of one full frame (122880 samples), so the strongest
+          // crossing is unambiguous and the earliest one is the STS preamble.
+          // See CommsLib::BeaconPick.
           //
           // HOUDINI_BEACON_PICK=first restores the pre-2026-09-02 rule ON THE
           // SAME BINARY. That is not a compatibility escape hatch, it is what

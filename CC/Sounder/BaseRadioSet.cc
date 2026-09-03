@@ -400,7 +400,8 @@ void BaseRadioSet::buildHoudiniBeacon(std::vector<int16_t>& iq) {
   // the beacon Radio's TX at _cfg->rate(), not the DAC max), so the RFDC's own
   // interpolation carries it to the DAC. Placing the beacon_size (~496) core at
   // the head of the 4096-deep RAM and leaving the rest SILENT makes an ISOLATED
-  // beacon that recurs every 4096 samples (~33 us): it fits inside the client's
+  // beacon that recurs once per FRAME (122880 samples, 1 ms): it fits inside the
+  // client's
   // detect window AND keeps find_beacon's trailing-energy threshold low, so the
   // SHARP native-rate 2-rep gold peak clears it at corr_scale=1. (The old x8
   // upsample + DAC-max replay recurred every 512 samples -- dense -- and smeared
@@ -416,13 +417,38 @@ void BaseRadioSet::buildHoudiniBeacon(std::vector<int16_t>& iq) {
   }
   float peak = 1e-30f;
   for (const auto& v : loop) peak = std::max(peak, std::abs(v));
+  // TRANSMIT AMPLITUDE, AS A FRACTION OF FULL SCALE. 0.6 was the only value
+  // that had ever been used, hard-coded, and that made the received level the
+  // one axis this bench could not vary -- so a detector claim that depends on
+  // level (AP-34: the shipped threshold is 4th order in amplitude over 2nd, and
+  // therefore not scale invariant) could be measured offline and never on
+  // silicon. HOUDINI_BEACON_FS makes it a knob.
+  //
+  // DIAGNOSTIC, NOT A LINK BUDGET. Lowering it weakens the beacon and nothing
+  // else, which is the point: it is the cheapest available stand-in for path
+  // loss on a cabled bench. Clamped to (0, 1] because above 1.0 the lround
+  // saturates into a clipped, spectrally-splattered beacon that would measure
+  // the clipping rather than the level.
+  float fs_frac = 0.6f;
+  if (const char* e = std::getenv("HOUDINI_BEACON_FS")) {
+    const float v = std::strtof(e, nullptr);
+    if (std::isfinite(v) && v > 0.0f && v <= 1.0f) {
+      fs_frac = v;
+      MLPD_WARN("HOUDINI_BEACON_FS=%g: beacon transmitted at %.1f%% of full "
+                "scale instead of the default 60%%. Diagnostic setting.\n",
+                static_cast<double>(v), static_cast<double>(v) * 100.0);
+    } else {
+      MLPD_WARN("HOUDINI_BEACON_FS=\"%s\" is not in (0, 1] -- keeping %.2f\n",
+                e, static_cast<double>(fs_frac));
+    }
+  }
   const size_t n_load = loop.size();
   iq.assign(n_load * 2, 0);
   for (size_t k = 0; k < n_load; ++k) {
-    iq[2 * k] =
-        static_cast<int16_t>(std::lround(loop[k].real() / peak * 0.6f * 32767));
-    iq[2 * k + 1] =
-        static_cast<int16_t>(std::lround(loop[k].imag() / peak * 0.6f * 32767));
+    iq[2 * k] = static_cast<int16_t>(
+        std::lround(loop[k].real() / peak * fs_frac * 32767));
+    iq[2 * k + 1] = static_cast<int16_t>(
+        std::lround(loop[k].imag() / peak * fs_frac * 32767));
   }
   if (std::getenv("HOUDINI_DUMP_BEACON")) {
     FILE* f = std::fopen("/tmp/beacon_ram.bin", "wb");

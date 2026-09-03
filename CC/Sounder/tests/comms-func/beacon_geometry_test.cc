@@ -29,7 +29,8 @@
  *   - with the shipped kFirstCrossing rule EVERY candidate beacon false-locks
  *     somewhere in the level range a real link spans;
  *   - with kTargetedArgmax -- legal only because the resync slice is ~812
- *     samples against a 4096-sample beacon copy spacing -- every candidate lands
+ *     samples against a beacon copy spacing of one full frame -- every candidate
+ *     lands
  *     on the beacon end at every level.
  * If a future change reintroduces a level-dependent index, this fails.
  *

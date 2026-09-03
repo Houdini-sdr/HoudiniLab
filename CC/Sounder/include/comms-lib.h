@@ -140,8 +140,13 @@ class CommsLib {
     kFirstClusterRefined,
     // Strongest crossing anywhere in the window. ONLY valid when the window
     // cannot hold two beacon copies -- true of the targeted resync slice, which
-    // is lead+tail (~812 samples at shipped defaults) against a 4096-sample copy
-    // spacing. There the earliest-crossing rule is actively wrong: the beacon's
+    // is lead+tail (~812 samples at shipped defaults) against a copy spacing of
+    // one FULL FRAME, 122880 samples: the strobe plays loops=1 once per TDD
+    // frame, so there is exactly one beacon per millisecond. (The old
+    // loops=forever era filled a symbol with ~15 copies 4096 apart and that
+    // number got repeated here by habit -- it is 30x too conservative, which
+    // matters because this precondition is what makes the rule legal and
+    // over-the-air drift will want a wider slice.) There the earliest-crossing rule is actively wrong: the beacon's
     // own STS preamble is 16-periodic, 16 divides the 128-sample correlator lag,
     // so the STS field is lag-128 self-coherent and manufactures crossings a few
     // hundred samples before the true peak. Whether they cross is a function of
