@@ -1698,7 +1698,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
     MLPD_INFO(
         "Grid tracker: %s (alpha %.3f beta %.3f step limit %.3f ppm; kalman "
         "R %.3f samp^2, q %.2g, innovation gate %.1f sigma)\n",
-        want_kf ? "KALMAN" : "alpha-beta", kGridAlpha, kGridBeta, kGridStepPpm,
+        (config_->sync().tracker.type == houdini::sync::TrackerType::kKalman) ? "KALMAN" : "alpha-beta", kGridAlpha, kGridBeta, kGridStepPpm,
         tracker_cfg.meas_var, tracker_cfg.rate_rw, tracker_cfg.innov_gate);
   }
   Sounder::GridTracker tracker;
