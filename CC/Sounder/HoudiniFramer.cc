@@ -320,10 +320,20 @@ void HoudiniFramer::armTdd(void) {
         // run -- TDD_CMD abort alone doesn't release it, and the replay RAM
         // can't be filled while strobe mode is enabled ("Disarm first").
         // Safe when nothing is armed.
+        // Not fatal (nothing armed is the normal case) but never silent: a
+        // strobe-off that does not take leaves the strobe bit set, the fill
+        // below is then refused, and the strobe-on after it is re-accepted --
+        // the one path that arms over stale RAM with every write answered
+        // (SH-348's candidate for 4.24). The plugin's refusal text names the
+        // bit, so the warning and the load's throw together say which.
         try {
           dev->writeSetting("TDD_REPLAY_STROBE",
                             "ch" + std::to_string(tx_ch) + ":off");
+        } catch (const std::exception& e) {
+          MLPD_WARN("TDD_REPLAY_STROBE ch%zu:off before the load refused: %s\n",
+                    tx_ch, e.what());
         } catch (...) {
+          MLPD_WARN("TDD_REPLAY_STROBE ch%zu:off before the load refused\n", tx_ch);
         }
         // A refused or short load (the plugin refuses the fill while the
         // replay bank's level arm is set) stops the sequence here: the arm
