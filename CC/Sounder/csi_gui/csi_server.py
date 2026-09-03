@@ -448,18 +448,36 @@ def _launch_sounder(args, udp_dest):
     # retrying the flaky cold-start. Mirrors the HIL test harness. The teardown's
     # output is kept (not sent to /dev/null): it exits non-zero when a radio could
     # not be cleared, and that is usually the reason the sounder then fails.
+    # THE RETRY LOOP MUST NOT OUTLIVE THIS PROCESS. Measured 2026-09-02: kill
+    # this launcher and the loop is orphaned, starts ANOTHER sounder, and that
+    # sounder holds both boards' RX streams; every later run is then refused at
+    # setSampleRate(RX) and writes an EMPTY log, so it reads as "nothing
+    # happened" rather than as an error. Six consecutive gate runs and three
+    # probe legs died that way before the empty logs were recognised as
+    # failures. The clean-shutdown path below already killpg's the group, but a
+    # SIGKILL to this process skips it entirely, and a bench harness that times
+    # out or force-kills is exactly the case that leaves the boards stuck.
+    #
+    # The sounder itself is NOT the problem: measured directly, a bare sounder
+    # releases both boards on SIGINT and on SIGKILL. Only the supervising layer
+    # needs the guard, so the loop now checks that its supervisor is still alive
+    # before each attempt and exits if not.
     script = (
         'source "%s"/bin/activate 2>/dev/null; '
         'export LD_LIBRARY_PATH="%s"/lib '
         'SOAPY_SDR_PLUGIN_PATH="%s"/lib/SoapySDR/modules0.8-3; '
         'cd "%s"; '
+        'SUP=%d; '
         'for a in 1 2 3 4; do '
+        '  kill -0 "$SUP" 2>/dev/null || { echo "[sounder] supervisor gone, not retrying"; break; }; '
         '  timeout 60 python3 %s 2>&1 | sed -u "s/^/[teardown] /"; sleep 8; '
+        '  kill -0 "$SUP" 2>/dev/null || { echo "[sounder] supervisor gone, not starting"; break; }; '
         '  ./build/sounder --view --conf_file "%s" --storepath "%s" 2>&1 | '
         '     sed -u "s/^/[sounder] /"; '
         '  echo "[sounder] exited, retrying..."; sleep 5; '
         'done'
-    ) % (args.venv, args.venv, args.venv, sd, td, args.conf, args.storepath)
+    ) % (args.venv, args.venv, args.venv, sd, os.getpid(), td, args.conf,
+         args.storepath)
     print("[csi] launching sounder --view in %s" % sd, flush=True)
     return subprocess.Popen(["bash", "-lc", script], env=env,
                             preexec_fn=os.setsid)
