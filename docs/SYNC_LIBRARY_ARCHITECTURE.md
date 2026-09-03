@@ -1,6 +1,6 @@
 # The sync library: architecture and migration plan
 
-Status: P1 LANDED and gated (DEMO_VERIFICATION 8.170), then reworked to the architecture review of 2026-09-03 and gated again (8.175-8.176): `BeaconShape`, `Detection` with evidence, the schema/values split, `ResyncPolicy`, `sim::Channel` and `Numerology` exist; P3 (the pfa-derived bar) and P5 (`PhaseTracker`) remain. Written 2026-09-03 as the plan to roll the beacon,
+Status: P1 LANDED and gated (DEMO_VERIFICATION 8.170), then reworked to the architecture review of 2026-09-03 and gated again (8.175-8.176): `BeaconShape`, `Detection` with evidence, the schema/values split, `ResyncPolicy`, `sim::Channel` and `Numerology` exist; P3 (the pfa-derived bar) landed offline on 2026-09-03 (`06dcac5`, silicon gate 8ae pending); P5 (`PhaseTracker`) remains. Written 2026-09-03 as the plan to roll the beacon,
 detector, confirm, carrier and grid-tracking code and everything the ledger has
 measured about it into one classed, configured, tested library. Section 8 lists
 the decisions that are the user's to make; everything else is a proposal with a
@@ -147,8 +147,10 @@ Rules:
   `detector.first_path_window`, `detector.first_path_floor_db`). The
   recommendation is to flip the default next release and remove the path
   after.
-- `detector.pfa_per_window` is loaded and validated in P1 but NOT applied
-  (reserved for P3); giving it a value produces a startup note saying so.
+- `detector.pfa_per_window` is the coherence form's bar when a configuration
+  sets it (P3, landed 2026-09-03): the detector turns it into a bar from the
+  replica and window lengths; unset, or on a repeated-field form, corr_scale
+  applies as shipped and a startup note says the probability is ignored.
 - `detector.first_path_window` defaults to -1, "half the replica length",
   which is what the pre-library correlator derived (64 at 128 taps, 32 at 64);
   the resolved value is what the SNR guard and the log carry.
