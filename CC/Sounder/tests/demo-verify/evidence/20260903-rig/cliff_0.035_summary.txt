@@ -1,0 +1,9 @@
+shape         rd accepts esc offg   acq resid sd  jitter   max lowsnr  bcfo sd forced
+legacy         1      21   0    0    +0     2.58    1.28     9      0      824      0
+nr             1      23   0    0    +0     2.29    0.88     6      0     3973      0
+nr_pss         1      23   0    0    +1     3.20    1.17     9      1     3976      1
+
+shape         rounds  accepts esc+offg sd mean  jitter   lowsnr
+legacy             1     21.0        0    2.58    1.28        0
+nr                 1     23.0        0    2.29    0.88        0
+nr_pss             1     23.0        0    3.20    1.17        1
