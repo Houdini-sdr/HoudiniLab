@@ -152,11 +152,27 @@ def teardown_node(hs, teardown, ip, ch, passes):
         sdr.setSampleRate(SOAPY_SDR_RX, ch, sdr.getSampleRate(SOAPY_SDR_RX, ch))
     except Exception as e:  # noqa: BLE001
         if "stream is open" in str(e):
+            # THE HOLDER IS USUALLY A LOCAL PROCESS, SO SAY THAT FIRST.
+            # Restarting the server was the only advice here, and it needs a
+            # sudo password this bench does not grant. In every case seen on
+            # 2026-09-02 the stream was held by an orphaned sounder on THIS
+            # host: csi_server.py --launch runs the sounder as a grandchild
+            # under a bash retry loop, so killing the server orphans the loop,
+            # the loop restarts a sounder, and that sounder holds both boards.
+            # Killing it releases the stream immediately -- no server restart.
+            # Six consecutive runs were refused that way before anyone noticed,
+            # because a refused run writes an EMPTY log rather than an error.
             print("  %s: WARNING an RX stream is still open on the device.%s\n"
                   "      This teardown cannot close another process's stream, and "
                   "the next run will fail\n"
-                  "      with 'setSampleRate(RX): an RX stream is open'. Clear it "
-                  "with:\n"
+                  "      with 'setSampleRate(RX): an RX stream is open'.\n"
+                  "      USUALLY A LOCAL PROCESS IS HOLDING IT -- an orphaned "
+                  "sounder left by a run\n"
+                  "      whose launcher was killed. Try this first, no sudo "
+                  "needed:\n"
+                  "          python3 tools/rig_release_holders.py\n"
+                  "      Only if that finds nothing does the server itself need "
+                  "restarting:\n"
                   "          sudo systemctl restart SoapySDRServer   (on %s)"
                   % (ip, state, ip))
             return False
