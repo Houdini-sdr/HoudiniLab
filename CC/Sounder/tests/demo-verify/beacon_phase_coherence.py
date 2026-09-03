@@ -28,6 +28,7 @@ import argparse
 import math
 import os
 import sys
+import time
 
 import numpy as np
 
@@ -52,6 +53,21 @@ def main():
     ap.add_argument("--frames", type=int, default=16)
     ap.add_argument("--windows", type=int, default=10)
     ap.add_argument("--corr-scale", type=float, default=10.0)
+    ap.add_argument("--mts", default="on", choices=["on", "off", "on-power0"],
+                    help="open the streams with mts=true as the sounder does "
+                         "(default on). off reproduces the probes' pre-2026-09-03 "
+                         "behaviour, whose transmitted beacon varied per arm (8.171).")
+    ap.add_argument("--settle", type=float, default=0.0,
+                    help="seconds to wait after arming the base station before "
+                         "capturing. The sounder's windows are taken seconds "
+                         "after its arm; this probe captured within ~1 s and "
+                         "saw a per-arm varying transmit spectrum (8.171).")
+    ap.add_argument("--bs-rx", action="store_true",
+                    help="also configure the base station's RECEIVE side (rate, "
+                         "frequency, an RX stream) before arming, as the sounder "
+                         "does. The probe's transmit-only arming produced a "
+                         "smeared, spectrally tilted beacon in some 2026-09-03 "
+                         "runs (8.169/8.171); this is the A/B for it.")
     ap.add_argument("--sense", default="conj", choices=["conj", "gold", "auto"],
                     help="which replica sense to correlate with. This probe "
                          "transmits the dumped core as is and the Houdini "
@@ -74,6 +90,8 @@ def main():
                          "frames (AP-67): how far the beacon phase can be "
                          "predicted ahead, and how the error grows with time")
     a = ap.parse_args()
+    tn.STREAM_MTS[0] = a.mts != "off"
+    tn.MTS_POWER_CH0[0] = a.mts == "on-power0"
 
     gold = np.fromfile(a.gold, dtype=np.complex64).astype(np.complex128)
     cc = np.fromfile(a.core, dtype=np.int16).astype(np.float64)
@@ -83,18 +101,20 @@ def main():
     ram[0:2*len(cc):2] = np.round(cc.real/pk*0.6*32767).astype(np.int16)
     ram[1:2*len(cc):2] = np.round(cc.imag/pk*0.6*32767).astype(np.int16)
     bs = Bs(a.bs, ram, 1)
-    bs.open_and_arm()
+    bs.open_and_arm(tx_only=not a.bs_rx)
     if not bs.liveness():
         print("BS beacon NOT alive; everything below would be noise.")
         return 1
-    print("BS %s armed. Capturing %d windows of %d frames.\n" % (a.bs, a.windows, a.frames + 1))
+    if a.settle > 0:
+        time.sleep(a.settle)
+    print("BS %s armed%s. Capturing %d windows of %d frames.\n"
+          % (a.bs, (", settled %.1f s" % a.settle) if a.settle > 0 else "", a.windows, a.frames + 1))
 
     dev = SoapySDR.Device(dict(driver="houdinisdr", remote="tcp://%s:55132" % a.ue,
                                timeout=RPC_TIMEOUT_US))
     dev.setSampleRate(SOAPY_SDR_RX, a.ch, RATE)
     tn.tune(dev, SOAPY_SDR_RX, a.ch, a.freq)
-    rxs = dev.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CS16, [a.ch],
-                          dict(local_port=str(10001 + a.ch), rx_gap_break="1"))
+    rxs = dev.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CS16, [a.ch], tn.rx_stream_args(a.ch))
     dev.activateStream(rxs)
 
     senses = [("gold", gold), ("conj", np.conj(gold))]

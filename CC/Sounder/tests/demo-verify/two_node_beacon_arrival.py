@@ -155,6 +155,24 @@ class Ue:
 # plain setFrequency(dir, ch, nco) -- so the probes and the sounder tune the
 # radios identically. The Iris-era "RF"/"BB" split in Radio::dev_init is not
 # reached on Houdini.
+STREAM_MTS = [True]
+MTS_POWER_CH0 = [False]
+
+
+STREAM_MTS_RX = [False]
+
+
+def rx_stream_args(ch):
+    # The UE's RX stream joins the MTS group only when asked: the driver's
+    # first-up rule needs a DAC0/TX stream on the SAME device set up with
+    # mts=true first, which the sounder's UE has (its TX stream) and this
+    # capture-only probe does not.
+    args = dict(local_port=str(10001 + ch), rx_gap_break="1")
+    if STREAM_MTS[0] and STREAM_MTS_RX[0]:
+        args["mts"] = "true"
+    return args
+
+
 def tune(dev, direction, ch, freq_hz):
     dev.setFrequency(direction, ch, freq_hz)
 
@@ -198,15 +216,32 @@ class Bs:
                                             remote="tcp://%s:55132" % self.ip,
                                             timeout=RPC_TIMEOUT_US))
             ident(self.dev, self.ip, "BS")
+            # EXACTLY the sounder's order (Radio.cc constructor): rate and
+            # NCO on the data channel, then the streams -- with MTS, a
+            # never-activated ch0 replay stream FIRST for tile-0 membership
+            # (the plugin's first-up rule), then the data TX stream, then RX.
+            # The TDD ladder and the RAM load come after, as in BaseRadioSet.
             self.dev.setSampleRate(SOAPY_SDR_TX, self.ch, RATE)
             tune(self.dev, SOAPY_SDR_TX, self.ch, 500e6)
             if not tx_only:
                 self.dev.setSampleRate(SOAPY_SDR_RX, self.ch, RATE)
                 tune(self.dev, SOAPY_SDR_RX, self.ch, 500e6)
-            if not tx_only:
-                self.rxs = self.dev.setupStream(
-                    SOAPY_SDR_RX, SOAPY_SDR_CS16, [self.ch],
-                    dict(local_port=str(10001 + self.ch), rx_gap_break="1"))
+        txargs = dict(tx_mode="replay")
+        self.aux_txs = None
+        if STREAM_MTS[0]:
+            txargs["mts"] = "true"
+            if self.ch != 0 and not self.shared:
+                if MTS_POWER_CH0[0]:
+                    # Variant under test: give tile 0 a rate and NCO before it
+                    # is asked to join the MTS group.
+                    self.dev.setSampleRate(SOAPY_SDR_TX, 0, RATE)
+                    tune(self.dev, SOAPY_SDR_TX, 0, 500e6)
+                self.aux_txs = self.dev.setupStream(
+                    SOAPY_SDR_TX, SOAPY_SDR_CS16, [0], dict(tx_mode="replay", mts="true"))
+        self.txs = self.dev.setupStream(SOAPY_SDR_TX, SOAPY_SDR_CS16, [self.ch], txargs)
+        if not self.shared and not tx_only:
+            self.rxs = self.dev.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CS16, [self.ch],
+                                            rx_stream_args(self.ch))
         # map_scan's exact pre-arm cleanup: FULL ladder + both strobes off
         # (the arrival flow's abort-only differed; bisecting the weak-RF gap)
         self.ladder()
@@ -215,8 +250,6 @@ class Bs:
                 self.dev.writeSetting("TDD_REPLAY_STROBE", "ch%d:off" % c)
             except Exception:  # noqa: BLE001
                 pass
-        self.txs = self.dev.setupStream(SOAPY_SDR_TX, SOAPY_SDR_CS16, [self.ch],
-                                        dict(tx_mode="replay"))
         r = self.dev.writeStream(self.txs, [self.ram_iq], 4096)
         if r.ret != 4096:
             raise RuntimeError("RAM load ret=%d" % r.ret)
@@ -271,6 +304,12 @@ class Bs:
                     self.dev.closeStream(self.txs)
                 except Exception:  # noqa: BLE001
                     pass
+            if getattr(self, "aux_txs", None) is not None:
+                try:
+                    self.dev.closeStream(self.aux_txs)
+                except Exception:  # noqa: BLE001
+                    pass
+                self.aux_txs = None
             self.dev = None
             self.txs = None
             return
