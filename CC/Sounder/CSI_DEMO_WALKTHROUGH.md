@@ -634,46 +634,76 @@ estimate, where `dot11` is about a third more stable. That number is a
 secondary reading on the sync panel, not what the client actually tracks
 frequency with, so it does not currently justify the margin it costs.
 
-### 7.1 Free running clock knobs
+### 7.1 Sync knobs: the `sync` block of the config
 
-These belong to the timing tracker the client runs when the two boards are on
-their own references rather than a shared one. Every default below is a measured
-value, not a guess, and the run is expected to be correct with all of them
-unset. They exist so a bench with different jitter or a different detection rate
-can be swept without a rebuild. Change one at a time and record which one.
+These belong to the timing tracker, the beacon detector, its SNR confirm and the
+beacon's own frequency estimate. Since 2026-09-03 they live in ONE place: a
+`sync` object in the JSON config, loaded into one validated structure whose
+every value is printed at startup with where it came from (`default`, `json`
+or `env`). Every default below is a measured value, not a guess, and the run
+is expected to be correct with all of them left alone.
 
-| Variable | Default | Meaning |
-| --- | --- | --- |
-| `HOUDINI_SCATTER_TOL_US` | 2.0 | How far a detection may land from the tracked grid and still count as the same beacon, in microseconds. Expressed in time so it holds at every sample rate. Raising it past about 15 makes the accept window larger than the slot can present, and the code clamps it and says so. Lowering it WIDENS the window the client searches in, so a tighter tolerance finds more beacons, not fewer. |
-| `HOUDINI_CONFIRM_TOL_US` | 5.2083 | The same tolerance during acquisition, where two further detections must land on the first one's grid before the lock is trusted. Tighter than the tracking gate on purpose. |
-| `HOUDINI_SYNC_TOL_SAMPLES` | a quarter of the config `ofdm_tx_zero_prefix` | Timing slack budgeted to drift between two beacon checks. Half the input to the resync cadence. |
-| `HOUDINI_SYNC_RESIDUAL_PPM` | 0.1 | Assumed worst case clock error after tracking. The other half of the cadence input. The two together set how often the client looks at the beacon, which at these defaults is every 2.6 seconds. |
-| `HOUDINI_GRID_ALPHA` | 0.5 | How much of each accepted detection's residual is applied to the schedule. Set both alpha and beta to 0 for a fixed period grid with no tracking at all. |
-| `HOUDINI_GRID_BETA` | 0.1 | How much of that residual is applied to the frame period estimate. |
-| `HOUDINI_GRID_STEP_PPM` | 0.5 | The most one detection may move the period estimate, in ppm. Guards against a single scatter outlier levering the rate. |
-| `HOUDINI_GRID_MAX_PPM` | 100 | Absolute band the period estimate may occupy either side of nominal. A plausibility bound, not an outlier reject. |
-| `HOUDINI_GRID_TRUST_PPM` | 1.0 | How far the tracked period and a fresh acquisition confirm may disagree before an escalation throws away the tracked one. |
-| `HOUDINI_ACQ_REFINE_SPAN` | 200 | Frames of baseline the acquisition stage wants before it trusts its rate estimate. Longer is more accurate and slower to lock. |
-| `HOUDINI_ACQ_MAX_PPM` | 100 | The same plausibility band applied to a rate that acquisition hands back. |
-| `HOUDINI_CFO_INDEX_GUARD` | 8 | Samples of margin the carrier estimator requires around the beacon before it will run. Out of range, it reports nothing rather than a fabricated figure. |
-| `HOUDINI_CSI_NO_PHASE_FIX` | unset | Set it to disable the per symbol common phase correction. On by default for Houdini. The residual carrier figure in the log is measured before this correction either way, so the health reading survives turning it off. |
-| `HOUDINI_COALESCE_SLOTS` | 1 | Collapse runs of discarded slots into one read. On by default. Set it to 0 for a per slot A/B comparison. It changes the client loop rate by roughly 2x, so any figure quoted per iteration has to say which setting produced it. |
-| `HOUDINI_LOOP_PROFILE` | 0 (off) | Print a breakdown of where a client loop iteration goes, once per this many iterations. Counts ITERATIONS. |
-| `HOUDINI_RX_PROFILE` | 0 (off) | Print the split between draining the FIFO and the read itself, once per this many radio reads. Counts READS, which is a different scale from the line above, and coalescing changes the ratio between them. |
-| `HOUDINI_CONFIRM_TOL_US` | 5.2083 | See the acquisition row above. Never applied looser than the tracking gate, whatever you set. |
-| `HOUDINI_BEACON_PICK` | unset | Diagnostic. Unset means the search returns the strongest correlation peak and then looks back a short way for the earliest arriving path, which is the shipped behaviour. `argmax` skips the look-back and takes the strongest peak; `first` restores the pre-2026-09-02 rule of taking the earliest crossing. Neither older rule is safe. The earliest-crossing rule locks onto the beacon's own preamble a few hundred samples early once the link is strong enough, and whether it does depends on received level, so a link that is fine today fails after a gain change. The strongest-peak rule is fine on a cable but wrong over the air, where the strongest arrival is often a reflection and which one is strongest changes as the signal fades, making the timing reference jump. Leave it unset. |
-| `HOUDINI_BEACON_THRESH` | unset | Diagnostic. Unset means the detector compares a normalised correlation, so the `corr_scale` setting means the same thing at every signal level. `power` restores the older comparison, whose effective strictness changed with received level by a factor of ten thousand across the range we measured. `nolag` uses a plain matched filter with no repeat check; it is worse on the repeated-field beacons and is here for comparison. The `nr_pss` beacon selects this form by itself, because its reference does not repeat. Leave it unset. |
-| `HOUDINI_FIRST_PATH_WIN` | 64 | How far back, in samples, the search looks for an earlier arriving path. 64 samples is about half a microsecond, which covers indoor multipath with margin. A longer window suits an outdoor path, but only with a beacon whose preamble sits further away than the window, or the preamble comes back into range. |
-| `HOUDINI_FIRST_PATH_DB` | -9 | How much weaker, in dB, an earlier arrival may be and still be taken as the first path. The default clears our hardest test case by under a decibel, so treat it as tuned rather than generous, and re-run the offline beacon test after changing it. |
-| `HOUDINI_BEACON_FS` | 0.6 | Diagnostic. What fraction of full scale the base station transmits the beacon at. Lowering it weakens the beacon and nothing else, which makes it a stand-in for path loss on a cabled bench. Below about 0.05 the client stops acquiring. |
-| `HOUDINI_RESYNC_RETRY_MAX` | 100 | Misses in one resync period before the client logs an exhausted episode. The anchored grid keeps flying either way; this is a counter, not a give-up. Note the resync period is now 2.6 seconds, so one episode covers far more wall time than it used to. |
-| `HOUDINI_ESCALATE_EPISODES` | 2 | Consecutive exhausted episodes before the client abandons tracking and re-acquires from scratch. |
-| `HOUDINI_HOLD_OFFGRID` | 2 | Consecutive off grid detections before the beacon counts as MOVED. One is scatter, so the default waits for a second. |
-| `HOUDINI_BS_RX_EVERY` | 20 | How many base station frames pass per `HOUDINI_BS_RX:` line. Only has an effect when `HOUDINI_BS_RX_DEBUG` is set. Set it to 1 for a two way transfer measurement, which needs every frame; expect a very large log. |
-| `HOUDINI_TRACKER` | `ab` | Which estimator tracks the base station frame grid. `ab` is the shipped alpha beta. `kf` selects the Kalman, which carries the gap length in its own uncertainty rather than applying fixed gains to every gap. Leave it unset unless you are running the comparison. |
-| `HOUDINI_KF_INNOV_GATE` | 4.0 | Kalman only. How many sigma an observation may sit from the prediction before the filter refuses it. This is the Kalman's outlier defence and it is what makes that arm worth running; set it to 0 to disable and the arm gets measurably worse. |
-| `HOUDINI_KF_MEAS_VAR` | 0.5 | Kalman only. Assumed detector scatter variance in samples squared. The default is the measured 0.63 to 0.70 sample spread, squared. |
-| `HOUDINI_KF_RATE_RW` | 1e-9 | Kalman only. How fast the frame period is assumed to wander, in samples squared per frame cubed. The default comes from the 0.23 ppm the clock moved across one session. |
+Three things to know:
+
+1. The table is GENERATED from the code (`./build/sync_config_schema`), so it
+   cannot drift from what the client actually reads. If you edit a knob in
+   the code, regenerate this table.
+2. A key the loader does not know, or a value outside its range, stops the
+   client with a message naming the key. A typo cannot quietly leave a knob at
+   its default.
+3. The `was` column is the environment variable each knob replaces. It is
+   still honoured this release while `sync.allow_env_overrides` is true (the
+   default), and every override is logged; set it false in the JSON to refuse
+   them. The plan is to remove the environment path next release.
+
+Example, in `files/houdini-ul.json`:
+
+```json
+"sync": {
+  "confirm":  { "snr_floor_db": 30 },
+  "resync":   { "scatter_tol_us": 2.0, "residual_ppm": 0.1 },
+  "tracker":  { "type": "alpha_beta", "alpha": 0.5, "beta": 0.1 }
+}
+```
+
+| key | default | was | range | what it does |
+| --- | --- | --- | --- | --- |
+| `sync.beacon.type` | `legacy` |  |  | Which beacon waveform the base station transmits (legacy, legacy_guard, dot11, nr, nr_pss). |
+| `sync.beacon.tx_full_scale` | 0.6 | `HOUDINI_BEACON_FS` | 0.001 to 1 | Transmit peak of the beacon as a fraction of DAC full scale. 0.6 shipped; lower it to stand in for path loss on a cable. |
+| `sync.detector.threshold` | `auto` | `HOUDINI_BEACON_THRESH` | auto, power, xcorr, coherence | Decision statistic: auto picks coherence for a single-copy replica and the normalised cross-correlation otherwise; power is the pre-2026-09 form. |
+| `sync.detector.pfa_per_window` | 0.001 |  | 1e-09 to 0.5 | False-alarm probability per search window for the coherence form; the bar is derived from it and the replica length. |
+| `sync.detector.pick` | `first_path` | `HOUDINI_BEACON_PICK` | first_crossing, cluster_refined, argmax, first_path | Which crossing is returned: first_path (shipped), argmax, cluster_refined, or first_crossing (unsafe on a strong link). |
+| `sync.detector.first_path_window` | 64 | `HOUDINI_FIRST_PATH_WIN` | 0 to 4095 | Samples the first-path search looks back from the peak. Must stay inside the preamble's self-coherent plateau. |
+| `sync.detector.first_path_floor_db` | -9 | `HOUDINI_FIRST_PATH_DB` | -30 to 0 | How much weaker, in dB of path power, an earlier arrival may be and still be taken as the first path. |
+| `sync.confirm.snr_floor_db` | 30 | `HOUDINI_SYNC_SNR_DB` | -10 to 80 | In-window SNR a detection must clear. A property of the link and the waveform: re-derive it when either changes. |
+| `sync.cfo.index_guard` | 8 | `HOUDINI_CFO_INDEX_GUARD` | 0 to 64 | Samples the carrier estimator's windows slide later than the detected end (AP-39). |
+| `sync.cfo.window_margin` | 0 |  | 0 to 32 | Samples shrunk from both ends of each estimator window so neither touches the burst's edge (8.164). |
+| `sync.cfo.log_every` | 10 | `HOUDINI_CFO_LOG_EVERY` | 1 to 1e+06 | Print one beacon-CFO log line in this many. |
+| `sync.tracker.type` | `alpha_beta` | `HOUDINI_TRACKER` | alpha_beta, kalman | Which estimator tracks the base station frame grid: alpha_beta (shipped) or kalman. |
+| `sync.tracker.alpha` | 0.5 | `HOUDINI_GRID_ALPHA` | 0 to 1 | Fraction of each accepted residual applied to the schedule. |
+| `sync.tracker.beta` | 0.1 | `HOUDINI_GRID_BETA` | 0 to 1 | Fraction of the residual applied to the frame period estimate. |
+| `sync.tracker.step_ppm` | 0.5 | `HOUDINI_GRID_STEP_PPM` | 0 to 1000 | Most one detection may move the period estimate, ppm. 0 disables the limit. |
+| `sync.tracker.max_ppm` | 100 | `HOUDINI_GRID_MAX_PPM` | 0.1 to 10000 | Absolute band the period estimate may occupy either side of nominal, ppm. |
+| `sync.tracker.trust_ppm` | 1 | `HOUDINI_GRID_TRUST_PPM` | 0 to 1000 | How far the tracked period and a fresh acquisition confirm may disagree before the confirm is preferred, ppm. |
+| `sync.tracker.kalman.meas_var` | 0.5 | `HOUDINI_KF_MEAS_VAR` | 1e-06 to 1e+06 | Kalman only: assumed detector scatter variance, samples squared. |
+| `sync.tracker.kalman.rate_rw` | 1e-09 | `HOUDINI_KF_RATE_RW` | 0 to 1 | Kalman only: how fast the frame period wanders, samples squared per frame cubed. |
+| `sync.tracker.kalman.innov_gate` | 4 | `HOUDINI_KF_INNOV_GATE` | 0 to 100 | Kalman only: sigmas an observation may sit from the prediction before it is ignored. 0 disables. |
+| `sync.resync.residual_ppm` | 0.1 | `HOUDINI_SYNC_RESIDUAL_PPM` | 0.0001 to 1000 | Assumed worst-case clock error after tracking; with sync_tol_samples it sets how often the beacon is looked at. |
+| `sync.resync.scatter_tol_us` | 2 | `HOUDINI_SCATTER_TOL_US` | 0.01 to 1000 | How far a detection may land from the tracked grid and still count as the same beacon, microseconds. |
+| `sync.resync.confirm_tol_us` | 5.2083 | `HOUDINI_CONFIRM_TOL_US` | 0.01 to 1000 | The same tolerance during acquisition. Never applied looser than the tracking gate. |
+| `sync.resync.sync_tol_samples` | derived | `HOUDINI_SYNC_TOL_SAMPLES` | 1 to 1e+06 | Timing slack budgeted to drift between looks, samples. Default: a quarter of the OFDM zero prefix. |
+| `sync.resync.retry_max` | 100 | `HOUDINI_RESYNC_RETRY_MAX` | 1 to 100000 | Misses in one resync period before the client logs an exhausted episode. |
+| `sync.resync.escalate_episodes` | 2 | `HOUDINI_ESCALATE_EPISODES` | 1 to 1000 | Consecutive exhausted episodes before the client abandons tracking and re-acquires. |
+| `sync.resync.hold_offgrid` | 2 | `HOUDINI_HOLD_OFFGRID` | 1 to 1000 | Consecutive off-grid detections before the beacon counts as moved. |
+| `sync.resync.acq_refine_span` | 200 | `HOUDINI_ACQ_REFINE_SPAN` | 2 to 100000 | Frames of baseline acquisition wants before it trusts its rate estimate. |
+| `sync.resync.acq_max_ppm` | 100 | `HOUDINI_ACQ_MAX_PPM` | 0.1 to 10000 | Plausibility band applied to a rate that acquisition hands back, ppm. |
+| `sync.allow_env_overrides` | true |  |  | Whether HOUDINI_* environment variables may override these values (each override is logged). Default true this release. |
+
+Diagnostics that dump files or print profiles (`HOUDINI_LOOP_PROFILE`,
+`HOUDINI_RX_PROFILE`, `HOUDINI_COALESCE_SLOTS`, `HOUDINI_CSI_NO_PHASE_FIX`,
+`HOUDINI_BS_RX_EVERY`, `HOUDINI_DUMP_*`) stay environment variables: they are
+not configuration, and a dump switch in a shipped JSON is a trap.
+
 
 The last four are the escalation net. Their defaults were tuned when the client
 grid drifted out of tolerance in about a second. With the clock steered it holds

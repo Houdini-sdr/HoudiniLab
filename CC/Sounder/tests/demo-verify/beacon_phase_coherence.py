@@ -101,6 +101,7 @@ def main():
     all_resid = []
     all_resid_i = []   # the same pairs, fractional-peak phase
     image_ratios = []  # wrong-sense over right-sense peak, per beacon
+    iq_stats = []      # (Q/I rms ratio, normalised <IQ>) per window
     lobe_steps = []    # phase(strong neighbour) - phase(peak), per beacon
     all_recs = []
     lag_pairs = []
@@ -110,6 +111,21 @@ def main():
         if c is None:
             print("  window %d aborted: %s" % (w + 1, err))
             continue
+        # Replica-independent chain statistics on the RAW samples: I/Q power
+        # balance and I/Q correlation. On a real-sampled converter with a
+        # digital mixer these should read 1.00 and 0.00 up to noise; a per-run
+        # departure would be the first place an "image" could physically come
+        # from, and would be measured without any replica assumption.
+        # MEANS REMOVED: a DC offset would otherwise read as imbalance and
+        # correlation. The offset itself is reported separately, in units of the
+        # window's rms, because a per-arm DC offset is a chain state too.
+        mi, mq = float(np.mean(c.real)), float(np.mean(c.imag))
+        ri, rq = c.real - mi, c.imag - mq
+        ii = float(np.mean(ri**2)); qq = float(np.mean(rq**2))
+        iq = float(np.mean(ri*rq)) / math.sqrt(ii*qq) if ii > 0 and qq > 0 else 0.0
+        rms = math.sqrt(ii + qq)
+        iq_stats.append((math.sqrt(qq/ii) if ii > 0 else 0.0, iq,
+                         math.hypot(mi, mq) / rms if rms > 0 else 0.0))
         if a.dump_raw and w == 0:
             c.astype(np.complex64).tofile(a.dump_raw)
             print("  raw window 0 (%d samples, %d short reads) -> %s" % (len(c), _short, a.dump_raw))
@@ -225,6 +241,12 @@ def main():
               % (Ri, sdi, " ".join("%d" % h for h in hi_)))
         print("  (integer-peak R above %.4f; a large gap says the integer peak"
               " wanders between samples)" % R)
+    if iq_stats:
+        qi = [x[0] for x in iq_stats]; xc = [x[1] for x in iq_stats]; dc = [x[2] for x in iq_stats]
+        print("  raw I/Q (means removed): Q/I rms %.4f..%.4f, corr %+.4f..%+.4f, DC offset %.3f..%.3f of rms, %d windows"
+              % (min(qi), max(qi), min(xc), max(xc), min(dc), max(dc), len(qi)))
+        print("  (circular noise: Q/I 1.000 +- %.3f, corr 0 +- %.3f at this window length)"
+              % (1.0/math.sqrt(2*len(c)), 1.0/math.sqrt(len(c))))
     if image_ratios:
         ls = np.array(lobe_steps) if lobe_steps else np.array([0.0])
         print("  receive-chain state: image ratio mean %.3f (min %.3f max %.3f); "
