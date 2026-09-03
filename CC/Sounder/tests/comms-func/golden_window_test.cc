@@ -73,9 +73,12 @@ bool readWindow(const std::string& path, std::vector<std::complex<int16_t>>* out
   f.seekg(0, std::ios::end);
   const auto bytes = static_cast<size_t>(f.tellg());
   f.seekg(0);
+  // An empty or truncated window is not a fixture: it must not count as one
+  // (under a backend that skips the replay the count is the only check).
+  if (bytes < sizeof(std::complex<int16_t>)) return false;
   out->resize(bytes / sizeof(std::complex<int16_t>));
   f.read(reinterpret_cast<char*>(out->data()), static_cast<std::streamsize>(bytes));
-  return true;
+  return static_cast<bool>(f);
 }
 }  // namespace
 
@@ -326,7 +329,7 @@ int main(int argc, char** argv) {
   }
   check(windows == 30, "found " + std::to_string(windows) + " fixture windows (expected 30)");
   for (const auto& kv : kExpected)
-    check(per_shape[kv.first] == kv.second, kv.first + ": " + std::to_string(kv.second) + " of " +
+    check(per_shape[kv.first] == kv.second, kv.first + ": " + std::to_string(per_shape[kv.first]) + " of " +
                                                 std::to_string(kv.second) + " fixture windows present (a half-populated set fails here, not quietly)");
   std::printf("\nRESULT: %s (%d failure(s))\n", g_fail ? "FAIL" : "PASS", g_fail);
   return g_fail ? 1 : 0;
