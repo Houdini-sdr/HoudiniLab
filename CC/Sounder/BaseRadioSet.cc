@@ -7,6 +7,7 @@
   *  Initializes and Configures Radios in the massive-MIMO base station 
   * ----------------------------------------------------------
   */
+#include <cerrno>
 #include "include/BaseRadioSet.h"
 #include "include/rx_gap_sink.h"
 
@@ -110,6 +111,11 @@ BaseRadioSet::BaseRadioSet(Config* cfg, const bool calibrate_proc) : _cfg(cfg) {
     // rather than let activateHoudiniRx() iterate an empty vector and spin on
     // a dead stream (observed on the bench before this guard existed). A cell
     // configured with no radios proceeds, as it always did.
+    if (bsRadios.at(c).empty() && requested_radios == 0) {
+      // Not a failure (master proceeded), but on Houdini it means no beacon
+      // is armed from this cell, which is worth one line.
+      MLPD_WARN("cell %zu lists no base station radios: nothing armed from it\n", c);
+    }
     if (bsRadios.at(c).empty() && requested_radios > 0) {
       radioNotFound = true;
       radio_serial_not_found.push_back(
@@ -427,9 +433,9 @@ void BaseRadioSet::buildHoudiniBeacon(std::vector<int16_t>& iq) {
   //
   // DIAGNOSTIC, NOT A LINK BUDGET. Lowering it weakens the beacon and nothing
   // else, which is the point: it is the cheapest available stand-in for path
-  // loss on a cabled bench. Clamped to (0, 1] because above 1.0 the lround
-  // saturates into a clipped, spectrally-splattered beacon that would measure
-  // the clipping rather than the level.
+  // loss on a cabled bench. Clamped to (0, 1] because above 1.0 the samples
+  // would clip into a spectrally-splattered beacon that measures the clipping
+  // rather than the level (the conversion below clamps, it does not wrap).
   // sync.beacon.tx_full_scale (HOUDINI_BEACON_FS as a logged override while
   // allow_env_overrides holds), range-checked by SyncConfig to (0.001, 1].
   const float fs_frac = static_cast<float>(_cfg->sync().beacon.tx_full_scale);
@@ -441,15 +447,22 @@ void BaseRadioSet::buildHoudiniBeacon(std::vector<int16_t>& iq) {
   }
   const size_t n_load = loop.size();
   iq.assign(n_load * 2, 0);
+  // Peak-scaled to fs_frac of full scale, then clamped: with fs_frac <= 1 the
+  // clamp never fires, and if it ever did the beacon would clip rather than
+  // wrap (the same rule as Utils::saturateToInt16).
+  const auto clamp16 = [](double v) {
+    return static_cast<int16_t>(std::lround(std::max(-32767.0, std::min(32767.0, v))));
+  };
   for (size_t k = 0; k < n_load; ++k) {
-    iq[2 * k] = static_cast<int16_t>(
-        std::lround(loop[k].real() / peak * fs_frac * 32767));
-    iq[2 * k + 1] = static_cast<int16_t>(
-        std::lround(loop[k].imag() / peak * fs_frac * 32767));
+    iq[2 * k] = clamp16(loop[k].real() / peak * fs_frac * 32767);
+    iq[2 * k + 1] = clamp16(loop[k].imag() / peak * fs_frac * 32767);
   }
   if (std::getenv("HOUDINI_DUMP_BEACON")) {
     const std::string path = Utils::dumpPath("beacon_ram.bin");
     FILE* f = std::fopen(path.c_str(), "wb");
+    if (f == nullptr) {
+      MLPD_WARN("HOUDINI_DUMP_BEACON: cannot open %s (%s)\n", path.c_str(), std::strerror(errno));
+    }
     if (f) {
       std::fwrite(iq.data(), sizeof(int16_t), iq.size(), f);
       std::fclose(f);

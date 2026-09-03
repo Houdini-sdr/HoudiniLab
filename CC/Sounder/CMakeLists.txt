@@ -201,7 +201,10 @@ if (HOUDINI_USE_CUDA)
     set(CMAKE_CUDA_ARCHITECTURES native)
   endif()
   add_definitions(-DUSE_CUDA)
-  list(APPEND SOUNDER_SOURCES find_beacon_cuda.cu)
+  # The kernel is a backend of houdini_sync's Detector (sync/detector.cc), so
+  # it is compiled into the library, not into the sounder's sources: every
+  # consumer of the library then links (review round 4, HIGH 3).
+  set(HOUDINI_CUDA_SOURCES find_beacon_cuda.cu)
   message(STATUS "GPU beacon correlator: ENABLED (CUDA arch ${CMAKE_CUDA_ARCHITECTURES})")
 endif()
 
@@ -249,10 +252,11 @@ enable_testing()
 # tool all take them from this library, so there is one find_beacon_avx in
 # the tree (review rounds 2 and 3).
 add_library(houdini_sync STATIC
-  sync/sync_config.cc
-  sync/beacon_shape.cc
+    sync/sync_config.cc
+    sync/beacon_shape.cc
     sync/detector.cc
-    comms-lib.cc comms-lib-avx.cc comms-lib-portable.cc utils.cc)
+    comms-lib.cc comms-lib-avx.cc comms-lib-portable.cc utils.cc
+    ${HOUDINI_CUDA_SOURCES})
 # Consumers see include/ only: a library consumer must not be able to reach
 # the sounder's sources through the library's include path.
 target_include_directories(houdini_sync PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)

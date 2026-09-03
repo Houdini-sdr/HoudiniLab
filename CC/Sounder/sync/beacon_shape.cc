@@ -25,15 +25,15 @@ BeaconShape BeaconShape::make(const std::string& name, Platform platform,
     throw std::invalid_argument("unknown beacon_type \"" + name + "\" -- expected one of " +
                                 expected);
   }
-  return fromDesc(shapes::make(s, num), platform, num);
+  return fromDesc(shapes::make(s, num), platform);
 }
 
-BeaconShape BeaconShape::fromDesc(const shapes::Desc& d, Platform platform,
-                                  const Numerology& num) {
+BeaconShape BeaconShape::fromDesc(const shapes::Desc& d, Platform platform) {
   BeaconShape b;
   b.name_ = d.name;
   b.platform_ = platform;
-  b.num_ = num;
+  b.num_ = d.numerology;
+  b.numerology_held_ = d.numerology_held;
   b.core_ = d.core;
   b.replica_ = d.replica;
   b.replica_off_ = d.replica_off;

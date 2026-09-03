@@ -7,6 +7,7 @@
 ---------------------------------------------------------------------
 */
 
+#include <cerrno>
 #include "include/recorder_worker.h"
 
 #include <arpa/inet.h>
@@ -451,6 +452,10 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
     if (seen.fetch_add(1) >= skip &&
         dumped.compare_exchange_strong(exp, true)) {
       FILE* f = std::fopen(Utils::dumpPath("cns_dump.bin").c_str(), "wb");
+      if (f == nullptr) {
+        MLPD_WARN("HOUDINI_CSI_DUMP: cannot open %s (%s)\n", Utils::dumpPath("cns_dump.bin").c_str(),
+                  std::strerror(errno));
+      }
       if (f) {
         const int32_t hdr[5] = {N, cp, es, nsym,
                                 static_cast<int32_t>(data_ind.size())};

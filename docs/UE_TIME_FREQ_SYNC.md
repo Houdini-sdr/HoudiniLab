@@ -72,9 +72,12 @@ term. Only the carrier phase is left over.
 
 ## 3. What is NOT corrected
 
-There is no derotator. `kEnableCfo` is a compile-time `false`, the legacy
-`estimateCFO` call behind it is dead, and the `TODO: measure CFO from the first
-beacon and apply here` is still a TODO.
+There is no derotator. The beacon CFO is measured on every accepted resync
+(`RepetitionPhaseEstimator`, sync/cfo_estimator.h) and reported, and the
+tracked-clock CFO drives the panel, but nothing applies either to the data
+path; the `TODO: measure CFO from the first beacon and apply here` is still a
+TODO. (The old `kEnableCfo` flag and the dead `estimateCFO` call behind it
+were removed 2026-09-03.)
 
 **The predicted consequence, NOT yet observed (AP-37).** H is estimated in the P
 slot and applied in the U slot, 8192 samples = 66.7 us apart. At -4260 Hz that

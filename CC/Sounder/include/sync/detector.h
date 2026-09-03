@@ -36,7 +36,9 @@ struct Detection {
   ssize_t end_index = -1;
   /// The decision statistic at the correlator's index, in the form's units
   /// (a coherence in [0, 1] for the normalised forms, a power ratio for
-  /// kPowerRatio), and the bar it cleared. Zero when nothing crossed.
+  /// kPowerRatio), and the bar it cleared. Zero when nothing crossed; NaN
+  /// when the backend reports none (the CUDA correlator), so a fixture
+  /// recorded from it cannot pass as a measured zero.
   double statistic = 0.0;
   double bar = 0.0;
   ThresholdForm form = ThresholdForm::kAuto;

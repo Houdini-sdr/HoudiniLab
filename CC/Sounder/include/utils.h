@@ -43,9 +43,12 @@ class Utils {
   static std::vector<std::complex<float>> cint16_to_cfloat(
       const std::vector<std::complex<int16_t>>& in);
   /// Full-scale float to int16 with saturation, never a wrap: every
-  /// conversion in the tree goes through this (a bare cast turned 1.01 into
-  /// a full-scale sign flip).
+  /// unit-scale conversion in the tree goes through this (a bare cast turned
+  /// 1.01 into a full-scale sign flip; the beacon RAM's peak-scaled path
+  /// clamps the same way in BaseRadioSet). NaN maps to 0, not to whatever
+  /// the cast would have made of it.
   static int16_t saturateToInt16(float v) {
+    if (v != v) return 0;
     const float s = v * 32768.0f;
     if (s >= 32767.0f) return 32767;
     if (s <= -32768.0f) return -32768;

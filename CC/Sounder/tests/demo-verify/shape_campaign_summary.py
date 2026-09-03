@@ -30,7 +30,7 @@ from gate_summary import analyse, sd  # noqa: E402
 RE_LOW = re.compile(r"rejected low-SNR detection .*count (\d+)")
 RE_BCFO = re.compile(r"Beacon CFO frame \d+: tracked ([+-]?[\d.]+) Hz .*\| beacon "
                      r"([+-]?[\d.]+|[+-]?nan) Hz")
-RE_FORCED = re.compile(r"threshold form forced to nolag")
+RE_FORCED = re.compile(r"threshold form forced to (nolag|coherence)")
 RE_NAME = re.compile(r"([a-z0-9_]+)_r(\d+)\.log$")
 
 

@@ -93,9 +93,6 @@ class Receiver {
                      houdini::sync::PickRule pick,
                      houdini::sync::Detection* detection = nullptr);
 
-  // Two-stage beacon CFO estimate, normalized (cycles/sample); multiply by
-  // the sample rate for Hz. Pointer form so both the vector-backed legacy
-  // path and the targeted-resync path (raw rxbuff) can call it.
   void initBuffers();
   // frame_period: the TRACKED BS frame period in UE samples (AP-31c). The
   // horizon ladder steps by it, not by samps_per_frame; <= 0 means nominal.

@@ -328,6 +328,13 @@ const SyncConfig::Spec* SyncConfig::spec(std::string_view path) {
   return nullptr;
 }
 
+size_t SyncConfig::indexOf(std::string_view path) {
+  const auto& sc = schema();
+  for (size_t i = 0; i < sc.size(); ++i)
+    if (path == sc[i].path) return i;
+  throw std::logic_error("sync schema: no such knob \"" + std::string(path) + "\"");
+}
+
 Source SyncConfig::provenanceOf(std::string_view path) const {
   const auto& sc = schema();
   for (size_t i = 0; i < sc.size(); ++i)
@@ -337,6 +344,7 @@ Source SyncConfig::provenanceOf(std::string_view path) const {
 
 void SyncConfig::setProvenance(size_t index, Source s) {
   if (provenance_.size() < schema().size()) provenance_.resize(schema().size(), Source::kDefault);
+  if (index >= provenance_.size()) throw std::logic_error("sync schema: provenance index out of range");
   provenance_[index] = s;
 }
 
@@ -356,19 +364,41 @@ SyncConfig SyncConfig::loadFromText(const std::string& root_json_text) {
       throw std::invalid_argument("beacon_type: expects a string");
     bt = root["beacon_type"].get<std::string>();
   }
-  std::optional<double> cs, csi;
-  if (root.contains("corr_scale") && root["corr_scale"].is_array() && !root["corr_scale"].empty())
-    cs = root["corr_scale"][0].get<double>();
-  if (root.contains("corr_scale_init") && root["corr_scale_init"].is_array() &&
-      !root["corr_scale_init"].empty())
-    csi = root["corr_scale_init"][0].get<double>();
-  return load(block, bt, cs, csi);
+  SyncConfig c = load(block, bt);
+  // The sounder's own fallbacks for the legacy arrays: 1 for an absent
+  // corr_scale, corr_scale for an absent corr_scale_init.
+  const bool has_cs = root.contains("corr_scale") && root["corr_scale"].is_array() &&
+                      !root["corr_scale"].empty();
+  const bool has_csi = root.contains("corr_scale_init") && root["corr_scale_init"].is_array() &&
+                       !root["corr_scale_init"].empty();
+  const double cs = has_cs ? root["corr_scale"][0].get<double>() : 1.0;
+  const double csi = has_csi ? root["corr_scale_init"][0].get<double>() : cs;
+  c.adoptLegacyThreshold(cs, csi, has_cs, has_csi);
+  return c;
+}
+
+void SyncConfig::adoptLegacyThreshold(double corr_scale, double corr_scale_init,
+                                      bool corr_scale_in_file, bool corr_scale_init_in_file) {
+  auto adopt = [this](const char* path, double v, bool in_file, const char* what) {
+    if (provenanceOf(path) == Source::kJson) return;  // the sync block wins
+    std::string note;
+    const std::string err = assign(*this, *spec(path), nlohmann::json(v), false, false, &note);
+    if (!err.empty()) throw std::invalid_argument(std::string(what) + ": " + err);
+    setProvenance(path, in_file ? Source::kJson : Source::kDerived);
+  };
+  adopt("detector.corr_scale", corr_scale, corr_scale_in_file, "corr_scale");
+  if (corr_scale_init_in_file) {
+    adopt("detector.corr_scale_init", corr_scale_init, true, "corr_scale_init");
+  } else if (provenanceOf("detector.corr_scale_init") != Source::kJson) {
+    // An absent corr_scale_init follows the EFFECTIVE corr_scale, whichever
+    // source set that (the block wins over the array).
+    detector.bar.corr_scale_init = detector.bar.corr_scale;
+    setProvenance("detector.corr_scale_init", Source::kDerived);
+  }
 }
 
 SyncConfig SyncConfig::load(const std::optional<std::string>& sync_block_json,
-                            const std::optional<std::string>& legacy_beacon_type,
-                            const std::optional<double>& legacy_corr_scale,
-                            const std::optional<double>& legacy_corr_scale_init) {
+                            const std::optional<std::string>& legacy_beacon_type) {
   SyncConfig c = defaults();
   const auto& sc = schema();
   nlohmann::json blk = nlohmann::json::object();
@@ -392,29 +422,25 @@ SyncConfig SyncConfig::load(const std::optional<std::string>& sync_block_json,
     if (!err.empty()) throw std::invalid_argument("sync." + std::string(sc[i].path) + ": " + err);
     c.setProvenance(i, Source::kJson);
   }
-  // The legacy keys the caller found at the top level of its file.
-  const auto legacy = [&](const char* path, const nlohmann::json& v, const char* what) {
-    const auto* s = spec(path);
-    size_t idx = 0;
-    for (; idx < sc.size(); ++idx) if (&sc[idx] == s) break;
-    if (c.provenance_[idx] == Source::kJson) return;  // the sync block wins
-    std::string note;
-    const std::string err = assign(c, *s, v, false, false, &note);
-    if (!err.empty()) throw std::invalid_argument(std::string(what) + ": " + err);
-    c.setProvenance(idx, Source::kJson);
-  };
+  // The legacy key the caller found at the top level of its file.
   if (legacy_beacon_type.has_value()) {
     if (c.provenanceOf("beacon.type") == Source::kJson && *legacy_beacon_type != c.beacon.type) {
       throw std::invalid_argument("beacon_type \"" + *legacy_beacon_type +
                                   "\" and sync.beacon.type \"" + c.beacon.type + "\" disagree");
     }
-    legacy("beacon.type", nlohmann::json(*legacy_beacon_type), "beacon_type");
+    if (c.provenanceOf("beacon.type") != Source::kJson) {
+      std::string note;
+      const std::string err = assign(c, *spec("beacon.type"), nlohmann::json(*legacy_beacon_type),
+                                     false, false, &note);
+      if (!err.empty()) throw std::invalid_argument("beacon_type: " + err);
+      c.setProvenance("beacon.type", Source::kJson);
+    }
   }
-  if (legacy_corr_scale.has_value()) legacy("detector.corr_scale", nlohmann::json(*legacy_corr_scale), "corr_scale");
-  if (legacy_corr_scale_init.has_value()) {
-    legacy("detector.corr_scale_init", nlohmann::json(*legacy_corr_scale_init), "corr_scale_init");
-  } else if (c.provenanceOf("detector.corr_scale_init") == Source::kDefault) {
-    c.detector.bar.corr_scale_init = c.detector.bar.corr_scale;  // defaults to corr_scale
+  // corr_scale_init follows corr_scale unless set (the sounder's own rule).
+  if (c.provenanceOf("detector.corr_scale_init") == Source::kDefault &&
+      c.provenanceOf("detector.corr_scale") != Source::kDefault) {
+    c.detector.bar.corr_scale_init = c.detector.bar.corr_scale;
+    c.setProvenance("detector.corr_scale_init", Source::kDerived);
   }
   // Environment overrides, when allowed: range-checked like JSON, then the
   // knob's policy decides what an out-of-range number does (clamp, or keep
@@ -465,14 +491,12 @@ void SyncConfig::resolve(const ResolveContext& ctx) {
   // derived by default (64 at 128 taps, 32 at 64).
   if (detector.first_path_window < 0 && ctx.replica_len > 0) {
     detector.first_path_window = static_cast<int>(ctx.replica_len / 2);
-    const auto* s = spec("detector.first_path_window");
-    setProvenance(static_cast<size_t>(s - schema().data()), Source::kDerived);
+    setProvenance("detector.first_path_window", Source::kDerived);
   }
   // NaN means "a quarter of the OFDM zero prefix".
   if (std::isnan(resync.sync_tol_samples) && ctx.prefix_samples > 0.0) {
     resync.sync_tol_samples = ctx.prefix_samples / 4.0;
-    const auto* s = spec("resync.sync_tol_samples");
-    setProvenance(static_cast<size_t>(s - schema().data()), Source::kDerived);
+    setProvenance("resync.sync_tol_samples", Source::kDerived);
   }
   // The Iris/UHD defaults are the rules that framer has always run (master
   // returned the first threshold crossing under the power-ratio form); the
@@ -481,14 +505,23 @@ void SyncConfig::resolve(const ResolveContext& ctx) {
   if (ctx.platform == Platform::kIrisUhd) {
     if (!wasSet("detector.pick")) {
       detector.pick = PickRule::kFirstCrossing;
-      setProvenance(static_cast<size_t>(spec("detector.pick") - schema().data()), Source::kDerived);
+      setProvenance("detector.pick", Source::kDerived);
     }
     if (!wasSet("detector.threshold")) {
       detector.threshold = ThresholdForm::kPowerRatio;
-      setProvenance(static_cast<size_t>(spec("detector.threshold") - schema().data()),
-                    Source::kDerived);
+      setProvenance("detector.threshold", Source::kDerived);
     }
   }
+  // A single-copy replica has no lag product to take: the detector runs the
+  // coherence form whatever was asked (8.154), and the record must say so.
+  if (ctx.single_copy_replica && detector.threshold != ThresholdForm::kCoherence) {
+    detector.threshold = ThresholdForm::kCoherence;
+    setProvenance("detector.threshold", Source::kDerived);
+  }
+  // Several clients: the receiver applies the legacy per-client arrays, not
+  // the block's one value.
+  clients_ = ctx.clients;
+  validate();
 }
 
 double ThresholdPolicy::coherenceBar(size_t replica_len, double pfa_per_window,
@@ -510,16 +543,26 @@ void SyncConfig::validate() {
          "value (8.65)");
   }
   if (detector.pick == PickRule::kFirstCrossing) {
-    note("detector.pick first_crossing false-locks on the beacon's own preamble once the link "
-         "is strong (AP-34); diagnostic only");
+    note(std::string("detector.pick first_crossing false-locks on the beacon's own preamble once "
+                     "the link is strong (AP-34)") +
+         (provenanceOf("detector.pick") == Source::kDerived
+              ? "; it is the Iris/UHD default, the rule that framer has always run"
+              : "; diagnostic only on Houdini"));
+  }
+  if (clients_ > 1 && (wasSet("detector.corr_scale") || wasSet("detector.corr_scale_init"))) {
+    note(std::to_string(clients_) + " clients are configured: the receiver applies the legacy "
+         "per-client corr_scale / corr_scale_init arrays, not sync.detector.corr_scale");
   }
   if (detector.pick == PickRule::kArgmax) {
     note("detector.pick argmax returns the STRONGEST path, which over the air is often a "
          "reflection that hops as the channel fades (8.143); diagnostic only");
   }
   if (detector.threshold == ThresholdForm::kPowerRatio) {
-    note("detector.threshold power is a different test at every received level (8.138); "
-         "diagnostic only");
+    note(std::string("detector.threshold power is a different test at every received level "
+                     "(8.138)") +
+         (provenanceOf("detector.threshold") == Source::kDerived
+              ? "; it is the Iris/UHD default, the form that framer has always run"
+              : "; diagnostic only on Houdini"));
   }
   if (detector.first_path_window > 512) {
     note("detector.first_path_window above 512 reaches past any preamble plateau and widens "

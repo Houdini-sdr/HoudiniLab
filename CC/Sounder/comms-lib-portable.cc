@@ -31,10 +31,34 @@ namespace {
 // set through CommsLib::setCorrelatorThreads (sync.detector.corr_threads,
 // SOUNDER_CORR_THREADS as its logged env alias); else 1. Capped at the pool
 // size (hardware concurrency) at dispatch.
-std::atomic<unsigned> g_corr_threads{1u};
+// 0 = nothing set through the API yet: the environment is then read ONCE,
+// which is how the bench tools that link this library without a Config
+// (bench-correlator-rate, beacon_geometry_test, houdini_loopback) take it.
+std::atomic<unsigned> g_corr_threads{0u};
 unsigned ResolveThreads(unsigned requested) {
   if (requested > 0) return requested;
-  return std::max(1u, g_corr_threads.load(std::memory_order_relaxed));
+  const unsigned set = g_corr_threads.load(std::memory_order_relaxed);
+  if (set > 0) return set;
+  static const unsigned from_env = [] {
+    if (const char* e = std::getenv("SOUNDER_CORR_THREADS")) {
+      const int v = std::atoi(e);
+      if (v > 0) return static_cast<unsigned>(v);
+    }
+    return 1u;
+  }();
+  return from_env;
+}
+
+// The radio's samples as the correlator takes them: full scale to +-1.
+std::vector<std::complex<float>> ToCorrelatorScale(const std::complex<int16_t>* raw,
+                                                   size_t n) {
+  static constexpr float kShortMaxFloat = 32767.0f;
+  std::vector<std::complex<float>> out(n);
+  for (size_t i = 0; i < n; ++i) {
+    out[i] = std::complex<float>(static_cast<float>(raw[i].real()) / kShortMaxFloat,
+                                 static_cast<float>(raw[i].imag()) / kShortMaxFloat);
+  }
+  return out;
 }
 
 // Persistent fork-join pool: worker threads are created once and reused, so
@@ -530,15 +554,8 @@ ssize_t CommsLib::find_beacon_avx(
     const std::vector<std::complex<float>>& match_samples, size_t check_window,
     float corr_scale, BeaconPick pick, BeaconThresh thresh_form,
     int first_path_window, double first_path_db) {
-  static constexpr float kShortMaxFloat = 32767.0f;
-  std::vector<std::complex<float>> sync_compare(check_window);
-  for (size_t i = 0; i < check_window; ++i) {
-    sync_compare[i] = std::complex<float>(
-        static_cast<float>(raw_samples[i].real()) / kShortMaxFloat,
-        static_cast<float>(raw_samples[i].imag()) / kShortMaxFloat);
-  }
-  return CommsLib::find_beacon_avx(sync_compare, match_samples, corr_scale,
-                                   pick, thresh_form, first_path_window,
+  return CommsLib::find_beacon_avx(ToCorrelatorScale(raw_samples, check_window), match_samples,
+                                   corr_scale, pick, thresh_form, first_path_window,
                                    first_path_db);
 }
 
@@ -547,15 +564,8 @@ CommsLib::BeaconResult CommsLib::find_beacon_ex(
     const std::vector<std::complex<float>>& match_samples, size_t check_window,
     float corr_scale, BeaconPick pick, BeaconThresh thresh_form,
     int first_path_window, double first_path_db) {
-  static constexpr float kShortMaxFloat = 32767.0f;
-  std::vector<std::complex<float>> sync_compare(check_window);
-  for (size_t i = 0; i < check_window; ++i) {
-    sync_compare[i] = std::complex<float>(
-        static_cast<float>(raw_samples[i].real()) / kShortMaxFloat,
-        static_cast<float>(raw_samples[i].imag()) / kShortMaxFloat);
-  }
-  return find_beacon_ex(sync_compare, match_samples, corr_scale, pick, thresh_form,
-                        first_path_window, first_path_db);
+  return find_beacon_ex(ToCorrelatorScale(raw_samples, check_window), match_samples, corr_scale,
+                        pick, thresh_form, first_path_window, first_path_db);
 }
 
 // Element-wise complex multiply, portable equivalent of the float

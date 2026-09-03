@@ -171,9 +171,11 @@ struct ResyncConfig {
 /// What resolve() needs from outside the configuration: the shape and the
 /// slot layout the sentinels are derived from.
 struct ResolveContext {
-  size_t replica_len = 0;      ///< taps in the correlator replica
-  double prefix_samples = 0.0; ///< the OFDM zero prefix, samples
+  size_t replica_len = 0;          ///< taps in the correlator replica
+  double prefix_samples = 0.0;     ///< the OFDM zero prefix, samples
   Platform platform = Platform::kHoudini;
+  bool single_copy_replica = false;///< the replica appears once (nr_pss): coherence form
+  size_t clients = 1;              ///< configured clients; above 1 the per-client arrays apply
 };
 
 struct SyncConfig {
@@ -232,25 +234,33 @@ struct SyncConfig {
   /// The shipped defaults (every provenance kDefault).
   static SyncConfig defaults();
   /// Load from the `sync` object of a config, given as its JSON text (nullopt
-  /// = absent), plus the legacy top-level "beacon_type" and the first client's
-  /// "corr_scale" / "corr_scale_init" when the caller has them. The library
+  /// = absent), plus the legacy top-level "beacon_type" when the caller has
+  /// it (the legacy thresholds come through adoptLegacyThreshold). The library
   /// does not see the config FILE: the caller hands it the block and the
   /// legacy keys. Unknown keys under `sync` throw std::invalid_argument; keys
   /// whose name starts with "_" are comments; a key containing a dot is
   /// refused with a reason. Then the environment, when allowed; then
   /// validation.
   static SyncConfig load(const std::optional<std::string>& sync_block_json,
-                         const std::optional<std::string>& legacy_beacon_type = std::nullopt,
-                         const std::optional<double>& legacy_corr_scale = std::nullopt,
-                         const std::optional<double>& legacy_corr_scale_init = std::nullopt);
+                         const std::optional<std::string>& legacy_beacon_type = std::nullopt);
+  /// The detection bars from the legacy per-client arrays (the first
+  /// client's), applied unless the sync block set them. `*_in_file` says
+  /// whether the key was present: a present value records as json, the
+  /// sounder's fallback for an absent key (1 for corr_scale, corr_scale for
+  /// corr_scale_init) as derived. Call after the arrays are parsed.
+  void adoptLegacyThreshold(double corr_scale, double corr_scale_init, bool corr_scale_in_file,
+                            bool corr_scale_init_in_file);
   /// Convenience for tests and tools: the WHOLE config file's text, from
   /// which the block and the legacy keys are taken.
   static SyncConfig loadFromText(const std::string& root_json_text);
   /// Fill the sentinels (first_path_window, sync_tol_samples) from the shape
-  /// and slot layout, and the platform defaults (detector.pick and
-  /// detector.threshold on Iris/UHD, whose framer predates the shapes), all
-  /// marked kDerived, so describe() prints the values actually used.
-  /// Idempotent; an explicit value is left alone.
+  /// and slot layout, the platform defaults (detector.pick and
+  /// detector.threshold on Iris/UHD, whose framer predates the shapes) and
+  /// the replica's rule (a single-copy replica runs the coherence form
+  /// whatever was asked), all marked kDerived, so describe() prints the
+  /// values actually used; then validates the result, so a derived value
+  /// gets the same notes a configured one would. Idempotent; an explicit
+  /// value is left alone.
   void resolve(const ResolveContext& ctx);
 
   /// Effective values with provenance, one line per knob.
@@ -263,8 +273,13 @@ struct SyncConfig {
  private:
   std::vector<Source> provenance_;
   std::vector<std::string> warnings_;
+  size_t clients_ = 1;
   void validate();
+  /// The schema index of a path; throws std::logic_error for a path the
+  /// schema does not know (a typo in this file, never a user error).
+  static size_t indexOf(std::string_view path);
   void setProvenance(size_t index, Source s);
+  void setProvenance(std::string_view path, Source s) { setProvenance(indexOf(path), s); }
 };
 
 }  // namespace sync

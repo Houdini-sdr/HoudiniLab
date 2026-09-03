@@ -9,6 +9,8 @@
 
 #include "include/config.h"
 
+#include <cerrno>
+#include <cstring>
 #include <cstdio>
 #include <cstdlib>
 #include <optional>
@@ -54,12 +56,9 @@ Config::Config(const std::string& jsonfile, const std::string& directory,
       }
       legacy_type = tddConf["beacon_type"].get<std::string>();
     }
-    std::optional<double> legacy_cs, legacy_csi;
-    const auto cs = tddConf.value("corr_scale", json::array());
-    if (cs.is_array() && !cs.empty()) legacy_cs = cs[0].get<double>();
-    const auto csi = tddConf.value("corr_scale_init", json::array());
-    if (csi.is_array() && !csi.empty()) legacy_csi = csi[0].get<double>();
-    sync_ = houdini::sync::SyncConfig::load(sync_block, legacy_type, legacy_cs, legacy_csi);
+    sync_ = houdini::sync::SyncConfig::load(sync_block, legacy_type);
+    // The legacy corr_scale arrays are adopted below, once they are parsed
+    // with their own fallbacks (an absent key is 1, as it always was).
   }
   std::stringstream ss;
   ss << "  Config: " << tddConf << "\n" << std::endl;
@@ -292,6 +291,13 @@ Config::Config(const std::string& jsonfile, const std::string& directory,
     }
     corr_scale_init_.assign(corr_scale_init.begin(), corr_scale_init.end());
   }
+  // The detection bars the library records and the receiver applies for a
+  // single client: the first client's, with the sounder's fallbacks (an
+  // absent corr_scale is 1, an absent corr_scale_init is corr_scale), marked
+  // json or derived accordingly. With several clients the arrays apply.
+  sync_.adoptLegacyThreshold(static_cast<double>(corr_scale_.at(0)),
+                             static_cast<double>(corr_scale_init_.at(0)), !corr_scale.empty(),
+                             !corr_scale_init.empty());
   ul_data_frame_num_ = tddConf.value("ul_data_frame_num", 1);
   dl_data_frame_num_ = tddConf.value("dl_data_frame_num", 1);
 
@@ -512,7 +518,7 @@ void Config::loadTopology(std::string serials_file, const bool bs_only,
         n_bs_antennas_.at(i) = bs_sdr_ch_ * n_bs_sdrs_.at(i);
         num_bs_sdrs_all_ += n_bs_sdrs_.at(i);
         num_bs_antennas_all_ += n_bs_antennas_.at(i);
-        cal_ref_sdr_id_ = n_bs_sdrs_.at(i) - 1;
+        cal_ref_sdr_id_ = n_bs_sdrs_.at(i) > 0 ? n_bs_sdrs_.at(i) - 1 : 0;
         MLPD_INFO(
             "Loading devices - cell %zu, sdrs %zu, antennas: %zu, "
             "total bs srds: %zu\n",
@@ -574,7 +580,7 @@ void Config::genBsSchedule(BsSchedType type) {
   switch (type) {
     case CALIB_STAR_TOPO:
       for (size_t c = 0; c < num_cells_; c++) {
-        cal_ref_sdr_id_ = n_bs_sdrs_[c] - 1;
+        cal_ref_sdr_id_ = n_bs_sdrs_[c] > 0 ? n_bs_sdrs_[c] - 1 : 0;
         bs_array_frames_[c].resize(n_bs_sdrs_[c]);
         size_t beacon_slot = 0;
         if (num_cl_antennas_ > 0)
@@ -607,7 +613,7 @@ void Config::genBsSchedule(BsSchedType type) {
     case CALIB_FULLY_CONN:
       // For full matrix measurements (all bs nodes transmit and receive)
       for (size_t c = 0; c < num_cells_; c++) {
-        cal_ref_sdr_id_ = n_bs_sdrs_[c] - 1;
+        cal_ref_sdr_id_ = n_bs_sdrs_[c] > 0 ? n_bs_sdrs_[c] - 1 : 0;
         bs_array_frames_[c].resize(n_bs_sdrs_[c]);
         size_t frame_length = num_channels * n_bs_sdrs_[c] * guard_mult_;
         for (size_t i = 0; i < n_bs_sdrs_[c]; i++) {
@@ -839,7 +845,20 @@ void Config::genPilots() {
   gold_cf32_.assign(shape.replica().begin(), shape.replica().end());
   // The sentinels resolve against the shape and the slot layout now that both
   // are known; what is printed here is the configuration actually used.
-  sync_.resolve({shape.replicaLen(), static_cast<double>(prefix_), platform()});
+  if (!shape.numerologyHeld()) {
+    MLPD_WARN(
+        "beacon_type %s: %.6g MSPS has no whole power-of-two symbol size for the NR "
+        "subcarrier spacing (%.0f kHz); the shipped 128-point symbols are built "
+        "instead, so the spacing on the air is %.1f kHz\n",
+        beacon_type_.c_str(), rate() / 1e6, num.scs_hz / 1e3, rate() / 128.0 / 1e3);
+  }
+  houdini::sync::ResolveContext rctx;
+  rctx.replica_len = shape.replicaLen();
+  rctx.prefix_samples = static_cast<double>(prefix_);
+  rctx.platform = platform();
+  rctx.single_copy_replica = shape.singleCopy();
+  rctx.clients = num_cl_sdrs_;
+  sync_.resolve(rctx);
   CommsLib::setCorrelatorThreads(static_cast<unsigned>(sync_.detector.corr_threads));
   MLPD_INFO("%s", sync_.describe().c_str());
   std::cout << "Beacon: type " << beacon_type_ << ", core " << shape.coreLen()
@@ -855,6 +874,10 @@ void Config::genPilots() {
 
   if (getenv("HOUDINI_DUMP_GOLD") != nullptr) {  // the exact find_beacon match
     FILE* f = std::fopen(Utils::dumpPath("gold.bin").c_str(), "wb");
+    if (f == nullptr) {
+      MLPD_WARN("HOUDINI_DUMP_GOLD: cannot open %s (%s)\n", Utils::dumpPath("gold.bin").c_str(),
+                std::strerror(errno));
+    }
     if (f) {
       for (const auto& c : gold_cf32_) {
         float v[2] = {c.real(), c.imag()};
@@ -889,6 +912,10 @@ void Config::genPilots() {
     // exact TX waveform. Length is beacon_size(), NOT a constant: 496 for
     // legacy, 528 / 320 / 272 for the others.
     FILE* f = std::fopen(Utils::dumpPath("beacon_core.bin").c_str(), "wb");
+    if (f == nullptr) {
+      MLPD_WARN("HOUDINI_DUMP_GOLD: cannot open %s (%s)\n",
+                Utils::dumpPath("beacon_core.bin").c_str(), std::strerror(errno));
+    }
     if (f) {
       std::fwrite(beacon_ci16_.data(), sizeof(std::complex<int16_t>),
                   beacon_ci16_.size(), f);

@@ -19,13 +19,16 @@
  *     counts: an STS is 16 samples and a gold symbol 128 at any rate, so
  *     their bandwidth follows the rate. STANDARD-defined shapes (nr, nr_pss)
  *     hold their subcarrier spacing: the PSS is 127 tones at `scs_hz`, so its
- *     IFFT size is rate / scs and a rate too low to carry 127 tones at that
- *     spacing is refused rather than silently redefined.
+ *     IFFT size is rate / scs. A rate that cannot carry 127 tones at that
+ *     spacing (no whole power-of-two size) builds the shipped 128-point
+ *     symbols instead and says so (Desc::numerology_held), because refusing
+ *     to build would abort every Iris config that names an NR shape.
  */
 #pragma once
 
 #include <cmath>
 #include <cstddef>
+#include <optional>
 #include <stdexcept>
 #include <string>
 
@@ -49,18 +52,30 @@ struct Numerology {
   double slotSeconds() const { return secondsFor(static_cast<double>(samps_per_slot)); }
   double frameSeconds() const { return secondsFor(static_cast<double>(samps_per_frame)); }
 
-  /// The IFFT size that carries `scs_hz` at this rate, which must be a whole
-  /// number and hold at least `min_tones` tones; throws otherwise.
-  size_t ifftSize(size_t min_tones) const {
+  /// The IFFT size that carries `scs_hz` at this rate, when one exists: a
+  /// whole number, a power of two (the FFT library is radix 2/4/8 and does
+  /// not check its plan), and at least `min_tones + 1` points, because the
+  /// tone mapper nulls DC so an n-point symbol carries n - 1 tones. Empty
+  /// otherwise, so a shape can fall back rather than refuse to build.
+  std::optional<size_t> ifftSizeIfExact(size_t min_tones) const {
+    if (!(rate_hz > 0.0) || !(scs_hz > 0.0)) return std::nullopt;
     const double n = rate_hz / scs_hz;
     const double r = std::round(n);
-    if (!(rate_hz > 0.0) || std::fabs(n - r) > 1e-6 || r < static_cast<double>(min_tones)) {
+    if (std::fabs(n - r) > 1e-6 || r < static_cast<double>(min_tones) + 1.0) return std::nullopt;
+    const size_t k = static_cast<size_t>(r);
+    if ((k & (k - 1)) != 0) return std::nullopt;
+    return k;
+  }
+  /// The same, throwing with the reason when no such size exists.
+  size_t ifftSize(size_t min_tones) const {
+    const auto k = ifftSizeIfExact(min_tones);
+    if (!k.has_value()) {
       throw std::invalid_argument(
           "numerology: " + std::to_string(rate_hz) + " Hz at " + std::to_string(scs_hz) +
-          " Hz spacing gives " + std::to_string(n) + " points, not a whole number of at least " +
-          std::to_string(min_tones));
+          " Hz spacing gives " + std::to_string(rate_hz / scs_hz) +
+          " points; a power of two of at least " + std::to_string(min_tones + 1) + " is needed");
     }
-    return static_cast<size_t>(r);
+    return *k;
   }
 };
 

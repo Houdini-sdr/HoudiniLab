@@ -76,7 +76,7 @@ struct SyncGeometry : SliceGeometry, ResyncSchedule {};
 /// tolerances they do NOT scale with the rate.
 inline SliceGeometry computeSliceGeometry(double rate_hz, long long samps_per_slot,
                                           long long samps_per_frame,
-                                          long long replica_len,
+                                          long long replica_len, long long replica_tail,
                                           double scatter_tol_us,
                                           double confirm_tol_us) {
   SliceGeometry g{};
@@ -85,9 +85,13 @@ inline SliceGeometry computeSliceGeometry(double rate_hz, long long samps_per_sl
                           : static_cast<double>(samps_per_frame) * 1e3;
   const long long slot = std::max<long long>(1, samps_per_slot);
   const long long L = std::max<long long>(1, replica_len);
-  const long long corr_context = 2 * L;  // correlator run-up
+  const long long tail = std::max<long long>(0, replica_tail);
+  // The slice is placed by the beacon END; the matched field ends `tail`
+  // samples before it, and the correlator needs two replicas of run-up
+  // before THAT (a leading replica, nr_pss, is 144 samples before the end).
+  const long long corr_context = tail + 2 * L;
 
-  const long long geom = 2 * L + L / 2;
+  const long long geom = corr_context + L / 2;
   g.slot_cap = std::max<long long>(
       1, (slot - geom - slot / kSyncWindowReserveDiv) / 2);
 
@@ -139,15 +143,15 @@ inline ResyncSchedule computeResyncSchedule(double rate_hz, long long samps_per_
 /// Both, for a caller that wants the whole table.
 inline SyncGeometry computeSyncGeometry(double rate_hz, long long samps_per_slot,
                                         long long samps_per_frame,
-                                        long long replica_len,
+                                        long long replica_len, long long replica_tail,
                                         double scatter_tol_us,
                                         double confirm_tol_us,
                                         double sync_tol_samples,
                                         double sync_residual_ppm) {
   SyncGeometry g{};
   static_cast<SliceGeometry&>(g) = computeSliceGeometry(
-      rate_hz, samps_per_slot, samps_per_frame, replica_len, scatter_tol_us,
-      confirm_tol_us);
+      rate_hz, samps_per_slot, samps_per_frame, replica_len, replica_tail,
+      scatter_tol_us, confirm_tol_us);
   static_cast<ResyncSchedule&>(g) = computeResyncSchedule(
       rate_hz, samps_per_frame, sync_tol_samples, sync_residual_ppm);
   return g;

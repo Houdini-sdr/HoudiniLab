@@ -4,6 +4,7 @@
 #include "sync/detector.h"
 
 #include <algorithm>
+#include <limits>
 
 #include "comms-lib.h"
 
@@ -81,6 +82,8 @@ Detection Detector::run(const std::complex<int16_t>* samples, size_t n,
     const ssize_t idx = CommsLib::find_beacon_cuda(samples, shape_.replica(), n, corr_scale);
     d.end_index = shape_.endFromCorrelatorIndex(idx, n);
     d.form = ThresholdForm::kPowerRatio;
+    d.statistic = std::numeric_limits<double>::quiet_NaN();  // not reported by this backend
+    d.bar = std::numeric_limits<double>::quiet_NaN();
     return d;
   }
 #endif

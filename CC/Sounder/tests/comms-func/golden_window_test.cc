@@ -126,6 +126,22 @@ int main(int argc, char** argv) {
     check(h.endFromCorrelatorIndex(-1, 1000) == -1 && h.endFromCorrelatorIndex(100, 1000) == 244 &&
               h.endFromCorrelatorIndex(900, 1000) == -1 && i.endFromCorrelatorIndex(900, 1000) == 900,
           "BeaconShape: end = index + tail, -1 when none or past the window, index itself with no tail");
+    // An NR shape at a rate that cannot hold the spacing builds the shipped
+    // symbols and says so; the shipped rate holds it; a rate that gives a
+    // non-power-of-two size is a fallback too (127 points would segfault the
+    // FFT plan).
+    Numerology low = Numerology::houdiniDefault();
+    low.rate_hz = 61.44e6;
+    Numerology odd = Numerology::houdiniDefault();
+    odd.rate_hz = 121.92e6;
+    const auto nr_low = BeaconShape::make("nr_pss", Platform::kHoudini, low);
+    const auto nr_odd = BeaconShape::make("nr_pss", Platform::kHoudini, odd);
+    check(!nr_low.numerologyHeld() && nr_low.replicaLen() == 128 && nr_low.coreLen() == h.coreLen() &&
+              !nr_odd.numerologyHeld() && nr_odd.replicaLen() == 128 && h.numerologyHeld(),
+          "NR at 61.44 or 121.92 MSPS falls back to the shipped 128-point symbols and reports it; 122.88 holds");
+    check(!Numerology::houdiniDefault().ifftSizeIfExact(128).has_value() &&
+              Numerology::houdiniDefault().ifftSizeIfExact(127).value_or(0) == 128,
+          "ifftSizeIfExact: 128 points carry 127 tones (DC is nulled), not 128");
     const auto l = BeaconShape::make("legacy", Platform::kHoudini, Numerology::houdiniDefault());
     check(l.geometry().usable() && l.geometry().core_len == 496 && l.geometry().fine_len == 128 &&
               l.singleCopy() == false && h.singleCopy(),
@@ -162,8 +178,13 @@ int main(int argc, char** argv) {
     check(idet.replicaTail() == 0 && idet.pick() == PickRule::kFirstCrossing &&
               idet.form() == ThresholdForm::kCoherence,
           "off Houdini: no replica tail, the derived first-crossing pick, and the replica still forces coherence");
+#if defined(USE_CUDA)
+    check(idet.backend() == houdini::sync::DetectorBackend::kCuda && !idet.backendAppliesConfig(),
+          "this build's backend is the CUDA correlator, which does not apply the configuration");
+#else
     check(idet.backend() == houdini::sync::DetectorBackend::kPortable && idet.backendAppliesConfig(),
           "this build's backend is the portable correlator, which applies the configuration");
+#endif
     // The tail pushes an end past the window: reported as no detection.
     Detector det(d, DetectorConfig{});
     std::vector<std::complex<int16_t>> tiny(d.coreLen() + 8, std::complex<int16_t>(0, 0));
@@ -183,9 +204,9 @@ int main(int argc, char** argv) {
     const auto r = det.run(tiny.data(), 8 + 128 + 100, 10.0f);
     check(!r.found() && r.statistic == 0.0, "a detection whose implied core end falls outside the window is reported as none");
     // guardFor: one rule, the resolved first-path window, never below 8.
-    check(SnrWindowGuard::guardFor(64) == 64 && SnrWindowGuard::guardFor(32) == 32 &&
-              SnrWindowGuard::guardFor(100) == 100 && SnrWindowGuard::guardFor(4) == 8,
-          "guardFor: the resolved window, never below 8");
+    check(SnrWindowGuard::guardFor(64) == 64 && SnrWindowGuard::guardFor(32) == 64 &&
+              SnrWindowGuard::guardFor(100) == 100 && SnrWindowGuard::guardFor(4) == 64,
+          "guardFor: the resolved window or the 64-sample echo allowance, whichever is larger");
   }
   const auto cfg = houdini::sync::SyncConfig::loadFromText("{}");
   const float kCorrScale = 10.0f;
@@ -196,7 +217,7 @@ int main(int argc, char** argv) {
     if (!houdini::sync::shapes::parse(shape, &sh)) { check(false, std::string("parse ") + shape); continue; }
     // Built the way the receiver builds them: the shape, a config resolved
     // against it, the detector, the guard from the resolved window.
-    const auto d = BeaconShape::fromDesc(houdini::sync::shapes::make(sh), Platform::kHoudini, Numerology::houdiniDefault());
+    const auto d = BeaconShape::fromDesc(houdini::sync::shapes::make(sh), Platform::kHoudini);
     auto rcfg = cfg;
     rcfg.resolve({d.replicaLen(), 160.0, Platform::kHoudini});
     Detector det(d, rcfg.detector);
@@ -252,7 +273,7 @@ int main(int argc, char** argv) {
       // The statistic, when the fixture recorded one (dumps after the
       // Detection widening of 2026-09-03): a change that leaves the argmax
       // alone but moves the margin is visible here.
-      if (meta.has("statistic")) {
+      if (meta.has("statistic") && std::isfinite(meta.at("statistic"))) {  // NaN = recorded by a backend without evidence
         std::snprintf(what, sizeof what, "%s window %d: statistic %.5g (recorded %.5g)", shape, i,
                       det_res.statistic, meta.at("statistic"));
         check(std::fabs(det_res.statistic - meta.at("statistic")) <= 1e-4 * std::max(1.0, std::fabs(meta.at("statistic"))), what);

@@ -63,15 +63,18 @@ class BeaconShape {
   /// ships the old beacon is exactly the failure the parameter exists to
   /// make visible.
   static BeaconShape make(const std::string& name, Platform platform, const Numerology& num);
-  /// Build from a shape the caller already has (tests, the dumper).
-  static BeaconShape fromDesc(const shapes::Desc& d, Platform platform,
-                              const Numerology& num);
+  /// Build from a shape the caller already has (tests, the dumper); the
+  /// numerology is the one the shape was built for (Desc::numerology).
+  static BeaconShape fromDesc(const shapes::Desc& d, Platform platform);
   static std::vector<std::string> names();
 
   const std::string& name() const { return name_; }
   Platform platform() const { return platform_; }
   size_t prefixSamples() const { return num_.prefix_samples; }
   const Numerology& numerology() const { return num_; }
+  /// False when an NR shape could not hold the numerology's subcarrier
+  /// spacing at this rate and built the shipped 128-point symbols instead.
+  bool numerologyHeld() const { return numerology_held_; }
 
   /// The transmitted burst at the shape's own scale (see config.cc on why the
   /// scale is load-bearing) and the matched-filter reference.
@@ -109,6 +112,7 @@ class BeaconShape {
   std::string name_;
   Platform platform_ = Platform::kHoudini;
   Numerology num_;
+  bool numerology_held_ = true;
   std::vector<std::complex<float>> core_, replica_;
   size_t replica_off_ = 0, replica_reps_ = 0, guard_len_ = 0, tail_ = 0;
   double papr_db_ = 0.0;

@@ -36,8 +36,9 @@ def one_run(i, args):
     # ~1 per 33 ms (each carries UP TO kMaxPts=600 points, symbols ~6..18 of
     # the slot -- NOT the whole constellation), so 60 sends = ~2 s after
     # pilots start; needs --frames >= ~2500
+    dump = os.path.join(os.environ.get("HOUDINI_DUMP_DIR", "/tmp"), "cns_dump.bin")
     try:
-        os.remove("/tmp/cns_dump.bin")
+        os.remove(dump)
     except OSError:
         pass
     os.makedirs("logs", exist_ok=True)
@@ -68,8 +69,8 @@ def one_run(i, args):
         p.kill()
     sock.close()
     logf.close()
-    if os.path.exists("/tmp/cns_dump.bin"):
-        os.replace("/tmp/cns_dump.bin", "logs/ap15_run%d_dump.bin" % i)
+    if os.path.exists(dump):
+        os.replace(dump, "logs/ap15_run%d_dump.bin" % i)
     log = open("logs/ap15_run%d.log" % i, "rb").read().decode(errors="replace")
     # The run's timing draw, taken from the first debug line AT OR AFTER the
     # settle boundary (the very first line of a run is pre-settle and can

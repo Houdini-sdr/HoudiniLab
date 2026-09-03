@@ -329,7 +329,9 @@ class CommsLib {
       std::vector<std::complex<int16_t>> const& g);
   // Portable + multi-threaded matched filter (see comms-lib-portable.cc),
   // equivalent to the float correlate_avx. Compiles and auto-vectorizes on both
-  // x86 and aarch64. num_threads=0 => auto (env SOUNDER_CORR_THREADS, else 1).
+  // x86 and aarch64. num_threads=0 => the value set by setCorrelatorThreads
+  // (sync.detector.corr_threads); if none was set, SOUNDER_CORR_THREADS read
+  // once (the bench tools' path); else 1.
   static std::vector<std::complex<float>> correlate_mt(
       const std::vector<std::complex<float>>& f,
       const std::vector<std::complex<float>>& g, unsigned num_threads = 0);

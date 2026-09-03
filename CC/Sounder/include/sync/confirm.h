@@ -27,28 +27,24 @@ namespace sync {
 
 class SnrWindowGuard {
  public:
-  /// @param floor_db   the SNR a detection must clear
-  /// @param guard      samples excluded either side of the core from BOTH
-  ///                   sums; at least 8 is applied here. It MUST cover the
-  ///                   first-path back window: when first-path returns the
-  ///                   direct path and a stronger echo sits a delay later,
-  ///                   that echo lands outside the core span and, with a small
-  ///                   guard, inside the noise sum -- a 1.4x echo 24 samples
-  ///                   late then reads ~20 dB, the floor rejects, and resync
-  ///                   escalates (8.151). Use guardFor() to derive it.
   /// @param core_len  the beacon core length (BeaconShape::coreLen)
   /// @param floor_db  the in-window SNR a detection must clear
   /// @param guard     samples excluded either side of the core (guardFor)
   SnrWindowGuard(size_t core_len, double floor_db, size_t guard)
       : core_len_(core_len), floor_db_(floor_db), guard_(std::max<size_t>(8, guard)) {}
 
-  /// THE GUARD COVERS THE FIRST-PATH BACK WINDOW (8.151): the noise estimate
-  /// must not include the samples the detector may have skipped in front of
-  /// the peak. One rule, from the detector's RESOLVED window, never below 8.
-  /// (The pre-library guard was 64 whatever the replica, which coincided with
-  /// this for the two fixtured shapes; for a 64-tap replica this is 32.)
+  /// The guard has two reasons, and the rule names both. (1) It covers the
+  /// FIRST-PATH BACK WINDOW: the noise sum must not include the samples the
+  /// detector may have skipped in front of the peak. (2) It covers a TRAILING
+  /// ECHO: when first-path returns the direct path and a stronger echo sits a
+  /// delay later, that echo lands outside the core span and, with a small
+  /// guard, inside the noise sum -- a 1.4x echo 24 samples late then reads
+  /// ~20 dB, the floor rejects, and resync escalates (8.151). The echo
+  /// allowance is a channel property, not a replica one, so it is a constant:
+  /// 64 samples (0.52 us), the value every shape ran with before the library.
+  static constexpr int kEchoGuardSamples = 64;
   static size_t guardFor(int resolved_first_path_window) {
-    return static_cast<size_t>(std::max(8, resolved_first_path_window));
+    return static_cast<size_t>(std::max(kEchoGuardSamples, resolved_first_path_window));
   }
 
   /// Energy of the presumed core [end_idx - core_len, end_idx) against the

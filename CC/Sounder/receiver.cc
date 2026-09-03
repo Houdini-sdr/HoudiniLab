@@ -990,7 +990,8 @@ void Receiver::clientTxPilots(size_t user_id, long long base_time,
     // late burst is exactly a phase jump with no other symptom. Drain here, after
     // scheduling, so the cost is once per horizon rather than per burst (AP-10).
     client_radio_set_->drainTxStatus(user_id);
-    if (std::getenv("HOUDINI_UE_TX_DEBUG") != nullptr && nsched > 0) {
+    static const bool kUeTxDebug = std::getenv("HOUDINI_UE_TX_DEBUG") != nullptr;  // read once
+    if (kUeTxDebug && nsched > 0) {
       MLPD_INFO("UE pilot burst: scheduled %d frames up to %lld (pad %lld)\n",
                 nsched, pilot_cursor, burst_pad);
     }
@@ -1345,7 +1346,8 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   const houdini::sync::SyncGeometry geom = houdini::sync::computeSyncGeometry(
       config_->rate(), static_cast<long long>(config_->samps_per_slot()),
       static_cast<long long>(config_->samps_per_frame()),
-      static_cast<long long>(config_->shape().replicaLen()), kScatterTolUs,
+      static_cast<long long>(config_->shape().replicaLen()),
+      static_cast<long long>(config_->shape().replicaTail()), kScatterTolUs,
       kConfirmTolUs, sync_tol_samples, sync_residual_ppm);
   const long long kScatterTol = geom.scatter_tol;
   if (geom.scatter_clamped) {

@@ -5,9 +5,9 @@
 frequency / CFO / timing correction based on each. ie which one works the best,
 which one we want to keep as default."
 
-Four candidates, all built by include/beacon_shapes.h and dumped by
-beacon_shape_dump, so the waveform this probe transmits is sample-for-sample the
-waveform Config::genPilots will build. That is not a nicety: AP-34(a) cost a
+Five candidates, all built by include/sync/beacon_shapes.h and dumped by
+beacon_shape_dump (with the resolved detector decisions), so the waveform this
+probe transmits is sample-for-sample the waveform Config::genPilots will build. That is not a nicety: AP-34(a) cost a
 bench session because the bench and the build disagreed about a beacon.
 
   legacy        15 x STS(16) + 2 x gold(128)      -- what we ship

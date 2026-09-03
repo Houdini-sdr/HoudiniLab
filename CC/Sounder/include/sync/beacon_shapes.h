@@ -89,8 +89,12 @@ struct Desc {
   size_t fine_off = 0, fine_len = 0, fine_reps = 0, guard_len = 0;
 
   /// The numerology the shape was built for. Sequence-defined shapes are the
-  /// same sample counts at any rate; the NR shapes hold `numerology.scs_hz`.
+  /// same sample counts at any rate; the NR shapes hold `numerology.scs_hz`
+  /// when the rate allows it. `numerology_held` is false when it did not and
+  /// the NR symbols fell back to the shipped 128-point size (the subcarrier
+  /// spacing is then rate / 128, not scs_hz); the caller should say so.
   Numerology numerology;
+  bool numerology_held = true;
 
   /// Peak-to-average power ratio in dB. Not cosmetic: the transmit path scales
   /// the core to a fixed fraction of full scale by PEAK, so a higher PAPR
@@ -240,9 +244,13 @@ inline size_t buildNr(Desc& d, const Numerology& num) {
     std::vector<cf> pss_tones;
     for (float v : nrPssMSeq(0)) pss_tones.push_back(cf(v, 0.f));
     // 127 tones at the numerology's subcarrier spacing: 128 points at the
-    // shipped 122.88 MSPS / 960 kHz. A rate that cannot carry them at that
-    // spacing throws here rather than redefining the spacing.
-    const size_t nfft = num.ifftSize(127);
+    // shipped 122.88 MSPS / 960 kHz. A rate with no whole power-of-two size
+    // for that spacing builds the shipped 128 and records that it did not
+    // hold the numerology (the caller warns); refusing would abort every
+    // config that names an NR shape at another rate.
+    const auto held = num.ifftSizeIfExact(127);
+    const size_t nfft = held.value_or(128);
+    d.numerology_held = held.has_value();
     auto pss = toneIfft(pss_tones, nfft);
     unitPower(pss);
     // TRS symbol: QPSK over a 38.211 Gold sequence, full band. c_init is

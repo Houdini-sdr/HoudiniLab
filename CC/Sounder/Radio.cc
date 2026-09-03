@@ -7,6 +7,7 @@
   * Initialize and Configure an SDR
   * ----------------------------------------------------------
 */
+#include <cerrno>
 #include "include/utils.h"
 #include "include/Radio.h"
 #include "include/rx_gap_sink.h"       // RxGapSink (UDP gap -> /Data/Gaps bridge)
@@ -431,6 +432,9 @@ int Radio::recvHoudini(void* const* buffs, int samples, long long& frameTime) {
       if (done.compare_exchange_strong(expected, true)) {
         const std::string path = Utils::dumpPath("cl_win.bin");
         FILE* f = std::fopen(path.c_str(), "wb");
+        if (f == nullptr) {
+          MLPD_WARN("HOUDINI_DUMP_WIN: cannot open %s (%s)\n", path.c_str(), std::strerror(errno));
+        }
         if (f) {
           std::fwrite(p, sizeof(int16_t), static_cast<size_t>(got) * 2, f);
           std::fclose(f);

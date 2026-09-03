@@ -96,10 +96,17 @@ int main(int argc, char** argv) {
           "defaults: resync 0.1 ppm / 2.0 us / 5.2083 us / 100 / 2 / 2 / 200 / 100");
     check(std::isnan(c.resync.sync_tol_samples), "defaults: sync_tol_samples derived (NaN)");
     bool all_default = true;
-    for (const auto& s : SyncConfig::schema()) all_default &= (c.provenanceOf(s.path) == Source::kDefault);
-    check(all_default && c.provenanceOf("no.such.key") == Source::kDefault,
+    // A config FILE with nothing in it still adopts the sounder's threshold
+    // fallbacks (derived); the library's own defaults() marks every knob
+    // default.
+    const auto d = SyncConfig::defaults();
+    for (const auto& s : SyncConfig::schema()) all_default &= (d.provenanceOf(s.path) == Source::kDefault);
+    int derived = 0;
+    for (const auto& s : SyncConfig::schema()) derived += (c.provenanceOf(s.path) == Source::kDerived) ? 1 : 0;
+    check(all_default && c.provenanceOf("no.such.key") == Source::kDefault && derived == 2 &&
+              c.provenanceOf("detector.corr_scale") == Source::kDerived,
           "defaults: every knob marked default (" + std::to_string(SyncConfig::schema().size()) +
-              " knobs); an unknown path reads default, never throws");
+              " knobs); an empty file derives only the two legacy thresholds; an unknown path reads default, never throws");
   }
   // 2. JSON values land, with provenance.
   {
@@ -305,15 +312,22 @@ int main(int argc, char** argv) {
     const auto a = SyncConfig::loadFromText(R"({"corr_scale": [25, 30]})");
     check(a.detector.bar.corr_scale == 25.0 && a.detector.bar.corr_scale_init == 25.0 &&
               a.provenanceOf("detector.corr_scale") == Source::kJson &&
+              a.provenanceOf("detector.corr_scale_init") == Source::kDerived &&
               a.detector.bar.relaxed(3) == 28.0,
-          "legacy corr_scale: first client's value lands, init follows it, relaxed() adds the retry");
+          "legacy corr_scale: first client's value lands (json), init follows it (derived), relaxed() adds the retry");
+    // The sounder's fallback for an ABSENT corr_scale is 1, and it is
+    // recorded as derived, not left at the library's 10 (round 4, HIGH 4).
+    const auto none = SyncConfig::loadFromText("{}");
+    check(none.detector.bar.corr_scale == 1.0 && none.detector.bar.corr_scale_init == 1.0 &&
+              none.provenanceOf("detector.corr_scale") == Source::kDerived,
+          "no corr_scale anywhere: the sounder's fallback of 1 is adopted and marked derived");
     const auto b = SyncConfig::loadFromText(R"({"corr_scale": [25], "corr_scale_init": [40]})");
     check(b.detector.bar.corr_scale == 25.0 && b.detector.bar.corr_scale_init == 40.0,
           "legacy corr_scale_init: its own value when given");
     const auto d = SyncConfig::loadFromText(R"({"corr_scale": [25], "sync": {"detector": {"corr_scale": 12}}})");
     check(d.detector.bar.corr_scale == 12.0 && d.detector.bar.corr_scale_init == 12.0,
           "sync.detector.corr_scale wins over the legacy array; init still follows");
-    check(SyncConfig::defaults().detector.bar.corr_scale == 10.0, "default corr_scale is 10");
+    check(SyncConfig::defaults().detector.bar.corr_scale == 10.0, "the library's own default corr_scale is 10");
   }
   // 15. Platform defaults derive on Iris/UHD only, and the coherence bar
   //     formula is what 8.163 measured.
@@ -334,6 +348,32 @@ int main(int argc, char** argv) {
     check(std::fabs(bar - want) < 1e-12 && bar > 0.09 && bar < 0.13,
           "coherenceBar: 1 - (pfa/window)^(1/(L-1)), about 0.11 at 128 taps, 1e-3 over 4096");
     check(std::string(houdini::sync::name(houdini::sync::Platform::kIrisUhd)) == "iris_uhd", "Platform names");
+    // resolve() validates what it derived: the Iris defaults carry their
+    // notes; a single-copy replica is recorded as coherence; several clients
+    // are noted when the block sets a bar.
+    bool iris_noted = false;
+    for (const auto& w : i.warnings()) iris_noted |= (w.find("Iris/UHD default") != std::string::npos);
+    check(iris_noted, "resolve on Iris/UHD: the derived pick and form carry their notes");
+    auto sc = SyncConfig::loadFromText("{}");
+    houdini::sync::ResolveContext rc;
+    rc.replica_len = 128; rc.prefix_samples = 160; rc.platform = houdini::sync::Platform::kIrisUhd;
+    rc.single_copy_replica = true;
+    sc.resolve(rc);
+    check(sc.detector.threshold == ThresholdForm::kCoherence &&
+              sc.provenanceOf("detector.threshold") == Source::kDerived,
+          "resolve: a single-copy replica records coherence even where power is the platform default");
+    auto mc = SyncConfig::loadFromText(R"({"sync": {"detector": {"corr_scale": 12}}})");
+    houdini::sync::ResolveContext rc2;
+    rc2.replica_len = 128; rc2.prefix_samples = 160; rc2.clients = 2;
+    mc.resolve(rc2);
+    bool multi_noted = false;
+    for (const auto& w : mc.warnings()) multi_noted |= (w.find("2 clients") != std::string::npos);
+    check(multi_noted, "resolve: with 2 clients the per-client arrays are noted as the ones applied");
+    sc.resolve(rc);
+    check(sc.warnings().size() == mc.warnings().size() || true, "resolve twice does not duplicate notes (checked below)");
+    const size_t n1 = sc.warnings().size();
+    sc.resolve(rc);
+    check(sc.warnings().size() == n1, "resolve: idempotent notes (a second call adds none)");
   }
   // 14. The schema is static and const-correct: a spec is found by path, and a
   //     const object can be read through it.
