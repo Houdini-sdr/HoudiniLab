@@ -173,8 +173,8 @@ BaseRadioSet::BaseRadioSet(Config* cfg, const bool calibrate_proc) : _cfg(cfg) {
     // Measure Sync Delays now: a trigger-block operation, so only a backend
     // with the hardware trigger (Iris). (An Iris cell that lists no radios
     // used to reach an out-of-range index here; it is skipped.)
-    if (!bsRadios.at(c).empty() && bsRadios.at(c).front() != nullptr &&
-        bsRadios.at(c).front()->hasHardwareTrigger()) {
+    // (The strip loop above leaves no null entry, so front() is a radio.)
+    if (!bsRadios.at(c).empty() && bsRadios.at(c).front()->hasHardwareTrigger()) {
       ensureFramer();
       // hasHardwareTrigger() is the gate (Iris only), so the framer is the
       // Iris one; the check makes that an error rather than an assumption.

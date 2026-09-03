@@ -584,8 +584,8 @@ void SyncConfig::validate() {
   // Only once the form is resolved (a repeated-field replica runs the
   // normalised cross-correlation whatever "auto" said).
   if (resolved_ && wasSet("detector.pfa_per_window") && !detector.pfa_applies) {
-    note("detector.pfa_per_window applies to the coherence form only; this replica's "
-         "repeated-field form keeps its corr_scale bar");
+    note(std::string("detector.pfa_per_window applies to the coherence form only; the resolved "
+                     "form (") + name(detector.threshold) + ") keeps its corr_scale bar");
   }
   if (tracker.type == TrackerType::kAlphaBeta && tracker.alpha == 0.0 && tracker.beta == 0.0) {
     note("tracker alpha and beta are both 0: the grid is fixed-period");

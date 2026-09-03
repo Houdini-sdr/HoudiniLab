@@ -109,7 +109,10 @@ struct ThresholdPolicy {
   /// P(coh > bar) per index is (1 - bar)^(L-1) and
   /// bar = 1 - (pfa_per_window / window_samples)^(1/(L-1)). Measured against
   /// its prediction in beacon_geometry_test; applied by the detector for the
-  /// coherence form when DetectorConfig::pfa_applies (P3).
+  /// coherence form when DetectorConfig::pfa_applies (P3). The correlator
+  /// ranks window + L - 1 indices, so the realised rate is that fraction
+  /// above the requested one (about 3 % at 4096 and 128), well inside the
+  /// Beta model's own error.
   static double coherenceBar(size_t replica_len, double pfa_per_window, size_t window_samples);
 };
 

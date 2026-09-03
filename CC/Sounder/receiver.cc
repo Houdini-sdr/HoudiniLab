@@ -15,6 +15,7 @@
 #include <unistd.h>
 
 #include <atomic>
+#include <functional>
 #include <chrono>
 #include <climits>
 #include <limits>
@@ -105,24 +106,28 @@ Receiver::Receiver(
     throw ReceiverException(e.what());
   }
   // Anything below that throws leaves the sets to their destructors, which
-  // release the devices but do not run the base station's framer teardown
-  // (the Houdini ladder): run it first, then let the throw continue (S3
-  // review, item 5). The client needs nothing here: its radio destructor
-  // already deactivates its streams (S4 review, item 4). A destructor must
-  // not throw while the stack unwinds, so the stop is caught and reported
-  // (S4 review, item 2). Disarmed on the constructor's last line.
+  // release the devices but do not run the framers' teardown: the base
+  // station's Houdini ladder, and on Iris with ue_hw_framer the client's
+  // correlator and TDD engine disable (its radio destructor only deactivates
+  // streams). Both sets are stopped first, each caught and reported, since a
+  // destructor must not throw while the stack unwinds (S3 review item 5, S4
+  // review item 2, P3 review item 1). Disarmed on the constructor's last line.
   struct StopOnThrow {
     Receiver* self;
     bool armed = true;
-    ~StopOnThrow() {
-      if (!armed || self->base_radio_set_ == nullptr) return;
+    static void stop(const char* which, const std::function<void()>& fn) {
       try {
-        self->base_radio_set_->radioStop();
+        fn();
       } catch (const std::exception& e) {
-        MLPD_ERROR("base radio set stop during construction failure: %s\n", e.what());
+        MLPD_ERROR("%s radio set stop during construction failure: %s\n", which, e.what());
       } catch (...) {
-        MLPD_ERROR("base radio set stop during construction failure: unknown error\n");
+        MLPD_ERROR("%s radio set stop during construction failure: unknown error\n", which);
       }
+    }
+    ~StopOnThrow() {
+      if (!armed) return;
+      if (self->base_radio_set_ != nullptr) stop("base", [&] { self->base_radio_set_->radioStop(); });
+      if (self->client_radio_set_ != nullptr) stop("client", [&] { self->client_radio_set_->radioStop(); });
     }
   } stop_on_throw{this};
 
@@ -1097,10 +1102,11 @@ ssize_t Receiver::syncSearch(const std::complex<int16_t>* check_data,
   if (kSyncDebug) {
     static std::atomic<int> c{0};
     if ((c.fetch_add(1) % 20) == 0) {  // braces load-bearing (macro)
-      MLPD_INFO("syncSearch[%s]: window=%zu corr_scale=%.3f gold=%zu pick=%d "
-                "-> idx=%ld\n",
-                kPath, search_window, corr_scale, config_->gold_cf32().size(),
-                static_cast<int>(pick), sync_index);
+      MLPD_INFO("syncSearch[%s]: window=%zu corr_scale=%.3f (applied %.3f) gold=%zu "
+                "pick=%d -> idx=%ld\n",
+                kPath, search_window, corr_scale,
+                sync_detector_->effectiveScale(corr_scale, search_window),
+                config_->gold_cf32().size(), static_cast<int>(pick), sync_index);
     }
   }
   return sync_index;
@@ -1664,10 +1670,13 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
     // whose other half exists because a run's identity was not recorded.
     {
       MLPD_INFO(
-          "Beacon detector [%s]: threshold %s, resync pick %s, acquisition pick "
-          "%s (first-path back window %d samples, floor %.1f dB); SNR floor "
+          "Beacon detector [%s]: threshold %s (bar %s), resync pick %s, acquisition "
+          "pick %s (first-path back window %d samples, floor %.1f dB); SNR floor "
           "%.1f dB, SNR guard %zu samples; CFO guard %d margin %d\n",
           sync_detector_->backendName(), houdini::sync::name(sync_detector_->form()),
+          sync_detector_->barFromPfa()
+              ? ("from pfa " + std::to_string(sync_detector_->pfaPerWindow()) + " per window").c_str()
+              : "1/corr_scale",
           houdini::sync::name(sync_detector_->pick()),
           houdini::sync::name(sync_detector_->pick()),
           sync_detector_->firstPathWindow(), sync_detector_->firstPathFloorDb(),
@@ -1677,8 +1686,8 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
     if (!sync_detector_->backendAppliesConfig()) {
       MLPD_WARN(
           "Detector backend %s returns the first crossing under the power-ratio "
-          "form; the configured detector.threshold / pick / first-path knobs "
-          "above are NOT applied\n",
+          "form; the configured detector.threshold / pick / first-path / "
+          "pfa_per_window knobs above are NOT applied\n",
           sync_detector_->backendName());
     }
     if (config_->shape().singleCopy()) {
@@ -1965,7 +1974,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
                       "corr_scale %.6g\nthresh %s\npick %s\nfirst_path_window %d\n"
                       "first_path_floor_db %.3f\nsnr_floor_db %.3f\n"
                       "snr_guard %zu\nreplica_tail %zu\nbeacon_type %s\n"
-                      "statistic %.6g\nbar %.6g\n",
+                      "statistic %.6g\nbar %.6g\nbar_from_pfa %d\n",
                       request_samples, sync_index, snr, frame_id,
                       rx_beacon_time, houdini_pilot_ref,
                       static_cast<long long>(config_->shape().expectedEndOffset()),
@@ -1976,7 +1985,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
                       sync_detector_->firstPathFloorDb(), sync_guard_->floorDb(),
                       sync_guard_->guard(), sync_detector_->replicaTail(),
                       config_->beacon_type().c_str(), resync_det.statistic,
-                      resync_det.bar);
+                      resync_det.bar, sync_detector_->barFromPfa() ? 1 : 0);
               fclose(fg);
             }
           }

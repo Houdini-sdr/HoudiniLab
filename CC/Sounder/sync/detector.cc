@@ -52,8 +52,7 @@ Detector::Detector(const BeaconShape& shape, const DetectorConfig& cfg)
                                              2 * static_cast<int>(shape.replicaLen()))
                              : shape.defaultFirstPathWindow()),
       first_path_floor_db_(cfg.first_path_floor_db),
-      pfa_applies_(cfg.pfa_applies && resolveForm(cfg.threshold, shape.singleCopy()) ==
-                                          ThresholdForm::kCoherence),
+      pfa_applies_(false),
       pfa_(cfg.pfa_per_window),
 #if defined(USE_CUDA)
       backend_(DetectorBackend::kCuda)
@@ -61,6 +60,9 @@ Detector::Detector(const BeaconShape& shape, const DetectorConfig& cfg)
       backend_(DetectorBackend::kPortable)
 #endif
 {
+  // The probability is the bar only for the coherence form on a backend
+  // that applies the configuration (the CUDA correlator applies none).
+  pfa_applies_ = cfg.pfa_applies && form_ == ThresholdForm::kCoherence && backendAppliesConfig();
 }
 
 const char* Detector::backendName() const {
