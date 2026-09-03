@@ -75,7 +75,10 @@ for ((k = 0; k < ROUNDS; ++k)); do
     for attempt in 1 2 3; do
       # Release anything a previous run left holding a board, then the framer.
       python3 tools/rig_release_holders.py >> "$log" 2>&1 || true
-      timeout 90 python3 csi_gui/teardown_framer.py --topology "$TOPO" > "$OUT/teardown_${s}_r$((k + 1)).log" 2>&1
+      # Named so that the campaign's own "*_r*.log" glob (and gate_summary's
+      # caller) never sweeps it in as a run: the first campaign did exactly
+      # that and the aggregate refused to run over nine empty "runs".
+      timeout 90 python3 csi_gui/teardown_framer.py --topology "$TOPO" > "$OUT/td-${s}-$((k + 1)).txt" 2>&1
       sleep 5
       # SIGTERM at the wall clock is the demo launcher's own shutdown path, so
       # streams close the way they do in the demo; a hard kill 15 s later is
