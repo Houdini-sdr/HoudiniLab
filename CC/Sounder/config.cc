@@ -802,7 +802,12 @@ void Config::genPilots() {
   beacon_coarse_len_ = shape_desc.coarse_len;
   beacon_coarse_reps_ = shape_desc.coarse_reps;
 
-  const size_t seq_len = shape_desc.replica.size();
+  // NOTE THE REPLICA'S SCALE IS LOAD-BEARING, and do not "tidy" it to unit
+  // power. find_beacon's test is `corr_scale * |gc|^2|gc_lag|^2 > sum|gc|^2`,
+  // 4th order against 2nd, so scaling the replica by k scales the decision ratio
+  // by k^2. Every detector ratio in DEMO_VERIFICATION 8.112 was measured with
+  // the replica exactly as it comes out of beacon_shapes, and renormalising it
+  // would move every threshold without touching a threshold.
   auto gold_ifft_ci16 = Utils::cfloat_to_cint16(shape_desc.replica);
   gold_cf32_.assign(shape_desc.replica.begin(), shape_desc.replica.end());
   std::cout << "Beacon: type " << beacon_type_ << ", core " << shape_desc.core.size()
@@ -844,9 +849,11 @@ void Config::genPilots() {
   beacon_ci16_ = Utils::cfloat_to_cint16(shape_desc.core);
   beacon_size_ = beacon_ci16_.size();
   if (getenv("HOUDINI_DUMP_GOLD") != nullptr) {
-    // The 496-sample STS+gold core (pre-prefix, unconjugated, unit scale) --
-    // what buildHoudiniBeacon conjugates and scales into the replay RAM.
-    // Lets offline tools (tests/demo-verify) construct the exact TX waveform.
+    // The beacon core for the CONFIGURED shape (pre-prefix, unconjugated, at
+    // the shape's own scale) -- what buildHoudiniBeacon conjugates and scales
+    // into the replay RAM. Lets offline tools (tests/demo-verify) construct the
+    // exact TX waveform. Length is beacon_size(), NOT a constant: 496 for
+    // legacy, 528 / 320 / 272 for the others.
     FILE* f = std::fopen("/tmp/beacon_core.bin", "wb");
     if (f) {
       std::fwrite(beacon_ci16_.data(), sizeof(std::complex<int16_t>),
