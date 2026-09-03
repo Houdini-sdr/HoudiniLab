@@ -49,17 +49,7 @@ unsigned ResolveThreads(unsigned requested) {
   return from_env;
 }
 
-// The radio's samples as the correlator takes them: full scale to +-1.
-std::vector<std::complex<float>> ToCorrelatorScale(const std::complex<int16_t>* raw,
-                                                   size_t n) {
-  static constexpr float kShortMaxFloat = 32767.0f;
-  std::vector<std::complex<float>> out(n);
-  for (size_t i = 0; i < n; ++i) {
-    out[i] = std::complex<float>(static_cast<float>(raw[i].real()) / kShortMaxFloat,
-                                 static_cast<float>(raw[i].imag()) / kShortMaxFloat);
-  }
-  return out;
-}
+
 
 // Persistent fork-join pool: worker threads are created once and reused, so
 // per-frame correlation pays no thread-creation cost (the per-call std::thread
@@ -554,7 +544,7 @@ ssize_t CommsLib::find_beacon_avx(
     const std::vector<std::complex<float>>& match_samples, size_t check_window,
     float corr_scale, BeaconPick pick, BeaconThresh thresh_form,
     int first_path_window, double first_path_db) {
-  return CommsLib::find_beacon_avx(ToCorrelatorScale(raw_samples, check_window), match_samples,
+  return CommsLib::find_beacon_avx(CommsLib::toCorrelatorScale(raw_samples, check_window), match_samples,
                                    corr_scale, pick, thresh_form, first_path_window,
                                    first_path_db);
 }
@@ -564,7 +554,7 @@ CommsLib::BeaconResult CommsLib::find_beacon_ex(
     const std::vector<std::complex<float>>& match_samples, size_t check_window,
     float corr_scale, BeaconPick pick, BeaconThresh thresh_form,
     int first_path_window, double first_path_db) {
-  return find_beacon_ex(ToCorrelatorScale(raw_samples, check_window), match_samples, corr_scale,
+  return find_beacon_ex(CommsLib::toCorrelatorScale(raw_samples, check_window), match_samples, corr_scale,
                         pick, thresh_form, first_path_window, first_path_db);
 }
 
@@ -585,4 +575,15 @@ std::vector<std::complex<float>> CommsLib::complex_mult(
 
 void CommsLib::setCorrelatorThreads(unsigned n) {
   if (n > 0) g_corr_threads.store(n, std::memory_order_relaxed);
+}
+
+std::vector<std::complex<float>> CommsLib::toCorrelatorScale(const std::complex<int16_t>* raw,
+                                                             size_t n) {
+  static constexpr float kShortMaxFloat = 32767.0f;
+  std::vector<std::complex<float>> out(n);
+  for (size_t i = 0; i < n; ++i) {
+    out[i] = std::complex<float>(static_cast<float>(raw[i].real()) / kShortMaxFloat,
+                                 static_cast<float>(raw[i].imag()) / kShortMaxFloat);
+  }
+  return out;
 }

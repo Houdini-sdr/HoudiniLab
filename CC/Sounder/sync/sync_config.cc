@@ -379,10 +379,12 @@ SyncConfig SyncConfig::loadFromText(const std::string& root_json_text) {
 
 void SyncConfig::adoptLegacyThreshold(double corr_scale, double corr_scale_init,
                                       bool corr_scale_in_file, bool corr_scale_init_in_file) {
+  block_sets_threshold_ = wasSet("detector.corr_scale") || wasSet("detector.corr_scale_init");
   auto adopt = [this](const char* path, double v, bool in_file, const char* what) {
     if (provenanceOf(path) == Source::kJson) return;  // the sync block wins
     std::string note;
-    const std::string err = assign(*this, *spec(path), nlohmann::json(v), false, false, &note);
+    const std::string err =
+        assign(*this, schema()[indexOf(path)], nlohmann::json(v), false, false, &note);
     if (!err.empty()) throw std::invalid_argument(std::string(what) + ": " + err);
     setProvenance(path, in_file ? Source::kJson : Source::kDerived);
   };
@@ -395,6 +397,7 @@ void SyncConfig::adoptLegacyThreshold(double corr_scale, double corr_scale_init,
     detector.bar.corr_scale_init = detector.bar.corr_scale;
     setProvenance("detector.corr_scale_init", Source::kDerived);
   }
+  validate();  // the notes describe the values now in place
 }
 
 SyncConfig SyncConfig::load(const std::optional<std::string>& sync_block_json,
@@ -430,8 +433,8 @@ SyncConfig SyncConfig::load(const std::optional<std::string>& sync_block_json,
     }
     if (c.provenanceOf("beacon.type") != Source::kJson) {
       std::string note;
-      const std::string err = assign(c, *spec("beacon.type"), nlohmann::json(*legacy_beacon_type),
-                                     false, false, &note);
+      const std::string err = assign(c, schema()[indexOf("beacon.type")],
+                                     nlohmann::json(*legacy_beacon_type), false, false, &note);
       if (!err.empty()) throw std::invalid_argument("beacon_type: " + err);
       c.setProvenance("beacon.type", Source::kJson);
     }
@@ -521,6 +524,7 @@ void SyncConfig::resolve(const ResolveContext& ctx) {
   // Several clients: the receiver applies the legacy per-client arrays, not
   // the block's one value.
   clients_ = ctx.clients;
+  platform_ = ctx.platform;
   validate();
 }
 
@@ -545,11 +549,11 @@ void SyncConfig::validate() {
   if (detector.pick == PickRule::kFirstCrossing) {
     note(std::string("detector.pick first_crossing false-locks on the beacon's own preamble once "
                      "the link is strong (AP-34)") +
-         (provenanceOf("detector.pick") == Source::kDerived
+         (platform_ == Platform::kIrisUhd
               ? "; it is the Iris/UHD default, the rule that framer has always run"
               : "; diagnostic only on Houdini"));
   }
-  if (clients_ > 1 && (wasSet("detector.corr_scale") || wasSet("detector.corr_scale_init"))) {
+  if (clients_ > 1 && block_sets_threshold_) {
     note(std::to_string(clients_) + " clients are configured: the receiver applies the legacy "
          "per-client corr_scale / corr_scale_init arrays, not sync.detector.corr_scale");
   }
@@ -560,7 +564,7 @@ void SyncConfig::validate() {
   if (detector.threshold == ThresholdForm::kPowerRatio) {
     note(std::string("detector.threshold power is a different test at every received level "
                      "(8.138)") +
-         (provenanceOf("detector.threshold") == Source::kDerived
+         (platform_ == Platform::kIrisUhd
               ? "; it is the Iris/UHD default, the form that framer has always run"
               : "; diagnostic only on Houdini"));
   }

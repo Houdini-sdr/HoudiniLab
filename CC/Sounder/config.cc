@@ -295,9 +295,15 @@ Config::Config(const std::string& jsonfile, const std::string& directory,
   // single client: the first client's, with the sounder's fallbacks (an
   // absent corr_scale is 1, an absent corr_scale_init is corr_scale), marked
   // json or derived accordingly. With several clients the arrays apply.
-  sync_.adoptLegacyThreshold(static_cast<double>(corr_scale_.at(0)),
-                             static_cast<double>(corr_scale_init_.at(0)), !corr_scale.empty(),
-                             !corr_scale_init.empty());
+  // A config with no clients has empty arrays (BS-only, calibration, beam
+  // sweep): the sounder's fallback of 1 applies, marked derived.
+  if (corr_scale_.empty() || corr_scale_init_.empty()) {
+    sync_.adoptLegacyThreshold(1.0, 1.0, false, false);
+  } else {
+    sync_.adoptLegacyThreshold(static_cast<double>(corr_scale_.at(0)),
+                               static_cast<double>(corr_scale_init_.at(0)), !corr_scale.empty(),
+                               !corr_scale_init.empty());
+  }
   ul_data_frame_num_ = tddConf.value("ul_data_frame_num", 1);
   dl_data_frame_num_ = tddConf.value("dl_data_frame_num", 1);
 

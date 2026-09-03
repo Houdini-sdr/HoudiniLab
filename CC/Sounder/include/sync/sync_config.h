@@ -274,6 +274,8 @@ struct SyncConfig {
   std::vector<Source> provenance_;
   std::vector<std::string> warnings_;
   size_t clients_ = 1;
+  Platform platform_ = Platform::kHoudini;
+  bool block_sets_threshold_ = false;  ///< the sync block (not the legacy array) set a bar
   void validate();
   /// The schema index of a path; throws std::logic_error for a path the
   /// schema does not know (a typo in this file, never a user error).

@@ -288,6 +288,9 @@ class CommsLib {
     double statistic = 0.0;
     std::complex<float> peak{0.0f, 0.0f};
   };
+  /// The radio's samples as the correlator takes them: full scale to +-1.
+  static std::vector<std::complex<float>> toCorrelatorScale(
+      const std::complex<int16_t>* raw, size_t n);
   static BeaconResult find_beacon_ex(
       const std::vector<std::complex<float>>& raw_samples,
       const std::vector<std::complex<float>>& match_samples, float corr_scale,

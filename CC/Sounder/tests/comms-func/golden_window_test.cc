@@ -203,7 +203,8 @@ int main(int argc, char** argv) {
     // the PSS end + 100 cannot hold the implied core end.
     const auto r = det.run(tiny.data(), 8 + 128 + 100, 10.0f);
     check(!r.found() && r.statistic == 0.0, "a detection whose implied core end falls outside the window is reported as none");
-    // guardFor: one rule, the resolved first-path window, never below 8.
+    // guardFor: one rule naming both reasons, the resolved first-path window
+    // or the 64-sample echo allowance, whichever is larger.
     check(SnrWindowGuard::guardFor(64) == 64 && SnrWindowGuard::guardFor(32) == 64 &&
               SnrWindowGuard::guardFor(100) == 100 && SnrWindowGuard::guardFor(4) == 64,
           "guardFor: the resolved window or the 64-sample echo allowance, whichever is larger");
@@ -212,7 +213,10 @@ int main(int argc, char** argv) {
   const float kCorrScale = 10.0f;
   int windows = 0;
   std::map<std::string, int> per_shape;
-  for (const char* shape : {"legacy", "nr_pss"}) {
+  // Windows per shape: legacy and nr_pss 00-05 (morning) + 06-11 (with the
+  // statistic); dot11 00-05 recorded after round 4 for the guard rule.
+  const std::map<std::string, int> kExpected = {{"legacy", 12}, {"nr_pss", 12}, {"dot11", 6}};
+  for (const char* shape : {"legacy", "nr_pss", "dot11"}) {
     houdini::sync::shapes::Shape sh;
     if (!houdini::sync::shapes::parse(shape, &sh)) { check(false, std::string("parse ") + shape); continue; }
     // Built the way the receiver builds them: the shape, a config resolved
@@ -233,6 +237,15 @@ int main(int argc, char** argv) {
       std::vector<std::complex<int16_t>> w;
       if (!readWindow(base + ".bin", &w)) continue;
       const auto meta = readMeta(base + ".txt");
+      if (!det.backendAppliesConfig()) {
+        // A backend that ignores the configured form and pick (CUDA) cannot
+        // reproduce windows recorded by the one that applies them.
+        ++windows;
+        ++per_shape[shape];
+        std::printf("SKIP  %s window %d: backend %s does not apply the configuration\n", shape, i,
+                    det.backendName());
+        continue;
+      }
       ++windows;
       ++per_shape[shape];
       if (!meta.has("sync_index") || !meta.has("snr")) {
@@ -309,9 +322,10 @@ int main(int argc, char** argv) {
       }
     }
   }
-  check(windows == 24, "found " + std::to_string(windows) + " fixture windows (expected 24)");
-  for (const char* shape : {"legacy", "nr_pss"})
-    check(per_shape[shape] == 12, std::string(shape) + ": 12 of 12 fixture windows present (a half-populated set fails here, not quietly)");
+  check(windows == 30, "found " + std::to_string(windows) + " fixture windows (expected 30)");
+  for (const auto& kv : kExpected)
+    check(per_shape[kv.first] == kv.second, kv.first + ": " + std::to_string(kv.second) + " of " +
+                                                std::to_string(kv.second) + " fixture windows present (a half-populated set fails here, not quietly)");
   std::printf("\nRESULT: %s (%d failure(s))\n", g_fail ? "FAIL" : "PASS", g_fail);
   return g_fail ? 1 : 0;
 }

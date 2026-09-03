@@ -66,17 +66,6 @@ struct Numerology {
     if ((k & (k - 1)) != 0) return std::nullopt;
     return k;
   }
-  /// The same, throwing with the reason when no such size exists.
-  size_t ifftSize(size_t min_tones) const {
-    const auto k = ifftSizeIfExact(min_tones);
-    if (!k.has_value()) {
-      throw std::invalid_argument(
-          "numerology: " + std::to_string(rate_hz) + " Hz at " + std::to_string(scs_hz) +
-          " Hz spacing gives " + std::to_string(rate_hz / scs_hz) +
-          " points; a power of two of at least " + std::to_string(min_tones + 1) + " is needed");
-    }
-    return *k;
-  }
 };
 
 }  // namespace sync
