@@ -11,6 +11,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <optional>
 #include <random>
 
 #include "include/beacon_shapes.h"
@@ -36,9 +37,30 @@ Config::Config(const std::string& jsonfile, const std::string& directory,
   const auto tddConf = json::parse(conf_str, nullptr, true, true);
   // The sync block, loaded and validated as ONE struct with provenance. Throws
   // std::invalid_argument on an unknown key or an out-of-range value, which
-  // main.cc reports as a configuration error rather than a crash.
-  sync_ = houdini::sync::SyncConfig::load(conf_str);
-  MLPD_INFO("%s", sync_.describe().c_str());
+  // main.cc reports as a configuration error rather than a crash. Its
+  // sentinels are resolved, and the record printed, once the beacon shape is
+  // built below.
+  {
+    // The library never sees the config FILE: the block and the legacy
+    // top-level keys are handed to it explicitly.
+    std::optional<std::string> sync_block;
+    if (tddConf.contains("sync") && !tddConf["sync"].is_null()) {
+      sync_block = tddConf["sync"].dump();
+    }
+    std::optional<std::string> legacy_type;
+    if (tddConf.contains("beacon_type")) {
+      if (!tddConf["beacon_type"].is_string()) {
+        throw std::invalid_argument("beacon_type: expects a string");
+      }
+      legacy_type = tddConf["beacon_type"].get<std::string>();
+    }
+    std::optional<double> legacy_cs, legacy_csi;
+    const auto cs = tddConf.value("corr_scale", json::array());
+    if (cs.is_array() && !cs.empty()) legacy_cs = cs[0].get<double>();
+    const auto csi = tddConf.value("corr_scale_init", json::array());
+    if (csi.is_array() && !csi.empty()) legacy_csi = csi[0].get<double>();
+    sync_ = houdini::sync::SyncConfig::load(sync_block, legacy_type, legacy_cs, legacy_csi);
+  }
   std::stringstream ss;
   ss << "  Config: " << tddConf << "\n" << std::endl;
   MLPD_INFO("\nInput config:\n\n%s", ss.str().c_str());
@@ -819,6 +841,10 @@ void Config::genPilots() {
   // would move every threshold without touching a threshold.
   auto gold_ifft_ci16 = Utils::cfloat_to_cint16(shape_desc.replica);
   gold_cf32_.assign(shape_desc.replica.begin(), shape_desc.replica.end());
+  // The sentinels resolve against the shape and the slot layout now that both
+  // are known; what is printed here is the configuration actually used.
+  sync_.resolve({gold_cf32_.size(), static_cast<double>(prefix_)});
+  MLPD_INFO("%s", sync_.describe().c_str());
   std::cout << "Beacon: type " << beacon_type_ << ", core " << shape_desc.core.size()
             << " samples, matched field " << shape_desc.replica_reps << " x "
             << shape_desc.replica.size() << " at offset "

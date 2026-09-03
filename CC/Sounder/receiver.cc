@@ -1333,11 +1333,8 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   // count silently retunes it at every rate while the tracking gate scales.
   // 5.2083 us reproduces the old 640 samples exactly at 122.88 MSPS.
   const double kConfirmTolUs = config_->sync().resync.confirm_tol_us;
-  // NaN in the config means "derive it": a quarter of the OFDM zero prefix.
-  double sync_tol_samples =
-      std::isnan(config_->sync().resync.sync_tol_samples)
-          ? static_cast<double>(config_->prefix()) / 4.0
-          : config_->sync().resync.sync_tol_samples;
+  // Resolved by Config: a quarter of the OFDM zero prefix unless configured.
+  double sync_tol_samples = config_->sync().resync.sync_tol_samples;
   // DEFAULT LOWERED 1.0 -> 0.1 ppm [user 2026-09-02, "a conservative value,
   // maybe 10x"]. This is the assumed worst-case clock error AFTER tracking, and
   // it sets the cadence: 1.0 ppm gave a 260 ms resync, which AP-53(a) showed is
@@ -1467,11 +1464,21 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   // shipped at the values that were gated, so the default build is unchanged
   // and the sweep costs no rebuild.
   size_t resync_retry_max =
-      static_cast<size_t>(std::max(1, config_->sync().resync.retry_max));
+      static_cast<size_t>(config_->sync().resync.retry_max);
+  // The resync bar: the configured policy (sync.detector.corr_scale, relaxed
+  // by one per retry) for a single client. With several clients the legacy
+  // per-client array keeps its say, because the policy holds one value.
+  const auto resyncScale = [this, tid](size_t retry) -> float {
+    if (config_->num_cl_sdrs() > 1) {
+      return config_->corr_scale(tid) + static_cast<float>(retry);
+    }
+    return static_cast<float>(
+        config_->sync().detector.bar.relaxed(static_cast<int>(retry)));
+  };
   size_t resync_success(0);
   size_t cfo_log_cnt = 0;  // throttles the beacon-CFO line
   const size_t kCfoLogEvery =
-      static_cast<size_t>(std::max(1, config_->sync().cfo.log_every));
+      static_cast<size_t>(config_->sync().cfo.log_every);
   // Liveness accept/reject half-width. Shipped ON THE WIRE so the panel draws
   // the band it actually illustrates rather than a hardcoded copy (AP-31
   // proposes retuning this, after which a page-side constant would silently lie).
@@ -1739,14 +1746,13 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   // are pure confirmation (Opus review M4: the old ~4.7%-by-chance figure
   // described the pre-targeting whole-window search). Hold-off itself
   // already covers the beacon-MOVED case; this covers beacon-LOST.
-  const size_t kEscalateExhaustedEpisodes = static_cast<size_t>(
-      std::max(1, config_->sync().resync.escalate_episodes));
+  const size_t kEscalateExhaustedEpisodes = static_cast<size_t>(config_->sync().resync.escalate_episodes);
   // How many consecutive off-grid detections before the beacon counts as
   // MOVED. One is scatter (ledger 4.18); the shipped rule is two. Steered, an
   // off-grid detection is far more surprising than it was, so this is the
   // other half of the AP-52 retune and it sweeps with the same A/B.
   const size_t kHoldOffGridCount =
-      static_cast<size_t>(std::max(1, config_->sync().resync.hold_offgrid));
+      static_cast<size_t>(config_->sync().resync.hold_offgrid);
   size_t resync_offgrid_streak = 0;
   size_t resync_exhausted_streak = 0;
   const size_t beacon_detect_window_esc = static_cast<size_t>(
@@ -1946,7 +1952,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
           // with this set to `first` and the false lock appears on silicon.
           const ssize_t idx = this->syncSearch(
               base + s0, static_cast<size_t>(slice_len),
-              config_->corr_scale(tid) + resync_retry_cnt, sync_detector_->pick());
+              resyncScale(resync_retry_cnt), sync_detector_->pick());
           if (idx >= 0) sync_index = s0 + idx;
         } else {
           resync_attempted = false;  // beacon not due in this window
@@ -1963,7 +1969,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
         sync_index = this->syncSearch(
             reinterpret_cast<std::complex<int16_t>*>(
                 rxbuff.at(kSyncDetectChannel)),
-            request_samples, config_->corr_scale(tid) + resync_retry_cnt,
+            request_samples, resyncScale(resync_retry_cnt),
             CommsLib::BeaconPick::kFirstCrossing);
       }
       if (sync_index >= 0 && config_->is_houdini() &&
@@ -2007,7 +2013,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
                       request_samples, sync_index, snr, frame_id,
                       rx_beacon_time, houdini_pilot_ref,
                       static_cast<long long>(houdiniBeaconEnd(config_)),
-                      static_cast<double>(config_->corr_scale(tid) + resync_retry_cnt),
+                      static_cast<double>(resyncScale(resync_retry_cnt)),
                       static_cast<int>(sync_detector_->form()),
                       static_cast<int>(sync_detector_->pick()),
                       sync_detector_->firstPathWindow(),
@@ -2677,7 +2683,10 @@ ssize_t Receiver::clientSyncBeacon(size_t radio_id, size_t sample_window,
         // constellation split it was investigated for -- see config.cc.
         sync_index = syncSearch(syncbuffmem.at(kSyncDetectChannel).data(),
                                 sample_window,
-                                config_->corr_scale_init(radio_id),
+                                config_->num_cl_sdrs() > 1
+                                    ? config_->corr_scale_init(radio_id)
+                                    : static_cast<float>(
+                                          config_->sync().detector.bar.corr_scale_init),
                                 sync_detector_->pick());
         // SNR floor: a correlation crossing at noise level is the artifact
         // class, not the beacon (measured: real ~45 dB, artifacts ~0 dB).

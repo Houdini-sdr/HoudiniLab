@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
 #include <string>
 #include <variant>
 
@@ -19,6 +20,7 @@ using houdini::sync::SyncConfig;
 using houdini::sync::ThresholdForm;
 using houdini::sync::PickRule;
 using houdini::sync::TrackerType;
+using houdini::sync::Source;
 
 namespace {
 int g_fail = 0;
@@ -28,7 +30,7 @@ void check(bool ok, const std::string& what) {
 }
 bool throws(const std::string& json) {
   try {
-    SyncConfig::load(json);
+    SyncConfig::loadFromText(json);
     return false;
   } catch (const std::exception&) {
     return true;
@@ -39,16 +41,40 @@ bool throws(const std::string& json) {
 // The operator's shell may export HOUDINI_* (the bench scripts do). Every
 // section below except the environment one must see none of them.
 void clearEnv() {
-  SyncConfig probe = SyncConfig::defaults();
-  for (const auto& k : probe.knobs())
+  for (const auto& k : SyncConfig::schema())
     if (k.env != nullptr) unsetenv(k.env);
 }
 
-int main() {
+// The walkthrough's knob table is generated from the schema and committed;
+// this diff is what keeps the two from drifting (commit 8253025 was the
+// drift it prevents). The path comes from CMake; without it the check is
+// skipped, loudly.
+void checkWalkthroughTable(const char* path) {
+  std::ifstream in(path);
+  if (!in) {
+    check(false, std::string("walkthrough table: cannot open ") + path);
+    return;
+  }
+  std::string line, block;
+  bool inside = false, seen = false;
+  while (std::getline(in, line)) {
+    if (line.rfind("<!-- sync-knob-table:begin", 0) == 0) { inside = true; seen = true; continue; }
+    if (line.rfind("<!-- sync-knob-table:end", 0) == 0) { inside = false; continue; }
+    if (inside) block += line + "\n";
+  }
+  const std::string generated = SyncConfig::schemaMarkdown();
+  check(seen, "walkthrough table: begin/end markers present");
+  check(block == generated, "walkthrough table matches the generated schema (regenerate with "
+                            "./build/sync_config_schema if this fails)");
+}
+
+int main(int argc, char** argv) {
   clearEnv();
+  if (argc > 1) checkWalkthroughTable(argv[1]);
+  else std::printf("SKIP  walkthrough table diff (no path given)\n");
   // 1. Defaults are the shipped values, every provenance "default".
   {
-    const auto c = SyncConfig::load("{}");
+    const auto c = SyncConfig::loadFromText("{}");
     check(c.beacon.type == "legacy" && c.beacon.tx_full_scale == 0.6,
           "defaults: beacon legacy at 0.6 FS");
     check(c.detector.threshold == ThresholdForm::kAuto &&
@@ -70,13 +96,14 @@ int main() {
           "defaults: resync 0.1 ppm / 2.0 us / 5.2083 us / 100 / 2 / 2 / 200 / 100");
     check(std::isnan(c.resync.sync_tol_samples), "defaults: sync_tol_samples derived (NaN)");
     bool all_default = true;
-    for (const auto& kv : c.provenance) all_default &= (kv.second == "default");
-    check(all_default && c.provenance.size() == c.knobs().size(),
-          "defaults: every knob marked default (" + std::to_string(c.knobs().size()) + " knobs)");
+    for (const auto& s : SyncConfig::schema()) all_default &= (c.provenanceOf(s.path) == Source::kDefault);
+    check(all_default && c.provenanceOf("no.such.key") == Source::kDefault,
+          "defaults: every knob marked default (" + std::to_string(SyncConfig::schema().size()) +
+              " knobs); an unknown path reads default, never throws");
   }
   // 2. JSON values land, with provenance.
   {
-    const auto c = SyncConfig::load(R"({"sync": {"detector": {"threshold": "coherence",
+    const auto c = SyncConfig::loadFromText(R"({"sync": {"detector": {"threshold": "coherence",
         "pick": "argmax", "first_path_window": 32}, "confirm": {"snr_floor_db": 12.5},
         "tracker": {"type": "kalman", "kalman": {"innov_gate": 3}},
         "resync": {"scatter_tol_us": 1.5}, "beacon": {"type": "nr_pss"}}})");
@@ -86,22 +113,21 @@ int main() {
     check(c.confirm.snr_floor_db == 12.5 && c.tracker.type == TrackerType::kKalman &&
               c.tracker.kf_innov_gate == 3.0 && c.resync.scatter_tol_us == 1.5,
           "json: nested doubles");
-    check(c.provenance.at("confirm.snr_floor_db") == "json" &&
-              c.provenance.at("resync.residual_ppm") == "default",
+    check(c.provenanceOf("confirm.snr_floor_db") == Source::kJson &&
+              c.provenanceOf("resync.residual_ppm") == Source::kDefault,
           "json: provenance marks only what was given");
-    const auto n = SyncConfig::load(R"({"sync": {"beacon": {"type": "nr_pss"}}})");
+    const auto n = SyncConfig::loadFromText(R"({"sync": {"beacon": {"type": "nr_pss"}}})");
     bool noted = false;
-    for (const auto& w : n.warnings) noted |= (w.find("8.157") != std::string::npos);
+    for (const auto& w : n.warnings()) noted |= (w.find("8.157") != std::string::npos);
     check(noted, "json: a non-legacy beacon with the DEFAULT floor is noted (8.157)");
     bool noted_when_set = false;
-    for (const auto& w : c.warnings) noted_when_set |= (w.find("8.157") != std::string::npos);
+    for (const auto& w : c.warnings()) noted_when_set |= (w.find("8.157") != std::string::npos);
     check(!noted_when_set, "json: no note when the floor was set explicitly");
   }
   // 3. Ranges: both bounds load, one step outside throws, for every numeric knob.
   {
-    SyncConfig probe = SyncConfig::defaults();
     int tested = 0, bad = 0;
-    for (const auto& k : probe.knobs()) {
+    for (const auto& k : SyncConfig::schema()) {
       if (!k.isNumeric()) continue;
       auto mk = [&](double v) {
         // build {"sync": {a: {b: {c: v}}}} from the dotted path
@@ -120,7 +146,7 @@ int main() {
         std::snprintf(num, sizeof num, "%.17g", v);
         return "{\"sync\": " + open + num + close + "}";
       };
-      const bool is_int = std::holds_alternative<int*>(k.target);
+      const bool is_int = std::holds_alternative<SyncConfig::Access<int>>(k.access);
       const double step = is_int ? 1.0 : (k.hi - k.lo) * 1e-3;
       const bool lo_ok = !throws(mk(k.lo));
       const bool hi_ok = !throws(mk(k.hi));
@@ -134,7 +160,7 @@ int main() {
       }
     }
     int numeric = 0;
-    for (const auto& k : probe.knobs()) numeric += k.isNumeric() ? 1 : 0;
+    for (const auto& k : SyncConfig::schema()) numeric += k.isNumeric() ? 1 : 0;
     check(bad == 0 && tested == numeric,
           "ranges: every numeric knob loads at its bounds and throws one step outside (" +
               std::to_string(tested) + " of " + std::to_string(numeric) + ")");
@@ -154,8 +180,8 @@ int main() {
         "top-level and sync beacon types that agree do not throw");
   // 5. The legacy top-level beacon_type.
   {
-    const auto c = SyncConfig::load(R"({"beacon_type": "dot11"})");
-    check(c.beacon.type == "dot11" && c.provenance.at("beacon.type") == "json",
+    const auto c = SyncConfig::loadFromText(R"({"beacon_type": "dot11"})");
+    check(c.beacon.type == "dot11" && c.provenanceOf("beacon.type") == Source::kJson,
           "top-level beacon_type is accepted into sync.beacon.type");
     check(throws(R"({"beacon_type": "dot11", "sync": {"beacon": {"type": "nr"}}})"),
           "top-level and sync beacon types that disagree throw");
@@ -165,39 +191,39 @@ int main() {
     setenv("HOUDINI_SCATTER_TOL_US", "3.5", 1);
     setenv("HOUDINI_BEACON_THRESH", "nolag", 1);
     setenv("HOUDINI_TRACKER", "kf", 1);
-    const auto c = SyncConfig::load("{}");
-    check(c.resync.scatter_tol_us == 3.5 && c.provenance.at("resync.scatter_tol_us") == "env",
+    const auto c = SyncConfig::loadFromText("{}");
+    check(c.resync.scatter_tol_us == 3.5 && c.provenanceOf("resync.scatter_tol_us") == Source::kEnv,
           "env: numeric override lands with provenance env");
     check(c.detector.threshold == ThresholdForm::kCoherence && c.tracker.type == TrackerType::kKalman,
           "env: legacy spellings nolag and kf map to coherence and kalman");
-    const auto d = SyncConfig::load(R"({"sync": {"allow_env_overrides": false}})");
-    check(d.resync.scatter_tol_us == 2.0 && d.provenance.at("resync.scatter_tol_us") == "default",
+    const auto d = SyncConfig::loadFromText(R"({"sync": {"allow_env_overrides": false}})");
+    check(d.resync.scatter_tol_us == 2.0 && d.provenanceOf("resync.scatter_tol_us") == Source::kDefault,
           "env: refused when allow_env_overrides is false");
     bool said = false;
-    for (const auto& w : d.warnings) said |= (w.find("IGNORED") != std::string::npos);
+    for (const auto& w : d.warnings()) said |= (w.find("IGNORED") != std::string::npos);
     check(said, "env: the refusal is reported");
     setenv("HOUDINI_SCATTER_TOL_US", "abc", 1);
-    const auto e = SyncConfig::load("{}");
+    const auto e = SyncConfig::loadFromText("{}");
     check(e.resync.scatter_tol_us == 2.0, "env: a non-number is ignored, not zero");
     setenv("HOUDINI_SCATTER_TOL_US", "5000", 1);
-    const auto f = SyncConfig::load("{}");
+    const auto f = SyncConfig::loadFromText("{}");
     check(f.resync.scatter_tol_us == 1000.0, "env: an out-of-range value is CLAMPED to the range");
     bool clamped_note = false;
-    for (const auto& w : f.warnings) clamped_note |= (w.find("clamped") != std::string::npos);
+    for (const auto& w : f.warnings()) clamped_note |= (w.find("clamped") != std::string::npos);
     check(clamped_note, "env: the clamp is reported");
     setenv("HOUDINI_ESCALATE_EPISODES", "0", 1);
     setenv("HOUDINI_RESYNC_RETRY_MAX", "2.5", 1);
-    const auto g = SyncConfig::load("{}");
+    const auto g = SyncConfig::loadFromText("{}");
     check(g.resync.escalate_episodes == 1 && g.resync.retry_max == 2,
           "env: an int knob at 0 clamps to its minimum and 2.5 floors to 2 (the old readers' meaning)");
     setenv("HOUDINI_BEACON_PICK", "first", 1);
-    const auto h = SyncConfig::load("{}");
+    const auto h = SyncConfig::loadFromText("{}");
     check(h.detector.pick == PickRule::kFirstCrossing, "env: the legacy spelling first maps to first_crossing");
     bool noted_first = false;
-    for (const auto& w : h.warnings) noted_first |= (w.find("AP-34") != std::string::npos);
+    for (const auto& w : h.warnings()) noted_first |= (w.find("AP-34") != std::string::npos);
     check(noted_first, "validate: first_crossing is noted as diagnostic only");
     setenv("HOUDINI_BEACON_PICK", "strongest", 1);
-    const auto i = SyncConfig::load("{}");
+    const auto i = SyncConfig::loadFromText("{}");
     check(i.detector.pick == PickRule::kFirstPath, "env: an unknown enum name is ignored, not fatal");
     clearEnv();
     // The three knobs whose old readers IGNORED an out-of-range value keep
@@ -206,16 +232,16 @@ int main() {
     setenv("HOUDINI_FIRST_PATH_DB", "3", 1);
     setenv("HOUDINI_FIRST_PATH_WIN", "5000", 1);
     setenv("HOUDINI_GRID_ALPHA", "50", 1);
-    const auto j = SyncConfig::load("{}");
+    const auto j = SyncConfig::loadFromText("{}");
     check(j.beacon.tx_full_scale == 0.6 && j.detector.first_path_floor_db == -9.0 &&
               j.detector.first_path_window == -1,
           "env: BEACON_FS=0, FIRST_PATH_DB=3, FIRST_PATH_WIN=5000 keep their defaults (as before)");
     int ignored_notes = 0;
-    for (const auto& w : j.warnings) ignored_notes += (w.find("kept, as the old reader did") != std::string::npos);
+    for (const auto& w : j.warnings()) ignored_notes += (w.find("kept, as the old reader did") != std::string::npos);
     check(ignored_notes == 3, "env: each ignored override is reported (" + std::to_string(ignored_notes) + " of 3)");
-    check(j.provenance.at("beacon.tx_full_scale") == "default" &&
-              j.provenance.at("detector.first_path_floor_db") == "default" &&
-              j.provenance.at("detector.first_path_window") == "default",
+    check(j.provenanceOf("beacon.tx_full_scale") == Source::kDefault &&
+              j.provenanceOf("detector.first_path_floor_db") == Source::kDefault &&
+              j.provenanceOf("detector.first_path_window") == Source::kDefault,
           "env: an ignored override leaves provenance at default");
     check(!throws(R"({"sync": {"_note.v2": "x"}})"), "a comment key with a dot is still a comment");
     check(j.tracker.alpha == 1.0, "env: GRID_ALPHA=50 clamps to 1 (it used to pass through, AP-56)");
@@ -224,14 +250,14 @@ int main() {
     clearEnv();
     check(throws(R"({"sync": {"detector.threshold": "power"}})"),
           "a flat dotted key is refused, not silently ignored");
-    const auto mc = SyncConfig::load(R"({"sync": {"detector": {"threshold": "Coherence"}}})");
+    const auto mc = SyncConfig::loadFromText(R"({"sync": {"detector": {"threshold": "Coherence"}}})");
     check(mc.detector.threshold == ThresholdForm::kCoherence, "json: enum names are case-insensitive");
-    const auto sb = SyncConfig::load(R"({"sync": {"allow_env_overrides": "false"}})");
+    const auto sb = SyncConfig::loadFromText(R"({"sync": {"allow_env_overrides": "false"}})");
     check(!sb.allow_env_overrides, "json: a string false is accepted for a bool knob");
   }
   // 7. The generated views exist and name every knob.
   {
-    const auto c = SyncConfig::load("{}");
+    const auto c = SyncConfig::loadFromText("{}");
     const std::string d = c.describe();
     const std::string m = SyncConfig::schemaMarkdown();
     check(d.find("resync.scatter_tol_us = 2") != std::string::npos, "describe names values");
@@ -239,17 +265,65 @@ int main() {
     check(d.find("resync.sync_tol_samples = derived") != std::string::npos &&
               d.find("detector.first_path_window = derived") != std::string::npos,
           "describe prints derived for the two sentinels");
-    const auto pw = SyncConfig::load(R"({"sync": {"detector": {"pfa_per_window": 0.01}}})");
+    const auto pw = SyncConfig::loadFromText(R"({"sync": {"detector": {"pfa_per_window": 0.01}}})");
     bool reserved = false;
-    for (const auto& w : pw.warnings) reserved |= (w.find("RESERVED") != std::string::npos);
+    for (const auto& w : pw.warnings()) reserved |= (w.find("RESERVED") != std::string::npos);
     check(reserved, "validate: a pfa_per_window value is noted as reserved and not applied");
-    const auto fixed = SyncConfig::load(R"({"sync": {"tracker": {"alpha": 0, "beta": 0}}})");
+    const auto fixed = SyncConfig::loadFromText(R"({"sync": {"tracker": {"alpha": 0, "beta": 0}}})");
     bool fixed_note = false;
-    for (const auto& w : fixed.warnings) fixed_note |= (w.find("fixed-period") != std::string::npos);
+    for (const auto& w : fixed.warnings()) fixed_note |= (w.find("fixed-period") != std::string::npos);
     check(fixed_note, "validate: alpha = beta = 0 is noted as a fixed-period grid");
     check(m.find("`sync.confirm.snr_floor_db`") != std::string::npos &&
               m.find("`HOUDINI_SYNC_SNR_DB`") != std::string::npos,
           "schema table carries the key and the environment name it replaces");
+  }
+  // 12. resolve(): the sentinels fill from the shape with provenance "derived";
+  //     an explicit value is left alone; the operation is idempotent.
+  {
+    auto c = SyncConfig::loadFromText("{}");
+    check(c.valueText(*SyncConfig::spec("detector.first_path_window")) == "derived" &&
+              c.valueText(*SyncConfig::spec("resync.sync_tol_samples")) == "derived",
+          "resolve: before, both sentinels print as derived");
+    c.resolve({128, 160.0});
+    check(c.detector.first_path_window == 64 && c.resync.sync_tol_samples == 40.0 &&
+              c.provenanceOf("detector.first_path_window") == Source::kDerived &&
+              c.provenanceOf("resync.sync_tol_samples") == Source::kDerived,
+          "resolve: 128-tap replica gives a 64-sample window, 160 prefix gives 40 samples, both derived");
+    c.resolve({64, 80.0});
+    check(c.detector.first_path_window == 64 && c.resync.sync_tol_samples == 40.0,
+          "resolve: idempotent (a second call with another shape changes nothing)");
+    auto e = SyncConfig::loadFromText(R"({"sync": {"detector": {"first_path_window": 16}}})");
+    e.resolve({128, 160.0});
+    check(e.detector.first_path_window == 16 && e.provenanceOf("detector.first_path_window") == Source::kJson,
+          "resolve: an explicit value is left alone with its provenance");
+    check(c.describe().find("detector.first_path_window = 64  [derived]") != std::string::npos,
+          "resolve: describe() prints the resolved value and its provenance");
+  }
+  // 13. The legacy per-client threshold arrays feed the policy; corr_scale_init
+  //     defaults to corr_scale; the sync block wins over the legacy key.
+  {
+    const auto a = SyncConfig::loadFromText(R"({"corr_scale": [25, 30]})");
+    check(a.detector.bar.corr_scale == 25.0 && a.detector.bar.corr_scale_init == 25.0 &&
+              a.provenanceOf("detector.corr_scale") == Source::kJson &&
+              a.detector.bar.relaxed(3) == 28.0,
+          "legacy corr_scale: first client's value lands, init follows it, relaxed() adds the retry");
+    const auto b = SyncConfig::loadFromText(R"({"corr_scale": [25], "corr_scale_init": [40]})");
+    check(b.detector.bar.corr_scale == 25.0 && b.detector.bar.corr_scale_init == 40.0,
+          "legacy corr_scale_init: its own value when given");
+    const auto d = SyncConfig::loadFromText(R"({"corr_scale": [25], "sync": {"detector": {"corr_scale": 12}}})");
+    check(d.detector.bar.corr_scale == 12.0 && d.detector.bar.corr_scale_init == 12.0,
+          "sync.detector.corr_scale wins over the legacy array; init still follows");
+    check(SyncConfig::defaults().detector.bar.corr_scale == 10.0, "default corr_scale is 10");
+  }
+  // 14. The schema is static and const-correct: a spec is found by path, and a
+  //     const object can be read through it.
+  {
+    const SyncConfig c = SyncConfig::defaults();
+    const auto* s = SyncConfig::spec("tracker.alpha");
+    const auto* none = SyncConfig::spec("tracker.nope");
+    check(s != nullptr && none == nullptr && c.valueText(*s) == "0.5",
+          "schema: spec() finds a path, returns nullptr otherwise, and reads a const object");
+    check(&SyncConfig::schema() == &SyncConfig::schema(), "schema: one static table");
   }
   std::printf("\nRESULT: %s (%d failure(s))\n", g_fail ? "FAIL" : "PASS", g_fail);
   return g_fail ? 1 : 0;

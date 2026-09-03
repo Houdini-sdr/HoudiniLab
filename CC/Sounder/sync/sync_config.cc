@@ -1,7 +1,7 @@
 /**
  * @file sync/sync_config.cc
- * @brief SyncConfig: the knob table, the loader, validation, and the two
- *        generated views (startup description, walkthrough table).
+ * @brief SyncConfig: the static schema, the loader, validation, resolution,
+ *        and the two generated views (startup description, walkthrough table).
  */
 #include "sync/sync_config.h"
 
@@ -23,6 +23,7 @@ const char* const kThresholdNames[] = {"auto", "power", "xcorr", "coherence", nu
 const char* const kPickNames[] = {"first_crossing", "cluster_refined", "argmax", "first_path",
                                   nullptr};
 const char* const kTrackerNames[] = {"alpha_beta", "kalman", nullptr};
+const char* const kSourceNames[] = {"default", "json", "env", "derived"};
 
 // The environment spellings that predate the table.
 struct EnvAlias {
@@ -67,16 +68,16 @@ const nlohmann::json* at(const nlohmann::json& root, const std::string& path) {
 }
 
 // Every leaf path under an object, dotted, so an unknown key can be named.
+// A comment key ("_" first) is skipped on the RAW key, dot or no dot. A
+// non-comment key that itself contains a dot ("detector.threshold" as ONE key)
+// can never be reached by the dotted walker, so it is refused with a reason
+// rather than passing as known.
 void leaves(const nlohmann::json& j, const std::string& prefix, std::vector<std::string>* out) {
   if (!j.is_object()) {
     out->push_back(prefix);
     return;
   }
   for (auto it = j.begin(); it != j.end(); ++it) {
-    // A comment key is skipped on the RAW key, dot or no dot. A non-comment
-    // key that itself contains a dot ("detector.threshold" as ONE key) can
-    // never be reached by the dotted walker, so it is refused with a reason
-    // rather than passing as known.
     if (!it.key().empty() && it.key()[0] == '_') continue;
     if (it.key().find('.') != std::string::npos) {
       throw std::invalid_argument("sync." + (prefix.empty() ? "" : prefix + ".") + it.key() +
@@ -88,59 +89,49 @@ void leaves(const nlohmann::json& j, const std::string& prefix, std::vector<std:
   }
 }
 
-// A key is a comment when ANY segment of its path starts with "_".
-bool isComment(const std::string& path) {
-  size_t start = 0;
-  while (true) {
-    if (start < path.size() && path[start] == '_') return true;
-    const size_t dot = path.find('.', start);
-    if (dot == std::string::npos) return false;
-    start = dot + 1;
-  }
-}
-
-int enumValue(const SyncConfig::Knob& k) {
-  if (auto pt = std::get_if<ThresholdForm*>(&k.target)) return static_cast<int>(**pt);
-  if (auto pp = std::get_if<PickRule*>(&k.target)) return static_cast<int>(**pp);
-  if (auto pk = std::get_if<TrackerType*>(&k.target)) return static_cast<int>(**pk);
+// Typed reads and writes through the accessor variant.
+int enumValue(const SyncConfig& c, const SyncConfig::Spec& s) {
+  if (auto a = std::get_if<SyncConfig::Access<ThresholdForm>>(&s.access)) return static_cast<int>(a->cref(c));
+  if (auto a = std::get_if<SyncConfig::Access<PickRule>>(&s.access)) return static_cast<int>(a->cref(c));
+  if (auto a = std::get_if<SyncConfig::Access<TrackerType>>(&s.access)) return static_cast<int>(a->cref(c));
   return -1;
 }
 
-void setEnum(const SyncConfig::Knob& k, int i) {
-  if (auto pt = std::get_if<ThresholdForm*>(&k.target)) {
-    **pt = static_cast<ThresholdForm>(i);
-  } else if (auto pp = std::get_if<PickRule*>(&k.target)) {
-    **pp = static_cast<PickRule>(i);
-  } else if (auto pk = std::get_if<TrackerType*>(&k.target)) {
-    **pk = static_cast<TrackerType>(i);
+void setEnum(SyncConfig& c, const SyncConfig::Spec& s, int i) {
+  if (auto a = std::get_if<SyncConfig::Access<ThresholdForm>>(&s.access)) {
+    a->ref(c) = static_cast<ThresholdForm>(i);
+  } else if (auto a2 = std::get_if<SyncConfig::Access<PickRule>>(&s.access)) {
+    a2->ref(c) = static_cast<PickRule>(i);
+  } else if (auto a3 = std::get_if<SyncConfig::Access<TrackerType>>(&s.access)) {
+    a3->ref(c) = static_cast<TrackerType>(i);
   }
 }
 
 // Assign a parsed value into a knob. Returns an error string, empty on success.
-// `clamp` (the environment path) pulls an out-of-range number into the range
-// and reports it through `note` instead of failing.
-std::string assign(const SyncConfig::Knob& k, const nlohmann::json& v, bool from_env, bool clamp,
-                   std::string* note) {
-  if (auto pd = std::get_if<double*>(&k.target)) {
+// `clamp` (an environment override with policy kClamp) pulls an out-of-range
+// number into the range and reports it through `note` instead of failing.
+std::string assign(SyncConfig& c, const SyncConfig::Spec& s, const nlohmann::json& v,
+                   bool from_env, bool clamp, std::string* note) {
+  if (auto ad = std::get_if<SyncConfig::Access<double>>(&s.access)) {
     if (!v.is_number()) return "expects a number";
     double d = v.get<double>();
     if (!std::isfinite(d)) return "is not finite";
-    if (d < k.lo || d > k.hi) {
+    if (d < s.lo || d > s.hi) {
       if (!clamp) {
         std::ostringstream o;
-        o << "value " << d << " outside [" << k.lo << ", " << k.hi << "]";
+        o << "value " << d << " outside [" << s.lo << ", " << s.hi << "]";
         return o.str();
       }
-      const double c = d < k.lo ? k.lo : k.hi;
+      const double cl = d < s.lo ? s.lo : s.hi;
       std::ostringstream o;
-      o << "clamped " << d << " to " << c;
+      o << "clamped " << d << " to " << cl;
       *note = o.str();
-      d = c;
+      d = cl;
     }
-    **pd = d;
+    ad->ref(c) = d;
     return "";
   }
-  if (auto pi = std::get_if<int*>(&k.target)) {
+  if (auto ai = std::get_if<SyncConfig::Access<int>>(&s.access)) {
     if (!v.is_number()) return "expects an integer";
     double d = v.get<double>();
     if (!std::isfinite(d)) return "is not finite";
@@ -151,229 +142,294 @@ std::string assign(const SyncConfig::Knob& k, const nlohmann::json& v, bool from
       *note = o.str();
       d = std::floor(d);
     }
-    if (d < k.lo || d > k.hi) {
+    if (d < s.lo || d > s.hi) {
       if (!clamp) {
         std::ostringstream o;
-        o << "value " << d << " outside [" << k.lo << ", " << k.hi << "]";
+        o << "value " << d << " outside [" << s.lo << ", " << s.hi << "]";
         return o.str();
       }
-      const double c = d < k.lo ? k.lo : k.hi;
+      const double cl = d < s.lo ? s.lo : s.hi;
       std::ostringstream o;
-      o << (note->empty() ? "" : *note + "; ") << "clamped " << d << " to " << c;
+      o << (note->empty() ? "" : *note + "; ") << "clamped " << d << " to " << cl;
       *note = o.str();
-      d = c;
+      d = cl;
     }
-    **pi = static_cast<int>(d);
+    ai->ref(c) = static_cast<int>(d);
     return "";
   }
-  if (auto pb = std::get_if<bool*>(&k.target)) {
-    if (v.is_boolean()) { **pb = v.get<bool>(); return ""; }
-    if (v.is_number()) { **pb = v.get<double>() != 0.0; return ""; }
+  if (auto ab = std::get_if<SyncConfig::Access<bool>>(&s.access)) {
+    if (v.is_boolean()) { ab->ref(c) = v.get<bool>(); return ""; }
+    if (v.is_number()) { ab->ref(c) = v.get<double>() != 0.0; return ""; }
     if (v.is_string()) {
-      const std::string s = lower(v.get<std::string>());
-      if (s == "true" || s == "1" || s == "yes") { **pb = true; return ""; }
-      if (s == "false" || s == "0" || s == "no") { **pb = false; return ""; }
+      const std::string t = lower(v.get<std::string>());
+      if (t == "true" || t == "1" || t == "yes") { ab->ref(c) = true; return ""; }
+      if (t == "false" || t == "0" || t == "no") { ab->ref(c) = false; return ""; }
     }
     return "expects true or false";
   }
-  if (auto ps = std::get_if<std::string*>(&k.target)) {
+  if (auto as = std::get_if<SyncConfig::Access<std::string>>(&s.access)) {
     if (!v.is_string()) return "expects a string";
-    **ps = v.get<std::string>();
+    as->ref(c) = v.get<std::string>();
     return "";
   }
   // enum
   if (!v.is_string()) return "expects a name";
-  std::string s = lower(v.get<std::string>());
-  if (from_env && k.env != nullptr) {
+  std::string t = lower(v.get<std::string>());
+  if (from_env && s.env != nullptr) {
     for (const auto& a : kEnumAliases)
-      if (std::strcmp(a.env, k.env) == 0 && s == a.value) s = a.canon;
+      if (std::strcmp(a.env, s.env) == 0 && t == a.value) t = a.canon;
   }
-  const int i = enumIndex(k.enum_names, s);
+  const int i = enumIndex(s.enum_names, t);
   if (i < 0) {
     std::string names;
-    for (int j = 0; k.enum_names[j]; ++j) names += std::string(j ? ", " : "") + k.enum_names[j];
-    return "unknown name \"" + s + "\" (one of: " + names + ")";
+    for (int j = 0; s.enum_names[j]; ++j) names += std::string(j ? ", " : "") + s.enum_names[j];
+    return "unknown name \"" + t + "\" (one of: " + names + ")";
   }
-  setEnum(k, i);
+  setEnum(c, s, i);
   return "";
 }
 
+// Accessor pairs as plain functions of a SyncConfig, one macro per member so
+// the schema below reads as a table.
+#define KNOB_ACCESS(T, member)                                                          \
+  SyncConfig::Access<T> {                                                               \
+    [](SyncConfig& c) -> T& { return c.member; },                                       \
+        [](const SyncConfig& c) -> const T& { return c.member; }                        \
+  }
+
+using EP = SyncConfig::EnvPolicy;
+
 }  // namespace
 
-const char* SyncConfig::name(ThresholdForm f) { return kThresholdNames[static_cast<int>(f)]; }
-const char* SyncConfig::name(PickRule p) { return kPickNames[static_cast<int>(p)]; }
-const char* SyncConfig::name(TrackerType t) { return kTrackerNames[static_cast<int>(t)]; }
+const char* name(Source s) { return kSourceNames[static_cast<int>(s)]; }
+const char* name(ThresholdForm f) { return kThresholdNames[static_cast<int>(f)]; }
+const char* name(PickRule p) { return kPickNames[static_cast<int>(p)]; }
+const char* name(TrackerType t) { return kTrackerNames[static_cast<int>(t)]; }
 
-std::vector<SyncConfig::Knob> SyncConfig::knobs() {
-  return {
+const std::vector<SyncConfig::Spec>& SyncConfig::schema() {
+  static const std::vector<Spec> kSchema = {
       // beacon
       {"beacon.type", nullptr, 0, 0,
        "Which beacon waveform the base station transmits (legacy, legacy_guard, dot11, nr, nr_pss).",
-       &beacon.type, nullptr},
+       KNOB_ACCESS(std::string, beacon.type), nullptr, EP::kClamp},
       {"beacon.tx_full_scale", "HOUDINI_BEACON_FS", 1e-3, 1.0,
        "Transmit peak of the beacon as a fraction of DAC full scale. 0.6 shipped; lower it to stand in for path loss on a cable.",
-       &beacon.tx_full_scale, nullptr, EnvPolicy::kIgnoreOutOfRange},
+       KNOB_ACCESS(double, beacon.tx_full_scale), nullptr, EP::kIgnoreOutOfRange},
       // detector
       {"detector.threshold", "HOUDINI_BEACON_THRESH", 0, 0,
        "Decision statistic: auto picks coherence for a single-copy replica and the normalised cross-correlation otherwise; power is the pre-2026-09 form.",
-       &detector.threshold, kThresholdNames},
+       KNOB_ACCESS(ThresholdForm, detector.threshold), kThresholdNames, EP::kClamp},
       {"detector.pfa_per_window", nullptr, 1e-9, 0.5,
        "RESERVED (phase P3), not applied yet: the false-alarm probability per search window the coherence form's bar will be derived from.",
-       &detector.pfa_per_window, nullptr},
+       KNOB_ACCESS(double, detector.pfa_per_window), nullptr, EP::kClamp},
       {"detector.pick", "HOUDINI_BEACON_PICK", 0, 0,
        "Which crossing is returned: first_path (shipped), argmax, cluster_refined, or first_crossing (unsafe on a strong link).",
-       &detector.pick, kPickNames},
+       KNOB_ACCESS(PickRule, detector.pick), kPickNames, EP::kClamp},
       {"detector.first_path_window", "HOUDINI_FIRST_PATH_WIN", -1, 4095,
        "Samples the first-path search looks back from the peak; -1 (default) means half the replica length. Must stay inside the preamble's self-coherent plateau.",
-       &detector.first_path_window, nullptr, EnvPolicy::kIgnoreOutOfRange},
+       KNOB_ACCESS(int, detector.first_path_window), nullptr, EP::kIgnoreOutOfRange},
       {"detector.first_path_floor_db", "HOUDINI_FIRST_PATH_DB", -30.0, 0.0,
        "How much weaker, in dB of path power, an earlier arrival may be and still be taken as the first path.",
-       &detector.first_path_floor_db, nullptr, EnvPolicy::kIgnoreOutOfRange},
+       KNOB_ACCESS(double, detector.first_path_floor_db), nullptr, EP::kIgnoreOutOfRange},
+      {"detector.corr_scale", nullptr, 1e-4, 1e7,
+       "Resync detection threshold: the bar is 1 / corr_scale, relaxed by one per retry. Read from the legacy per-client top-level array when absent.",
+       KNOB_ACCESS(double, detector.bar.corr_scale), nullptr, EP::kClamp},
+      {"detector.corr_scale_init", nullptr, 1e-4, 1e7,
+       "Acquisition detection threshold (bar 1 / corr_scale_init); defaults to corr_scale.",
+       KNOB_ACCESS(double, detector.bar.corr_scale_init), nullptr, EP::kClamp},
       // confirm
       {"confirm.snr_floor_db", "HOUDINI_SYNC_SNR_DB", -10.0, 80.0,
        "In-window SNR a detection must clear. A property of the link and the waveform: re-derive it when either changes.",
-       &confirm.snr_floor_db, nullptr},
+       KNOB_ACCESS(double, confirm.snr_floor_db), nullptr, EP::kClamp},
       // cfo
       {"cfo.index_guard", "HOUDINI_CFO_INDEX_GUARD", 0, 64,
        "Samples the carrier estimator's windows slide later than the detected end (AP-39).",
-       &cfo.index_guard, nullptr},
+       KNOB_ACCESS(int, cfo.index_guard), nullptr, EP::kClamp},
       {"cfo.window_margin", nullptr, 0, 32,
        "Samples shrunk from both ends of each estimator window so neither touches the burst's edge (8.164).",
-       &cfo.window_margin, nullptr},
+       KNOB_ACCESS(int, cfo.window_margin), nullptr, EP::kClamp},
       {"cfo.log_every", "HOUDINI_CFO_LOG_EVERY", 1, 1000000,
-       "Print one beacon-CFO log line in this many.", &cfo.log_every, nullptr},
+       "Print one beacon-CFO log line in this many.", KNOB_ACCESS(int, cfo.log_every), nullptr,
+       EP::kClamp},
       // tracker
       {"tracker.type", "HOUDINI_TRACKER", 0, 0,
        "Which estimator tracks the base station frame grid: alpha_beta (shipped) or kalman.",
-       &tracker.type, kTrackerNames},
+       KNOB_ACCESS(TrackerType, tracker.type), kTrackerNames, EP::kClamp},
       {"tracker.alpha", "HOUDINI_GRID_ALPHA", 0.0, 1.0,
-       "Fraction of each accepted residual applied to the schedule.", &tracker.alpha, nullptr},
+       "Fraction of each accepted residual applied to the schedule.", KNOB_ACCESS(double, tracker.alpha),
+       nullptr, EP::kClamp},
       {"tracker.beta", "HOUDINI_GRID_BETA", 0.0, 1.0,
-       "Fraction of the residual applied to the frame period estimate.", &tracker.beta, nullptr},
+       "Fraction of the residual applied to the frame period estimate.", KNOB_ACCESS(double, tracker.beta),
+       nullptr, EP::kClamp},
       {"tracker.step_ppm", "HOUDINI_GRID_STEP_PPM", 0.0, 1000.0,
        "Most one detection may move the period estimate, ppm. 0 disables the limit.",
-       &tracker.step_ppm, nullptr},
+       KNOB_ACCESS(double, tracker.step_ppm), nullptr, EP::kClamp},
       {"tracker.max_ppm", "HOUDINI_GRID_MAX_PPM", 0.1, 10000.0,
        "Absolute band the period estimate may occupy either side of nominal, ppm.",
-       &tracker.max_ppm, nullptr},
+       KNOB_ACCESS(double, tracker.max_ppm), nullptr, EP::kClamp},
       {"tracker.trust_ppm", "HOUDINI_GRID_TRUST_PPM", 0.0, 1000.0,
        "How far the tracked period and a fresh acquisition confirm may disagree before the confirm is preferred, ppm.",
-       &tracker.trust_ppm, nullptr},
+       KNOB_ACCESS(double, tracker.trust_ppm), nullptr, EP::kClamp},
       {"tracker.kalman.meas_var", "HOUDINI_KF_MEAS_VAR", 1e-6, 1e6,
-       "Kalman only: assumed detector scatter variance, samples squared.", &tracker.kf_meas_var,
-       nullptr},
+       "Kalman only: assumed detector scatter variance, samples squared.",
+       KNOB_ACCESS(double, tracker.kf_meas_var), nullptr, EP::kClamp},
       {"tracker.kalman.rate_rw", "HOUDINI_KF_RATE_RW", 0.0, 1.0,
        "Kalman only: how fast the frame period wanders, samples squared per frame cubed.",
-       &tracker.kf_rate_rw, nullptr},
+       KNOB_ACCESS(double, tracker.kf_rate_rw), nullptr, EP::kClamp},
       {"tracker.kalman.innov_gate", "HOUDINI_KF_INNOV_GATE", 0.0, 100.0,
        "Kalman only: sigmas an observation may sit from the prediction before it is ignored. 0 disables.",
-       &tracker.kf_innov_gate, nullptr},
+       KNOB_ACCESS(double, tracker.kf_innov_gate), nullptr, EP::kClamp},
       // resync
       {"resync.residual_ppm", "HOUDINI_SYNC_RESIDUAL_PPM", 1e-4, 1000.0,
        "Assumed worst-case clock error after tracking; with sync_tol_samples it sets how often the beacon is looked at.",
-       &resync.residual_ppm, nullptr},
+       KNOB_ACCESS(double, resync.residual_ppm), nullptr, EP::kClamp},
       {"resync.scatter_tol_us", "HOUDINI_SCATTER_TOL_US", 0.01, 1000.0,
        "How far a detection may land from the tracked grid and still count as the same beacon, microseconds.",
-       &resync.scatter_tol_us, nullptr},
+       KNOB_ACCESS(double, resync.scatter_tol_us), nullptr, EP::kClamp},
       {"resync.confirm_tol_us", "HOUDINI_CONFIRM_TOL_US", 0.01, 1000.0,
        "The same tolerance during acquisition. Never applied looser than the tracking gate.",
-       &resync.confirm_tol_us, nullptr},
+       KNOB_ACCESS(double, resync.confirm_tol_us), nullptr, EP::kClamp},
       {"resync.sync_tol_samples", "HOUDINI_SYNC_TOL_SAMPLES", 0.5, 1e6,
        "Timing slack budgeted to drift between looks, samples. Default: a quarter of the OFDM zero prefix.",
-       &resync.sync_tol_samples, nullptr},
+       KNOB_ACCESS(double, resync.sync_tol_samples), nullptr, EP::kClamp},
       {"resync.retry_max", "HOUDINI_RESYNC_RETRY_MAX", 1, 100000,
-       "Misses in one resync period before the client logs an exhausted episode.", &resync.retry_max,
-       nullptr},
+       "Misses in one resync period before the client logs an exhausted episode.",
+       KNOB_ACCESS(int, resync.retry_max), nullptr, EP::kClamp},
       {"resync.escalate_episodes", "HOUDINI_ESCALATE_EPISODES", 1, 1000,
        "Consecutive exhausted episodes before the client abandons tracking and re-acquires.",
-       &resync.escalate_episodes, nullptr},
+       KNOB_ACCESS(int, resync.escalate_episodes), nullptr, EP::kClamp},
       {"resync.hold_offgrid", "HOUDINI_HOLD_OFFGRID", 1, 1000,
-       "Consecutive off-grid detections before the beacon counts as moved.", &resync.hold_offgrid,
-       nullptr},
+       "Consecutive off-grid detections before the beacon counts as moved.",
+       KNOB_ACCESS(int, resync.hold_offgrid), nullptr, EP::kClamp},
       {"resync.acq_refine_span", "HOUDINI_ACQ_REFINE_SPAN", 2, 100000,
        "Frames of baseline acquisition wants before it trusts its rate estimate.",
-       &resync.acq_refine_span, nullptr},
+       KNOB_ACCESS(int, resync.acq_refine_span), nullptr, EP::kClamp},
       {"resync.acq_max_ppm", "HOUDINI_ACQ_MAX_PPM", 0.1, 10000.0,
-       "Plausibility band applied to a rate that acquisition hands back, ppm.", &resync.acq_max_ppm,
-       nullptr},
+       "Plausibility band applied to a rate that acquisition hands back, ppm.",
+       KNOB_ACCESS(double, resync.acq_max_ppm), nullptr, EP::kClamp},
       {"allow_env_overrides", nullptr, 0, 0,
        "Whether HOUDINI_* environment variables may override these values (each override is logged; see the policy column). Default true this release.",
-       &allow_env_overrides, nullptr},
+       KNOB_ACCESS(bool, allow_env_overrides), nullptr, EP::kClamp},
   };
+  return kSchema;
 }
 
-std::vector<SyncConfig::Knob> SyncConfig::knobs() const {
-  // Reading only: the table is built on a mutable view of the same storage.
-  return const_cast<SyncConfig*>(this)->knobs();
+#undef KNOB_ACCESS
+
+const SyncConfig::Spec* SyncConfig::spec(std::string_view path) {
+  for (const auto& s : schema())
+    if (path == s.path) return &s;
+  return nullptr;
+}
+
+Source SyncConfig::provenanceOf(std::string_view path) const {
+  const auto& sc = schema();
+  for (size_t i = 0; i < sc.size(); ++i)
+    if (path == sc[i].path) return i < provenance_.size() ? provenance_[i] : Source::kDefault;
+  return Source::kDefault;
+}
+
+void SyncConfig::setProvenance(size_t index, Source s) {
+  if (provenance_.size() < schema().size()) provenance_.resize(schema().size(), Source::kDefault);
+  provenance_[index] = s;
 }
 
 SyncConfig SyncConfig::defaults() {
   SyncConfig c;
-  for (const auto& k : c.knobs()) c.provenance[k.path] = "default";
+  c.provenance_.assign(schema().size(), Source::kDefault);
   return c;
 }
 
-SyncConfig SyncConfig::load(const std::string& root_json_text) {
-  SyncConfig c = defaults();
+SyncConfig SyncConfig::loadFromText(const std::string& root_json_text) {
   const auto root = nlohmann::json::parse(root_json_text, nullptr, true, true);
-  const nlohmann::json empty = nlohmann::json::object();
-  const nlohmann::json* blk = &empty;
-  if (root.contains("sync") && !root["sync"].is_null()) {
-    if (!root["sync"].is_object()) throw std::invalid_argument("sync: must be an object");
-    blk = &root["sync"];
+  std::optional<std::string> block;
+  if (root.contains("sync") && !root["sync"].is_null()) block = root["sync"].dump();
+  std::optional<std::string> bt;
+  if (root.contains("beacon_type")) {
+    if (!root["beacon_type"].is_string())
+      throw std::invalid_argument("beacon_type: expects a string");
+    bt = root["beacon_type"].get<std::string>();
+  }
+  std::optional<double> cs, csi;
+  if (root.contains("corr_scale") && root["corr_scale"].is_array() && !root["corr_scale"].empty())
+    cs = root["corr_scale"][0].get<double>();
+  if (root.contains("corr_scale_init") && root["corr_scale_init"].is_array() &&
+      !root["corr_scale_init"].empty())
+    csi = root["corr_scale_init"][0].get<double>();
+  return load(block, bt, cs, csi);
+}
+
+SyncConfig SyncConfig::load(const std::optional<std::string>& sync_block_json,
+                            const std::optional<std::string>& legacy_beacon_type,
+                            const std::optional<double>& legacy_corr_scale,
+                            const std::optional<double>& legacy_corr_scale_init) {
+  SyncConfig c = defaults();
+  const auto& sc = schema();
+  nlohmann::json blk = nlohmann::json::object();
+  if (sync_block_json.has_value()) {
+    blk = nlohmann::json::parse(*sync_block_json, nullptr, true, true);
+    if (blk.is_null()) blk = nlohmann::json::object();
+    if (!blk.is_object()) throw std::invalid_argument("sync: must be an object");
   }
   // Unknown keys are errors: a typo that quietly leaves a knob at its default
   // is exactly the failure this loader exists to make visible.
   std::vector<std::string> present;
-  leaves(*blk, "", &present);
-  auto ks = c.knobs();
+  leaves(blk, "", &present);
   for (const auto& p : present) {
-    if (isComment(p)) continue;
-    bool known = false;
-    for (const auto& k : ks) if (p == k.path) { known = true; break; }
-    if (!known) throw std::invalid_argument("sync." + p + ": unknown key");
+    if (spec(p) == nullptr) throw std::invalid_argument("sync." + p + ": unknown key");
   }
-  for (auto& k : ks) {
-    const nlohmann::json* v = at(*blk, k.path);
+  for (size_t i = 0; i < sc.size(); ++i) {
+    const nlohmann::json* v = at(blk, sc[i].path);
     if (v == nullptr) continue;
     std::string note;
-    const std::string err = assign(k, *v, false, false, &note);
-    if (!err.empty()) throw std::invalid_argument("sync." + std::string(k.path) + ": " + err);
-    c.provenance[k.path] = "json";
+    const std::string err = assign(c, sc[i], *v, false, false, &note);
+    if (!err.empty()) throw std::invalid_argument("sync." + std::string(sc[i].path) + ": " + err);
+    c.setProvenance(i, Source::kJson);
   }
-  // The legacy top-level beacon_type (config.cc reads it for genPilots).
-  if (root.contains("beacon_type")) {
-    if (!root["beacon_type"].is_string())
-      throw std::invalid_argument("beacon_type: expects a string");
-    const std::string top = root["beacon_type"].get<std::string>();
-    if (c.provenance["beacon.type"] == "json" && top != c.beacon.type) {
-      throw std::invalid_argument("beacon_type \"" + top + "\" and sync.beacon.type \"" +
-                                  c.beacon.type + "\" disagree");
+  // The legacy keys the caller found at the top level of its file.
+  const auto legacy = [&](const char* path, const nlohmann::json& v, const char* what) {
+    const auto* s = spec(path);
+    size_t idx = 0;
+    for (; idx < sc.size(); ++idx) if (&sc[idx] == s) break;
+    if (c.provenance_[idx] == Source::kJson) return;  // the sync block wins
+    std::string note;
+    const std::string err = assign(c, *s, v, false, false, &note);
+    if (!err.empty()) throw std::invalid_argument(std::string(what) + ": " + err);
+    c.setProvenance(idx, Source::kJson);
+  };
+  if (legacy_beacon_type.has_value()) {
+    if (c.provenanceOf("beacon.type") == Source::kJson && *legacy_beacon_type != c.beacon.type) {
+      throw std::invalid_argument("beacon_type \"" + *legacy_beacon_type +
+                                  "\" and sync.beacon.type \"" + c.beacon.type + "\" disagree");
     }
-    if (c.provenance["beacon.type"] != "json") {
-      c.beacon.type = top;
-      c.provenance["beacon.type"] = "json";
-    }
+    legacy("beacon.type", nlohmann::json(*legacy_beacon_type), "beacon_type");
+  }
+  if (legacy_corr_scale.has_value()) legacy("detector.corr_scale", nlohmann::json(*legacy_corr_scale), "corr_scale");
+  if (legacy_corr_scale_init.has_value()) {
+    legacy("detector.corr_scale_init", nlohmann::json(*legacy_corr_scale_init), "corr_scale_init");
+  } else if (c.provenanceOf("detector.corr_scale_init") == Source::kDefault) {
+    c.detector.bar.corr_scale_init = c.detector.bar.corr_scale;  // defaults to corr_scale
   }
   // Environment overrides, when allowed: range-checked like JSON, then the
   // knob's policy decides what an out-of-range number does (clamp, or keep
   // the value already in place, each with a note); garbage is refused and
   // reported; every override is recorded.
-  for (auto& k : ks) {
-    if (k.env == nullptr) continue;
-    const char* e = std::getenv(k.env);
+  for (size_t i = 0; i < sc.size(); ++i) {
+    const auto& s = sc[i];
+    if (s.env == nullptr) continue;
+    const char* e = std::getenv(s.env);
     if (e == nullptr) continue;
     if (!c.allow_env_overrides) {
-      c.warnings.push_back(std::string(k.env) + "=\"" + e +
-                           "\" IGNORED: sync.allow_env_overrides is false");
+      c.warnings_.push_back(std::string(s.env) + "=\"" + e +
+                            "\" IGNORED: sync.allow_env_overrides is false");
       continue;
     }
     nlohmann::json v;
-    if (k.isNumeric()) {
+    if (s.isNumeric()) {
       char* end = nullptr;
       const double d = std::strtod(e, &end);
       if (end == e || *end != '\0') {
-        c.warnings.push_back(std::string(k.env) + "=\"" + e + "\" is not a number -- ignored");
+        c.warnings_.push_back(std::string(s.env) + "=\"" + e + "\" is not a number -- ignored");
         continue;
       }
       v = d;
@@ -381,78 +437,93 @@ SyncConfig SyncConfig::load(const std::string& root_json_text) {
       v = std::string(e);
     }
     std::string note;
-    const bool clamp = k.env_policy == EnvPolicy::kClamp;
-    const std::string err = assign(k, v, true, clamp, &note);
+    const bool clamp = s.env_policy == EnvPolicy::kClamp;
+    const std::string err = assign(c, s, v, true, clamp, &note);
     if (!err.empty()) {
-      c.warnings.push_back(std::string(k.env) + "=\"" + e + "\": " + err +
-                           (clamp ? " -- ignored"
-                                  : " -- ignored, the value already in place (" +
-                                        valueText(k) + ") kept, as the old reader did"));
+      c.warnings_.push_back(std::string(s.env) + "=\"" + e + "\": " + err +
+                            (clamp ? " -- ignored"
+                                   : " -- ignored, the value already in place (" + c.valueText(s) +
+                                         ") kept, as the old reader did"));
       continue;
     }
-    c.provenance[k.path] = "env";
-    c.warnings.push_back(std::string(k.env) + " overrides sync." + k.path + " (" + e + ")" +
-                         (note.empty() ? "" : " [" + note + "]"));
+    c.setProvenance(i, Source::kEnv);
+    c.warnings_.push_back(std::string(s.env) + " overrides sync." + s.path + " (" + e + ")" +
+                          (note.empty() ? "" : " [" + note + "]"));
   }
   c.validate();
   return c;
 }
 
-void SyncConfig::validate() {
-  // Cross-constraints the ledger paid for.
-  if (resync.confirm_tol_us < resync.scatter_tol_us) {
-    warnings.push_back("resync.confirm_tol_us is tighter than scatter_tol_us; acquisition uses "
-                       "the tighter value (8.65)");
+void SyncConfig::resolve(const ResolveContext& ctx) {
+  // -1 means "half the replica length": what the pre-library correlator
+  // derived by default (64 at 128 taps, 32 at 64).
+  if (detector.first_path_window < 0 && ctx.replica_len > 0) {
+    detector.first_path_window = static_cast<int>(ctx.replica_len / 2);
+    const auto* s = spec("detector.first_path_window");
+    setProvenance(static_cast<size_t>(s - schema().data()), Source::kDerived);
   }
-  if (detector.pick == PickRule::kFirstCrossing) {
-    warnings.push_back("detector.pick first_crossing false-locks on the beacon's own preamble "
-                       "once the link is strong (AP-34); diagnostic only");
-  }
-  if (detector.pick == PickRule::kArgmax) {
-    warnings.push_back("detector.pick argmax returns the STRONGEST path, which over the air is "
-                       "often a reflection that hops as the channel fades (8.143); diagnostic only");
-  }
-  if (detector.threshold == ThresholdForm::kPowerRatio) {
-    warnings.push_back("detector.threshold power is a different test at every received level "
-                       "(8.138); diagnostic only");
-  }
-  if (detector.first_path_window > 512) {
-    warnings.push_back("detector.first_path_window above 512 reaches past any preamble plateau "
-                       "and widens the SNR guard to most of a slot; CommsLib caps it at twice "
-                       "the replica length");
-  }
-  const auto prov = [this](const char* key) {
-    const auto it = provenance.find(key);
-    return it == provenance.end() ? std::string("default") : it->second;
-  };
-  if (prov("detector.pfa_per_window") != "default") {
-    warnings.push_back("detector.pfa_per_window is RESERVED (phase P3) and not applied: the "
-                       "detector still uses the config's corr_scale for every form");
-  }
-  if (tracker.type == TrackerType::kAlphaBeta && tracker.alpha == 0.0 && tracker.beta == 0.0) {
-    warnings.push_back("tracker alpha and beta are both 0: the grid is fixed-period");
-  }
-  if (beacon.type != "legacy" && prov("confirm.snr_floor_db") == "default") {
-    warnings.push_back("confirm.snr_floor_db is the legacy default with beacon.type \"" +
-                       beacon.type + "\": a quieter waveform is rejected wholesale at a level "
-                       "legacy clears (8.157); derive the floor from this beacon's in-window SNR");
+  // NaN means "a quarter of the OFDM zero prefix".
+  if (std::isnan(resync.sync_tol_samples) && ctx.prefix_samples > 0.0) {
+    resync.sync_tol_samples = ctx.prefix_samples / 4.0;
+    const auto* s = spec("resync.sync_tol_samples");
+    setProvenance(static_cast<size_t>(s - schema().data()), Source::kDerived);
   }
 }
 
-std::string SyncConfig::valueText(const Knob& k) {
+void SyncConfig::validate() {
+  warnings_.erase(std::remove_if(warnings_.begin(), warnings_.end(),
+                                 [](const std::string& w) { return w.rfind("note:", 0) == 0; }),
+                  warnings_.end());
+  auto note = [this](const std::string& w) { warnings_.push_back("note: " + w); };
+  // Cross-constraints the ledger paid for.
+  if (resync.confirm_tol_us < resync.scatter_tol_us) {
+    note("resync.confirm_tol_us is tighter than scatter_tol_us; acquisition uses the tighter "
+         "value (8.65)");
+  }
+  if (detector.pick == PickRule::kFirstCrossing) {
+    note("detector.pick first_crossing false-locks on the beacon's own preamble once the link "
+         "is strong (AP-34); diagnostic only");
+  }
+  if (detector.pick == PickRule::kArgmax) {
+    note("detector.pick argmax returns the STRONGEST path, which over the air is often a "
+         "reflection that hops as the channel fades (8.143); diagnostic only");
+  }
+  if (detector.threshold == ThresholdForm::kPowerRatio) {
+    note("detector.threshold power is a different test at every received level (8.138); "
+         "diagnostic only");
+  }
+  if (detector.first_path_window > 512) {
+    note("detector.first_path_window above 512 reaches past any preamble plateau and widens "
+         "the SNR guard to most of a slot; the correlator caps it at twice the replica length");
+  }
+  if (wasSet("detector.pfa_per_window")) {
+    note("detector.pfa_per_window is RESERVED (phase P3) and not applied: the detector still "
+         "uses corr_scale for every form");
+  }
+  if (tracker.type == TrackerType::kAlphaBeta && tracker.alpha == 0.0 && tracker.beta == 0.0) {
+    note("tracker alpha and beta are both 0: the grid is fixed-period");
+  }
+  if (beacon.type != "legacy" && !wasSet("confirm.snr_floor_db")) {
+    note("confirm.snr_floor_db is the legacy default with beacon.type \"" + beacon.type +
+         "\": a quieter waveform is rejected wholesale at a level legacy clears (8.157); derive "
+         "the floor from this beacon's in-window SNR");
+  }
+}
+
+std::string SyncConfig::valueText(const Spec& s) const {
   std::ostringstream o;
-  if (auto pd = std::get_if<double*>(&k.target)) {
-    if (std::isnan(**pd)) return "derived";
-    o << **pd;
-  } else if (auto pi = std::get_if<int*>(&k.target)) {
-    if (**pi < 0 && k.lo < 0) return "derived";
-    o << **pi;
-  } else if (auto pb = std::get_if<bool*>(&k.target)) {
-    o << (**pb ? "true" : "false");
-  } else if (auto ps = std::get_if<std::string*>(&k.target)) {
-    o << **ps;
+  if (auto ad = std::get_if<Access<double>>(&s.access)) {
+    if (std::isnan(ad->cref(*this))) return "derived";
+    o << ad->cref(*this);
+  } else if (auto ai = std::get_if<Access<int>>(&s.access)) {
+    if (ai->cref(*this) < 0 && s.lo < 0) return "derived";
+    o << ai->cref(*this);
+  } else if (auto ab = std::get_if<Access<bool>>(&s.access)) {
+    o << (ab->cref(*this) ? "true" : "false");
+  } else if (auto as = std::get_if<Access<std::string>>(&s.access)) {
+    o << as->cref(*this);
   } else {
-    o << k.enum_names[enumValue(k)];
+    o << s.enum_names[enumValue(*this, s)];
   }
   return o.str();
 }
@@ -460,35 +531,33 @@ std::string SyncConfig::valueText(const Knob& k) {
 std::string SyncConfig::describe() const {
   std::ostringstream o;
   o << "sync configuration (value  provenance):\n";
-  for (const auto& k : knobs()) {
-    auto it = provenance.find(k.path);
-    o << "  " << k.path << " = " << valueText(k) << "  ["
-      << (it == provenance.end() ? "default" : it->second) << "]\n";
-  }
-  for (const auto& w : warnings) o << "  note: " << w << "\n";
+  for (const auto& s : schema())
+    o << "  " << s.path << " = " << valueText(s) << "  [" << name(provenanceOf(s.path)) << "]\n";
+  for (const auto& w : warnings_) o << "  " << (w.rfind("note:", 0) == 0 ? w : "note: " + w) << "\n";
   return o.str();
 }
 
 std::string SyncConfig::schemaMarkdown() {
-  SyncConfig c = defaults();
+  const SyncConfig c = defaults();
   std::ostringstream o;
-  o << "| key | default | was | range | env out of range | what it does |\n| --- | --- | --- | --- | --- | --- |\n";
-  for (const auto& k : c.knobs()) {
-    o << "| `sync." << k.path << "` | ";
-    const std::string v = valueText(k);
-    if (std::holds_alternative<std::string*>(k.target) || k.isEnum()) o << "`" << v << "`";
+  o << "| key | default | was | range | env out of range | what it does |\n"
+       "| --- | --- | --- | --- | --- | --- |\n";
+  for (const auto& s : schema()) {
+    o << "| `sync." << s.path << "` | ";
+    const std::string v = c.valueText(s);
+    if (std::holds_alternative<Access<std::string>>(s.access) || s.isEnum()) o << "`" << v << "`";
     else o << v;
-    o << " | " << (k.env ? std::string("`") + k.env + "`" : "") << " | ";
-    if (k.isNumeric()) o << k.lo << " to " << k.hi;
-    else if (k.isEnum()) {
-      for (int j = 0; k.enum_names[j]; ++j) o << (j ? ", " : "") << k.enum_names[j];
+    o << " | " << (s.env ? std::string("`") + s.env + "`" : "") << " | ";
+    if (s.isNumeric()) o << s.lo << " to " << s.hi;
+    else if (s.isEnum()) {
+      for (int j = 0; s.enum_names[j]; ++j) o << (j ? ", " : "") << s.enum_names[j];
     }
     o << " | ";
-    if (k.env != nullptr) {
-      if (!k.isNumeric()) o << "refused";
-      else o << (k.env_policy == EnvPolicy::kClamp ? "clamped" : "ignored, value kept");
+    if (s.env != nullptr) {
+      if (!s.isNumeric()) o << "refused";
+      else o << (s.env_policy == EnvPolicy::kClamp ? "clamped" : "ignored, value kept");
     }
-    o << " | " << k.doc << " |\n";
+    o << " | " << s.doc << " |\n";
   }
   return o.str();
 }

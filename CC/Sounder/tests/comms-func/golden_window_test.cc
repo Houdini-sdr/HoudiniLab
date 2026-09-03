@@ -80,8 +80,7 @@ bool readWindow(const std::string& path, std::vector<std::complex<int16_t>>* out
 int main(int argc, char** argv) {
   // Nothing from the operator's shell may change what this test builds.
   {
-    houdini::sync::SyncConfig probe = houdini::sync::SyncConfig::defaults();
-    for (const auto& k : probe.knobs())
+    for (const auto& k : houdini::sync::SyncConfig::schema())
       if (k.env != nullptr) unsetenv(k.env);
   }
   const std::string dir = argc > 1 ? argv[1] : "tests/comms-func/fixtures/golden";
@@ -146,7 +145,7 @@ int main(int argc, char** argv) {
               SnrWindowGuard::guardFor(0, 4) == 8,
           "guardFor: 64 by default, the configured value when given, never below the window or 8");
   }
-  const auto cfg = houdini::sync::SyncConfig::load("{}");
+  const auto cfg = houdini::sync::SyncConfig::loadFromText("{}");
   const float kCorrScale = 10.0f;
   int windows = 0;
   for (const char* shape : {"legacy", "nr_pss"}) {

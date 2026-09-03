@@ -261,7 +261,7 @@ target_link_libraries(houdini_sync PUBLIC ${MUFFT_LIBRARIES})
 
 add_executable(sync_config_test tests/comms-func/sync_config_test.cc)
 target_link_libraries(sync_config_test houdini_sync -lpthread)
-add_test(NAME sync_config COMMAND sync_config_test)
+add_test(NAME sync_config COMMAND sync_config_test ${CMAKE_CURRENT_SOURCE_DIR}/CSI_DEMO_WALKTHROUGH.md)
 
 add_executable(sync_config_schema tests/comms-func/sync_config_schema.cc)
 target_link_libraries(sync_config_schema houdini_sync -lpthread)
