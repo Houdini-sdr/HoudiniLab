@@ -80,8 +80,37 @@ static constexpr ssize_t kHoudiniStrobeOffsTicks = 384;
 // can run both rules on ONE binary. Read once: a rule that changed mid-run would
 // make the residual distribution a mixture of two populations, which is exactly
 // the sort of data that gets averaged and believed.
+// DEFAULT SINCE 2026-09-02: first-path with a normalised cross-correlation.
+// The selection is recorded here because it was made from a matrix, not a
+// preference. Across 4 beacons x 7 received levels x 8 noise draws, plus six
+// synthetic multipath channels at 8.5 ppm CFO:
+//
+//   combination        index exact    multipath    corr_scale spread
+//   power + first       6 of 28        correct        10001x     <- pre-today
+//   power + argmax     28 of 28        BIASED         10001x     <- this morning
+//   xcorr + first       7 of 28        correct             1x
+//   xcorr + argmax     28 of 28        BIASED              1x
+//   xcorr + first-path 28 of 28        correct             1x     <- default
+//   no-lag + first-path  fails draws   correct             1x     <- NR-style
+//
+// ON SILICON THE CHOICE IS NOT VISIBLE, and that is stated rather than hidden:
+// six interleaved pairs across two clock offsets and four transmit levels give
+// 15-19 accepts and ZERO false locks for BOTH forms, with residual spreads that
+// overlap. Every advantage the default has is a property this cabled,
+// sub-ppm-when-calibrated, single-path bench cannot exercise. It is chosen for
+// the stated target -- over the air on free-running clocks -- where a
+// level-dependent threshold and a timing reference that hops between multipath
+// components are both real, and neither is reachable here.
 static CommsLib::BeaconPick resyncPickFromEnv() {
   const char* e = std::getenv("HOUDINI_BEACON_PICK");
+  if (e != nullptr && std::string(e) == "argmax") {
+    MLPD_WARN(
+        "HOUDINI_BEACON_PICK=argmax: strongest crossing, no first-path search. "
+        "Correct on a single-path link and BIASED on multipath -- it returns "
+        "the strongest path, which is often a reflection, and which path is "
+        "strongest changes as the channel fades.\n");
+    return CommsLib::BeaconPick::kTargetedArgmax;
+  }
   if (e != nullptr && std::string(e) == "firstpath") {
     MLPD_WARN(
         "HOUDINI_BEACON_PICK=firstpath: targeted resync takes the strongest "
@@ -90,7 +119,7 @@ static CommsLib::BeaconPick resyncPickFromEnv() {
         "path is frequently a reflection, and which path is strongest CHANGES "
         "as the channel fades, so a grid tracked off it hops. Degenerates to "
         "argmax on a single-path link. EXPERIMENTAL.\n");
-    return CommsLib::BeaconPick::kFirstPath;
+    return CommsLib::BeaconPick::kFirstPath;  // the default; explicit is fine
   }
   if (e != nullptr && std::string(e) == "first") {
     MLPD_WARN(
@@ -100,7 +129,7 @@ static CommsLib::BeaconPick resyncPickFromEnv() {
         "enough, which is why the default changed.\n");
     return CommsLib::BeaconPick::kFirstCrossing;
   }
-  return CommsLib::BeaconPick::kTargetedArgmax;
+  return CommsLib::BeaconPick::kFirstPath;
 }
 static const CommsLib::BeaconPick kResyncPick = resyncPickFromEnv();
 
@@ -113,15 +142,30 @@ static const CommsLib::BeaconPick kResyncPick = resyncPickFromEnv();
 // gated on silicon, so it is opt-in.
 static CommsLib::BeaconThresh resyncThreshFromEnv() {
   const char* e = std::getenv("HOUDINI_BEACON_THRESH");
+  if (e != nullptr && std::string(e) == "power") {
+    MLPD_WARN(
+        "HOUDINI_BEACON_THRESH=power: the pre-2026-09-02 statistic, 4th order "
+        "in received amplitude over 2nd. corr_scale is then a different test at "
+        "every level -- measured, the smallest working value moves 10000x over "
+        "a 64x level sweep.\n");
+    return CommsLib::BeaconThresh::kPowerRatio;
+  }
+  if (e != nullptr && std::string(e) == "nolag") {
+    MLPD_WARN(
+        "HOUDINI_BEACON_THRESH=nolag: NR-style, matched filter with no repeat "
+        "check. Measurably less robust on THIS beacon, which has a repeated "
+        "field worth using.\n");
+    return CommsLib::BeaconThresh::kXCorrNoLag;
+  }
   if (e != nullptr && std::string(e) == "xcorr") {
     MLPD_WARN(
         "HOUDINI_BEACON_THRESH=xcorr: detection uses the normalised "
         "cross-correlation. corr_scale becomes a level-invariant fraction "
         "(bar = 1/corr_scale against a peak statistic of ~0.32); the shipped "
         "values 10 and 100 stay well inside range. EXPERIMENTAL, not gated.\n");
-    return CommsLib::BeaconThresh::kNormalizedXCorr;
+    return CommsLib::BeaconThresh::kNormalizedXCorr;  // the default
   }
-  return CommsLib::BeaconThresh::kPowerRatio;
+  return CommsLib::BeaconThresh::kNormalizedXCorr;
 }
 static const CommsLib::BeaconThresh kResyncThresh = resyncThreshFromEnv();
 static ssize_t houdiniBeaconEnd(Config* cfg) {
