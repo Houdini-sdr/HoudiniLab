@@ -203,7 +203,9 @@ int main(int argc, char** argv) {
     SnrWindowGuard guard(d.coreLen(), rcfg.confirm.snr_floor_db,
                          SnrWindowGuard::guardFor(det.firstPathWindow()));
     houdini::sync::RepetitionPhaseEstimator cfo(d.geometry(), rcfg.cfo.window_margin, true);
-    for (int i = 0; i < 6; ++i) {
+    // 00-05 recorded 2026-09-03 morning (index and SNR); 06-11 that afternoon
+    // by the review-fix build, which also records the statistic and the bar.
+    for (int i = 0; i < 12; ++i) {
       char nb[64];
       std::snprintf(nb, sizeof nb, "/resyncwin_%02d", i);
       const std::string base = dir + "/" + shape + nb;
@@ -255,6 +257,17 @@ int main(int argc, char** argv) {
                       det_res.statistic, meta.at("statistic"));
         check(std::fabs(det_res.statistic - meta.at("statistic")) <= 1e-4 * std::max(1.0, std::fabs(meta.at("statistic"))), what);
       }
+      // Informational, not a check: where the strongest crossing sits and how
+      // much stronger it is than the picked first path. The fixtures' recorded
+      // statistic (8.176) showed picks as low as 2 dB above the bar on legacy.
+      {
+        const auto am = det.run(w.data(), w.size(), corr_scale, PickRule::kArgmax);
+        std::printf("INFO  %s window %d: picked %lld stat %.4g | argmax %lld stat %.4g | pick - argmax = %lld samples, %.1f dB below\n",
+                    shape, i, static_cast<long long>(det_res.end_index), det_res.statistic,
+                    static_cast<long long>(am.end_index), am.statistic,
+                    static_cast<long long>(det_res.end_index - am.end_index),
+                    am.statistic > 0 ? 10.0 * std::log10(am.statistic / std::max(1e-12, det_res.statistic)) : 0.0);
+      }
       const double snr = guard.snrDb(w.data(), w.size(), det_res.end_index);
       std::snprintf(what, sizeof what, "%s window %d: snr %.2f dB (recorded %.2f)", shape, i,
                     snr, meta.at("snr"));
@@ -275,9 +288,9 @@ int main(int argc, char** argv) {
       }
     }
   }
-  check(windows >= 12, "found " + std::to_string(windows) + " fixture windows (expected 12)");
+  check(windows == 24, "found " + std::to_string(windows) + " fixture windows (expected 24)");
   for (const char* shape : {"legacy", "nr_pss"})
-    check(per_shape[shape] == 6, std::string(shape) + ": 6 of 6 fixture windows present (a half-populated set fails here, not quietly)");
+    check(per_shape[shape] == 12, std::string(shape) + ": 12 of 12 fixture windows present (a half-populated set fails here, not quietly)");
   std::printf("\nRESULT: %s (%d failure(s))\n", g_fail ? "FAIL" : "PASS", g_fail);
   return g_fail ? 1 : 0;
 }

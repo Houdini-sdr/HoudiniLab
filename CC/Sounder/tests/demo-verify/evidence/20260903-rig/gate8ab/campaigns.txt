@@ -1,0 +1,90 @@
+campaign: shapes [legacy nr_pss] x 2 rounds x 60s, conf files/houdini-ul.json, topology files/topology-houdini.json, out logs/gate8ab
+binary: 2026-09-03_12:27:46 build/sounder  git: 729e726b5 sync library: ResyncPolicy, sim::Channel, Numerology
+[12:31:16] round 1 shape legacy -> logs/gate8ab/legacy_r1.log
+cleaned 0 process(es)
+  rc=124 started=1 accepts=23
+[12:32:25] round 1 shape nr_pss -> logs/gate8ab/nr_pss_r1.log
+cleaned 0 process(es)
+  rc=124 started=1 accepts=23
+[12:33:35] round 2 shape nr_pss -> logs/gate8ab/nr_pss_r2.log
+cleaned 0 process(es)
+  rc=124 started=1 accepts=23
+[12:34:46] round 2 shape legacy -> logs/gate8ab/legacy_r2.log
+cleaned 0 process(es)
+  rc=124 started=1 accepts=23
+cleaned 0 process(es)
+=== gate_summary ===
+stack BS  fpga c88e0b5f device 3a0aa361 host 3a0aa361
+stack UE  fpga c88e0b5f device 3a0aa361 host 3a0aa361
+REFUSING TO AGGREGATE: runs used different beacons: legacy(496), nr_pss(272)
+beacon legacy, core 496 samples
+beacon nr_pss, core 272 samples
+
+run                  accept   esc offgrid     sd max|r|     det  lowSNR starved  CNS low
+legacy_r1.log            23     0       0   1.99      7      23    0/23       0   0/1536
+legacy_r2.log            23     0       0   4.71     13      23    0/23       0  22/1536
+nr_pss_r1.log            23     0       0   4.68      8      23    0/23       0   0/1536
+nr_pss_r2.log            23     0       0   2.94     15      23    0/23       0  16/1536
+
+legacy_r1.log          tracker=alpha-beta cadence=2604.2 ms geometry=3284 samp / 4096 (80.2%), tol 246
+                         acquisition confirmed resid +0 over 202 frames
+legacy_r2.log          tracker=alpha-beta cadence=2604.2 ms geometry=3284 samp / 4096 (80.2%), tol 246
+                         acquisition confirmed resid -1 over 202 frames
+nr_pss_r1.log          tracker=alpha-beta cadence=2604.2 ms geometry=3284 samp / 4096 (80.2%), tol 246
+                         acquisition confirmed resid +1 over 210 frames
+nr_pss_r2.log          tracker=alpha-beta cadence=2604.2 ms geometry=3284 samp / 4096 (80.2%), tol 246
+                         acquisition confirmed resid +0 over 208 frames
+
+  accept         23 23 23 23   spread 0
+  resid sd       1.991 4.708 4.679 2.936   spread 2.717
+  max |resid|    7 13 8 15   spread 8
+  CNS low frac   0 0.01432 0 0.01042   spread 0.01432
+
+=== WARN/ERROR census (kinds, digits collapsed) ===
+  WARNG     44  CSI view: dropped 1 slot(s) with RX gaps (latest 4096 padded samples, ant 0). The display is stale, not wrong;
+  WARNG     43  BS: no UE burst in frame read (rms 6 vs floor 6, occurrence 1) -- frame skipped
+  WARNG     37  BS: pilot slot failed the LTS check (selfsim 0.09, occurrence 1) -- frame marked untrusted
+  WARNING    16  RFDC ADC0.0 IntrStatus=0x34000000 [OVR_VOLTAGE CMODE_OVR CMODE_UNDR] (first event this session)[0m
+  WARNG     12  BS recv: no slot from radio 0 (1 slotless reads so far). Either the UE is not transmitting (pause, escalation,
+  WARNG      8  CNS score 0.027 at frame 258, r=7.000 (low occurrence 1 of 15 datagrams)
+  WARNING     6  RFDC DAC2.0 IntrStatus=0x80000008 [FIFOMRGNIND_UF FIFO_OVR] (first event this session)[0m
+  WARNING     4  TDD_SCHED: entry 29 (rx) abuts entry 0 (tx-ish) ACROSS THE FRAME WRAP -- that boundary is the power board's WA
+  WARNING     4  TDD_ARM: the ring this arm will PLAY (symbols_per_frame=30) has entry 29 (rx) abutting entry 0 (tx-ish) ACROSS
+  WARNG      4  VIEW MODE (HOUDINI_CSI_UDP is set): CSI streams to the dashboard and NO HDF5 FILE IS WRITTEN. Unset it to reco
+  WARNG      3  CNS score 0.140 at frame 10034, r=-5.344 (low occurrence 4 of 540 datagrams)
+
+wrote logs/gate8ab/gate.json
+CAMPAIGN-DONE rc=0
+campaign: shapes [dot11] x 1 rounds x 60s, conf files/houdini-ul.json, topology files/topology-houdini.json, out logs/gate8ab_dot11
+binary: 2026-09-03_12:27:46 build/sounder  git: 729e726b5 sync library: ResyncPolicy, sim::Channel, Numerology
+[12:35:55] round 1 shape dot11 -> logs/gate8ab_dot11/dot11_r1.log
+cleaned 0 process(es)
+  rc=124 started=1 accepts=23
+cleaned 0 process(es)
+=== gate_summary ===
+stack BS  fpga c88e0b5f device 3a0aa361 host 3a0aa361
+stack UE  fpga c88e0b5f device 3a0aa361 host 3a0aa361
+beacon dot11, core 320 samples
+
+run                  accept   esc offgrid     sd max|r|     det  lowSNR starved  CNS low
+dot11_r1.log             23     0       0   3.91     15      23    0/23       0   6/1536
+
+dot11_r1.log           tracker=alpha-beta cadence=2604.2 ms geometry=3444 samp / 4096 (84.1%), tol 246
+                         acquisition confirmed resid +0 over 203 frames
+
+
+=== WARN/ERROR census (kinds, digits collapsed) ===
+  WARNG     13  BS: no UE burst in frame read (rms 6 vs floor 6, occurrence 1) -- frame skipped
+  WARNG     12  CSI view: dropped 1 slot(s) with RX gaps (latest 4096 padded samples, ant 0). The display is stale, not wrong;
+  WARNG     11  BS: pilot slot failed the LTS check (selfsim 0.07, occurrence 1) -- frame marked untrusted
+  WARNING     4  RFDC ADC0.0 IntrStatus=0x34000000 [OVR_VOLTAGE CMODE_OVR CMODE_UNDR] (first event this session)[0m
+  WARNG      3  BS recv: no slot from radio 0 (1 slotless reads so far). Either the UE is not transmitting (pause, escalation,
+  WARNG      2  CNS score 0.137 at frame 16355, r=-1.895 (low occurrence 2 of 832 datagrams)
+  WARNING     1  RFDC DAC2.0 IntrStatus=0x80000008 [FIFOMRGNIND_UF FIFO_OVR] (first event this session)[0m
+  WARNING     1  TDD_SCHED: entry 29 (rx) abuts entry 0 (tx-ish) ACROSS THE FRAME WRAP -- that boundary is the power board's WA
+  WARNING     1  TDD_ARM: the ring this arm will PLAY (symbols_per_frame=30) has entry 29 (rx) abutting entry 0 (tx-ish) ACROSS
+  WARNG      1  VIEW MODE (HOUDINI_CSI_UDP is set): CSI streams to the dashboard and NO HDF5 FILE IS WRITTEN. Unset it to reco
+  WARNG      1  CNS score 0.108 at frame 2624, r=3.227 (low occurrence 1 of 149 datagrams)
+
+wrote logs/gate8ab_dot11/gate.json
+CAMPAIGN-DONE rc=0
