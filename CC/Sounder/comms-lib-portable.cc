@@ -336,8 +336,8 @@ static const double kFirstPathDb = firstPathDb();
 // an actual -18 dB one, and a sidelobe 18 dB down gets promoted to "first path".
 // Measured: nolag+first-path read -190 samples on a SINGLE-PATH channel with the
 // squared floor and -129 with the corrected one.
-static double firstPathFloorFrac(CommsLib::BeaconThresh form) {
-  const double p = std::pow(10.0, kFirstPathDb / 10.0);
+static double firstPathFloorFrac(CommsLib::BeaconThresh form, double db) {
+  const double p = std::pow(10.0, db / 10.0);
   return form == CommsLib::BeaconThresh::kXCorrNoLag ? p : p * p;
 }
 // -9 dB is close to the margin: bisected offline, the hardest gated multipath
@@ -351,6 +351,19 @@ int CommsLib::find_beacon_avx(
     const std::vector<std::complex<float>>& raw_samples,
     const std::vector<std::complex<float>>& match_samples, float corr_scale,
     BeaconPick pick, BeaconThresh thresh_form) {
+  // The pre-SyncConfig entry: first-path knobs from the environment (read
+  // once) with the historical defaults.
+  return find_beacon_avx(raw_samples, match_samples, corr_scale, pick,
+                         thresh_form,
+                         firstPathWindow(static_cast<int>(match_samples.size())),
+                         kFirstPathDb);
+}
+
+int CommsLib::find_beacon_avx(
+    const std::vector<std::complex<float>>& raw_samples,
+    const std::vector<std::complex<float>>& match_samples, float corr_scale,
+    BeaconPick pick, BeaconThresh thresh_form, int first_path_window,
+    double first_path_db) {
   const int seqLen = static_cast<int>(match_samples.size());
 #ifdef TEST_BENCH
   const auto t0 = std::chrono::steady_clock::now();
@@ -499,8 +512,10 @@ int CommsLib::find_beacon_avx(
     // threshold crossings: a weak first path can sit under the absolute bar
     // while being unambiguous relative to the peak beside it, which is the
     // whole reason the test is a FRACTION of the peak.
-    const int win = firstPathWindow(seqLen);
-    const double floor_ratio = firstPathFloorFrac(thresh_form) * best_ratio;
+    // Bounded the way the env reader bounds it: at most two replica lengths.
+    const int win = std::max(0, std::min(first_path_window, seqLen * 2));
+    const double floor_ratio =
+        firstPathFloorFrac(thresh_form, first_path_db) * best_ratio;
     int first = best;
     for (int i = std::max(0, best - win); i < best; ++i) {
       if (ranking(static_cast<size_t>(i)) >= floor_ratio) { first = i; break; }
@@ -529,6 +544,17 @@ ssize_t CommsLib::find_beacon_avx(
     const std::complex<int16_t>* raw_samples,
     const std::vector<std::complex<float>>& match_samples, size_t check_window,
     float corr_scale, BeaconPick pick, BeaconThresh thresh_form) {
+  return find_beacon_avx(raw_samples, match_samples, check_window, corr_scale,
+                         pick, thresh_form,
+                         firstPathWindow(static_cast<int>(match_samples.size())),
+                         kFirstPathDb);
+}
+
+ssize_t CommsLib::find_beacon_avx(
+    const std::complex<int16_t>* raw_samples,
+    const std::vector<std::complex<float>>& match_samples, size_t check_window,
+    float corr_scale, BeaconPick pick, BeaconThresh thresh_form,
+    int first_path_window, double first_path_db) {
   static constexpr float kShortMaxFloat = 32767.0f;
   std::vector<std::complex<float>> sync_compare(check_window);
   for (size_t i = 0; i < check_window; ++i) {
@@ -537,7 +563,8 @@ ssize_t CommsLib::find_beacon_avx(
         static_cast<float>(raw_samples[i].imag()) / kShortMaxFloat);
   }
   return CommsLib::find_beacon_avx(sync_compare, match_samples, corr_scale,
-                                   pick, thresh_form);
+                                   pick, thresh_form, first_path_window,
+                                   first_path_db);
 }
 
 // Element-wise complex multiply, portable equivalent of the float

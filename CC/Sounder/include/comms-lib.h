@@ -259,6 +259,22 @@ class CommsLib {
       size_t check_window, float corr_scale,
       BeaconPick pick = BeaconPick::kFirstCrossing,
       BeaconThresh thresh_form = BeaconThresh::kPowerRatio);
+  // The first-path knobs made EXPLICIT. The two-argument-shorter overloads
+  // above keep reading HOUDINI_FIRST_PATH_WIN / HOUDINI_FIRST_PATH_DB for the
+  // callers that predate sync::SyncConfig; the library passes the configured
+  // values here so a run has one source of truth for them.
+  //   first_path_window  samples of back-search from the peak (0..2*seqLen)
+  //   first_path_db      how much weaker an earlier path may be, dB <= 0
+  static int find_beacon_avx(
+      const std::vector<std::complex<float>>& raw_samples,
+      const std::vector<std::complex<float>>& match_samples, float corr_scale,
+      BeaconPick pick, BeaconThresh thresh_form, int first_path_window,
+      double first_path_db);
+  static ssize_t find_beacon_avx(
+      const std::complex<int16_t>* raw_samples,
+      const std::vector<std::complex<float>>& match_samples,
+      size_t check_window, float corr_scale, BeaconPick pick,
+      BeaconThresh thresh_form, int first_path_window, double first_path_db);
   // GPU beacon detector (find_beacon_cuda.cu), defined only when built with
   // -DUSE_CUDA (CMake HOUDINI_USE_CUDA), which is OFF by default and OFF on the
   // rig. NOTE it still returns the FIRST crossing (atomicMin over the index), so

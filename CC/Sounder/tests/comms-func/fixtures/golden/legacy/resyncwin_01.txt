@@ -1,0 +1,7 @@
+n 4096
+sync_index 756
+snr 48.15
+frame 2033
+rx_beacon_time 488393288
+pilot_ref 170011169
+beacon_end 880

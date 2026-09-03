@@ -244,6 +244,28 @@ target_link_libraries(sounder_module -lpthread --enable-threadsafe ${GFLAGS_LIBR
 # it builds and runs anywhere, which is the point -- the two defects it covers
 # were only visible by running a UE against silicon at one rate.
 enable_testing()
+# ---- houdini_sync: the UE synchronisation library ---------------------------
+# One classed home for the beacon shapes, the detector, the confirm, the carrier
+# estimator and their configuration (docs/SYNC_LIBRARY_ARCHITECTURE.md). Static,
+# portable (x86 and aarch64), no dependency beyond what the sounder links.
+add_library(houdini_sync STATIC
+    sync/sync_config.cc
+    sync/detector.cc
+    comms-lib.cc comms-lib-avx.cc comms-lib-portable.cc utils.cc)
+target_include_directories(houdini_sync PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_compile_definitions(houdini_sync PUBLIC ${MUFFT_DEFINITIONS})
+target_link_libraries(houdini_sync PUBLIC ${MUFFT_LIBRARIES})
+
+add_executable(sync_config_test tests/comms-func/sync_config_test.cc)
+target_link_libraries(sync_config_test houdini_sync -lpthread)
+add_test(NAME sync_config COMMAND sync_config_test)
+
+add_executable(golden_window_test tests/comms-func/golden_window_test.cc)
+target_link_libraries(golden_window_test houdini_sync -lpthread)
+add_test(NAME golden_window COMMAND golden_window_test
+         ${CMAKE_CURRENT_SOURCE_DIR}/tests/comms-func/fixtures/golden)
+
 add_executable(sync_geometry_test tests/comms-func/sync_geometry_test.cc)
 target_include_directories(sync_geometry_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 add_test(NAME sync_geometry COMMAND sync_geometry_test)
