@@ -21,6 +21,8 @@
 #include <string>
 #include <vector>
 
+#include <SoapySDR/Errors.hpp>
+
 #include "include/logger.h"
 #include "include/macros.h"
 #include "include/rx_gap_sink.h"
@@ -120,8 +122,19 @@ void HoudiniFramer::armReplayBeacon(void) {
     for (size_t i = 0; i < radios_.at(c).size(); ++i) {
       if (i != cfg_->beacon_radio()) continue;
       Radio* r = radios_.at(c).at(i).get();
-      r->xmit(buffs, static_cast<int>(n_load), 0, t0);  // load replay RAM
-      r->activateXmit();                                // arm free-running loop
+      // The load is the beacon: a refused or short load (the plugin returns an
+      // error while the replay bank's level arm is still set) must stop the
+      // bring-up here, not arm the loop over stale RAM and play a beacon that
+      // is not the one built above (DEMO_VERIFICATION 4.24, SH-348).
+      const int loaded = r->xmit(buffs, static_cast<int>(n_load), 0, t0);
+      if (loaded != static_cast<int>(n_load)) {
+        throw std::runtime_error(
+            "Houdini beacon replay RAM load refused: " +
+            std::string(loaded < 0 ? SoapySDR::errToStr(loaded) : "short load") +
+            " (" + std::to_string(loaded) + " of " + std::to_string(n_load) +
+            " samples)");
+      }
+      r->activateXmit();  // arm free-running loop
       MLPD_INFO(
           "Houdini BS beacon armed: %zu-sample app-rate replay loop (isolated "
           "beacon, period %zu) on cell %zu radio %zu\n",
@@ -312,7 +325,20 @@ void HoudiniFramer::armTdd(void) {
                             "ch" + std::to_string(tx_ch) + ":off");
         } catch (...) {
         }
-        r->xmit(buffs, static_cast<int>(n_load), 0, t0);  // load replay RAM
+        // A refused or short load (the plugin refuses the fill while the
+        // replay bank's level arm is set) stops the sequence here: the arm
+        // retry loop runs the ladder, which clears that arm, and re-invokes
+        // this setup. Arming over stale RAM would play a beacon that is not
+        // the one built above (DEMO_VERIFICATION 4.24, SH-348).
+        const int loaded = r->xmit(buffs, static_cast<int>(n_load), 0, t0);
+        if (loaded != static_cast<int>(n_load)) {
+          throw std::runtime_error(
+              "Houdini beacon replay RAM load refused: " +
+              std::string(loaded < 0 ? SoapySDR::errToStr(loaded)
+                                     : "short load") +
+              " (" + std::to_string(loaded) + " of " +
+              std::to_string(n_load) + " samples)");
+        }
         dev->writeSetting("TDD_SCHED", tdd);
       // ONE burst per frame (loops=1) spanning the usable symbol: the RAM is
       // [beacon core 496][zeros], and len (2-sample units, driver contract)
