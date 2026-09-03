@@ -53,6 +53,7 @@
 
 #include "sync/beacon_shapes.h"
 #include "sync/numerology.h"
+#include "sync/sync_config.h"
 #include "sync/sim/channel.h"
 #include "comms-lib.h"
 #include "utils.h"
@@ -700,6 +701,35 @@ int main() {
         std::printf("%-10.0f %-8s %10d %10d\n", cs, nolag ? "nolag" : "xcorr",
                     nwin, crossed);
       }
+    }
+    // P3: the same noise windows at the bar a per-window probability implies.
+    // At pfa 0.1 over 12288 samples the coherence bar is 0.088 for 128 taps
+    // (1 - (0.1/12288)^(1/127)), and the expected crossings over 16 windows
+    // are ~1.6; the corr_scale 100 bar (0.01) above crosses on every window.
+    // PREDICTION stated first: crossed <= 4 (a 2.5x allowance on a Poisson
+    // mean of 1.6). Measured 3 on the first run.
+    {
+      const double pfa = 0.1;
+      const double bar = houdini::sync::ThresholdPolicy::coherenceBar(pss.replica.size(), pfa, 12288);
+      int crossed = 0;
+      for (int w = 0; w < 16; ++w) {
+        std::mt19937 g(9000u + w);
+        auto u01 = [&g]() { return (static_cast<double>(g()) + 0.5) / 4294967296.0; };
+        std::vector<std::complex<int16_t>> buf(12288);
+        for (auto& v : buf) {
+          const double a = std::sqrt(-2.0 * std::log(u01()));
+          const double ph = 2.0 * M_PI * u01();
+          v = std::complex<int16_t>(static_cast<int16_t>(20.0 * a * std::cos(ph)),
+                                    static_cast<int16_t>(20.0 * a * std::sin(ph)));
+        }
+        const ssize_t idx = CommsLib::find_beacon_avx(buf.data(), pss.replica, buf.size(),
+                                                      static_cast<float>(1.0 / bar),
+                                                      Pick::kFirstClusterRefined, Thr::kCoherence);
+        if (idx >= 0) ++crossed;
+      }
+      std::printf("pfa %.2f  bar %.4f  windows 16  crossed %d (expected ~1.6)\n", pfa, bar, crossed);
+      check(crossed <= 4, "P3: the pfa-derived coherence bar crosses noise windows at about the stated rate (" +
+                              std::to_string(crossed) + " of 16 at pfa 0.1)");
     }
   }
 

@@ -108,18 +108,22 @@ struct ThresholdPolicy {
   /// window's coherence against an L-tap replica is Beta(1, L-1), so
   /// P(coh > bar) per index is (1 - bar)^(L-1) and
   /// bar = 1 - (pfa_per_window / window_samples)^(1/(L-1)). Measured against
-  /// its prediction in beacon_geometry_test. RESERVED for P3 with
-  /// DetectorConfig::pfa_per_window; not applied by the detector yet.
+  /// its prediction in beacon_geometry_test; applied by the detector for the
+  /// coherence form when DetectorConfig::pfa_applies (P3).
   static double coherenceBar(size_t replica_len, double pfa_per_window, size_t window_samples);
 };
 
 struct DetectorConfig {
   ThresholdForm threshold = ThresholdForm::kAuto;
-  /// RESERVED for phase P3 (architecture plan): the coherence form's bar will
-  /// be derived from this and the replica length (8.163). NOT APPLIED YET --
-  /// the detector still uses `bar` for every form, and validate() says so
-  /// when a value is given.
+  /// The coherence form's bar, when a configuration SETS this: the
+  /// false-alarm probability per search window, turned into a bar by the
+  /// replica length and the window length (ThresholdPolicy::coherenceBar,
+  /// 8.163), so one number means the same thing at every level, rate and
+  /// replica. Unset, the coherence form keeps the corr_scale bar it shipped
+  /// with. Ignored, with a note, for the repeated-field forms (P3).
   double pfa_per_window = 1e-3;
+  /// Set by resolve(): the form is coherence and pfa_per_window was given.
+  bool pfa_applies = false;
   /// The Houdini default. On Iris/UHD resolve() derives first_crossing, the
   /// rule that framer has always run, unless the JSON sets one.
   PickRule pick = PickRule::kFirstPath;
@@ -278,6 +282,7 @@ struct SyncConfig {
   std::vector<std::string> warnings_;
   size_t clients_ = 1;
   Platform platform_ = Platform::kHoudini;
+  bool resolved_ = false;  ///< resolve() has run: notes that need the resolved form may fire
   bool block_sets_threshold_ = false;  ///< the sync block (not the legacy array) set a bar
   void validate();
   /// The schema index of a path; throws std::logic_error for a path the

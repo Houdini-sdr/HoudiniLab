@@ -52,6 +52,9 @@ Detector::Detector(const BeaconShape& shape, const DetectorConfig& cfg)
                                              2 * static_cast<int>(shape.replicaLen()))
                              : shape.defaultFirstPathWindow()),
       first_path_floor_db_(cfg.first_path_floor_db),
+      pfa_applies_(cfg.pfa_applies && resolveForm(cfg.threshold, shape.singleCopy()) ==
+                                          ThresholdForm::kCoherence),
+      pfa_(cfg.pfa_per_window),
 #if defined(USE_CUDA)
       backend_(DetectorBackend::kCuda)
 #else
@@ -69,10 +72,20 @@ Detection Detector::run(const std::complex<int16_t>* samples, size_t n,
   return run(samples, n, corr_scale, pick_);
 }
 
+double Detector::effectiveScale(float corr_scale, size_t n) const {
+  if (!pfa_applies_) return static_cast<double>(corr_scale);
+  // The bar the configured false-alarm probability implies for this replica
+  // over this window (8.163), expressed as the corr_scale the correlator
+  // takes (bar = 1 / corr_scale). The retry relaxation the caller applies to
+  // corr_scale does not apply here: the probability is the policy.
+  return 1.0 / ThresholdPolicy::coherenceBar(shape_.replicaLen(), pfa_, n);
+}
+
 Detection Detector::run(const std::complex<int16_t>* samples, size_t n,
                         float corr_scale, PickRule pick) const {
   Detection d;
-  d.bar = 1.0 / static_cast<double>(corr_scale);
+  const float scale = static_cast<float>(effectiveScale(corr_scale, n));
+  d.bar = 1.0 / static_cast<double>(scale);
 #if defined(USE_CUDA)
   if (backend_ == DetectorBackend::kCuda) {
     // The GPU correlator returns the first crossing under the power-ratio
@@ -88,7 +101,7 @@ Detection Detector::run(const std::complex<int16_t>* samples, size_t n,
   }
 #endif
   const CommsLib::BeaconResult r = CommsLib::find_beacon_ex(
-      samples, shape_.replica(), n, corr_scale, toCorrelator(pick), toCorrelator(form_),
+      samples, shape_.replica(), n, scale, toCorrelator(pick), toCorrelator(form_),
       first_path_window_, first_path_floor_db_);
   d.end_index = shape_.endFromCorrelatorIndex(r.index, n);
   d.form = form_;

@@ -282,7 +282,7 @@ int main(int argc, char** argv) {
     const auto pw = SyncConfig::loadFromText(R"({"sync": {"detector": {"pfa_per_window": 0.01}}})");
     bool reserved = false;
     for (const auto& w : pw.warnings()) reserved |= (w.find("RESERVED") != std::string::npos);
-    check(reserved, "validate: a pfa_per_window value is noted as reserved and not applied");
+    check(!reserved, "validate: pfa_per_window is no longer reserved (P3 applies it to the coherence form)");
     const auto fixed = SyncConfig::loadFromText(R"({"sync": {"tracker": {"alpha": 0, "beta": 0}}})");
     bool fixed_note = false;
     for (const auto& w : fixed.warnings()) fixed_note |= (w.find("fixed-period") != std::string::npos);
@@ -350,6 +350,24 @@ int main(int argc, char** argv) {
     check(h.detector.pick == PickRule::kFirstPath && h.detector.threshold == ThresholdForm::kAuto &&
               h.provenanceOf("detector.pick") == Source::kDefault,
           "resolve: Houdini keeps the shipped defaults");
+    // P3: the probability applies to the coherence form only, and only when set.
+    auto pf = SyncConfig::loadFromText(R"({"sync": {"detector": {"pfa_per_window": 1e-3}}})");
+    houdini::sync::ResolveContext rpf;
+    rpf.replica_len = 128; rpf.prefix_samples = 160; rpf.single_copy_replica = true;
+    pf.resolve(rpf);
+    check(pf.detector.pfa_applies && pf.detector.threshold == ThresholdForm::kCoherence,
+          "P3: pfa set + a single-copy replica -> the pfa bar applies");
+    auto px = SyncConfig::loadFromText(R"({"sync": {"detector": {"pfa_per_window": 1e-3}}})");
+    houdini::sync::ResolveContext rpx;
+    rpx.replica_len = 128; rpx.prefix_samples = 160;
+    px.resolve(rpx);
+    bool ignored = false;
+    for (const auto& w : px.warnings()) ignored |= (w.find("applies to the coherence form only") != std::string::npos);
+    check(!px.detector.pfa_applies && ignored,
+          "P3: pfa set on a repeated-field replica -> not applied, and noted");
+    auto pu = SyncConfig::loadFromText("{}");
+    pu.resolve(rpf);
+    check(!pu.detector.pfa_applies, "P3: pfa unset -> corr_scale applies even on the coherence form");
     const double bar = houdini::sync::ThresholdPolicy::coherenceBar(128, 1e-3, 4096);
     const double want = 1.0 - std::pow(1e-3 / 4096.0, 1.0 / 127.0);
     check(std::fabs(bar - want) < 1e-12 && bar > 0.09 && bar < 0.13,

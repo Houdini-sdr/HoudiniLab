@@ -223,7 +223,7 @@ const std::vector<SyncConfig::Spec>& SyncConfig::schema() {
        "Decision statistic: auto picks coherence for a single-copy replica and the normalised cross-correlation otherwise; power is the pre-2026-09 form and the Iris/UHD default.",
        KNOB_ACCESS(ThresholdForm, detector.threshold), kThresholdNames, EP::kClamp},
       {"detector.pfa_per_window", nullptr, 1e-9, 0.5,
-       "RESERVED (phase P3), not applied yet: the false-alarm probability per search window the coherence form's bar will be derived from.",
+       "The coherence form's bar when set: the false-alarm probability per search window, turned into a bar by the replica and window lengths (8.163). Unset, corr_scale applies; ignored for the repeated-field forms.",
        KNOB_ACCESS(double, detector.pfa_per_window), nullptr, EP::kClamp},
       {"detector.pick", "HOUDINI_BEACON_PICK", 0, 0,
        "Which crossing is returned: first_path (the Houdini default), argmax, cluster_refined, or first_crossing (the Iris/UHD default; unsafe on a strong link).",
@@ -525,10 +525,15 @@ void SyncConfig::resolve(const ResolveContext& ctx) {
     detector.threshold = ThresholdForm::kCoherence;
     setProvenance("detector.threshold", Source::kDerived);
   }
+  // The pfa-derived bar applies to the coherence form when a configuration
+  // set the probability (P3); the repeated-field forms keep corr_scale.
+  detector.pfa_applies =
+      wasSet("detector.pfa_per_window") && detector.threshold == ThresholdForm::kCoherence;
   // Several clients: the receiver applies the legacy per-client arrays, not
   // the block's one value.
   clients_ = ctx.clients;
   platform_ = ctx.platform;
+  resolved_ = true;
   validate();
 }
 
@@ -576,9 +581,11 @@ void SyncConfig::validate() {
     note("detector.first_path_window above 512 reaches past any preamble plateau and widens "
          "the SNR guard to most of a slot; the correlator caps it at twice the replica length");
   }
-  if (wasSet("detector.pfa_per_window")) {
-    note("detector.pfa_per_window is RESERVED (phase P3) and not applied: the detector still "
-         "uses corr_scale for every form");
+  // Only once the form is resolved (a repeated-field replica runs the
+  // normalised cross-correlation whatever "auto" said).
+  if (resolved_ && wasSet("detector.pfa_per_window") && !detector.pfa_applies) {
+    note("detector.pfa_per_window applies to the coherence form only; this replica's "
+         "repeated-field form keeps its corr_scale bar");
   }
   if (tracker.type == TrackerType::kAlphaBeta && tracker.alpha == 0.0 && tracker.beta == 0.0) {
     note("tracker alpha and beta are both 0: the grid is fixed-period");

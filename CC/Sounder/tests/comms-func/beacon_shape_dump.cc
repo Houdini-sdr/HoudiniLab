@@ -91,7 +91,7 @@ int main(int argc, char** argv) {
                   "\"form\": \"%s\", \"pick\": \"%s\", \"replica_tail\": %zu, "
                   "\"first_path_window\": %d, \"first_path_floor_db\": %.1f, "
                   "\"snr_guard\": %zu, \"end_offset_houdini\": %zd, "
-                  "\"coherence_bar_pfa%.0e_4096\": %.6f}",
+                  "\"coherence_bar_pfa%.0e_4096\": %.6f, \"bar_from_pfa\": %s}",
                   first ? "" : ",\n", d.name.c_str(), d.core.size(),
                   d.replica.size(), d.replica_off, d.replica_reps, d.fine_off, d.fine_len, d.fine_reps,
                   d.guard_len, d.coarse_off, d.coarse_len, d.coarse_reps,
@@ -99,7 +99,8 @@ int main(int argc, char** argv) {
                   shape.replicaTail(), det.firstPathWindow(), det.firstPathFloorDb(),
                   houdini::sync::SnrWindowGuard::guardFor(det.firstPathWindow()),
                   shape.expectedEndOffset(), cfg.detector.pfa_per_window,
-                  houdini::sync::ThresholdPolicy::coherenceBar(shape.replicaLen(), cfg.detector.pfa_per_window, 4096));
+                  houdini::sync::ThresholdPolicy::coherenceBar(shape.replicaLen(), cfg.detector.pfa_per_window, 4096),
+                  det.barFromPfa() ? "true" : "false");
     js += buf;
     first = false;
     std::printf("%-13s core %4zu  replica %3zu  fine@%zu x%zu  guard %zu  PAPR %.2f dB\n",

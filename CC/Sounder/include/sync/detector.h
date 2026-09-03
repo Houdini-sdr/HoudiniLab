@@ -60,7 +60,10 @@ class Detector {
   ///               replica, the correlator's own limit
   Detector(const BeaconShape& shape, const DetectorConfig& cfg);
 
-  /// Search `n` samples with the bar 1/corr_scale (ThresholdPolicy). `pick`
+  /// Search `n` samples with the bar 1/corr_scale (ThresholdPolicy), or, for
+  /// the coherence form when the configuration set a false-alarm probability
+  /// (DetectorConfig::pfa_applies), the bar that probability implies for
+  /// this replica over `n` samples (ThresholdPolicy::coherenceBar). `pick`
   /// overrides the configured rule for a caller whose window may hold several
   /// beacon copies.
   Detection run(const std::complex<int16_t>* samples, size_t n, float corr_scale) const;
@@ -73,6 +76,13 @@ class Detector {
   bool singleCopy() const { return shape_.singleCopy(); }
   int firstPathWindow() const { return first_path_window_; }
   double firstPathFloorDb() const { return first_path_floor_db_; }
+  /// True when the bar comes from the configured false-alarm probability
+  /// rather than corr_scale (coherence form, pfa set).
+  bool barFromPfa() const { return pfa_applies_; }
+  double pfaPerWindow() const { return pfa_; }
+  /// The corr_scale equivalent this detector applies for a window of `n`
+  /// samples: the caller's value, or 1 / coherenceBar when barFromPfa().
+  double effectiveScale(float corr_scale, size_t n) const;
   const BeaconShape& shape() const { return shape_; }
 
   DetectorBackend backend() const { return backend_; }
@@ -93,6 +103,8 @@ class Detector {
   PickRule pick_;
   int first_path_window_;
   double first_path_floor_db_;
+  bool pfa_applies_;
+  double pfa_;
   DetectorBackend backend_;
 };
 

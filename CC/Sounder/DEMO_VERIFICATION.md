@@ -649,6 +649,26 @@ whether an NR-shaped beacon is a live option for the OTA target.
 | 8.167 | **THE CONJUGATE-IMAGE INFERENCE IS RETRACTED, AND WHAT SURVIVES IS SMALLER AND BETTER FOUNDED.** [user: "any test should be validated again even if it matches the hypothesis"; "I am skeptical of a conjugate-image"]. The inference rested on a rule of thumb -- a pure beacon gives a wrong-sense/right-sense peak ratio of 1/sqrt(128) = 0.09 -- that this replica violates: the Gold IFFT sequence is structured and its conjugate-free self-product, computed exactly on a pure delayed beacon (`phase_probe_null.py`), is **0.16 to 0.28 depending on the fractional delay**. The identical analysis on the real windows reads **0.18 to 0.24 on the sounder's six golden windows and 0.29 to 0.34 on the probe's raw window**, i.e. at the null; and the estimator barely responds to an injected image below b = 0.3 (0.211 at b = 0, 0.212 at b = 0.2), so it could not have detected a small one anyway. The "100x variation between re-arms" was the probe's lag-product ratio for the wrong sense, a statistic that was never given a null and cannot carry a claim. **Retracted: image, chain-state variation, and the AP-70 handoff as filed.** **What survives, validated the same way:** (1) the correlation lobe's phase step between adjacent samples is **0.06 to 0.30 rad on real data in BOTH capture paths** (sounder windows -0.07 / -0.16 / -0.29 / +0.20 / -0.07 / -0.14; probe -0.06 to -0.30) against **0.01 for a pure delayed beacon**, so the received beacon's spectrum is asymmetric by a modest, benign amount (chain and cable dispersion) and an integer-peak phase readout inherits that step at every argmax hop; (2) one run had two equal-magnitude adjacent samples **2.4 rad apart**, which a single correlation lobe cannot produce and which fits a two-component arrival about one sample apart; its waveform was not captured, so it is **UNEXPLAINED**, and the probe now arms a raw dump so the next one is. (3) Incidental and verified: the probe transmits the dumped core as is while the sounder pre-conjugates its transmit, so the probe's windows correlate with conj(g) and the sounder's with g; both are consistent with the conjugating receive mixer. The AP-67 design rule stands on (1) alone | `tests/demo-verify/phase_probe_null.py` (null, calibration, both real paths) | VERIFIED-TEST; image claim RETRACTED; 2.4 rad run UNEXPLAINED |
 | 8.168 | **AP-67 MEASURED: THE BEACON PHASE IS PREDICTABLE FOUR FRAMES AHEAD TO ABOUT 1.5 DEGREES.** On the clean runs the phase innovation after removing one fitted per-frame advance is **0.021 / 0.026 / 0.024 / 0.025 rad at lags 1 / 2 / 3 / 4 frames** (192 / 180 / 168 / 156 pairs), i.e. flat: neither the linear growth of a frequency error nor the sqrt(lag) growth of a random walk is visible above the lag-1 floor, which is the estimator's own noise. So over 4 ms the transmitter's carrier phase relative to the receiver's is a constant advance to 1.5 degrees, and the 5-degree budget in `docs/UE_TIME_FREQ_SYNC.md` section 11.4 was conservative by 3x. Consequence: a beacon-only phase tracker supports 64-QAM-grade phase (about 2 degrees) across the frame on this bench, and the in-slot pilots the doc recommends are for channel change and for other hardware, not for this oscillator pair. One caveat carried: the runs were 6 to 12 windows of 17 frames on a cable at the calibrated clock state; the innovation over tens of frames and over the air is not measured | `ap67.log`, `evidence/20260903-rig/ap67_*.csv` | VERIFIED-HW |
 
+### 8ae. P3, the false-alarm-derived coherence bar: criteria written BEFORE the runs
+
+Pre-registration, in the 8v style. P3 makes `sync.detector.pfa_per_window`
+the coherence form's bar when a configuration sets it (the bar 8.163
+derived: 1 - (pfa / window)^(1/(L-1)), 0.113 for the 128-tap PSS at 1e-3
+over a 4096-sample window), leaving the repeated-field forms and an unset
+probability on corr_scale exactly as shipped. **Offline (run at the time of
+writing):** the 12 recorded nr_pss windows return the recorded index under
+the pfa bar with the bar 0.113 recorded in the detection; the legacy
+detector ignores the probability; the geometry test's noise windows cross
+at about the stated rate (prediction: at most 4 of 16 at pfa 0.1). **On
+silicon:** two interleaved 60 s rounds of nr_pss, `pfa_per_window` 1e-3
+against the shipped config (corr_scale 100, bar 0.01), through the campaign
+overlay. The claim: the one rejected noise-window crossing per acquisition
+hunt that 8.162 recorded (a coherence of ~0 crossing a bar of 0.01) goes to
+zero under the pfa bar, with accepts, escalations, off-grid, residual sd
+and jitter inside the 8.176 envelope. FAIL on the envelope bisects P3; a
+nonzero count of rejected crossings under the pfa bar is reported as
+measured, not explained away.
+
 ### 8ad. The radio platform seam, step by step: criteria written BEFORE each gate
 
 Pre-registration, in the 8v style. `docs/RADIO_PLATFORM_SEAM.md` is the plan.

@@ -212,6 +212,37 @@ int main(int argc, char** argv) {
               SnrWindowGuard::guardFor(100) == 100 && SnrWindowGuard::guardFor(4) == 64,
           "guardFor: the resolved window or the 64-sample echo allowance, whichever is larger");
   }
+  // P3 on the recorded nr_pss windows: with a false-alarm probability set,
+  // the coherence bar comes from it (0.113 for 128 taps, 1e-3 over 4096)
+  // instead of 1/corr_scale, and every recorded index is unchanged: the true
+  // peak is far above either bar.
+  {
+    auto pcfg = SyncConfig::loadFromText(R"({"sync": {"detector": {"pfa_per_window": 1e-3}}})");
+    const auto d = BeaconShape::make("nr_pss", Platform::kHoudini, Numerology::houdiniDefault());
+    pcfg.resolve({d.replicaLen(), 160.0, Platform::kHoudini, true, 1});
+    Detector det(d, pcfg.detector);
+    check(det.barFromPfa() && std::fabs(det.effectiveScale(100.0f, 4096) - 1.0 / 0.112978) < 1e-3,
+          "P3: the nr_pss detector takes its bar from the probability (scale 8.85 for 1e-3 over 4096)");
+    int same = 0, total = 0;
+    for (int i = 0; i < 12; ++i) {
+      char nb[64];
+      std::snprintf(nb, sizeof nb, "/nr_pss/resyncwin_%02d", i);
+      std::vector<std::complex<int16_t>> w;
+      if (!readWindow(dir + nb + ".bin", &w)) continue;
+      const auto meta = readMeta(dir + nb + ".txt");
+      if (!meta.has("sync_index")) continue;
+      ++total;
+      const auto r = det.run(w.data(), w.size(), 100.0f);
+      if (r.end_index == static_cast<ssize_t>(meta.at("sync_index")) && std::fabs(r.bar - 0.112978) < 1e-4) ++same;
+    }
+    check(total == 12 && same == 12, "P3: all 12 nr_pss windows return the recorded index under the pfa bar, bar 0.113 recorded");
+    const auto l = BeaconShape::make("legacy", Platform::kHoudini, Numerology::houdiniDefault());
+    auto lcfg = SyncConfig::loadFromText(R"({"sync": {"detector": {"pfa_per_window": 1e-3}}})");
+    lcfg.resolve({l.replicaLen(), 160.0, Platform::kHoudini, false, 1});
+    Detector ldet(l, lcfg.detector);
+    check(!ldet.barFromPfa() && ldet.effectiveScale(100.0f, 4096) == 100.0,
+          "P3: the legacy (xcorr) detector ignores the probability and keeps corr_scale");
+  }
   const auto cfg = houdini::sync::SyncConfig::loadFromText("{}");
   const float kCorrScale = 10.0f;
   int windows = 0;
