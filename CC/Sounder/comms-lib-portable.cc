@@ -326,7 +326,13 @@ static double firstPathDb() {
   }
   return db;
 }
-static const double kFirstPathDb = firstPathDb();
+// Read lazily by the pre-SyncConfig overloads only, so a build whose sounder
+// takes the value from sync.detector.first_path_floor_db never reads (or
+// complains about) the environment here.
+static double kFirstPathDbLazy() {
+  static const double v = firstPathDb();
+  return v;
+}
 
 // THE FLOOR DEPENDS ON THE STATISTIC'S ORDER, AND THE FIRST VERSION SQUARED IT
 // UNCONDITIONALLY. kPowerRatio, kNormalized and kNormalizedXCorr are all 4th
@@ -356,7 +362,7 @@ int CommsLib::find_beacon_avx(
   return find_beacon_avx(raw_samples, match_samples, corr_scale, pick,
                          thresh_form,
                          firstPathWindow(static_cast<int>(match_samples.size())),
-                         kFirstPathDb);
+                         kFirstPathDbLazy());
 }
 
 int CommsLib::find_beacon_avx(
@@ -547,7 +553,7 @@ ssize_t CommsLib::find_beacon_avx(
   return find_beacon_avx(raw_samples, match_samples, check_window, corr_scale,
                          pick, thresh_form,
                          firstPathWindow(static_cast<int>(match_samples.size())),
-                         kFirstPathDb);
+                         kFirstPathDbLazy());
 }
 
 ssize_t CommsLib::find_beacon_avx(

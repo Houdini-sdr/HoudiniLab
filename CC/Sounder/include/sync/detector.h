@@ -41,8 +41,10 @@ class Detector {
   /// @param replica_reps  copies of it in the core; 1 forces the coherence form
   /// @param replica_tail  samples from the replica's end to the core's end
   /// @param cfg           threshold form (kAuto resolves here), pick, first-path
-  /// @param houdini       false keeps the Iris/UHD path on the power-ratio form
-  ///                      and the cluster-refined pick, untouched.
+  ///                      (a negative first_path_window resolves to half the
+  ///                      replica length, the pre-library derivation)
+  /// @param houdini       false keeps the Iris/UHD path on the power-ratio form,
+  ///                      the cluster-refined pick and no replica tail, untouched.
   Detector(const std::vector<std::complex<float>>& replica, size_t replica_reps,
            size_t replica_tail, const DetectorConfig& cfg, bool houdini);
 
@@ -58,6 +60,7 @@ class Detector {
 
   CommsLib::BeaconThresh form() const { return form_; }
   CommsLib::BeaconPick pick() const { return pick_; }
+  /// Samples the beacon END sits past the correlator's index; 0 off Houdini.
   size_t replicaTail() const { return tail_; }
   bool singleCopy() const { return single_copy_; }
   int firstPathWindow() const { return first_path_window_; }
@@ -79,7 +82,6 @@ class Detector {
   CommsLib::BeaconPick pick_;
   int first_path_window_;
   double first_path_floor_db_;
-  bool houdini_;
 };
 
 }  // namespace sync

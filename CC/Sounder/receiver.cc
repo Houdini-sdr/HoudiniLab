@@ -51,9 +51,8 @@ static constexpr bool kEnableCfo = false;
 // now selects between four beacons (include/beacon_shapes.h).
 static constexpr int kStsLen = 16;
 static constexpr int kGoldLen = 128;
-// Beacon CFO logs at ~9/s; print 1 in N so a long run does not add millions of
-// lines. The panel gets every sample regardless. HOUDINI_CFO_LOG_EVERY=1 makes
-// it dense, which is what a calibration run wants.
+// The beacon-CFO log line is throttled by sync.cfo.log_every (1 in N); the
+// panel gets every sample regardless. 1 makes it dense, for a calibration run.
 
 // Where the beacon END sits relative to the slot-0 start, per the
 // TRANSMITTED layout -- the constant the UE subtracts from sync_index to
@@ -86,11 +85,8 @@ static ssize_t houdiniBeaconEnd(Config* cfg) {
 // once in the constructor with the configured floor and a guard that covers the
 // first-path back window (8.151). Reached through sync_guard_.
 
-// Env override for a tunable double, with the compiled default when unset.
-// The AP-31 tracker gains are the first users: they need to be sweepable on a
-// live bench without a rebuild, since the right damping depends on the arrival
-// jitter and the detection rate, both of which are bench properties.
-
+// Every tunable of the sync path is a sync.* knob (sync/sync_config.h): JSON
+// first, environment as a logged override while allow_env_overrides holds.
 
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
@@ -137,10 +133,11 @@ Receiver::Receiver(
     sync_detector_ = std::make_unique<houdini::sync::Detector>(
         config_->gold_cf32(), config_->beacon_replica_reps(),
         config_->beacon_replica_tail(), sc.detector, config_->is_houdini());
-    // THE GUARD MUST COVER THE FIRST-PATH BACK WINDOW (8.151), and at least 8.
+    // THE GUARD MUST COVER THE FIRST-PATH BACK WINDOW (8.151): the detector's
+    // RESOLVED window, which may be derived from the replica length.
     sync_guard_ = std::make_unique<houdini::sync::SnrWindowGuard>(
         sc.confirm.snr_floor_db,
-        static_cast<size_t>(std::max(8, sc.detector.first_path_window)));
+        static_cast<size_t>(sync_detector_->firstPathWindow()));
     houdini::sync::FieldGeometry g;
     g.core_len = static_cast<int>(config_->beacon_size());
     g.fine_off = static_cast<int>(config_->beacon_fine_off());
@@ -1093,6 +1090,9 @@ ssize_t Receiver::syncSearch(const std::complex<int16_t>* check_data,
   // needs the argmax-by-ratio change before it can serve acquisition.
   assert(search_window <= config_->samps_per_frame());
 #if defined(USE_CUDA)
+  // NOT the configured detector: the CUDA correlator still returns the first
+  // crossing under the power-ratio form and knows nothing of the pick rule or
+  // the first-path knobs. The startup log says so under this build.
   const char* kPath = "cuda";
   ssize_t sync_index = CommsLib::find_beacon_cuda(
       check_data, config_->gold_cf32(), search_window, corr_scale);
@@ -1355,7 +1355,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   // Both inputs are validated: a zero or negative ppm makes the cadence
   // quotient infinite, and a config without `ofdm_tx_zero_prefix` gives a zero
   // tolerance and a resync attempt every single frame. Neither should degrade
-  // quietly. (envDouble already rejects NaN and inf, AP-54.)
+  // quietly. (SyncConfig rejects NaN and inf and range-checks, AP-54/AP-56.)
   if (!(sync_tol_samples > 0.0) || !std::isfinite(sync_tol_samples)) {
     MLPD_WARN(
         "sync tolerance %.3f is not a positive finite sample count (config "
@@ -1467,7 +1467,9 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   size_t resync_retry_max =
       static_cast<size_t>(std::max(1, config_->sync().resync.retry_max));
   size_t resync_success(0);
-  size_t cfo_log_cnt = 0;  // throttles the beacon-CFO line (kCfoLogEvery)
+  size_t cfo_log_cnt = 0;  // throttles the beacon-CFO line
+  const size_t kCfoLogEvery =
+      static_cast<size_t>(std::max(1, config_->sync().cfo.log_every));
   // Liveness accept/reject half-width. Shipped ON THE WIRE so the panel draws
   // the band it actually illustrates rather than a hardcoded copy (AP-31
   // proposes retuning this, after which a page-side constant would silently lie).
@@ -1688,6 +1690,12 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
           sync_guard_->floorDb(), config_->sync().cfo.index_guard,
           cfo_estimator_->margin());
     }
+#if defined(USE_CUDA)
+    MLPD_WARN(
+        "USE_CUDA build: syncSearch runs find_beacon_cuda (first crossing, "
+        "power ratio); the configured detector.threshold / pick / first-path "
+        "knobs above are NOT applied\n");
+#endif
     if (config_->beacon_replica_reps() < 2) {
       MLPD_INFO(
           "Beacon replica is a single copy (%s): threshold form forced to "
@@ -1986,12 +1994,23 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
             snprintf(pb, sizeof(pb), "%s/resyncwin_%02d.txt", rwdir, wk);
             FILE* fg = fopen(pb, "w");
             if (fg != nullptr) {
+              // The settings this window was searched and judged under, so a
+              // replay (golden_window_test) can assert it runs the same ones.
               fprintf(fg,
                       "n %d\nsync_index %zd\nsnr %.2f\nframe %zu\n"
-                      "rx_beacon_time %lld\npilot_ref %lld\nbeacon_end %lld\n",
+                      "rx_beacon_time %lld\npilot_ref %lld\nbeacon_end %lld\n"
+                      "corr_scale %.6g\nthresh %d\npick %d\nfirst_path_window %d\n"
+                      "first_path_floor_db %.3f\nsnr_floor_db %.3f\n"
+                      "replica_tail %zu\nbeacon_type %s\n",
                       request_samples, sync_index, snr, frame_id,
                       rx_beacon_time, houdini_pilot_ref,
-                      static_cast<long long>(houdiniBeaconEnd(config_)));
+                      static_cast<long long>(houdiniBeaconEnd(config_)),
+                      static_cast<double>(config_->corr_scale(tid) + resync_retry_cnt),
+                      static_cast<int>(sync_detector_->form()),
+                      static_cast<int>(sync_detector_->pick()),
+                      sync_detector_->firstPathWindow(),
+                      sync_detector_->firstPathFloorDb(), sync_guard_->floorDb(),
+                      sync_detector_->replicaTail(), config_->beacon_type().c_str());
               fclose(fg);
             }
           }
@@ -2088,7 +2107,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
                          houdini_frame_period - 1.0)
                   : 0.0;
           const double cfo_tracked_hz = eps_tracked * config_->freq();
-          if ((cfo_log_cnt++ % static_cast<size_t>(std::max(1, config_->sync().cfo.log_every))) == 0) {
+          if ((cfo_log_cnt++ % kCfoLogEvery) == 0) {
             MLPD_INFO(
                 "Beacon CFO frame %zu: tracked %+.1f Hz (%+.4f ppm) | beacon "
                 "%+.1f Hz (%+.3f ppm), delta %+.1f Hz, resid %+lld, "
@@ -2656,9 +2675,7 @@ ssize_t Receiver::clientSyncBeacon(size_t radio_id, size_t sample_window,
         sync_index = syncSearch(syncbuffmem.at(kSyncDetectChannel).data(),
                                 sample_window,
                                 config_->corr_scale_init(radio_id),
-                                config_->is_houdini()
-                                    ? sync_detector_->pick()
-                                    : CommsLib::BeaconPick::kFirstClusterRefined);
+                                sync_detector_->pick());
         // SNR floor: a correlation crossing at noise level is the artifact
         // class, not the beacon (measured: real ~45 dB, artifacts ~0 dB).
         // Reject and keep hunting rather than anchor on it.

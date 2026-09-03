@@ -17,13 +17,13 @@
  *
  * ENVIRONMENT OVERRIDES ARE A MIGRATION AID. `allow_env_overrides` defaults to
  * true for this release because the bench scripts in tests/demo-verify still
- * drive sweeps through the environment; every override is logged, and a JSON
- * config can set it false. The plan is to flip the default next release and
- * remove the path after (architecture plan, section 5 and 8).
+ * drive sweeps through the environment; every override is logged, an
+ * out-of-range numeric override is CLAMPED into the knob's range with a note
+ * (the old readers clamped too, so a script's `=0` keeps meaning "the minimum"),
+ * and a JSON config can set the flag false. The plan is to flip the default
+ * next release and remove the path after (architecture plan, sections 5 and 8).
  *
- * Header-only apart from the loader, which needs nlohmann::json; the struct
- * itself has no dependency so the library's other classes and the tests can
- * take it without JSON.
+ * The struct itself has no JSON dependency; `load()` in sync_config.cc does.
  */
 #pragma once
 
@@ -32,6 +32,7 @@
 #include <limits>
 #include <map>
 #include <string>
+#include <variant>
 #include <vector>
 
 namespace houdini {
@@ -42,12 +43,12 @@ namespace sync {
 /// and gets the coherence form; a repeated replica gets the normalised
 /// cross-correlation. See CommsLib::BeaconThresh for the arithmetic and
 /// DEMO_VERIFICATION 8.138 / 8.144 / 8.154 for the measurements.
-enum class ThresholdForm { kAuto, kPowerRatio, kNormalizedXCorr, kCoherence };
+enum class ThresholdForm : int { kAuto = 0, kPowerRatio, kNormalizedXCorr, kCoherence };
 
 /// Which threshold crossing the detector returns. See CommsLib::BeaconPick.
-enum class PickRule { kFirstCrossing, kClusterRefined, kArgmax, kFirstPath };
+enum class PickRule : int { kFirstCrossing = 0, kClusterRefined, kArgmax, kFirstPath };
 
-enum class TrackerType { kAlphaBeta, kKalman };
+enum class TrackerType : int { kAlphaBeta = 0, kKalman };
 
 struct BeaconConfig {
   std::string type = "legacy";  ///< beacon_shapes name
@@ -56,12 +57,17 @@ struct BeaconConfig {
 
 struct DetectorConfig {
   ThresholdForm threshold = ThresholdForm::kAuto;
-  /// False-alarm probability per search window for the coherence form: the
-  /// bar is derived from it and the replica length (8.163). Unused by the
-  /// legacy forms, which keep the config's corr_scale.
+  /// RESERVED for phase P3 (architecture plan): the coherence form's bar will
+  /// be derived from this and the replica length (8.163). NOT APPLIED YET --
+  /// the receiver still passes the config's corr_scale for every form, and
+  /// validate() says so when a value is given.
   double pfa_per_window = 1e-3;
   PickRule pick = PickRule::kFirstPath;
-  int first_path_window = 64;         ///< samples of back-search
+  /// Samples of back-search from the peak. -1 (the default) means "half the
+  /// replica length", which is what the pre-library code derived: 64 for a
+  /// 128-tap replica, 32 for the 64-tap dot11 and nr replicas. Resolved in
+  /// Detector's constructor; read it back from Detector::firstPathWindow().
+  int first_path_window = -1;
   double first_path_floor_db = -9.0;  ///< how much weaker an earlier path may be
 };
 
@@ -92,7 +98,8 @@ struct ResyncConfig {
   double scatter_tol_us = 2.0;    ///< tracking gate, time
   double confirm_tol_us = 5.2083; ///< acquisition gate, time (never looser)
   /// Timing slack budgeted to drift between looks, samples. NaN means "a
-  /// quarter of the OFDM zero prefix", the shipped derivation.
+  /// quarter of the OFDM zero prefix"; the receiver resolves it, because the
+  /// prefix is not known here.
   double sync_tol_samples = std::numeric_limits<double>::quiet_NaN();
   int retry_max = 100;
   int escalate_episodes = 2;
@@ -113,28 +120,43 @@ struct SyncConfig {
   /// Where each value came from, by JSON path: "default", "json" or "env".
   std::map<std::string, std::string> provenance;
   /// Validation notes that did not stop the load (a floor above the expected
-  /// SNR, an override that was ignored). Printed at startup.
+  /// SNR, an override that was clamped or ignored). Printed at startup.
   std::vector<std::string> warnings;
 
-  /// One knob: how it is named, bounded and stored.
+  /// A typed pointer to one knob's storage inside a SyncConfig.
+  using Target = std::variant<double*, int*, bool*, std::string*, ThresholdForm*,
+                              PickRule*, TrackerType*>;
+
+  /// One knob: how it is named, bounded and stored. `target` points INTO the
+  /// SyncConfig that produced the table, so a table is only valid for that
+  /// object's lifetime and must be taken from the object it will modify.
   struct Knob {
     const char* path;   ///< JSON path under "sync", dotted
     const char* env;    ///< the environment name it replaces, or nullptr
-    enum Kind { kDouble, kInt, kBool, kEnum, kString } kind;
     double lo, hi;      ///< inclusive range for numeric kinds
     const char* doc;    ///< one sentence, for the generated table
-    void* target;       ///< into this struct
-    const char* const* enum_names;  ///< kEnum: nullptr-terminated names
+    Target target;
+    const char* const* enum_names;  ///< enum kinds: nullptr-terminated names
+    bool isNumeric() const {
+      return std::holds_alternative<double*>(target) || std::holds_alternative<int*>(target);
+    }
+    bool isEnum() const {
+      return !std::holds_alternative<double*>(target) && !std::holds_alternative<int*>(target) &&
+             !std::holds_alternative<bool*>(target) && !std::holds_alternative<std::string*>(target);
+    }
   };
   std::vector<Knob> knobs();
+  /// The same table over a const object, for reading only.
+  std::vector<Knob> knobs() const;
 
-  /// Defaults, with the prefix-derived tolerance resolved.
+  /// The shipped defaults (every provenance "default").
   static SyncConfig defaults();
   /// Load: defaults, then the `sync` object of `root_json_text` (the WHOLE
   /// config file's text, parsed here), then the environment when allowed.
-  /// Unknown keys under `sync` throw; a legacy top-level "beacon_type" is
-  /// accepted into beacon.type with a warning when the block does not name
-  /// one, and is an error when both are present and disagree.
+  /// Unknown keys under `sync` throw std::invalid_argument; keys whose name
+  /// (any segment) starts with "_" are comments. A legacy top-level
+  /// "beacon_type" is accepted into beacon.type, and is an error when both are
+  /// present and disagree.
   static SyncConfig load(const std::string& root_json_text);
   /// Range checks and cross-constraints. Throws std::invalid_argument on a
   /// value that cannot be run; appends to `warnings` for the rest.
@@ -143,8 +165,9 @@ struct SyncConfig {
   std::string describe() const;
   /// The walkthrough's knob table, generated so it cannot drift.
   static std::string schemaMarkdown();
+  /// One knob's current value as text ("derived" for a NaN or -1 sentinel).
+  static std::string valueText(const Knob& k);
 
-  /// Helpers used by the loader and the receiver.
   static const char* name(ThresholdForm f);
   static const char* name(PickRule p);
   static const char* name(TrackerType t);

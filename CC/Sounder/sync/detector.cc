@@ -44,13 +44,19 @@ Detector::Detector(const std::vector<std::complex<float>>& replica,
                    const DetectorConfig& cfg, bool houdini)
     : replica_(replica),
       single_copy_(replica_reps < 2),
-      tail_(replica_tail),
+      // The tail is a Houdini convention (the Iris/UHD path never had one).
+      tail_(houdini ? replica_tail : 0),
       form_(resolveForm(cfg.threshold, replica_reps < 2, houdini)),
       pick_(houdini ? resolvePick(cfg.pick)
                     : CommsLib::BeaconPick::kFirstClusterRefined),
-      first_path_window_(cfg.first_path_window),
-      first_path_floor_db_(cfg.first_path_floor_db),
-      houdini_(houdini) {}
+      // -1 means "half the replica length": what the pre-library correlator
+      // derived by default (64 at 128 taps, 32 at 64). An explicit value is
+      // bounded the way the correlator bounds it, at twice the replica.
+      first_path_window_(cfg.first_path_window >= 0
+                             ? std::min<int>(cfg.first_path_window,
+                                             2 * static_cast<int>(replica.size()))
+                             : static_cast<int>(replica.size() / 2)),
+      first_path_floor_db_(cfg.first_path_floor_db) {}
 
 Detection Detector::run(const std::complex<int16_t>* samples, size_t n,
                         float corr_scale) const {
@@ -69,7 +75,7 @@ Detection Detector::run(const std::complex<int16_t>* samples, size_t n,
   // leading PSS and the end sits `tail_` later. A detection whose implied end
   // falls outside the window is reported as none: the SNR guard could not
   // measure it anyway.
-  if (idx >= 0 && houdini_ && tail_ > 0) {
+  if (idx >= 0 && tail_ > 0) {
     if (idx + static_cast<ssize_t>(tail_) >= static_cast<ssize_t>(n)) return d;
     idx += static_cast<ssize_t>(tail_);
   }

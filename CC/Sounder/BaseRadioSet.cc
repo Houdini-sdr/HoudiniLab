@@ -432,7 +432,7 @@ void BaseRadioSet::buildHoudiniBeacon(std::vector<int16_t>& iq) {
   // sync.beacon.tx_full_scale (HOUDINI_BEACON_FS as a logged override while
   // allow_env_overrides holds), range-checked by SyncConfig to (0.001, 1].
   const float fs_frac = static_cast<float>(_cfg->sync().beacon.tx_full_scale);
-  if (fs_frac != 0.6f) {
+  if (_cfg->sync().provenance.at("beacon.tx_full_scale") != "default") {
     MLPD_WARN("beacon transmitted at %.1f%% of full scale instead of the "
               "default 60%% (sync.beacon.tx_full_scale). Diagnostic setting.\n",
               static_cast<double>(fs_frac) * 100.0);

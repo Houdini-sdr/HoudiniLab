@@ -653,8 +653,10 @@ Three things to know:
    its default.
 3. The `was` column is the environment variable each knob replaces. It is
    still honoured this release while `sync.allow_env_overrides` is true (the
-   default), and every override is logged; set it false in the JSON to refuse
-   them. The plan is to remove the environment path next release.
+   default), every override is logged, and a number outside a knob's range is
+   pulled to the nearest bound with a note, as the old readers did; set it
+   false in the JSON to refuse them. The plan is to remove the environment
+   path next release.
 
 Example, in `files/houdini-ul.json`:
 
@@ -671,9 +673,9 @@ Example, in `files/houdini-ul.json`:
 | `sync.beacon.type` | `legacy` |  |  | Which beacon waveform the base station transmits (legacy, legacy_guard, dot11, nr, nr_pss). |
 | `sync.beacon.tx_full_scale` | 0.6 | `HOUDINI_BEACON_FS` | 0.001 to 1 | Transmit peak of the beacon as a fraction of DAC full scale. 0.6 shipped; lower it to stand in for path loss on a cable. |
 | `sync.detector.threshold` | `auto` | `HOUDINI_BEACON_THRESH` | auto, power, xcorr, coherence | Decision statistic: auto picks coherence for a single-copy replica and the normalised cross-correlation otherwise; power is the pre-2026-09 form. |
-| `sync.detector.pfa_per_window` | 0.001 |  | 1e-09 to 0.5 | False-alarm probability per search window for the coherence form; the bar is derived from it and the replica length. |
+| `sync.detector.pfa_per_window` | 0.001 |  | 1e-09 to 0.5 | RESERVED (phase P3), not applied yet: the false-alarm probability per search window the coherence form's bar will be derived from. |
 | `sync.detector.pick` | `first_path` | `HOUDINI_BEACON_PICK` | first_crossing, cluster_refined, argmax, first_path | Which crossing is returned: first_path (shipped), argmax, cluster_refined, or first_crossing (unsafe on a strong link). |
-| `sync.detector.first_path_window` | 64 | `HOUDINI_FIRST_PATH_WIN` | 0 to 4095 | Samples the first-path search looks back from the peak. Must stay inside the preamble's self-coherent plateau. |
+| `sync.detector.first_path_window` | derived | `HOUDINI_FIRST_PATH_WIN` | -1 to 4095 | Samples the first-path search looks back from the peak; -1 (default) means half the replica length. Must stay inside the preamble's self-coherent plateau. |
 | `sync.detector.first_path_floor_db` | -9 | `HOUDINI_FIRST_PATH_DB` | -30 to 0 | How much weaker, in dB of path power, an earlier arrival may be and still be taken as the first path. |
 | `sync.confirm.snr_floor_db` | 30 | `HOUDINI_SYNC_SNR_DB` | -10 to 80 | In-window SNR a detection must clear. A property of the link and the waveform: re-derive it when either changes. |
 | `sync.cfo.index_guard` | 8 | `HOUDINI_CFO_INDEX_GUARD` | 0 to 64 | Samples the carrier estimator's windows slide later than the detected end (AP-39). |
@@ -691,13 +693,13 @@ Example, in `files/houdini-ul.json`:
 | `sync.resync.residual_ppm` | 0.1 | `HOUDINI_SYNC_RESIDUAL_PPM` | 0.0001 to 1000 | Assumed worst-case clock error after tracking; with sync_tol_samples it sets how often the beacon is looked at. |
 | `sync.resync.scatter_tol_us` | 2 | `HOUDINI_SCATTER_TOL_US` | 0.01 to 1000 | How far a detection may land from the tracked grid and still count as the same beacon, microseconds. |
 | `sync.resync.confirm_tol_us` | 5.2083 | `HOUDINI_CONFIRM_TOL_US` | 0.01 to 1000 | The same tolerance during acquisition. Never applied looser than the tracking gate. |
-| `sync.resync.sync_tol_samples` | derived | `HOUDINI_SYNC_TOL_SAMPLES` | 1 to 1e+06 | Timing slack budgeted to drift between looks, samples. Default: a quarter of the OFDM zero prefix. |
+| `sync.resync.sync_tol_samples` | derived | `HOUDINI_SYNC_TOL_SAMPLES` | 0.5 to 1e+06 | Timing slack budgeted to drift between looks, samples. Default: a quarter of the OFDM zero prefix. |
 | `sync.resync.retry_max` | 100 | `HOUDINI_RESYNC_RETRY_MAX` | 1 to 100000 | Misses in one resync period before the client logs an exhausted episode. |
 | `sync.resync.escalate_episodes` | 2 | `HOUDINI_ESCALATE_EPISODES` | 1 to 1000 | Consecutive exhausted episodes before the client abandons tracking and re-acquires. |
 | `sync.resync.hold_offgrid` | 2 | `HOUDINI_HOLD_OFFGRID` | 1 to 1000 | Consecutive off-grid detections before the beacon counts as moved. |
 | `sync.resync.acq_refine_span` | 200 | `HOUDINI_ACQ_REFINE_SPAN` | 2 to 100000 | Frames of baseline acquisition wants before it trusts its rate estimate. |
 | `sync.resync.acq_max_ppm` | 100 | `HOUDINI_ACQ_MAX_PPM` | 0.1 to 10000 | Plausibility band applied to a rate that acquisition hands back, ppm. |
-| `sync.allow_env_overrides` | true |  |  | Whether HOUDINI_* environment variables may override these values (each override is logged). Default true this release. |
+| `sync.allow_env_overrides` | true |  |  | Whether HOUDINI_* environment variables may override these values (each override is logged, out-of-range numbers clamped). Default true this release. |
 
 Diagnostics that dump files or print profiles (`HOUDINI_LOOP_PROFILE`,
 `HOUDINI_RX_PROFILE`, `HOUDINI_COALESCE_SLOTS`, `HOUDINI_CSI_NO_PHASE_FIX`,

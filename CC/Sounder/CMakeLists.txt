@@ -254,6 +254,8 @@ add_library(houdini_sync STATIC
     comms-lib.cc comms-lib-avx.cc comms-lib-portable.cc utils.cc)
 target_include_directories(houdini_sync PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/include)
+# Linked into sounder_module (a MODULE) as well as the executables.
+set_target_properties(houdini_sync PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_compile_definitions(houdini_sync PUBLIC ${MUFFT_DEFINITIONS})
 target_link_libraries(houdini_sync PUBLIC ${MUFFT_LIBRARIES})
 

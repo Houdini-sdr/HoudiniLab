@@ -137,10 +137,18 @@ Rules:
   and derives the bar from `pfa_per_window` and L; `corr_scale` is read only
   when a legacy form is named explicitly.
 - Startup prints the effective struct with one of `default`, `json`, `env`
-  beside every value. With `allow_env_overrides: false` (the default) an
-  `HOUDINI_*` knob that would have changed a value is reported and ignored.
-  The recommendation is to keep the override path for one release and then
-  remove it.
+  beside every value. With `allow_env_overrides: false` an `HOUDINI_*` knob
+  that would have changed a value is reported and ignored. AS SHIPPED IN P1
+  the flag defaults to TRUE, because the bench scripts still sweep through
+  the environment: every override is logged, and a number outside a knob's
+  range is clamped to the bound with a note, which is what the old readers
+  did. The recommendation is to flip the default next release and remove the
+  path after.
+- `detector.pfa_per_window` is loaded and validated in P1 but NOT applied
+  (reserved for P3); giving it a value produces a startup note saying so.
+- `detector.first_path_window` defaults to -1, "half the replica length",
+  which is what the pre-library correlator derived (64 at 128 taps, 32 at 64);
+  the resolved value is what the SNR guard and the log carry.
 
 ## 6. Testing strategy
 
