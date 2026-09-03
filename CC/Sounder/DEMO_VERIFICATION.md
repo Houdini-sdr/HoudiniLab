@@ -513,6 +513,61 @@ what makes it defensible. Evidence: `tests/demo-verify/evidence/20260902-rig/`.
 | 8.110 | Side effects of 8.108 worth knowing before the re-run, both already visible in the geometry: the confirm tolerance is **pulled in to 246 as well** (the invariant from 8.71 clamps acquisition to the tracking gate, so acquisition tightens with it), and the slot clamp **no longer bites at 245.76 MSPS** -- it first engages near 983 MSPS now, because the clamp ceiling is fixed by slot geometry while the tolerance scales with rate. The rate-ladder test was re-pinned to assert the PROPERTY (must not bite at the shipped rate, must bite somewhere on the ladder) rather than the rung, since the rung is a consequence of the default and moved when the default did | `sync_geometry_test` | VERIFIED-TEST |
 
 
+### 8v. The gate criteria, written down BEFORE the gate runs
+
+Pre-registration, not a report. `EPS_CROSSCHECK.md` is why 8.100 got caught: the
+reading for each outcome was committed before the run, so "they agree" had to
+survive a stated test instead of being argued into place afterwards. 8.109 says
+the criteria have to be restated before the re-run and this is that restatement.
+Nothing below is a result.
+
+**What the merge would ship that 8.79's gate did not cover.** Three changes, all
+on the resync path: the cadence is 10x slower (8.107), the scatter gate is 4.2x
+tighter (8.108), and the targeted search now returns the STRONGEST crossing in
+its slice rather than the earliest (the AP-34 root cause).
+
+**Why the old thresholds cannot be reused.** 8.79 read 91 to 209 accepted
+detections per 60 s run. The client now looks at the beacon every 2.6 s, so a
+60 s run offers about 23 opportunities, and at the 80.2 % accept-window
+occupancy the geometry gives, roughly 18 of them can land. **An accept count near
+the old numbers would mean something is wrong, not right.** The residual sd is
+then computed over ~20 samples instead of ~150, where its own relative standard
+error is about 16 %, so PRE and POST sds agreeing to two decimals is not
+available and demanding it would fail a healthy run.
+
+**The criteria.**
+
+| # | criterion | why this one |
+| --- | --- | --- |
+| G1 | 0 escalations, 0 off-grid detections, 0 BAD Receive, in every run | absolute; unaffected by how many detections a run collects |
+| G2 | acquisition confirms in every run, confirm residual within +-3 samples | acquisition is untouched by all three changes, so a change here is a regression |
+| G3 | accepted detections between 8 and 40 per 60 s run | brackets the ~18 the geometry predicts. Fails BOTH ways on purpose: far fewer means resync is not firing, far more means the cadence did not actually change |
+| G4 | max abs(residual) <= 6 samples in every run | the pre-change measured worst case across ~20 runs. Absolute, and it is the number the 246-sample gate has to cover |
+| G5 | residual sd within a factor of 2 of the PRE arm's, per-run | a factor, not a decimal, because n ~ 20 |
+| G6 | PRE and POST arms interleaved, >= 3 runs each, ONE binary | this bench drifts; a two-build gate confounds the change with the day |
+
+**G6 is now possible because of `HOUDINI_BEACON_PICK`.** The crossing rule can be
+switched at runtime, so PRE and POST differ in one environment variable rather
+than in a binary.
+
+**The separate existence proof, which is NOT a gate criterion.** This bench runs
+below the received level where the earliest-crossing rule breaks, so a clean gate
+here would demonstrate only that the fix does no harm. It would NOT demonstrate
+the fix. The threshold test is `corr_scale * peak > local_energy`, 4th order in
+amplitude against 2nd, so **raising `corr_scale` is arithmetically the same knob
+as raising the received level**. Predicted before the run: sweep `corr_scale`
+with `HOUDINI_BEACON_PICK=first` and the residual must collapse to a large
+NEGATIVE value (offline says about -363 samples for the shipped beacon) at some
+point in the sweep; repeat with the default pick and it must not, at any value.
+If the first sweep stays clean at every corr_scale, the offline mechanism does
+not transfer to silicon and the fix is not justified by anything measured here.
+
+**What a PASS does not license.** A pass says the shipped path is unharmed at
+this bench's level and that the new rule holds where the old one fails. It says
+nothing about the 802.11 or NR beacons, which are not on the shipped path, and
+nothing about the Iris/UHD untargeted branch, which is deliberately unchanged.
+
+
 ## Standing traps (carried from the driver contract, apply to every phase)
 
 1. An unknown or non-writable writeSetting key logs a warning and silently
