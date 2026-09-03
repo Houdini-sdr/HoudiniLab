@@ -88,14 +88,6 @@ class Receiver {
                      houdini::sync::Detection* detection = nullptr);
 
   void initBuffers();
-  /// The client's synchronisation model (Config::SyncModel): the receiver's
-  /// remaining platform branches are the stamp-anchored model (a tracked
-  /// frame grid on beacon timestamps, bursts composed in process, a timed
-  /// resync cadence) against the trigger-framed one (the Iris/UHD framer
-  /// triggers the client and the beacon and uplink data come from files).
-  bool stampAnchored() const {
-    return config_->sync_model() == Config::SyncModel::kStampAnchored;
-  }
   // frame_period: the TRACKED BS frame period in UE samples (AP-31c). The
   // horizon ladder steps by it, not by samps_per_frame; <= 0 means nominal.
   void clientTxPilots(size_t user_id, long long base_time,
@@ -114,6 +106,15 @@ class Receiver {
   void clientAdjustRx(size_t radio_id, size_t discard_samples);
 
  private:
+  /// The client's synchronisation model (Config::SyncModel): the receiver's
+  /// remaining platform branches are the stamp-anchored model (a tracked
+  /// frame grid on beacon timestamps, bursts composed in process, a timed
+  /// resync cadence) against the trigger-framed one (the Iris/UHD framer
+  /// triggers the client and the beacon and uplink data come from files).
+  bool stampAnchored() const {
+    return config_->sync_model() == Config::SyncModel::kStampAnchored;
+  }
+
   Config* config_;
   // The sync library objects, built once in the constructor from the
   // configured beacon shape and the sync block. Every beacon search, every

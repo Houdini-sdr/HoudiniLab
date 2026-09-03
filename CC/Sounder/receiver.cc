@@ -105,15 +105,24 @@ Receiver::Receiver(
     throw ReceiverException(e.what());
   }
   // Anything below that throws leaves the sets to their destructors, which
-  // release the devices but do not run the framer teardown (the Houdini
-  // ladder): stop them first, then rethrow (S3 review, item 5).
+  // release the devices but do not run the base station's framer teardown
+  // (the Houdini ladder): run it first, then let the throw continue (S3
+  // review, item 5). The client needs nothing here: its radio destructor
+  // already deactivates its streams (S4 review, item 4). A destructor must
+  // not throw while the stack unwinds, so the stop is caught and reported
+  // (S4 review, item 2). Disarmed on the constructor's last line.
   struct StopOnThrow {
     Receiver* self;
     bool armed = true;
     ~StopOnThrow() {
-      if (!armed) return;
-      if (self->base_radio_set_ != nullptr) self->base_radio_set_->radioStop();
-      if (self->client_radio_set_ != nullptr) self->client_radio_set_->radioStop();
+      if (!armed || self->base_radio_set_ == nullptr) return;
+      try {
+        self->base_radio_set_->radioStop();
+      } catch (const std::exception& e) {
+        MLPD_ERROR("base radio set stop during construction failure: %s\n", e.what());
+      } catch (...) {
+        MLPD_ERROR("base radio set stop during construction failure: unknown error\n");
+      }
     }
   } stop_on_throw{this};
 
@@ -147,7 +156,6 @@ Receiver::Receiver(
   MLPD_TRACE("Receiver Construction -- number radios %zu\n",
              config_->num_bs_sdrs_all());
 
-  stop_on_throw.armed = false;  // the throwing part is over; the checks below manage the sets themselves
   if (((this->base_radio_set_ != nullptr) &&
        (this->base_radio_set_->getRadioNotFound())) ||
       ((this->client_radio_set_ != nullptr) &&
@@ -174,6 +182,7 @@ Receiver::Receiver(
   Sounder::NodeVersions::instance().checkAndWarn();
 
   this->initBuffers();
+  stop_on_throw.armed = false;  // construction complete (S4 review, item 1)
   MLPD_TRACE("Construction complete\n");
 }
 

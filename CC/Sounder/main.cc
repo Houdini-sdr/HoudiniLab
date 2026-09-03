@@ -66,8 +66,15 @@ int main(int argc, char* argv[]) {
     dg->GenerateData(FLAGS_storepath);
   } else if (FLAGS_calibrate) {
     // The calibration run: the set this build provides, constructed in its
-    // calibration mode (the Iris sample-offset procedure), through the factory.
-    auto base_radio_set_ = makeBaseRadioSet(config.get(), true);
+    // calibration mode (the Iris sample-offset procedure), through the
+    // factory. A build with no procedure refuses; the reason reaches the
+    // operator here instead of escaping main (S4 review, item 3).
+    try {
+      auto base_radio_set_ = makeBaseRadioSet(config.get(), true);
+    } catch (const std::exception& e) {
+      std::fprintf(stderr, "Calibration not run: %s\n", e.what());
+      return EXIT_FAILURE;
+    }
   } else {
     int cnt = 0;
     int maxTry = 2;
