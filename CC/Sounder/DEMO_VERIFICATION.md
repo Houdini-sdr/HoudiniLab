@@ -593,6 +593,20 @@ shipped beacon losing about half its detections.
 | P5 no false locks | 0 low-SNR detections in every nr_pss run (the 21 dB, not 42 dB, noise separation of the no-lag statistic is the mechanism that would produce them) | 0 | > 1 in any run |
 | P6 margin (campaign B) | at 0.07 and 0.06 FS, nr_pss accepts >= nr accepts in every round, and nr_pss within 3 of legacy -- because its processing gain equals legacy's and the remaining deficit is the 1.1 dB PAPR cost | as stated in 4 of 4 rounds | nr_pss < nr in any round (the architecture is not the fix), or nr_pss more than 6 below legacy in 3 of 4 (the no-lag floor costs more than PAPR) |
 
+**Amendment to campaign B, written 07:58 rig time, after its first two runs
+and BEFORE the runs it governs.** At 0.07 FS the 30 dB in-window SNR floor sits
+within about 1 dB of what the link delivers, so the floor -- not the detector --
+decides who is accepted, and it decides on average power: the NR core carries
+1.1 dB less at equal peak (PAPR 4.28 against 3.14 dB). Measured on the first
+two runs with the shipped floor: legacy 17 accepts with 225 rejections, nr 0
+accepts with 1873 rejections and no lock. That ranks shapes by PAPR and says
+nothing about P6's question. Campaign B is therefore re-run with
+`HOUDINI_SYNC_SNR_DB=6`, exactly as 8.145 did to find the same edge, so that
+acceptance is gated by detectability; the noise-window artifacts of 8.155 read
+-0.3 to -0.5 dB and a 6 dB floor still rejects them, so P5's guard stays in
+force. P6 is evaluated on the amended runs only; the shipped-floor round is
+kept as its own row.
+
 **What changes the default.** Nothing in this campaign: `legacy` stays. What
 the campaign settles is AP-66's question -- whether the NR deficit measured in
 8.134 was the waveform or the detector it was run through -- and therefore
