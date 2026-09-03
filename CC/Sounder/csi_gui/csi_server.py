@@ -479,8 +479,13 @@ def _launch_sounder(args, udp_dest):
         # a second and killing the sounder when it disappears is what actually
         # frees the boards. Measured: a sounder releases both boards on SIGTERM,
         # SIGINT and SIGKILL alike, so ending it is sufficient.
-        '  ./build/sounder --view --conf_file "%s" --storepath "%s" 2>&1 | '
-        '     sed -u "s/^/[sounder] /" & '
+        # PROCESS SUBSTITUTION, NOT A PIPELINE. After `a | b &`, bash sets $! to
+        # b -- so the first version of this watch held sed's pid and dutifully
+        # killed sed while the sounder kept both boards. Verified on silicon:
+        # boards still held, zero "supervisor gone" lines. `a > >(b) &` leaves $!
+        # as the sounder, which is the process that has to die.
+        '  ./build/sounder --view --conf_file "%s" --storepath "%s" '
+        '     > >(sed -u "s/^/[sounder] /") 2>&1 & '
         '  SPID=$!; '
         '  while kill -0 "$SPID" 2>/dev/null; do '
         '    kill -0 "$SUP" 2>/dev/null || { echo "[sounder] supervisor gone, stopping sounder"; '
