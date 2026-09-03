@@ -93,6 +93,27 @@ static CommsLib::BeaconPick resyncPickFromEnv() {
   return CommsLib::BeaconPick::kTargetedArgmax;
 }
 static const CommsLib::BeaconPick kResyncPick = resyncPickFromEnv();
+
+// Which FORM the detection threshold takes. Default is the shipped power ratio;
+// HOUDINI_BEACON_THRESH=xcorr selects the normalised cross-correlation, whose
+// threshold is level-invariant. EXPERIMENTAL: the offline evidence is strong
+// (exact index at every level for all four beacons, and the smallest working
+// corr_scale is 3.16 at EVERY level and for EVERY shape, against a shipped form
+// whose working value moves 10000x across the same sweep) but it has not been
+// gated on silicon, so it is opt-in.
+static CommsLib::BeaconThresh resyncThreshFromEnv() {
+  const char* e = std::getenv("HOUDINI_BEACON_THRESH");
+  if (e != nullptr && std::string(e) == "xcorr") {
+    MLPD_WARN(
+        "HOUDINI_BEACON_THRESH=xcorr: detection uses the normalised "
+        "cross-correlation. corr_scale becomes a level-invariant fraction "
+        "(bar = 1/corr_scale against a peak statistic of ~0.32); the shipped "
+        "values 10 and 100 stay well inside range. EXPERIMENTAL, not gated.\n");
+    return CommsLib::BeaconThresh::kNormalizedXCorr;
+  }
+  return CommsLib::BeaconThresh::kPowerRatio;
+}
+static const CommsLib::BeaconThresh kResyncThresh = resyncThreshFromEnv();
 static ssize_t houdiniBeaconEnd(Config* cfg) {
   if (cfg->is_houdini()) {
     return kHoudiniStrobeOffsTicks + static_cast<ssize_t>(cfg->beacon_size());
@@ -1135,6 +1156,9 @@ int Receiver::clientTxData(int tid, int frame_id, long long base_time) {
 ssize_t Receiver::syncSearch(const std::complex<int16_t>* check_data,
                              size_t search_window, float corr_scale,
                              CommsLib::BeaconPick pick) {
+  // One form for BOTH search paths: acquisition and resync must agree about
+  // what the threshold means, or the anchor and the tracking gate are measured
+  // against different statistics.
   ssize_t sync_index(-1);
   assert(search_window <= config_->samps_per_frame());
 #if defined(USE_CUDA)
@@ -1145,7 +1169,8 @@ ssize_t Receiver::syncSearch(const std::complex<int16_t>* check_data,
   // portable find_beacon_avx works on x86 and aarch64 (see comms-lib-portable.cc)
   const char* kPath = "avx";
   sync_index = CommsLib::find_beacon_avx(check_data, config_->gold_cf32(),
-                                         search_window, corr_scale, pick);
+                                         search_window, corr_scale, pick,
+                                         kResyncThresh);
 #endif
   if (std::getenv("HOUDINI_SYNC_DEBUG") != nullptr) {
     static std::atomic<int> c{0};

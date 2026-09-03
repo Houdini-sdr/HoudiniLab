@@ -152,12 +152,50 @@ class CommsLib {
     kTargetedArgmax,
   };
 
+  // WHICH FORM THE DETECTION THRESHOLD TAKES. This is the difference between a
+  // knob that names a fixed thing and one that does not.
+  enum class BeaconThresh {
+    // SHIPPED: corr_scale * |gc[i]|^2|gc[i-L]|^2 > sum_L |gc|^2. The numerator
+    // is 4th order in received amplitude and the denominator 2nd, so the
+    // decision ratio carries units of power and moves with LEVEL. Measured over
+    // a 64x level sweep on the shipped beacon, the statistic at the true peak
+    // runs 0.0777 to 321.4 -- a spread of 4136, which is 64^2 to within noise.
+    // So a fixed corr_scale is a different test at every received level, and
+    // the beacon's own STS preamble crosses it above ~3200 counts peak.
+    kPowerRatio,
+    // Schmidl & Cox 1997, section III: divide by the energy term SQUARED so the
+    // statistic is dimensionless and bounded in [0,1]. Same corr_scale meaning
+    // (the bar is 1/corr_scale), now a FRACTION rather than a power. Measured
+    // over the same sweep: 0.9845 to 0.9843, a spread of 1.00. The preamble
+    // plateau lands at 1/L^2 -- also level-independent -- so one threshold
+    // separates them everywhere.
+    kNormalized,
+    // The one above is WRONG AS FORMULATED, kept because the measurement that
+    // killed it is worth keeping. Schmidl & Cox's R(d) is the LOCAL SIGNAL
+    // ENERGY of the repeated half-symbol; `thresh` here is the trailing energy
+    // of the MATCHED FILTER OUTPUT, which is not the same quantity, and the
+    // algebra does not carry over. Measured: it makes the peak statistic
+    // level-invariant (spread 1.00 against 4136) and then selects the WRONG
+    // peak on the shorter guarded beacons -- dot11 lands at -65, exactly one
+    // fine-field length early, on every seed at every level, because dividing
+    // by a squared trailing sum favours the index with less preceding
+    // correlation energy, which is the FIRST repetition.
+    //
+    // This is the normalised CROSS-CORRELATION, which is the right shape for a
+    // matched filter: |gc[i]|^2 / (E_raw[i] * E_rep) is a coherence in [0,1],
+    // level-invariant because both numerator and denominator are 2nd order in
+    // received amplitude. The repeat check is then the product of the two
+    // coherences, which is still in [0,1].
+    kNormalizedXCorr,
+  };
+
   // Functions using AVX
   static int find_beacon(const std::vector<std::complex<float>>& raw_samples);
   static int find_beacon_avx(
       const std::vector<std::complex<float>>& raw_samples,
       const std::vector<std::complex<float>>& match_samples, float corr_scale,
-      BeaconPick pick = BeaconPick::kFirstCrossing);
+      BeaconPick pick = BeaconPick::kFirstCrossing,
+      BeaconThresh thresh_form = BeaconThresh::kPowerRatio);
 
   ///Find Beacon with raw samples from the radio
   static int find_beacon(const std::complex<int16_t>* raw_samples,
@@ -167,7 +205,8 @@ class CommsLib {
       const std::complex<int16_t>* raw_samples,
       const std::vector<std::complex<float>>& match_samples,
       size_t check_window, float corr_scale,
-      BeaconPick pick = BeaconPick::kFirstCrossing);
+      BeaconPick pick = BeaconPick::kFirstCrossing,
+      BeaconThresh thresh_form = BeaconThresh::kPowerRatio);
   // GPU beacon detector (find_beacon_cuda.cu), defined only when built with
   // -DUSE_CUDA (CMake HOUDINI_USE_CUDA), which is OFF by default and OFF on the
   // rig. NOTE it still returns the FIRST crossing (atomicMin over the index), so

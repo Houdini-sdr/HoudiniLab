@@ -270,7 +270,7 @@ std::vector<float> TrailingWindowSum(const std::vector<float>& f,
 int CommsLib::find_beacon_avx(
     const std::vector<std::complex<float>>& raw_samples,
     const std::vector<std::complex<float>>& match_samples, float corr_scale,
-    BeaconPick pick) {
+    BeaconPick pick, BeaconThresh thresh_form) {
   const int seqLen = static_cast<int>(match_samples.size());
 #ifdef TEST_BENCH
   const auto t0 = std::chrono::steady_clock::now();
@@ -292,9 +292,62 @@ int CommsLib::find_beacon_avx(
   const auto t3 = std::chrono::steady_clock::now();
 #endif
   assert(peak_metric.size() == thresh.size());
+  // The decision statistic. kNormalized divides by the energy term SQUARED,
+  // which makes it dimensionless -- see BeaconThresh. Computed in double
+  // because thresh^2 underflows a float on a quiet window (thresh runs down to
+  // ~1e-20 on this bench, and 1e-40 is a denormal), and an underflowed
+  // denominator would admit every index instead of none.
+  const bool normalized = thresh_form == BeaconThresh::kNormalized;
+  const bool xcorr = thresh_form == BeaconThresh::kNormalizedXCorr;
+  // For kNormalizedXCorr: trailing energy of the RAW samples, and the replica's
+  // energy. |gc[i]|^2 / (E_raw[i] * E_rep) is the normalised cross-correlation,
+  // 2nd order over 2nd order, so it is a coherence in [0,1] and does not move
+  // with received level.
+  //
+  // ALIGNMENT, WHICH THE FIRST VERSION GOT WRONG TWICE. gc[i] correlates the
+  // window [i-L+1, i] against the replica -- measured, not assumed: for a core
+  // placed at `pos`, the peak lands at pos + core_len - 1, the LAST sample of
+  // the matched field. So the energy term has to cover exactly that window.
+  //   (1) TrailingWindowSum is EXCLUSIVE of i: it returns sum over [i-L, i-1].
+  //       That convention is deliberate for `thresh` (compare a peak against
+  //       the energy BEFORE it) and wrong here, so this computes its own.
+  //   (2) correlate_mt returns N + M - 1 samples, so the metric arrays are
+  //       longer than the raw input by L-1; sizing the energy array from the
+  //       raw length silently zeroed the tail of the search window.
+  std::vector<double> raw_energy;
+  double rep_energy = 0.0;
+  if (xcorr) {
+    const std::vector<float> raw_abs = Abs2(raw_samples);
+    raw_energy.assign(peak_metric.size(), 0.0);
+    double run = 0.0;
+    for (size_t i = 0; i < raw_abs.size() && i < raw_energy.size(); ++i) {
+      run += static_cast<double>(raw_abs[i]);
+      if (i >= static_cast<size_t>(seqLen))
+        run -= static_cast<double>(raw_abs[i - seqLen]);
+      raw_energy[i] = run;
+    }
+    for (const auto& v : match_samples) rep_energy += std::norm(v);
+  }
+  auto ranking = [&](size_t i) {
+    const double t = static_cast<double>(thresh[i]);
+    if (xcorr) {
+      // peak_metric[i] = |gc[i]|^2 * |gc[i-L]|^2, so normalising it needs BOTH
+      // windows' energies. Below the lag there is no second window and the
+      // index cannot be a repeat, so it scores zero rather than dividing by a
+      // window that does not exist.
+      if (i < static_cast<size_t>(seqLen) || i >= raw_energy.size()) return 0.0;
+      const double e1 = raw_energy[i] * rep_energy;
+      const double e2 = raw_energy[i - seqLen] * rep_energy;
+      if (e1 <= 0.0 || e2 <= 0.0) return 0.0;
+      return static_cast<double>(peak_metric[i]) / (e1 * e2);
+    }
+    const double den = normalized ? t * t : t;
+    return static_cast<double>(peak_metric[i]) / (den + 1e-30);
+  };
+  const double bar = 1.0 / static_cast<double>(corr_scale);
   std::queue<int> valid_peaks;
   for (size_t i = 0; i < peak_metric.size(); ++i) {
-    if (corr_scale * peak_metric[i] > thresh[i]) {
+    if (ranking(i) > bar) {
       valid_peaks.push(static_cast<int>(i));
     }
   }
@@ -337,7 +390,7 @@ int CommsLib::find_beacon_avx(
     while (!valid_peaks.empty()) {
       const int i = valid_peaks.front();
       valid_peaks.pop();
-      const double r = peak_metric[i] / (thresh[i] + 1e-30);
+      const double r = ranking(i);
       if (r > best_ratio) { best_ratio = r; best = i; }
     }
     return best;
@@ -353,7 +406,7 @@ int CommsLib::find_beacon_avx(
     const int i = valid_peaks.front();
     valid_peaks.pop();
     if (i - first > seqLen) break;
-    const double r = peak_metric[i] / (thresh[i] + 1e-30);
+    const double r = ranking(i);
     if (r > best_ratio) { best_ratio = r; best = i; }
   }
   return best;
@@ -363,7 +416,7 @@ int CommsLib::find_beacon_avx(
 ssize_t CommsLib::find_beacon_avx(
     const std::complex<int16_t>* raw_samples,
     const std::vector<std::complex<float>>& match_samples, size_t check_window,
-    float corr_scale, BeaconPick pick) {
+    float corr_scale, BeaconPick pick, BeaconThresh thresh_form) {
   static constexpr float kShortMaxFloat = 32767.0f;
   std::vector<std::complex<float>> sync_compare(check_window);
   for (size_t i = 0; i < check_window; ++i) {
@@ -372,7 +425,7 @@ ssize_t CommsLib::find_beacon_avx(
         static_cast<float>(raw_samples[i].imag()) / kShortMaxFloat);
   }
   return CommsLib::find_beacon_avx(sync_compare, match_samples, corr_scale,
-                                   pick);
+                                   pick, thresh_form);
 }
 
 // Element-wise complex multiply, portable equivalent of the float

@@ -73,9 +73,10 @@ void check(bool ok, const std::string& what) {
 /// nothing, which is the whole reason AP-34(a) needed silicon to find its bug.
 /// Returns the returned index MINUS the true beacon end, or kMiss.
 constexpr long long kMiss = -1000000;
+using Thr = CommsLib::BeaconThresh;
 long long residual(const Desc& b, double peak_counts, double snr_db,
                    long long lead, long long tail, float corr_scale, Pick pick,
-                   unsigned seed) {
+                   unsigned seed, Thr thresh_form = Thr::kPowerRatio) {
   const long long len = static_cast<long long>(b.core.size());
   std::mt19937 g(seed);
   auto u01 = [&g]() { return (static_cast<double>(g()) + 0.5) / 4294967296.0; };
@@ -106,8 +107,8 @@ long long residual(const Desc& b, double peak_counts, double snr_db,
         static_cast<int16_t>(std::max(-32000.0, std::min(32000.0, re))),
         static_cast<int16_t>(std::max(-32000.0, std::min(32000.0, im))));
   }
-  const ssize_t idx =
-      CommsLib::find_beacon_avx(buf.data(), b.replica, n, corr_scale, pick);
+  const ssize_t idx = CommsLib::find_beacon_avx(buf.data(), b.replica, n,
+                                               corr_scale, pick, thresh_form);
   return idx < 0 ? kMiss : s0 + idx - end;
 }
 
@@ -287,6 +288,119 @@ int main() {
     check(std::norm(spec[0]) <= tot / (200.0 * spec.size()),
           "  NR tracking symbol nulls DC");
   }
+
+  // ---------------------------------------------------------------------
+  // THE THRESHOLD FORM, WHICH IS THE STRUCTURAL HALF OF THE SAME DEFECT.
+  //
+  // kTargetedArgmax above fixes WHICH crossing is returned. It does not fix
+  // what the threshold MEANS: the shipped statistic is 4th order in received
+  // amplitude over 2nd, so `corr_scale` is a different test at every level.
+  // Measured separately: the statistic at the true peak runs 0.0777 to 321.4
+  // across a 64x level sweep, a spread of 4136 (= 64^2). Normalised -- divide
+  // by the energy term squared, Schmidl & Cox 1997 -- it runs 0.9845 to 0.9843.
+  //
+  // The prediction under test, stated before the numbers: with the normalised
+  // statistic the preamble plateau sits at 1/L^2, which is level-INDEPENDENT
+  // and far below any sensible bar, so EVEN THE OLD earliest-crossing rule
+  // should land on the beacon end at every level. If that holds, the
+  // normalisation subsumes the selection fix rather than merely complementing
+  // it. If it does not, the two are independent and both are needed.
+  std::printf("\n=== threshold form x pick rule, over the level sweep ===\n");
+  std::printf("cells: levels (of %zu) whose index is exact / levels that MISS\n",
+              sizeof(kLevels) / sizeof(*kLevels));
+  std::printf("%-14s %13s %13s %13s %13s %13s\n", "shape",
+              "power+first", "power+argmax", "norm+argmax", "xcorr+first",
+              "xcorr+argmax");
+  int norm_first_bad = 0, norm_argmax_bad = 0, power_first_bad = 0;
+  for (const auto& b : ds) {
+    std::printf("%-14s", b.name.c_str());
+    struct Combo { Thr tf; Pick pk; };
+    const Combo combos[] = {{Thr::kPowerRatio, Pick::kFirstCrossing},
+                            {Thr::kPowerRatio, Pick::kTargetedArgmax},
+                            {Thr::kNormalized, Pick::kTargetedArgmax},
+                            {Thr::kNormalizedXCorr, Pick::kFirstCrossing},
+                            {Thr::kNormalizedXCorr, Pick::kTargetedArgmax}};
+    for (const auto& cb : combos) {
+      {
+        const Thr tf = cb.tf; const Pick pk = cb.pk;
+        int exact = 0, miss = 0;
+        for (const double lv : kLevels) {
+          bool ok = true, any_miss = false;
+          for (unsigned sd = 1; sd <= 8; ++sd) {
+            const long long v = residual(b, lv, kSnrDb, kLead, kTail,
+                                         kResyncCorrScale, pk, sd, tf);
+            if (v == kMiss) { any_miss = true; ok = false; }
+            else if (v != kEndConvention) ok = false;
+          }
+          if (ok) ++exact;
+          if (any_miss) ++miss;
+        }
+        const int nlev = static_cast<int>(sizeof(kLevels) / sizeof(*kLevels));
+        if (tf == Thr::kNormalizedXCorr && pk == Pick::kFirstCrossing)
+          norm_first_bad += nlev - exact;
+        if (tf == Thr::kNormalizedXCorr && pk == Pick::kTargetedArgmax)
+          norm_argmax_bad += nlev - exact;
+        if (tf == Thr::kPowerRatio && pk == Pick::kFirstCrossing)
+          power_first_bad += nlev - exact;
+        char c[32];
+        std::snprintf(c, sizeof c, "%d ex/%d miss", exact, miss);
+        std::printf(" %13s", c);
+      }
+    }
+    std::printf("\n");
+  }
+  check(power_first_bad > 0,
+        "  power+first still fails somewhere (the comparison is not a no-op)");
+  check(norm_argmax_bad == 0,
+        "  xcorr + argmax is exact at every level, every shape");
+  // Reported, not gated, because it is the claim under test rather than a
+  // requirement: if normalising alone were enough, the selection rule would be
+  // belt-and-braces rather than load-bearing.
+  std::printf("\n  xcorr + FIRST-crossing: %d level(s) not exact -- %s\n",
+              norm_first_bad,
+              norm_first_bad == 0
+                  ? "normalisation ALONE fixes the index too"
+                  : "normalisation is NOT sufficient; the pick rule is still needed");
+
+  // ---------------------------------------------------------------------
+  // DOES THE KNOB NAME A FIXED THING? The whole point of normalising is that
+  // `corr_scale` should mean the same test at every received level. Measured
+  // through the PUBLIC API only, no internals exposed: for each level, the
+  // SMALLEST corr_scale that still returns the exact index. If the statistic is
+  // level-invariant that number is constant; if it is 4th-order-over-2nd it
+  // must fall as 1/level^2.
+  std::printf("\n=== smallest corr_scale that still detects exactly ===\n");
+  std::printf("%-14s %-10s", "shape", "form");
+  for (const double lv : kLevels) std::printf(" %8.0f", lv);
+  std::printf("   spread\n");
+  for (const auto& b : ds) {
+    for (const auto tf : {Thr::kPowerRatio, Thr::kNormalizedXCorr}) {
+      std::printf("%-14s %-10s", b.name.c_str(),
+                  tf == Thr::kPowerRatio ? "power" : "xcorr");
+      double lo = 1e300, hi = 0.0;
+      for (const double lv : kLevels) {
+        // Walk corr_scale down in half-decades until the index stops being
+        // exact; the last value that worked is the sensitivity edge.
+        double edge = 0.0;
+        for (double cs = 1e7; cs >= 1e-4; cs /= 3.1623) {
+          bool ok = true;
+          for (unsigned sd = 1; sd <= 4 && ok; ++sd) {
+            const long long v = residual(b, lv, kSnrDb, kLead, kTail,
+                                         static_cast<float>(cs),
+                                         Pick::kTargetedArgmax, sd, tf);
+            if (v != kEndConvention) ok = false;
+          }
+          if (ok) edge = cs; else if (edge > 0.0) break;
+        }
+        std::printf(" %8.3g", edge);
+        if (edge > 0.0) { lo = std::min(lo, edge); hi = std::max(hi, edge); }
+      }
+      std::printf("   %6.0fx\n", (lo < 1e299 && lo > 0) ? hi / lo : 0.0);
+    }
+  }
+  std::printf("\nA constant row means one threshold works at every level.\n");
+  std::printf("A row falling as 1/level^2 means the knob is a different test\n");
+  std::printf("at every level, which is what the shipped form does.\n");
 
   std::printf("\nRESULT: %s (%d failure(s))\n", g_fail ? "FAIL" : "PASS", g_fail);
   return g_fail ? 1 : 0;
