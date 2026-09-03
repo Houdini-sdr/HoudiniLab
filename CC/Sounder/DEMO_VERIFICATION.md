@@ -555,6 +555,52 @@ will actually ship.
 | 8.136 | **THE ADEV THAT SET THE CADENCE REPLICATES ON THE DEPLOYED STACK.** Three 300 s captures on `3a0aa361`, 25000 detections each: drift at tau = 2 s is **0.46 / 0.49 / 0.44 samples** against 0.46 / 0.58 / 0.49 measured before the deploy, and at tau = 20 s it is **14.6 / 21.7 / 19.6** against 18.1 / 23.5 / 20.3. Bathtub shape unchanged, minimum still at tau 1-2 s at 0.0019 ppm. **So the 2.6 s cadence and its 0.1 ppm assumed residual are confirmed on the stack that ships**, and 8.125's worry that a 24x move in raw eps might invalidate the ADEV is answered: it does not, because the ADEV measures the CHANGE in rate and the raw offset cancels in it | `rv2/adev_s{1,2,3}.txt` | VERIFIED-HW |
 | 8.137 | **AND THE CLOCK PAIR RAMPS WITHIN THE SESSION, VISIBLY, ACROSS THREE CONSECUTIVE CAPTURES.** Whole-run eps over three back-to-back 300 s legs: **+0.2777, +0.3825, +0.4393 ppm** -- a monotone climb of 0.16 ppm in 15 minutes, on top of the 24x session-to-session move in 8.125. The beacon probe read -0.2231 ppm at the same period; the sign is opposite BY CONSTRUCTION (that probe fits residual-versus-frame, which decreases when the UE clock is slow, while `clock_drift_probe` reports eps = (f_BS - f_UE)/f_UE, which is positive when the UE is slow) and the magnitudes agree to 25 % across measurements minutes apart on a pair that is visibly ramping. **Stated explicitly because a sign disagreement between two of my own instruments was asserted as an error once before and was not one** | `rv2/adev_s*.txt`; `rv2/beacon_fixednr.json` | VERIFIED-HW |
 
+### 8z. NR-form acquisition on silicon (AP-66): criteria written BEFORE the runs
+
+Pre-registration, in the 8v style. Nothing in this block is a result.
+
+**What is under test.** `nr_pss` transmits the SAME burst as `nr` (byte-equal
+cores, asserted by `beacon_shape_dump`) and differs only in what the detector
+correlates against: the leading 128-sample PSS, once, through the plain matched
+filter, instead of the trailing 2 x 64 TRS pair through the lag product. That is
+NR's acquisition architecture and it was never measured before 2026-09-03:
+8.134/8.144 ran an NR waveform through an 802.11-shaped detector. Offline the
+change holds every prediction (`beacon_geometry_test`: exact at 7 levels x 8
+draws, one corr_scale across a 64x sweep, processing gain 37.8 dB against
+legacy's 37.7, first-path exact on six multipath channels at 8.5 ppm CFO).
+
+**Setup.** One binary (`50c6b65` plus the campaign commit), one config
+(`files/houdini-ul.json`) with ONLY `beacon_type` varied, every other knob at
+its shipped default, 60 s per run, `run_shape_campaign.sh` with the order
+rotated as a Latin square: (legacy, nr, nr_pss), (nr, nr_pss, legacy), (nr_pss,
+legacy, nr). Instrument: `gate_summary.py`. Campaign A at the shipped transmit
+level (0.6 FS); campaign B at `HOUDINI_BEACON_FS` 0.07 and 0.06, the edge 8.145
+measured, two rounds each.
+
+**What accept count can and cannot say.** 8.150 measured legacy, legacy_guard,
+dot11 and nr at 19 / 19 / 19 / 19 accepts at 0.6 FS: the count saturates at ~19
+of ~23 opportunities for every shape on this cable, so campaign A CANNOT rank
+the shapes by margin and is not asked to. Its job is liveness and the index
+convention. Margin is asked of campaign B, at the level where 8.145 found the
+shipped beacon losing about half its detections.
+
+| # | prediction | confirms | refutes |
+| --- | --- | --- | --- |
+| P1 liveness | nr_pss acquires in 3 of 3 campaign-A runs and its log carries `threshold form forced to nolag` with `beacon end = detector index + 144` | 3/3 `lock CONFIRMED` | any nr_pss run failing to confirm while its interleaved neighbours confirm |
+| P2 convention | the 144-sample replica tail is applied once and everywhere: 0 escalations, 0 off-grid, acquisition residual within +-3 (8.150 read -1..+1 for the others) | as stated | an off-grid or escalation in nr_pss only, or a residual near +-144 |
+| P3 saturation | campaign-A accepts 17-19 for all three, spread <= 2 -- stated so that a tie is read as the expected tie and not as "nr_pss is as good as legacy" | as stated | a shape below 15 at 0.6 FS (then something other than margin is wrong) |
+| P4 timing | nr_pss resid sd within 2x of the same-round legacy (8.111: all shapes indistinguishable on adjacent-difference jitter; raw sd is clock-dominated, hence 2x) | as stated | > 2x in 2 of 3 rounds |
+| P5 no false locks | 0 low-SNR detections in every nr_pss run (the 21 dB, not 42 dB, noise separation of the no-lag statistic is the mechanism that would produce them) | 0 | > 1 in any run |
+| P6 margin (campaign B) | at 0.07 and 0.06 FS, nr_pss accepts >= nr accepts in every round, and nr_pss within 3 of legacy -- because its processing gain equals legacy's and the remaining deficit is the 1.1 dB PAPR cost | as stated in 4 of 4 rounds | nr_pss < nr in any round (the architecture is not the fix), or nr_pss more than 6 below legacy in 3 of 4 (the no-lag floor costs more than PAPR) |
+
+**What changes the default.** Nothing in this campaign: `legacy` stays. What
+the campaign settles is AP-66's question -- whether the NR deficit measured in
+8.134 was the waveform or the detector it was run through -- and therefore
+whether an NR-shaped beacon is a live option for the OTA target.
+
+| # | claim | evidence | status |
+| --- | --- | --- | --- |
+
 ### 8x. The gate, and the proof the crossing-rule fix was needed
 
 Run against the criteria pre-registered in 8v, on ONE node stack
