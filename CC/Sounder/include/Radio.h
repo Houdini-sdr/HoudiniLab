@@ -13,8 +13,9 @@
   * than the whole Config, has one receive form, and carries no other
   * platform's framer hooks. What a platform has and another does not (the
   * transmit time grid, the receive gap ledger, a hardware trigger, an AGC)
-  * is a capability a backend reports, never a no-op default that silently
-  * passes.
+  * is a capability a backend reports: a query the caller can branch on, or
+  * an honest "none" (0 pad, 0 status events) where the old code reported the
+  * same. What there is not is a hook that claims to have acted and did not.
   *
   * Backends: RadioSoapy (Iris and SoapyUHD, the SoapySDR plumbing),
   * RadioHoudini (RadioSoapy plus the Houdini stream arguments, the

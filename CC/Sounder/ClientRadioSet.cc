@@ -15,8 +15,6 @@
 #include "SoapySDR/Formats.hpp"
 #include "SoapySDR/Time.hpp"
 #include "SoapySDR/Device.hpp"
-#include "SoapySDR/Formats.hpp"
-#include "SoapySDR/Time.hpp"
 #include "include/Radio.h"
 #include "include/comms-lib.h"
 #include "include/logger.h"

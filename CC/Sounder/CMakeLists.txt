@@ -178,7 +178,7 @@ set(SOUNDER_SOURCES ${PURE_UHD_SOURCES}
     ClientRadioSet.cc
     config.cc
     data_generator.cc
-    Radio.cc RadioSoapy.cc RadioHoudini.cc
+    Radio.cc RadioSoapy.cc RadioHoudini.cc BeaconFramer.cc HoudiniFramer.cc IrisFramer.cc
     receiver.cc
     scheduler.cc
     recorder_worker.cc

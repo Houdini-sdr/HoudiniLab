@@ -32,7 +32,7 @@
 
 int main(int argc, char** argv) {
   std::string out = ".";
-  // 0.6 of full scale, which is what buildHoudiniBeacon puts the core at.
+  // 0.6 of full scale, which is what HoudiniFramer::buildBeacon puts the core at.
   double peak = 0.6 * 32767.0;
   for (int i = 1; i < argc; ++i) {
     if (!std::strcmp(argv[i], "--out") && i + 1 < argc) out = argv[++i];

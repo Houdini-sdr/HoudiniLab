@@ -26,7 +26,7 @@ std::unique_ptr<Radio> Radio::create(Type type, const RadioParams& params) {
   switch (type) {
     case Type::kSoapyIris:
     case Type::kSoapyUhd:
-      return std::make_unique<RadioSoapy>(params);
+      return std::make_unique<RadioSoapy>(params, type);
     case Type::kSoapyHoudini:
       return std::make_unique<RadioHoudini>(params);
     case Type::kUhdNative:

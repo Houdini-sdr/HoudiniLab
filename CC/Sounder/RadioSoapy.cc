@@ -31,7 +31,7 @@ void RadioSoapy::setup(int ch, double rxgain, double txgain) {
   dev_->setSampleRate(SOAPY_SDR_TX, ch, params_.rate_hz);
 
   // these params are sufficient to set before DC offset and IQ imbalance calibration
-  if (!kUseSoapyUHD) {
+  if (!isUhd()) {
     dev_->setAntenna(SOAPY_SDR_RX, ch, "TRX");
     dev_->setBandwidth(SOAPY_SDR_RX, ch, params_.bw_filter_hz);
     dev_->setBandwidth(SOAPY_SDR_TX, ch, params_.bw_filter_hz);
@@ -47,7 +47,7 @@ void RadioSoapy::setup(int ch, double rxgain, double txgain) {
 
   dev_->setFrequency(SOAPY_SDR_RX, ch, "RF", params_.rf_freq_hz);
   dev_->setFrequency(SOAPY_SDR_TX, ch, "RF", params_.rf_freq_hz);
-  if (kUseSoapyUHD == false) {
+  if (!isUhd()) {
     // Unified gains for both lime and frontend
     if (params_.single_gain) {
       dev_->setGain(SOAPY_SDR_RX, ch,
@@ -96,7 +96,7 @@ void RadioSoapy::setup(int ch, double rxgain, double txgain) {
   }
 
   // DC Offset for Iris
-  if (!kUseSoapyUHD) {
+  if (!isUhd()) {
     dev_->setDCOffsetMode(SOAPY_SDR_RX, ch, true);
     dev_->writeSetting("RESET_DATA_LOGIC", "");
   }
@@ -124,12 +124,12 @@ void RadioSoapy::drain_buffers(std::vector<void*> buffs, int symSamp) {
 }
 
 
-RadioSoapy::RadioSoapy(const RadioParams& params, const SoapySDR::Kwargs& args,
+RadioSoapy::RadioSoapy(const RadioParams& params, Type type, const SoapySDR::Kwargs& args,
                        const SoapySDR::Kwargs& rxStreamArgs,
                        const SoapySDR::Kwargs& txStreamArgs, double preStreamRxRate,
                        double preStreamTxRate, double preStreamFreq,
                        bool houdini_streams)
-    : Radio(params) {
+    : Radio(params), type_(type) {
   const char* soapyFmt = SOAPY_SDR_CS16;
   const std::vector<size_t>& channels = params.channels;
   const double rxFreqOffset = params.rx_freq_offset_hz;
@@ -245,18 +245,19 @@ RadioSoapy::RadioSoapy(const RadioParams& params, const SoapySDR::Kwargs& args,
   num_rx_ch_ = channels.empty() ? 1 : channels.size();
 
   // RESET_DATA_LOGIC is an Iris-only setting; Houdini/UHD don't implement it.
-  if (!kUseSoapyUHD && driver == "iris") {
+  if (!isUhd() && driver == "iris") {
     reset_DATA_clk_domain();
   }
 }
 
 
-RadioSoapy::RadioSoapy(const RadioParams& params)
-    : RadioSoapy(params, [&params] {
+RadioSoapy::RadioSoapy(const RadioParams& params, Type type)
+    : RadioSoapy(params, type, [&params, type] {
         SoapySDR::Kwargs args;
-        if (kUseSoapyUHD) {
+        if (type == Type::kSoapyUhd) {
           args["driver"] = "uhd";
           args["addr"] = params.id;
+          std::cout << "Init bsRadios: " << args["addr"] << std::endl;
         } else {
           args["driver"] = "iris";
           args["serial"] = params.id;
@@ -266,9 +267,8 @@ RadioSoapy::RadioSoapy(const RadioParams& params)
       }(),
       SoapySDR::Kwargs(), SoapySDR::Kwargs(), 0.0, 0.0, 0.0, false) {}
 
-Radio::Type RadioSoapy::type() const { return kUseSoapyUHD ? Type::kSoapyUhd : Type::kSoapyIris; }
-bool RadioSoapy::hasHardwareTrigger() const { return !kUseSoapyUHD; }
-bool RadioSoapy::hasAgc() const { return !kUseSoapyUHD; }
+bool RadioSoapy::hasHardwareTrigger() const { return !isUhd(); }
+bool RadioSoapy::hasAgc() const { return !isUhd(); }
 
 long long RadioSoapy::txTimeNs(long long frame_ticks, double rate_hz, bool /*tdd_pilot*/,
                                long long /*advance_ticks*/) const {
@@ -285,7 +285,7 @@ void RadioSoapy::printSettings() const {
       printf("Actual RX sample rate: %fMSps...\n", (dev_->getSampleRate(SOAPY_SDR_RX, ch) / 1e6));
       printf("Actual RX frequency: %fGHz...\n", (dev_->getFrequency(SOAPY_SDR_RX, ch) / 1e9));
       printf("Actual RX gain: %f...\n", (dev_->getGain(SOAPY_SDR_RX, ch)));
-      if (!kUseSoapyUHD) {
+      if (!isUhd()) {
         printf("Actual RX LNA gain: %f...\n", (dev_->getGain(SOAPY_SDR_RX, ch, "LNA")));
         printf("Actual RX PGA gain: %f...\n", (dev_->getGain(SOAPY_SDR_RX, ch, "PGA")));
         printf("Actual RX TIA gain: %f...\n", (dev_->getGain(SOAPY_SDR_RX, ch, "TIA")));
@@ -304,7 +304,7 @@ void RadioSoapy::printSettings() const {
       printf("Actual TX sample rate: %fMSps...\n", (dev_->getSampleRate(SOAPY_SDR_TX, ch) / 1e6));
       printf("Actual TX frequency: %fGHz...\n", (dev_->getFrequency(SOAPY_SDR_TX, ch) / 1e9));
       printf("Actual TX gain: %f...\n", (dev_->getGain(SOAPY_SDR_TX, ch)));
-      if (!kUseSoapyUHD) {
+      if (!isUhd()) {
         printf("Actual TX PAD gain: %f...\n", (dev_->getGain(SOAPY_SDR_TX, ch, "PAD")));
         printf("Actual TX IAMP gain: %f...\n", (dev_->getGain(SOAPY_SDR_TX, ch, "IAMP")));
         if (dev_->getHardwareInfo()["frontend"].find("CBRS") != std::string::npos) {
@@ -321,8 +321,10 @@ void RadioSoapy::printSettings() const {
 }
 
 RadioSoapy::~RadioSoapy() {
-  deactivateRecv();
-  deactivateXmit();
+  // Qualified: a derived class's overrides are gone by the time a base
+  // destructor runs, so say which versions are meant.
+  RadioSoapy::deactivateRecv();
+  RadioSoapy::deactivateXmit();
   if (aux_mts_txs_ != nullptr) {
     dev_->closeStream(aux_mts_txs_);
     aux_mts_txs_ = nullptr;
@@ -393,7 +395,7 @@ int RadioSoapy::activateRecv(long long rxTime, size_t numSamps, int flags) {
                       SOAPY_SDR_WAIT_TRIGGER | SOAPY_SDR_END_BURST};
   int flag_args = soapyFlags[flags];
   // for USRP device start rx stream UHD_INIT_TIME_SEC sec in the future
-  if (!kUseSoapyUHD) {
+  if (!isUhd()) {
     return dev_->activateStream(rxs_, flag_args, rxTime, numSamps);
   } else {
     return dev_->activateStream(rxs_, SOAPY_SDR_HAS_TIME,
@@ -420,7 +422,7 @@ int RadioSoapy::xmit(const void* const* buffs, int samples, int flags,
 
 void RadioSoapy::activateXmit(void) {
   // for USRP device start tx stream UHD_INIT_TIME_SEC sec in the future
-  if (!kUseSoapyUHD) {
+  if (!isUhd()) {
     dev_->activateStream(txs_);
   } else {
     dev_->activateStream(txs_, SOAPY_SDR_HAS_TIME, UHD_INIT_TIME_SEC * 1e9, 0);

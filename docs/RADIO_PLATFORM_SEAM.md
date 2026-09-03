@@ -83,7 +83,7 @@ class Radio {                       // abstract and NARROW: streams, time, devic
 };
 class RadioSoapy : Radio            // the Soapy plumbing, Iris behaviour (today's Radio minus the branch)
 class RadioHoudini : RadioSoapy     // stream arguments, pre-stream rates, the drain, the grid snap, status
-class RadioUhd : Radio              // today's RadioUHD, under USE_UHD
+class RadioUhd : Radio              // today's RadioUHD, under USE_UHD (one object per multi-board device)
 
 class BeaconFramer {                // what the base station does per frame
   arm(), rx(radio, buffs, frameTime), stop(), framePad()
@@ -92,7 +92,9 @@ class IrisTddFramer : BeaconFramer  // the TDD JSON, triggers, per-frame beacon 
 class HoudiniTddFramer : BeaconFramer  // the ring, the strobe grid, the gated RX (today's htdd_* block)
 
 BaseRadioSet, ClientRadioSet        // hold std::unique_ptr<Radio>; pick the framer from the radio's platform;
-                                    // no is_houdini() left in either
+                                    // no is_houdini() left in either (S1, S2: done)
+IBaseRadioSet, IClientRadioSet      // S3: the interfaces the receiver holds; the Soapy sets above and the
+                                    // native-UHD sets (one multi-board device) implement them; a factory picks
 ```
 
 The receiver keeps two acquisition models (the stamp-anchored Houdini one
@@ -110,9 +112,9 @@ the build matrix.
 | Step | Content | Gate |
 |---|---|---|
 | S0 | `tools/build_matrix.sh` (SOAPY_IRIS, SOAPY_UHD, PURE_UHD where libuhd exists, else reported as skipped); env overrides off + the campaign overlay | matrix green; suites; the campaign script runs a sweep through the overlay |
-| S1 | abstract `Radio`, `RadioSoapy`, `RadioHoudini`, the factory; the sets hold `unique_ptr<Radio>`; the Houdini radio-level branches move into `RadioHoudini` | matrix; suites; 30 windows; 3 interleaved runs (legacy, nr_pss, dot11) |
-| S2 | `BeaconFramer` with the Iris and Houdini implementations; the base station's framer block moves out of `BaseRadioSet` | same |
-| S3 | `RadioUhd` behind the same sets; the UHD set classes and the receiver's `#if USE_UHD` type switch go | matrix (compile-only for UHD); suites; 3 runs |
+| S1 | abstract `Radio`, `RadioSoapy`, `RadioHoudini`, the factory; the sets hold `unique_ptr<Radio>`; the Houdini radio-level branches move into `RadioHoudini` (DONE `ed38a51`; matrix and suites green; silicon gate pending a rig slot) | matrix; suites; 30 windows; 3 interleaved runs (legacy, nr_pss, dot11) |
+| S2 | `BeaconFramer` with the Iris and Houdini implementations; the base station's framer block moves out of `BaseRadioSet` (BUILT; `BaseRadioSet.cc` 1376 to 419 lines) | same |
+| S3 | an abstract set interface per role (the ten base-station and six client methods the receiver calls) with the Soapy sets and the native-UHD sets as implementations, chosen by a factory; the receiver's `#if USE_UHD` type switch goes. CORRECTED 2026-09-03 after reading the UHD sets: the native UHD base set holds ONE multi-board device object (`multi_usrp`, `get_num_mboards`), not one radio per board, so it cannot sit behind the per-radio `BaseRadioSet` as a `RadioUhd`; it is its own set, which is exactly Agora's `RadioSetUhd` shape | matrix (compile-only for UHD); suites; 3 runs |
 | S4 | the receiver's remaining branches keyed on `Platform`; the recorder's Houdini fixes as a `PlatformRxFixes` object | same |
 
 Reviews: Opus after each step until a round reports nothing new, as for

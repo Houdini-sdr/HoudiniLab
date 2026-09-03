@@ -72,8 +72,8 @@ RadioHoudini::RadioHoudini(const RadioParams& params)
     // plays out at THIS rate and the RFDC interpolates to the DAC, so no host
     // upsampling is needed (the old DAC-max sentinel made the beacon recur
     // every 512 samples and buried the correlator's 2-rep peak).
-    : RadioSoapy(params, deviceArgs(params), rxStreamArgs(params), txStreamArgs(params),
-                 params.rate_hz, params.rate_hz, params.nco_hz, true) {}
+    : RadioSoapy(params, Type::kSoapyHoudini, deviceArgs(params), rxStreamArgs(params),
+                 txStreamArgs(params), params.rate_hz, params.rate_hz, params.nco_hz, true) {}
 
 void RadioHoudini::setup(int ch, double rxgain, double txgain) {
   // The mixer NCO is the only tuning knob and there is no antenna, analog

@@ -18,11 +18,12 @@
 
 class RadioSoapy : public Radio {
  public:
-  /// Open an Iris (or SoapyUHD) device from its parameters.
-  explicit RadioSoapy(const RadioParams& params);
+  /// Open an Iris or a Soapy-UHD device from its parameters; `type` says
+  /// which (the build's RADIO_TYPE picks the default through radioTypeFor).
+  RadioSoapy(const RadioParams& params, Type type);
   ~RadioSoapy() override;
 
-  Type type() const override;
+  Type type() const override { return type_; }
   houdini::sync::Platform platform() const override { return houdini::sync::Platform::kIrisUhd; }
   void printSettings() const override;
   bool hasHardwareTrigger() const override;
@@ -50,10 +51,12 @@ class RadioSoapy : public Radio {
   /// offsets, open the streams. `houdini_streams` selects the Houdini stream
   /// order (TX first, with the MTS membership stream when ch0 is not a data
   /// channel).
-  RadioSoapy(const RadioParams& params, const SoapySDR::Kwargs& args,
+  RadioSoapy(const RadioParams& params, Type type, const SoapySDR::Kwargs& args,
              const SoapySDR::Kwargs& rxStreamArgs, const SoapySDR::Kwargs& txStreamArgs,
              double preStreamRxRate, double preStreamTxRate, double preStreamFreq,
              bool houdini_streams);
+  bool isUhd() const { return type_ == Type::kSoapyUhd; }
+  Type type_;
 
   SoapySDR::Device* dev_ = nullptr;
   // nullptr NSDMI is load-bearing: the ctor's cleanup-and-rethrow reads
