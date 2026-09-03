@@ -278,33 +278,60 @@ def main():
     loaded = {n: load_shape(args.shapes_dir, n, shapes_json[n]) for n in names}
 
     if args.self_test:
+        # ONE NOISE DRAW IS NOT A MEASUREMENT OF AN ESTIMATOR. The first version
+        # of this self-test used a single fixed seed, so every "error" it printed
+        # was one realisation, and it duly reported legacy_guard biased +78 Hz
+        # and nr +140 Hz while legacy sat at -8. Those looked like per-shape
+        # systematic offsets. They were the same draw scaled by each shape's own
+        # noise sensitivity: at 20 dB every one of them grew by exactly the
+        # sqrt(SNR) ratio, which is the signature of noise, not of bias.
+        #
+        # So: many draws, and separate what a bias and a spread actually are.
+        # BIAS is the correctness claim -- an estimator that is systematically
+        # off will read a wrong CFO no matter how long you average. SPREAD is a
+        # sensitivity, expected to differ between shapes, and is REPORTED rather
+        # than gated because a shorter fine field is legitimately noisier.
         bad = 0
-        print("\nself-test: known CFO and SNR injected, no hardware\n")
-        print("%-13s %10s %10s %8s %7s %9s %8s" %
-              ("shape", "CFO want", "CFO got", "err Hz", "R", "SNR want", "SNR got"))
+        ndraw = 64
+        print("\nself-test: known CFO and SNR injected, %d draws each, "
+              "no hardware\n" % ndraw)
+        print("%-13s %9s %8s %9s %8s %8s %9s %8s" %
+              ("shape", "CFO want", "bias Hz", "spread Hz", "R", "SNR want",
+               "SNR bias", "verdict"))
         for nm in names:
             g = shapes_json[nm]
             core = np.fromfile(os.path.join(args.shapes_dir, "%s_core.bin" % nm),
                                dtype=np.int16)
-            for want_hz in (0.0, 250.0, -1200.0, 4250.0):
-                for want_snr in (45.0, 20.0):
+            for want_snr in (45.0, 20.0):
+                for want_hz in (0.0, 250.0, -1200.0, 4250.0):
                     pos = 700
-                    c = synth_beacon(core, g, want_hz, want_snr, 4096, pos, 12345)
-                    hz, r = cfo_from_fine(c, pos, g, False)
-                    sn = snr_db(c, pos, g)
-                    err = hz - want_hz
-                    # The estimator's own noise floor scales as 1/fine_len, so
-                    # tens of Hz at 20 dB with a 64-sample pair is expected. This
-                    # bound is a sanity gate, not a spec.
-                    ok_cfo = abs(err) < 60.0
-                    ok_snr = abs(sn - want_snr) < 3.0
+                    errs, rs, sns = [], [], []
+                    for sd in range(ndraw):
+                        c = synth_beacon(core, g, want_hz, want_snr, 4096, pos,
+                                         1000 + sd)
+                        hz, r = cfo_from_fine(c, pos, g, False)
+                        errs.append(hz - want_hz)
+                        rs.append(r)
+                        sns.append(snr_db(c, pos, g))
+                    bias = float(np.mean(errs))
+                    spread = float(np.std(errs))
+                    # The bias must be small compared with the spread it hides
+                    # in: a systematic error worth catching is one that survives
+                    # averaging, i.e. bigger than the standard error of the mean.
+                    sem = spread / np.sqrt(ndraw)
+                    ok_cfo = abs(bias) < max(3.0 * sem, 5.0)
+                    snb = float(np.mean(sns)) - want_snr
+                    ok_snr = abs(snb) < 3.0
                     if not (ok_cfo and ok_snr):
                         bad += 1
-                    print("%-13s %10.1f %10.1f %8.1f %7.3f %9.1f %8.1f  %s%s"
-                          % (nm, want_hz, hz, err, r, want_snr, sn,
-                             "" if ok_cfo else "CFO-FAIL ",
-                             "" if ok_snr else "SNR-FAIL"))
+                    print("%-13s %9.1f %8.2f %9.1f %8.3f %8.1f %9.2f %8s"
+                          % (nm, want_hz, bias, spread, float(np.mean(rs)),
+                             want_snr, snb,
+                             "ok" if (ok_cfo and ok_snr) else
+                             ("CFO-BIAS" if not ok_cfo else "SNR")))
         print("\nself-test: %s (%d failure(s))" % ("PASS" if not bad else "FAIL", bad))
+        print("spread is a sensitivity, not a defect: a 64-sample fine field is")
+        print("legitimately noisier than a 128-sample one. Only bias is gated.")
         return 1 if bad else 0
     for n in names:
         g = shapes_json[n]
