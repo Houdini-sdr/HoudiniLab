@@ -11,7 +11,7 @@ recommended default.
 The UE synchronisation path works and is measured (DEMO_VERIFICATION 8.x), but
 it is spread across `receiver.cc` (3000 lines, about half of them sync),
 `config.cc`, `comms-lib-portable.cc`, two header-only helpers
-(`sync_geometry.h`, `grid_tracker.h`), `beacon_shapes.h`, and Python mirrors of
+(`sync/sync_geometry.h`, `sync/grid_tracker.h`), `sync/beacon_shapes.h`, and Python mirrors of
 the detector and the CFO estimator in `tests/demo-verify/`. Its configuration is
 about thirty `HOUDINI_*` environment variables: 17 numeric knobs read through
 `envDouble` in `receiver.cc`, five enumerations and switches read by `getenv`
@@ -73,8 +73,8 @@ and the tests link it; `rx-recorder` may later.
 | `Detector` | composes the three above; selects the form from the replica; returns `Detection{end_index, statistic, form}` with the replica tail applied | `syncSearch` | 8.154 |
 | `Confirm` | `SnrWindowGuard{floor_db, guard = max(8, first_path_window)}`; interface for `SequenceConfirm` (SSS) | `beaconSnrDb` | 8.151, 8.155 |
 | `CfoEstimator` | `RepetitionPhase{margin}` with the coarse unwrap; NaN on failure; interface for `SymbolPairPhase` | `estimateCFO` | AP-39, 8.164 |
-| `SyncGeometry` | targeted slice from tolerance and numerology | `sync_geometry.h` | 8.65 |
-| `GridTracker` | `AlphaBeta`, `Kalman`, `TrackerConfig` | `grid_tracker.h` | 8.81 |
+| `SyncGeometry` | `SliceGeometry` (targeted slice from tolerance and the replica length) and `ResyncSchedule` (the cadence) | `sync/sync_geometry.h` | 8.65 |
+| `GridTracker` | `AlphaBeta`, `Kalman`, `TrackerConfig` (built from the JSON tracker block) | `sync/grid_tracker.h` | 8.81 |
 | `ResyncPolicy` | cadence from residual ppm, retry ladder, escalation, hold-offgrid, acquisition refine span | constants and env in the client loop | 8.104 to 8.108 |
 | `PhaseTracker` | two-state phase and frequency with a random-walk model, fed by the detection's complex peak | new | AP-67 |
 | `SyncConfig` | the validated struct behind all of the above, with provenance | `envDouble` and `getenv` sites | AP-56 |

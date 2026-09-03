@@ -39,8 +39,12 @@
 #include "sync/cfo_estimator.h"
 #include "sync/sync_config.h"
 
-namespace beacon_shapes {
+namespace houdini {
+namespace sync {
+namespace shapes {
 struct Desc;
+}
+}
 }
 
 namespace houdini {
@@ -59,7 +63,7 @@ class BeaconShape {
   /// make visible.
   static BeaconShape make(const std::string& name, Platform platform, size_t prefix_samples);
   /// Build from a shape the caller already has (tests, the dumper).
-  static BeaconShape fromDesc(const beacon_shapes::Desc& d, Platform platform,
+  static BeaconShape fromDesc(const shapes::Desc& d, Platform platform,
                               size_t prefix_samples);
   static std::vector<std::string> names();
 

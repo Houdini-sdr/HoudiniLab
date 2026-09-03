@@ -21,6 +21,10 @@ class ClientRadioSetUHD {
   int radioTx(size_t radio_id, const void* const* buffs, int numSamps,
               int flags, long long& frameTime);
   void radioStop(void);
+  /// Drain asynchronous TX status; UHD reports it through its own stream and
+  /// there is nothing to drain here. Kept so the receiver's call compiles
+  /// under RADIO_TYPE=PURE_UHD (baseline assessment B1).
+  int drainTxStatus(size_t /*radio_id*/) { return 0; }
   bool getRadioNotFound() { return radioNotFound; }
 
  private:

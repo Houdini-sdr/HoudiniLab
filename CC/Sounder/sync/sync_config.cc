@@ -240,6 +240,9 @@ const std::vector<SyncConfig::Spec>& SyncConfig::schema() {
       {"detector.corr_scale_init", nullptr, 1e-4, 1e7,
        "Acquisition detection threshold (bar 1 / corr_scale_init); defaults to corr_scale.",
        KNOB_ACCESS(double, detector.bar.corr_scale_init), nullptr, EP::kClamp},
+      {"detector.corr_threads", "SOUNDER_CORR_THREADS", 1, 256,
+       "Threads for the correlator's matched filter. 1 shipped; measured a net loss below ~4 on the rig host.",
+       KNOB_ACCESS(int, detector.corr_threads), nullptr, EP::kClamp},
       // confirm
       {"confirm.snr_floor_db", "HOUDINI_SYNC_SNR_DB", -10.0, 80.0,
        "In-window SNR a detection must clear. A property of the link and the waveform: re-derive it when either changes.",

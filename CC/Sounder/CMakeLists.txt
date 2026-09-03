@@ -253,13 +253,17 @@ add_library(houdini_sync STATIC
   sync/beacon_shape.cc
     sync/detector.cc
     comms-lib.cc comms-lib-avx.cc comms-lib-portable.cc utils.cc)
-target_include_directories(houdini_sync PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CMAKE_CURRENT_SOURCE_DIR}/include)
+# Consumers see include/ only: a library consumer must not be able to reach
+# the sounder's sources through the library's include path.
+target_include_directories(houdini_sync PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 # Linked into sounder_module (a MODULE) as well as the executables.
 set_target_properties(houdini_sync PROPERTIES POSITION_INDEPENDENT_CODE ON)
-target_compile_definitions(houdini_sync PUBLIC ${MUFFT_DEFINITIONS})
 target_link_libraries(houdini_sync PUBLIC ${MUFFT_LIBRARIES})
 
+# The radio-free tests and the bench tools. ON by default so the gate keeps
+# building them; a packager can turn them off.
+option(SOUNDER_BUILD_TESTS "Build the radio-free tests and bench tools (ctest)" ON)
+if (SOUNDER_BUILD_TESTS)
 add_executable(sync_config_test tests/comms-func/sync_config_test.cc)
 target_link_libraries(sync_config_test houdini_sync -lpthread)
 add_test(NAME sync_config COMMAND sync_config_test ${CMAKE_CURRENT_SOURCE_DIR}/CSI_DEMO_WALKTHROUGH.md)
@@ -273,20 +277,19 @@ add_test(NAME golden_window COMMAND golden_window_test
          ${CMAKE_CURRENT_SOURCE_DIR}/tests/comms-func/fixtures/golden)
 
 add_executable(sync_geometry_test tests/comms-func/sync_geometry_test.cc)
-target_include_directories(sync_geometry_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(sync_geometry_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 add_test(NAME sync_geometry COMMAND sync_geometry_test)
 
 # Radio-free A/B: AP-41's kalman against the shipped alpha-beta over the SAME
 # synthetic detections. The rig can only run one at a time; this pairs them.
 add_executable(grid_tracker_test tests/comms-func/grid_tracker_test.cc)
-target_include_directories(grid_tracker_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(grid_tracker_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 add_test(NAME grid_tracker COMMAND grid_tracker_test)
 
 # The index-convention check AP-34(a) did not have. Links the real CommsLib so
 # it exercises the REAL detector; a replica would agree with itself.
 add_executable(beacon_geometry_test
     tests/comms-func/beacon_geometry_test.cc)
-target_include_directories(beacon_geometry_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(beacon_geometry_test houdini_sync -lpthread ${MUFFT_LIBRARIES})
 add_test(NAME beacon_geometry COMMAND beacon_geometry_test)
 
@@ -294,12 +297,10 @@ add_test(NAME beacon_geometry COMMAND beacon_geometry_test)
 # running the unmodified receiver.cc client-sync path can acquire it.
 add_executable(beacon_shape_dump
     tests/comms-func/beacon_shape_dump.cc)
-target_include_directories(beacon_shape_dump PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(beacon_shape_dump houdini_sync -lpthread ${MUFFT_LIBRARIES})
 
 add_executable(beacon_tx_gold
     tests/comms-func/beacon_tx_gold.cc)
-target_include_directories(beacon_tx_gold PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(beacon_tx_gold houdini_sync -lpthread
     ${SoapySDR_LIBRARIES}
     ${MUFFT_LIBRARIES})
@@ -310,7 +311,6 @@ target_link_libraries(beacon_tx_gold houdini_sync -lpthread
 add_executable(houdini_bs_ue_sync
     tests/comms-func/houdini_bs_ue_sync.cc
     ${SOUNDER_SOURCES})
-target_include_directories(houdini_bs_ue_sync PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(houdini_bs_ue_sync houdini_sync -lpthread --enable-threadsafe ${GFLAGS_LIBRARIES} ${UHD_LIBRARIES}
     ${SoapySDR_LIBRARIES}
     ${HDF5_LIBRARIES}
@@ -321,8 +321,8 @@ target_link_libraries(houdini_bs_ue_sync houdini_sync -lpthread --enable-threads
 add_executable(houdini_loopback
     tests/comms-func/houdini_loopback.cc
     ${SOUNDER_SOURCES})
-target_include_directories(houdini_loopback PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(houdini_loopback houdini_sync -lpthread --enable-threadsafe ${GFLAGS_LIBRARIES} ${UHD_LIBRARIES}
     ${SoapySDR_LIBRARIES}
     ${HDF5_LIBRARIES}
     ${MUFFT_LIBRARIES})
+endif()  # SOUNDER_BUILD_TESTS

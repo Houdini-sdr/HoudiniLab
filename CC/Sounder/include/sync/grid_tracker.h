@@ -1,5 +1,5 @@
 /**
- * @file grid_tracker.h
+ * @file sync/grid_tracker.h
  * @brief The UE's estimate of the BS frame grid: (reference, period), with two
  *        interchangeable estimators behind one interface.
  *
@@ -34,24 +34,39 @@
 #include <cmath>
 #include <cstddef>
 
-namespace Sounder {
+#include "sync/sync_config.h"
 
-enum class TrackerKind { kAlphaBeta = 0, kKalman = 1 };
+namespace houdini {
+namespace sync {
 
+
+/// The estimator's input. Its values have ONE owner, GridTrackerConfig in
+/// sync_config.h (the JSON `tracker` block): construct from it, with the frame
+/// length that turns step_ppm into a per-update limit in samples. The
+/// defaults here are therefore the shipped ones, never a second copy.
 struct TrackerConfig {
-  TrackerKind kind = TrackerKind::kAlphaBeta;
+  explicit TrackerConfig(const GridTrackerConfig& g = GridTrackerConfig{},
+                         double frame_samples = 0.0)
+      : type(g.type),
+        alpha(g.alpha),
+        beta(g.beta),
+        step_limit(g.step_ppm * 1e-6 * frame_samples),
+        meas_var(g.kf_meas_var),
+        rate_rw(g.kf_rate_rw),
+        innov_gate(g.kf_innov_gate) {}
+  TrackerType type;
   // alpha-beta
-  double alpha = 0.5;
-  double beta = 0.1;
-  double step_limit = 0.0;   ///< samples/frame per update; 0 = off
+  double alpha;
+  double beta;
+  double step_limit;   ///< samples/frame per update; 0 = off
   // kalman
-  double meas_var = 0.5;     ///< R, samples^2. Detector scatter: sd 0.63-0.70
+  double meas_var;     ///< R, samples^2. Detector scatter: sd 0.63-0.70
                              ///< measured post-fix, so ~0.5 is the variance.
-  double rate_rw = 1e-9;     ///< q, samples^2/frame^3. Rate random walk: eps
+  double rate_rw;     ///< q, samples^2/frame^3. Rate random walk: eps
                              ///< moved 0.23 ppm across a session, which is
                              ///< 0.028 samples/frame over ~6e5 frames, so
                              ///< q ~ 0.028^2/6e5 ~ 1.3e-9.
-  double innov_gate = 0.0;   ///< sigmas; 0 = off. A principled outlier reject.
+  double innov_gate;   ///< sigmas; 0 = off. A principled outlier reject.
   // NOTE: there is deliberately NO period band here. The plausibility clamp
   // lives with the caller that owns the period (receiver.cc), because this
   // class holds no state to clamp -- it returns GAINS. Fields named period_lo
@@ -100,7 +115,7 @@ class GridTracker {
     innov_ = 0.0;
     if (kf <= 0) return false;
     const double dk = static_cast<double>(kf);
-    if (cfg_.kind == TrackerKind::kKalman) {
+    if (cfg_.type == TrackerType::kKalman) {
       // Predict. F = [[1, dk], [0, 1]]. The caller re-anchors its reference to
       // frame kf on every accepted update, so dk IS the elapsed time and no
       // absolute frame index ever grows without bound.
@@ -153,7 +168,7 @@ class GridTracker {
   double innovSigmas() const { return innov_; }  ///< kalman only, 0 otherwise
   double timeSigma() const { return std::sqrt(p00_); }
   double rateSigma() const { return std::sqrt(p11_); }
-  bool isKalman() const { return cfg_.kind == TrackerKind::kKalman; }
+  bool isKalman() const { return cfg_.type == TrackerType::kKalman; }
   size_t updates() const { return updates_; }
   size_t rejected() const { return rejected_; }
 
@@ -164,6 +179,7 @@ class GridTracker {
   size_t updates_ = 0, rejected_ = 0;
 };
 
-}  // namespace Sounder
+}  // namespace sync
+}  // namespace houdini
 
 #endif  // GRID_TRACKER_H_

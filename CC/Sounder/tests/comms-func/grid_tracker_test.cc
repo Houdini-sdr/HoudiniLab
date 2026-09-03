@@ -25,7 +25,7 @@
 #include <string>
 #include <vector>
 
-#include "include/grid_tracker.h"
+#include "sync/grid_tracker.h"
 
 namespace {
 
@@ -112,8 +112,8 @@ struct Result {
   bool is_kalman;
 };
 
-Result run(const Trace& t, Sounder::TrackerConfig cfg) {
-  Sounder::GridTracker tr;
+Result run(const Trace& t, houdini::sync::TrackerConfig cfg) {
+  houdini::sync::GridTracker tr;
   tr.reset(cfg);
   // The caller owns ref and period, and applies the tracker's gains with the
   // SAME arithmetic receiver.cc uses (round kf*period to a whole sample, then
@@ -169,24 +169,24 @@ Result run(const Trace& t, Sounder::TrackerConfig cfg) {
   return r;
 }
 
-Sounder::TrackerConfig ab() {
-  Sounder::TrackerConfig c;
-  c.kind = Sounder::TrackerKind::kAlphaBeta;
+houdini::sync::TrackerConfig ab() {
+  houdini::sync::TrackerConfig c;
+  c.type = houdini::sync::TrackerType::kAlphaBeta;
   c.alpha = 0.5;
   c.beta = 0.1;
   c.step_limit = 0.5e-6 * kFrame;   // HOUDINI_GRID_STEP_PPM default
   return c;
 }
 
-Sounder::TrackerConfig abBare() {
-  Sounder::TrackerConfig c = ab();
+houdini::sync::TrackerConfig abBare() {
+  houdini::sync::TrackerConfig c = ab();
   c.step_limit = 0.0;      // no slew limit: the estimator with nothing added
   return c;
 }
 
-Sounder::TrackerConfig kf(double gate = 0.0) {
-  Sounder::TrackerConfig c = ab();
-  c.kind = Sounder::TrackerKind::kKalman;
+houdini::sync::TrackerConfig kf(double gate = 0.0) {
+  houdini::sync::TrackerConfig c = ab();
+  c.type = houdini::sync::TrackerType::kKalman;
   c.step_limit = 0.0;      // the kalman's robustness is the innovation gate
   c.meas_var = kScatterSd * kScatterSd;
   c.rate_rw = 1e-9;

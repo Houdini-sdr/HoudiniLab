@@ -1,7 +1,7 @@
 /**
  * @file beacon_shape_dump.cc
  * @brief Write each candidate beacon's TX core and correlator replica to disk,
- *        from the ONE definition in include/beacon_shapes.h.
+ *        from the ONE definition in include/sync/beacon_shapes.h.
  *
  * The bench probes are Python and must not re-implement the sequences: a
  * re-implementation that agrees with itself proves nothing, and one that
@@ -25,7 +25,7 @@
 #include <string>
 #include <vector>
 
-#include "include/beacon_shapes.h"
+#include "sync/beacon_shapes.h"
 #include "sync/beacon_shape.h"
 #include "sync/confirm.h"
 #include "sync/detector.h"
@@ -41,10 +41,10 @@ int main(int argc, char** argv) {
   }
   std::string js = "{\n  \"peak_counts\": " + std::to_string(peak) + ",\n  \"shapes\": {\n";
   bool first = true;
-  for (const char* name : beacon_shapes::kAllNames) {
-    beacon_shapes::Shape sh;
-    if (!beacon_shapes::parse(name, &sh)) { std::fprintf(stderr, "bad %s\n", name); return 2; }
-    const auto d = beacon_shapes::make(sh);
+  for (const char* name : houdini::sync::shapes::kAllNames) {
+    houdini::sync::shapes::Shape sh;
+    if (!houdini::sync::shapes::parse(name, &sh)) { std::fprintf(stderr, "bad %s\n", name); return 2; }
+    const auto d = houdini::sync::shapes::make(sh);
     double pk = 0.0;
     for (const auto& v : d.core) pk = std::max(pk, static_cast<double>(std::norm(v)));
     const double g = peak / std::sqrt(pk);
@@ -113,7 +113,7 @@ int main(int argc, char** argv) {
   std::fwrite(js.data(), 1, js.size(), f);
   std::fclose(f);
   std::printf("wrote %zu shapes to %s\n",
-              sizeof(beacon_shapes::kAllNames) / sizeof(*beacon_shapes::kAllNames),
+              sizeof(houdini::sync::shapes::kAllNames) / sizeof(*houdini::sync::shapes::kAllNames),
               out.c_str());
   return 0;
 }

@@ -32,7 +32,8 @@
 #include "sync/cfo_estimator.h"
 #include "sync/confirm.h"
 #include "sync/detector.h"
-#include "sync_geometry.h"
+#include "sync/grid_tracker.h"
+#include "sync/sync_geometry.h"
 #include "macros.h"
 
 class ReceiverException : public std::runtime_error {
@@ -95,8 +96,6 @@ class Receiver {
   // Two-stage beacon CFO estimate, normalized (cycles/sample); multiply by
   // the sample rate for Hz. Pointer form so both the vector-backed legacy
   // path and the targeted-resync path (raw rxbuff) can call it.
-  float estimateCFO(const std::complex<int16_t>* buf, size_t buf_len,
-                    int sync_index) const;
   void initBuffers();
   // frame_period: the TRACKED BS frame period in UE samples (AP-31c). The
   // horizon ladder steps by it, not by samps_per_frame; <= 0 means nominal.
@@ -110,7 +109,7 @@ class Receiver {
   // how far the beacon slipped over them, so the rate costs nothing extra --
   // see the bootstrap note at the definition.
   bool houdiniAcquireAnchor(int tid, size_t detect_window,
-                            const Sounder::SyncGeometry& geom,
+                            const houdini::sync::SyncGeometry& geom,
                             long long& anchor_out,
                             double* period_out = nullptr);
   void clientAdjustRx(size_t radio_id, size_t discard_samples);

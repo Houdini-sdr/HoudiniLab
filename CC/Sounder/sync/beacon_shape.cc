@@ -5,30 +5,30 @@
 
 #include <stdexcept>
 
-#include "beacon_shapes.h"
+#include "sync/beacon_shapes.h"
 
 namespace houdini {
 namespace sync {
 
 std::vector<std::string> BeaconShape::names() {
   std::vector<std::string> out;
-  for (const char* n : beacon_shapes::kAllNames) out.emplace_back(n);
+  for (const char* n : shapes::kAllNames) out.emplace_back(n);
   return out;
 }
 
 BeaconShape BeaconShape::make(const std::string& name, Platform platform,
                               size_t prefix_samples) {
-  beacon_shapes::Shape s;
-  if (!beacon_shapes::parse(name, &s)) {
+  shapes::Shape s;
+  if (!shapes::parse(name, &s)) {
     std::string expected;
     for (const auto& n : names()) expected += (expected.empty() ? "" : ", ") + n;
     throw std::invalid_argument("unknown beacon_type \"" + name + "\" -- expected one of " +
                                 expected);
   }
-  return fromDesc(beacon_shapes::make(s), platform, prefix_samples);
+  return fromDesc(shapes::make(s), platform, prefix_samples);
 }
 
-BeaconShape BeaconShape::fromDesc(const beacon_shapes::Desc& d, Platform platform,
+BeaconShape BeaconShape::fromDesc(const shapes::Desc& d, Platform platform,
                                   size_t prefix_samples) {
   BeaconShape b;
   b.name_ = d.name;

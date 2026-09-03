@@ -34,23 +34,20 @@
 #include "include/logger.h"
 #include "include/macros.h"
 #include "include/node_version.h"
-#include "include/grid_tracker.h"
-#include "include/sync_geometry.h"
+#include "sync/grid_tracker.h"
+#include "sync/sync_geometry.h"
 #include "include/utils.h"
 
 //Default to detect the beacon on first channel
 static constexpr size_t kSyncDetectChannel = 0;
 static constexpr float kBeaconDetectWindowScaler = 2.33f;
-static constexpr bool kEnableCfo = false;
 // Beacon core geometry, mirrored from Config::genBeacon (config.cc): 15 reps of
-// STS(16) then 2 reps of gold(128). estimateCFO() correlates BOTH structures
+// STS(16) then 2 reps of gold(128). The estimator (sync/cfo_estimator.h) correlates BOTH structures
 // and guards on the total at runtime.
 // The legacy beacon's layout, kept ONLY as the reference the sync-geometry
 // constants are written against. The CFO estimator no longer uses them: it
 // reads the configured shape's geometry from Config, because `beacon_type`
-// now selects between four beacons (include/beacon_shapes.h).
-static constexpr int kStsLen = 16;
-static constexpr int kGoldLen = 128;
+// now selects between four beacons (include/sync/beacon_shapes.h).
 // The beacon-CFO log line is throttled by sync.cfo.log_every (1 in N); the
 // panel gets every sample regardless. 1 makes it dense, for a calibration run.
 
@@ -141,7 +138,7 @@ Receiver::Receiver(
         g, sc.cfo.window_margin, config_->is_houdini());
     if (!g.usable()) {
       MLPD_WARN(
-          "estimateCFO: beacon '%s' has no usable repeated field (core %d, fine "
+          "beacon CFO: beacon '%s' has no usable repeated field (core %d, fine "
           "%d x %d at %d) -- the beacon CFO reading will be NaN\n",
           config_->beacon_type().c_str(), g.core_len, g.fine_reps, g.fine_len,
           g.fine_off);
@@ -1086,7 +1083,8 @@ ssize_t Receiver::syncSearch(const std::complex<int16_t>* check_data,
       sync_detector_->run(check_data, search_window, corr_scale, pick);
   const ssize_t sync_index = det.end_index;
   if (detection != nullptr) *detection = det;
-  if (std::getenv("HOUDINI_SYNC_DEBUG") != nullptr) {
+  static const bool kSyncDebug = std::getenv("HOUDINI_SYNC_DEBUG") != nullptr;  // read once
+  if (kSyncDebug) {
     static std::atomic<int> c{0};
     if ((c.fetch_add(1) % 20) == 0) {  // braces load-bearing (macro)
       MLPD_INFO("syncSearch[%s]: window=%zu corr_scale=%.3f gold=%zu pick=%d "
@@ -1205,10 +1203,6 @@ static void sendSyncTelemetry(size_t frame, int tid, uint32_t state,
 // geometry, NaN on every failure path, the Houdini mixer's conjugation undone.
 // The window placement rules and their measured consequences (AP-39, 8.164) are
 // documented there. `sync_index` is the beacon END, as everywhere in this file.
-float Receiver::estimateCFO(const std::complex<int16_t>* buf, size_t buf_len,
-                            int sync_index) const {
-  return cfo_estimator_->estimate(buf, buf_len, sync_index);
-}
 
 void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   if (config_->core_alloc() == true) {
@@ -1347,9 +1341,10 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   }
   // ONE derivation, shared with sync_geometry_test so the whole rate ladder is
   // checkable without a radio (AP-56). Everything below reads out of `geom`.
-  const Sounder::SyncGeometry geom = Sounder::computeSyncGeometry(
+  const houdini::sync::SyncGeometry geom = houdini::sync::computeSyncGeometry(
       config_->rate(), static_cast<long long>(config_->samps_per_slot()),
-      static_cast<long long>(config_->samps_per_frame()), kScatterTolUs,
+      static_cast<long long>(config_->samps_per_frame()),
+      static_cast<long long>(config_->shape().replicaLen()), kScatterTolUs,
       kConfirmTolUs, sync_tol_samples, sync_residual_ppm);
   const long long kScatterTol = geom.scatter_tol;
   if (geom.scatter_clamped) {
@@ -1363,11 +1358,13 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   // State the resulting geometry at bring-up. This is the number that decides
   // whether the UE ever LOOKS for the beacon, and a zero here is the silent
   // failure, so it must be visible without the reader computing it.
-  if (!geom.usable) {
+  if (!config_->is_houdini()) {
+    // The slice geometry drives the targeted resync, which only Houdini runs.
+  } else if (!geom.usable) {
     MLPD_ERROR(
         "beacon accept window is %lld samples: the UE will never attempt a "
         "resync and will fly open loop with no telemetry. Lower "
-        "HOUDINI_SCATTER_TOL_US.\n",
+        "sync.resync.scatter_tol_us.\n",
         geom.accept_window);
   } else {
     MLPD_INFO(
@@ -1640,19 +1637,11 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   // edge-of-gate detection lands inside the +-kScatterTol window, because
   // alpha-beta has the slew limit and a bare kalman has nothing. So the gate is
   // not an optional extra, it is what makes this arm worth running.
-  Sounder::TrackerConfig tracker_cfg;
+  // One owner of the values: the JSON tracker block, with the frame length
+  // that turns step_ppm into a per-update limit in samples.
+  const houdini::sync::TrackerConfig tracker_cfg(
+      config_->sync().tracker, static_cast<double>(config_->samps_per_frame()));
   {
-    tracker_cfg.kind =
-        config_->sync().tracker.type == houdini::sync::TrackerType::kKalman
-            ? Sounder::TrackerKind::kKalman
-            : Sounder::TrackerKind::kAlphaBeta;
-    tracker_cfg.alpha = kGridAlpha;
-    tracker_cfg.beta = kGridBeta;
-    tracker_cfg.step_limit =
-        kGridStepPpm * 1e-6 * static_cast<double>(config_->samps_per_frame());
-    tracker_cfg.meas_var = config_->sync().tracker.kf_meas_var;
-    tracker_cfg.rate_rw = config_->sync().tracker.kf_rate_rw;
-    tracker_cfg.innov_gate = config_->sync().tracker.kf_innov_gate;
     // THE ACTIVE DETECTOR, ON EVERY RUN. The env overrides each warn when set,
     // so taking the same values BY DEFAULT logged nothing at all and a run's
     // log carried no record of which rule produced its numbers -- in a change
@@ -1689,7 +1678,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
         (config_->sync().tracker.type == houdini::sync::TrackerType::kKalman) ? "KALMAN" : "alpha-beta", kGridAlpha, kGridBeta, kGridStepPpm,
         tracker_cfg.meas_var, tracker_cfg.rate_rw, tracker_cfg.innov_gate);
   }
-  Sounder::GridTracker tracker;
+  houdini::sync::GridTracker tracker;
   tracker.reset(tracker_cfg);
   // Frame-start grid point n frames after the tracked reference.
   auto houdiniGridStart = [&](long long n) {
@@ -1828,12 +1817,12 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
       break;
     }
     //Slot 0 / Beacon...
-    const auto prof_t0 = profile_clock::now();
+    const auto prof_t0 = loop_profile_every > 0 ? profile_clock::now() : profile_clock::time_point{};
     const int request_samples = samples_per_slot - beacon_adjust;
     const int rx_status = client_radio_set_->radioRx(
         tid, rxbuff.data(), request_samples, rx_beacon_time);
     beacon_adjust = 0;
-    const auto prof_t1 = profile_clock::now();
+    const auto prof_t1 = loop_profile_every > 0 ? profile_clock::now() : profile_clock::time_point{};
     if (rx_status < 0) {
       MLPD_ERROR("Rx status reporting error %d, exiting\n", rx_status);
       config_->running(false);
@@ -2049,7 +2038,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
             cfo_index = sync_index;  // fall back to the detector's own index
           }
           const float cfo_norm =
-              estimateCFO(reinterpret_cast<std::complex<int16_t>*>(
+              cfo_estimator_->estimate(reinterpret_cast<std::complex<int16_t>*>(
                               rxbuff.at(kSyncDetectChannel)),
                           static_cast<size_t>(request_samples),
                           static_cast<int>(cfo_index));
@@ -2229,14 +2218,6 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
             "index: %ld, tid %d\n",
             frame_id, new_rx_offset, resync_retry_cnt + 1, sync_index, tid);
 
-        if (kEnableCfo && (sync_index >= 0)) {
-          const auto cfo_phase_est =
-              estimateCFO(samplemem.at(kSyncDetectChannel).data(),
-                          samplemem.at(kSyncDetectChannel).size(), sync_index);
-          MLPD_INFO("Client %d Estimated CFO (Hz): %f\n", tid,
-                    cfo_phase_est * config_->rate());
-        }
-
         //Offset Alignment logic
         if (new_rx_offset < 0) {
           beacon_adjust = (-1 * new_rx_offset);
@@ -2283,7 +2264,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
         }
       }
     }
-    const auto prof_t2 = profile_clock::now();
+    const auto prof_t2 = loop_profile_every > 0 ? profile_clock::now() : profile_clock::time_point{};
     // schedule all TX slot
     // config_->tx_advance() needs calibration based on SDR model and sampling rate
     // Houdini always uses the continuous P(+U) burst below (clientTxPilots now
@@ -2312,7 +2293,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
                              houdini_frame_period);
       }
     }  // end if config_->ul_data_slot_present()
-    const auto prof_t3 = profile_clock::now();
+    const auto prof_t3 = loop_profile_every > 0 ? profile_clock::now() : profile_clock::time_point{};
 
     //Beacon + Tx Complete, process the rest of the slots
     for (size_t slot_id = 1; slot_id < config_->slot_per_frame(); slot_id++) {
@@ -2486,7 +2467,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
 // lock; it BLOCKS while no detection at all is available (searching forever
 // is the wanted behavior when the beacon is gone -- pilots pause).
 bool Receiver::houdiniAcquireAnchor(int tid, size_t detect_window,
-                                    const Sounder::SyncGeometry& geom,
+                                    const houdini::sync::SyncGeometry& geom,
                                     long long& anchor_out,
                                     double* period_out) {
   // Detector scatter (ledger 4.18) plus path, expressed in TIME so it scales

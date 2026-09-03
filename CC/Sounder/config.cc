@@ -14,7 +14,7 @@
 #include <optional>
 #include <random>
 
-#include "include/beacon_shapes.h"
+#include "sync/beacon_shapes.h"
 #include "include/comms-lib.h"
 #include "include/constants.h"
 #include "include/logger.h"
@@ -804,7 +804,7 @@ void Config::genPilots() {
 
   // Compose the beacon slot. WHICH beacon is a config choice since 2026-09-02
   // ("beacon_type": legacy | legacy_guard | dot11 | nr), and every candidate is
-  // defined once in include/beacon_shapes.h -- the same header the offline
+  // defined once in include/sync/beacon_shapes.h -- the same header the offline
   // geometry test and the bench probes build from, so the waveform this
   // transmits is sample-for-sample the waveform they measured. That agreement
   // is the point: AP-34(a) cost a bench session because the bench and the build
@@ -835,6 +835,7 @@ void Config::genPilots() {
   // The sentinels resolve against the shape and the slot layout now that both
   // are known; what is printed here is the configuration actually used.
   sync_.resolve({shape.replicaLen(), static_cast<double>(prefix_), platform()});
+  CommsLib::setCorrelatorThreads(static_cast<unsigned>(sync_.detector.corr_threads));
   MLPD_INFO("%s", sync_.describe().c_str());
   std::cout << "Beacon: type " << beacon_type_ << ", core " << shape.coreLen()
             << " samples, matched field " << shape.replicaReps() << " x "
@@ -848,15 +849,15 @@ void Config::genPilots() {
             << ", PAPR " << shape.paprDb() << " dB" << std::endl;
 
   if (getenv("HOUDINI_DUMP_GOLD") != nullptr) {  // the exact find_beacon match
-    FILE* f = std::fopen("/tmp/gold.bin", "wb");
+    FILE* f = std::fopen(Utils::dumpPath("gold.bin").c_str(), "wb");
     if (f) {
       for (const auto& c : gold_cf32_) {
         float v[2] = {c.real(), c.imag()};
         std::fwrite(v, sizeof(float), 2, f);
       }
       std::fclose(f);
-      std::printf("Dumped gold_cf32 (%zu samp) to /tmp/gold.bin\n",
-                  gold_cf32_.size());
+      std::printf("Dumped gold_cf32 (%zu samp) to %s\n", gold_cf32_.size(),
+                  Utils::dumpPath("gold.bin").c_str());
     }
   }
 
@@ -882,13 +883,13 @@ void Config::genPilots() {
     // into the replay RAM. Lets offline tools (tests/demo-verify) construct the
     // exact TX waveform. Length is beacon_size(), NOT a constant: 496 for
     // legacy, 528 / 320 / 272 for the others.
-    FILE* f = std::fopen("/tmp/beacon_core.bin", "wb");
+    FILE* f = std::fopen(Utils::dumpPath("beacon_core.bin").c_str(), "wb");
     if (f) {
       std::fwrite(beacon_ci16_.data(), sizeof(std::complex<int16_t>),
                   beacon_ci16_.size(), f);
       std::fclose(f);
-      std::printf("Dumped beacon core (%zu samp ci16) to /tmp/beacon_core.bin\n",
-                  beacon_ci16_.size());
+      std::printf("Dumped beacon core (%zu samp ci16) to %s\n", beacon_ci16_.size(),
+                  Utils::dumpPath("beacon_core.bin").c_str());
     }
   }
 

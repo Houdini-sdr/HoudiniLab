@@ -450,7 +450,7 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
     bool exp = false;
     if (seen.fetch_add(1) >= skip &&
         dumped.compare_exchange_strong(exp, true)) {
-      FILE* f = std::fopen("/tmp/cns_dump.bin", "wb");
+      FILE* f = std::fopen(Utils::dumpPath("cns_dump.bin").c_str(), "wb");
       if (f) {
         const int32_t hdr[5] = {N, cp, es, nsym,
                                 static_cast<int32_t>(data_ind.size())};
@@ -466,7 +466,7 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
         }
         std::fwrite(d, sizeof(short), static_cast<size_t>(slot) * 2, f);
         std::fclose(f);
-        MLPD_INFO("CSI dump written to /tmp/cns_dump.bin\n");
+        MLPD_INFO("CSI dump written to %s\n", Utils::dumpPath("cns_dump.bin").c_str());
       }
     }
   }
@@ -881,7 +881,14 @@ RecorderWorker::~RecorderWorker() { this->finalize(); }
 
 void RecorderWorker::init(void) {
   this->initCsi();
-  if (this->view_mode_) return;  // viewing mode streams CSI, writes no HDF5
+  if (this->view_mode_) {
+    // Say so, loudly: a stray HOUDINI_CSI_UDP in the environment would
+    // otherwise disable every recording on any backend with no trace.
+    MLPD_WARN(
+        "VIEW MODE (HOUDINI_CSI_UDP is set): CSI streams to the dashboard and "
+        "NO HDF5 FILE IS WRITTEN. Unset it to record.\n");
+    return;
+  }
   this->hdf5_ = new Hdf5Lib(this->hdf5_name_, "Data");
   // Write Atrributes
   // ******* COMMON ******** //

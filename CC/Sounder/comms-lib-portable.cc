@@ -10,6 +10,7 @@
  * this compiles on the DGX Spark.
  */
 #include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <chrono>
 #include <complex>
@@ -23,18 +24,17 @@
 #include <thread>
 #include <vector>
 
-#include "include/comms-lib.h"
+#include "comms-lib.h"
 
 namespace {
-// Thread count for correlate_mt: explicit request wins; else SOUNDER_CORR_THREADS
-// env; else 1. Capped at the pool size (hardware concurrency) at dispatch.
+// Thread count for correlate_mt: an explicit request wins; else the value
+// set through CommsLib::setCorrelatorThreads (sync.detector.corr_threads,
+// SOUNDER_CORR_THREADS as its logged env alias); else 1. Capped at the pool
+// size (hardware concurrency) at dispatch.
+std::atomic<unsigned> g_corr_threads{1u};
 unsigned ResolveThreads(unsigned requested) {
   if (requested > 0) return requested;
-  if (const char* e = std::getenv("SOUNDER_CORR_THREADS")) {
-    const int v = std::atoi(e);
-    if (v > 0) return static_cast<unsigned>(v);
-  }
-  return 1u;
+  return std::max(1u, g_corr_threads.load(std::memory_order_relaxed));
 }
 
 // Persistent fork-join pool: worker threads are created once and reused, so
@@ -276,63 +276,10 @@ std::vector<float> TrailingWindowSum(const std::vector<float>& f,
 // delay (RMS spread 20-100 ns) with margin and is 5x inside the plateau. An
 // outdoor channel with 1-2 us of spread needs a longer window AND a preamble
 // whose plateau is further away than that; do not raise one without the other.
-static int firstPathWindow(int seq_len) {
-  // Read ONCE. Re-reading getenv per call would let the window change mid-run,
-  // making the residual distribution a mixture of two populations -- the same
-  // argument that makes the pick rule a read-once constant in receiver.cc, not
-  // honoured here until now.
-  static const int cached = [] {
-    const char* e = std::getenv("HOUDINI_FIRST_PATH_WIN");
-    if (e == nullptr) return -1;
-    char* end = nullptr;
-    const long v = std::strtol(e, &end, 10);
-    if (end != e && *end == '\0' && v >= 0 && v < 4096) {
-      return static_cast<int>(v);
-    }
-    // atoi("64x") returns 0, which silently DISABLED the back-search.
-    std::fprintf(stderr,
-                 "[find_beacon] HOUDINI_FIRST_PATH_WIN=\"%s\" is not an integer "
-                 "in [0, 4096) -- using the default\n", e);
-    return -1;
-  }();
-  if (cached >= 0) return std::min(cached, seq_len * 2);
-  return seq_len / 2;
-}
-// How far below the peak an earlier path may be and still be taken as the first
-// path, in dB of PATH POWER.
-//
-// THE CONVERSION IS THE WHOLE POINT AND I GOT IT WRONG FIRST TIME. The ranking
-// statistic is |gc[i]|^2 * |gc[i-L]|^2, which is 4th order in path AMPLITUDE,
-// so a path whose POWER is x times the peak's scores x^2 -- not x. Setting the
-// floor to 0.25 "for 6 dB" therefore demanded a path only 1.5 dB down, and the
-// back-search never fired on any multipath channel: measured +7, +23 and +39
-// samples of bias, identical to plain argmax, which is what a rule that never
-// fires looks like.
-static double firstPathDb() {
-  double db = -9.0;
-  if (const char* e = std::getenv("HOUDINI_FIRST_PATH_DB")) {
-    char* end = nullptr;
-    const double v = std::strtod(e, &end);
-    if (end != e && *end == '\0' && std::isfinite(v) && v <= 0.0 && v >= -30.0) {
-      db = v;
-    } else {
-      // FAIL LOUD. strtod("abc") returns 0.0, which passed the old range test
-      // and set the floor to 1.0 -- silently disabling the back-search in the
-      // rule this knob exists to tune.
-      std::fprintf(stderr,
-                   "[find_beacon] HOUDINI_FIRST_PATH_DB=\"%s\" is not a number "
-                   "in [-30, 0] -- using %g dB\n", e, db);
-    }
-  }
-  return db;
-}
-// Read lazily by the pre-SyncConfig overloads only, so a build whose sounder
-// takes the value from sync.detector.first_path_floor_db never reads (or
-// complains about) the environment here.
-static double kFirstPathDbLazy() {
-  static const double v = firstPathDb();
-  return v;
-}
+// The default back window: half a replica (see the note above), what the
+// two-argument-shorter overloads pass. The configured value arrives through
+// the explicit overloads.
+static int defaultFirstPathWindow(int seq_len) { return seq_len / 2; }
 
 // THE FLOOR DEPENDS ON THE STATISTIC'S ORDER, AND THE FIRST VERSION SQUARED IT
 // UNCONDITIONALLY. kPowerRatio, kNormalized and kNormalizedXCorr are all 4th
@@ -361,8 +308,8 @@ int CommsLib::find_beacon_avx(
   // once) with the historical defaults.
   return find_beacon_avx(raw_samples, match_samples, corr_scale, pick,
                          thresh_form,
-                         firstPathWindow(static_cast<int>(match_samples.size())),
-                         kFirstPathDbLazy());
+                         defaultFirstPathWindow(static_cast<int>(match_samples.size())),
+                         kDefaultFirstPathFloorDb);
 }
 
 CommsLib::BeaconResult CommsLib::find_beacon_ex(
@@ -470,7 +417,8 @@ CommsLib::BeaconResult CommsLib::find_beacon_ex(
       valid_peaks.push(static_cast<int>(i));
     }
   }
-  if (std::getenv("FIND_BEACON_DEBUG") != nullptr) {
+  static const bool kDebug = std::getenv("FIND_BEACON_DEBUG") != nullptr;  // read once
+  if (kDebug) {
     double best_ratio = 0.0;
     size_t best_i = 0, best_pm_i = 0;
     float best_pm = 0.0f;
@@ -573,8 +521,8 @@ ssize_t CommsLib::find_beacon_avx(
     float corr_scale, BeaconPick pick, BeaconThresh thresh_form) {
   return find_beacon_avx(raw_samples, match_samples, check_window, corr_scale,
                          pick, thresh_form,
-                         firstPathWindow(static_cast<int>(match_samples.size())),
-                         kFirstPathDbLazy());
+                         defaultFirstPathWindow(static_cast<int>(match_samples.size())),
+                         kDefaultFirstPathFloorDb);
 }
 
 ssize_t CommsLib::find_beacon_avx(
@@ -623,4 +571,8 @@ std::vector<std::complex<float>> CommsLib::complex_mult(
     out[i] = conj ? f[i] * std::conj(g[i]) : f[i] * g[i];
   }
   return out;
+}
+
+void CommsLib::setCorrelatorThreads(unsigned n) {
+  if (n > 0) g_corr_threads.store(n, std::memory_order_relaxed);
 }

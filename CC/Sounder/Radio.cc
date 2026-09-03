@@ -7,6 +7,7 @@
   * Initialize and Configure an SDR
   * ----------------------------------------------------------
 */
+#include "include/utils.h"
 #include "include/Radio.h"
 #include "include/rx_gap_sink.h"       // RxGapSink (UDP gap -> /Data/Gaps bridge)
 #include "include/rx_recorder_grid.h"  // TimeGridTracker
@@ -428,12 +429,13 @@ int Radio::recvHoudini(void* const* buffs, int samples, long long& frameTime) {
       static std::atomic<bool> done{false};
       bool expected = false;
       if (done.compare_exchange_strong(expected, true)) {
-        FILE* f = std::fopen("/tmp/cl_win.bin", "wb");
+        const std::string path = Utils::dumpPath("cl_win.bin");
+        FILE* f = std::fopen(path.c_str(), "wb");
         if (f) {
           std::fwrite(p, sizeof(int16_t), static_cast<size_t>(got) * 2, f);
           std::fclose(f);
-          MLPD_INFO("Dumped client beacon window rms=%.1f got=%d -> /tmp/cl_win.bin\n",
-                    rms, got);
+          MLPD_INFO("Dumped client beacon window rms=%.1f got=%d -> %s\n",
+                    rms, got, path.c_str());
         }
       }
     }

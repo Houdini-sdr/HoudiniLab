@@ -419,7 +419,7 @@ is 4 x 4384 = 17536 samples, over four times the replay RAM. At 240 kHz it
 fits, but the library's PBCH and MIB machinery exists to tell a UE WHERE in the
 frame it is, which our fixed beacon position already settles, and it would pull
 a large dependency into the sounder for two sequences that
-`include/beacon_shapes.h` already generates from the standard's own
+`include/sync/beacon_shapes.h` already generates from the standard's own
 definitions.
 
 ### 11.3 What the literature does with a repeating beacon

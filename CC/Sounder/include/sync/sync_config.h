@@ -86,7 +86,7 @@ const char* name(PickRule p);
 const char* name(TrackerType t);
 
 struct BeaconConfig {
-  std::string type = "legacy";  ///< beacon_shapes name
+  std::string type = "legacy";  ///< a BeaconShape name (sync/beacon_shapes.h)
   double tx_full_scale = 0.6;   ///< transmit peak as a fraction of full scale
 };
 
@@ -127,6 +127,9 @@ struct DetectorConfig {
   int first_path_window = -1;
   double first_path_floor_db = -9.0;  ///< how much weaker an earlier path may be
   ThresholdPolicy bar;
+  /// Threads for the correlator's matched filter (CommsLib::correlate_mt).
+  /// 1 shipped; the rig host measured threading a net loss below ~4 threads.
+  int corr_threads = 1;
 };
 
 struct ConfirmConfig {

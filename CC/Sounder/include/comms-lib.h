@@ -260,9 +260,14 @@ class CommsLib {
       BeaconPick pick = BeaconPick::kFirstCrossing,
       BeaconThresh thresh_form = BeaconThresh::kPowerRatio);
   // The first-path knobs made EXPLICIT. The two-argument-shorter overloads
-  // above keep reading HOUDINI_FIRST_PATH_WIN / HOUDINI_FIRST_PATH_DB for the
-  // callers that predate sync::SyncConfig; the library passes the configured
-  // values here so a run has one source of truth for them.
+  // above use the defaults (half the replica, kDefaultFirstPathFloorDb); the
+  // configured values come through sync::SyncConfig and the library passes
+  // them here, so a run has ONE source of truth and nothing in the correlator
+  // reads the environment.
+  static constexpr double kDefaultFirstPathFloorDb = -9.0;
+  /// Threads for correlate_mt (sync.detector.corr_threads); 0 leaves the
+  /// current setting. Read at dispatch, so set it before the first search.
+  static void setCorrelatorThreads(unsigned n);
   //   first_path_window  samples of back-search from the peak (0..2*seqLen)
   //   first_path_db      how much weaker an earlier path may be, dB <= 0
   static int find_beacon_avx(

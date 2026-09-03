@@ -31,7 +31,7 @@
 #include <string>
 #include <vector>
 
-#include "beacon_shapes.h"
+#include "sync/beacon_shapes.h"
 #include "sync/beacon_shape.h"
 #include "sync/cfo_estimator.h"
 #include "sync/confirm.h"
@@ -189,12 +189,13 @@ int main(int argc, char** argv) {
   const auto cfg = houdini::sync::SyncConfig::loadFromText("{}");
   const float kCorrScale = 10.0f;
   int windows = 0;
+  std::map<std::string, int> per_shape;
   for (const char* shape : {"legacy", "nr_pss"}) {
-    beacon_shapes::Shape sh;
-    if (!beacon_shapes::parse(shape, &sh)) { check(false, std::string("parse ") + shape); continue; }
+    houdini::sync::shapes::Shape sh;
+    if (!houdini::sync::shapes::parse(shape, &sh)) { check(false, std::string("parse ") + shape); continue; }
     // Built the way the receiver builds them: the shape, a config resolved
     // against it, the detector, the guard from the resolved window.
-    const auto d = BeaconShape::fromDesc(beacon_shapes::make(sh), Platform::kHoudini, 160);
+    const auto d = BeaconShape::fromDesc(houdini::sync::shapes::make(sh), Platform::kHoudini, 160);
     auto rcfg = cfg;
     rcfg.resolve({d.replicaLen(), 160.0, Platform::kHoudini});
     Detector det(d, rcfg.detector);
@@ -209,6 +210,7 @@ int main(int argc, char** argv) {
       if (!readWindow(base + ".bin", &w)) continue;
       const auto meta = readMeta(base + ".txt");
       ++windows;
+      ++per_shape[shape];
       if (!meta.has("sync_index") || !meta.has("snr")) {
         check(false, std::string(shape) + " window " + std::to_string(i) + ": fixture txt lacks sync_index/snr");
         continue;
@@ -273,6 +275,8 @@ int main(int argc, char** argv) {
     }
   }
   check(windows >= 12, "found " + std::to_string(windows) + " fixture windows (expected 12)");
+  for (const char* shape : {"legacy", "nr_pss"})
+    check(per_shape[shape] == 6, std::string(shape) + ": 6 of 6 fixture windows present (a half-populated set fails here, not quietly)");
   std::printf("\nRESULT: %s (%d failure(s))\n", g_fail ? "FAIL" : "PASS", g_fail);
   return g_fail ? 1 : 0;
 }

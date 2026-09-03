@@ -17,11 +17,12 @@
  * Build: CMake target sync_geometry_test. Run: ./sync_geometry_test (or ctest).
  */
 #include <cinttypes>
+#include <cmath>
 #include <cstdio>
 #include <string>
 #include <vector>
 
-#include "include/sync_geometry.h"
+#include "sync/sync_geometry.h"
 
 namespace {
 
@@ -59,14 +60,17 @@ constexpr double kResidualPpm = 0.1;       // was 1.0 until 2026-09-02
 
 }  // namespace
 
+// The gold replica the whole table was derived with. A shorter replica needs
+// less run-up: dot11 and nr (64 taps) get 128 fewer lead and 32 fewer tail.
+constexpr long long kReplicaLen = 128;
+
 int main() {
   std::printf(
       "%-24s %8s %8s %8s %9s %8s %9s %10s\n", "rate", "scatter", "confirm",
       "cap", "clamped", "window", "window %", "resync ms");
-  std::vector<Sounder::SyncGeometry> geo;
+  std::vector<houdini::sync::SyncGeometry> geo;
   for (const auto& r : kLadder) {
-    const auto g = Sounder::computeSyncGeometry(
-        r.rate_hz, r.samps_per_slot, r.samps_per_frame, kScatterUs, kConfirmUs,
+    const auto g = houdini::sync::computeSyncGeometry(r.rate_hz, r.samps_per_slot, r.samps_per_frame, kReplicaLen, kScatterUs, kConfirmUs,
         kSyncTolSamples, kResidualPpm);
     geo.push_back(g);
     std::printf("%-24s %8lld %8lld %8lld %9s %8lld %8.1f%% %10.1f\n", r.name,
@@ -172,7 +176,7 @@ int main() {
   // sweep so the invariant is checked across it rather than at the default.
   std::printf("=== HOUDINI_SCATTER_TOL_US swept, shipped rate ===\n");
   for (double tol_us : {1.0, 2.0, 4.0, 8.3333, 12.0, 20.0, 60.0}) {
-    const auto g = Sounder::computeSyncGeometry(122.88e6, 4096, 122880, tol_us,
+    const auto g = houdini::sync::computeSyncGeometry(122.88e6, 4096, 122880, kReplicaLen, tol_us,
                                                 kConfirmUs, kSyncTolSamples,
                                                 kResidualPpm);
     std::printf("  %6.2f us -> scatter %5lld  confirm %5lld%s  window %5lld "
@@ -188,11 +192,25 @@ int main() {
   }
   std::printf("\n");
 
+  // ---- the replica length sizes the slice ------------------------------
+  {
+    const auto g128 = houdini::sync::computeSliceGeometry(122.88e6, 4096, 122880, 128, kScatterUs, kConfirmUs);
+    const auto g64 = houdini::sync::computeSliceGeometry(122.88e6, 4096, 122880, 64, kScatterUs, kConfirmUs);
+    check(g128.lead - g64.lead == 128 && g128.tail - g64.tail == 32 &&
+              g64.accept_window == g128.accept_window + 160,
+          "a 64-tap replica needs 128 less lead and 32 less tail than the 128-tap gold");
+    const auto whole = houdini::sync::computeSyncGeometry(122.88e6, 4096, 122880, 128, kScatterUs, kConfirmUs, kSyncTolSamples, kResidualPpm);
+    const auto sched = houdini::sync::computeResyncSchedule(122.88e6, 122880, kSyncTolSamples, kResidualPpm);
+    check(whole.lead == g128.lead && whole.resync_interval_s == sched.resync_interval_s &&
+              whole.resync_period_iters == static_cast<long long>(std::floor(1e9 / (100.0 * 122880.0))),
+          "computeSyncGeometry composes the slice and the schedule; the Iris cadence is the 100 ppb rule");
+  }
+
   // ---- degenerate inputs must not produce a silent open loop -----------
   {
     // A tolerance far too large for any slot: the clamp, not the caller, has to
     // keep the gate usable.
-    const auto g = Sounder::computeSyncGeometry(122.88e6, 4096, 122880, 1000.0,
+    const auto g = houdini::sync::computeSyncGeometry(122.88e6, 4096, 122880, kReplicaLen, 1000.0,
                                                 kConfirmUs, kSyncTolSamples,
                                                 kResidualPpm);
     check(g.scatter_clamped && g.usable && g.accept_window_frac >= 0.20,
@@ -202,7 +220,7 @@ int main() {
     // A zero rate would divide by zero in the cadence; the fallback keeps the
     // frame at 1 ms rather than producing an infinity the size_t cast turns
     // into a huge value that disables beacon checking entirely.
-    const auto g = Sounder::computeSyncGeometry(0.0, 4096, 122880, kScatterUs,
+    const auto g = houdini::sync::computeSyncGeometry(0.0, 4096, 122880, kReplicaLen, kScatterUs,
                                                 kConfirmUs, kSyncTolSamples,
                                                 kResidualPpm);
     check(g.resync_interval_s > 0.0 && g.resync_interval_s <= 1e3,

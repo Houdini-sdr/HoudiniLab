@@ -1,5 +1,5 @@
 /**
- * @file beacon_shapes.h
+ * @file sync/beacon_shapes.h
  * @brief The candidate beacon waveforms, defined ONCE.
  *
  * [user 2026-09-02] "instead of being 802.11 LTS / NR TRS and 802.11 'like',
@@ -31,7 +31,9 @@
 
 #include "comms-lib.h"
 
-namespace beacon_shapes {
+namespace houdini {
+namespace sync {
+namespace shapes {
 
 using cf = std::complex<float>;
 
@@ -370,4 +372,6 @@ inline bool parse(const std::string& s, Shape* out) {
 inline const char* kAllNames[] = {"legacy", "legacy_guard", "dot11", "nr",
                                   "nr_pss"};
 
-}  // namespace beacon_shapes
+}  // namespace shapes
+}  // namespace sync
+}  // namespace houdini

@@ -51,15 +51,15 @@
 #include <string>
 #include <vector>
 
-#include "include/beacon_shapes.h"
-#include "include/comms-lib.h"
-#include "include/utils.h"
+#include "sync/beacon_shapes.h"
+#include "comms-lib.h"
+#include "utils.h"
 
 namespace {
 
-using beacon_shapes::cf;
-using beacon_shapes::Desc;
-using beacon_shapes::Shape;
+using houdini::sync::shapes::cf;
+using houdini::sync::shapes::Desc;
+using houdini::sync::shapes::Shape;
 using Pick = CommsLib::BeaconPick;
 using Thr = CommsLib::BeaconThresh;
 
@@ -251,11 +251,11 @@ void cell(const Row& r) {
 }  // namespace
 
 int main() {
-  const Desc ds[] = {beacon_shapes::make(Shape::kLegacy),
-                     beacon_shapes::make(Shape::kLegacyGuard),
-                     beacon_shapes::make(Shape::kDot11),
-                     beacon_shapes::make(Shape::kNr),
-                     beacon_shapes::make(Shape::kNrPss)};
+  const Desc ds[] = {houdini::sync::shapes::make(Shape::kLegacy),
+                     houdini::sync::shapes::make(Shape::kLegacyGuard),
+                     houdini::sync::shapes::make(Shape::kDot11),
+                     houdini::sync::shapes::make(Shape::kNr),
+                     houdini::sync::shapes::make(Shape::kNrPss)};
 
   std::printf("Candidate beacons, and where the detector says they are.\n");
   std::printf("Resync slice [end-%lld, end+%lld), corr_scale %.0f, SNR %.0f dB.\n",
@@ -347,7 +347,7 @@ int main() {
     for (int i = 0; i < 2; ++i)
       want.insert(want.end(), gold_ci16.begin(), gold_ci16.end());
 
-    const auto legacy = beacon_shapes::make(Shape::kLegacy);
+    const auto legacy = houdini::sync::shapes::make(Shape::kLegacy);
     std::vector<std::complex<int16_t>> got;
     {
       std::vector<std::complex<float>> f(legacy.core.begin(), legacy.core.end());
@@ -377,7 +377,7 @@ int main() {
   // designed. Check the property directly -- every field must occupy as many
   // distinct non-DC bins as it has tones.
   {
-    const auto nr = beacon_shapes::make(Shape::kNr);
+    const auto nr = houdini::sync::shapes::make(Shape::kNr);
     // The tracking symbol is the last fine_len samples of the core.
     std::vector<cf> sym(nr.core.end() - nr.fine_len, nr.core.end());
     auto spec = CommsLib::FFT(sym, static_cast<int>(nr.fine_len), false);
@@ -566,7 +566,7 @@ int main() {
                       {Shape::kNrPss, Thr::kCoherence, "nr_pss beacon, nolag threshold"}};
   for (const auto& ota : otas) {
     std::printf("\n=== over-the-air channels, %s ===\n", ota.label);
-    const auto b = beacon_shapes::make(ota.shape);
+    const auto b = houdini::sync::shapes::make(ota.shape);
     const Channel chans[] = {
         {{{0, 1.0}}, 0.0, "1 path, no CFO"},
         {{{0, 1.0}}, 4250.0, "1 path, 8.5 ppm CFO"},
@@ -738,8 +738,8 @@ int main() {
   std::printf("\n=== noise-only hunt windows: how often each form crosses ===\n");
   std::printf("%-10s %-8s %10s %10s\n", "corr_scale", "form", "windows", "crossed");
   {
-    const auto pss = beacon_shapes::make(Shape::kNrPss);
-    const auto leg = beacon_shapes::make(Shape::kLegacy);
+    const auto pss = houdini::sync::shapes::make(Shape::kNrPss);
+    const auto leg = houdini::sync::shapes::make(Shape::kLegacy);
     for (const float cs : {10.0f, 100.0f}) {
       for (int form = 0; form < 2; ++form) {
         const bool nolag = form == 0;

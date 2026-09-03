@@ -687,6 +687,7 @@ Example, in `files/houdini-ul.json`:
 | `sync.detector.first_path_floor_db` | -9 | `HOUDINI_FIRST_PATH_DB` | -30 to 0 | ignored, value kept | How much weaker, in dB of path power, an earlier arrival may be and still be taken as the first path. |
 | `sync.detector.corr_scale` | 10 |  | 0.0001 to 1e+07 |  | Resync detection threshold: the bar is 1 / corr_scale, relaxed by one per retry. Read from the legacy per-client top-level array when absent. |
 | `sync.detector.corr_scale_init` | 10 |  | 0.0001 to 1e+07 |  | Acquisition detection threshold (bar 1 / corr_scale_init); defaults to corr_scale. |
+| `sync.detector.corr_threads` | 1 | `SOUNDER_CORR_THREADS` | 1 to 256 | clamped | Threads for the correlator's matched filter. 1 shipped; measured a net loss below ~4 on the rig host. |
 | `sync.confirm.snr_floor_db` | 30 | `HOUDINI_SYNC_SNR_DB` | -10 to 80 | clamped | In-window SNR a detection must clear. A property of the link and the waveform: re-derive it when either changes. |
 | `sync.cfo.index_guard` | 8 | `HOUDINI_CFO_INDEX_GUARD` | 0 to 64 | clamped | Samples the carrier estimator's windows slide later than the detected end (AP-39). |
 | `sync.cfo.window_margin` | 0 |  | 0 to 32 |  | Samples shrunk from both ends of each estimator window so neither touches the burst's edge (8.164). |

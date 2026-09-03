@@ -106,10 +106,11 @@ BaseRadioSet::BaseRadioSet(Config* cfg, const bool calibrate_proc) : _cfg(cfg) {
     bsRadios.at(c).shrink_to_fit();
     const size_t requested_radios = _cfg->n_bs_sdrs().at(c);
     _cfg->n_bs_sdrs().at(c) = num_radios;
-    // Zero radios is never success: fail loudly rather than let
-    // activateHoudiniRx() iterate an empty vector and spin on a dead stream
-    // (observed on the bench before this guard existed).
-    if (bsRadios.at(c).empty()) {
+    // A cell that LISTS radios and opens none is never success: fail loudly
+    // rather than let activateHoudiniRx() iterate an empty vector and spin on
+    // a dead stream (observed on the bench before this guard existed). A cell
+    // configured with no radios proceeds, as it always did.
+    if (bsRadios.at(c).empty() && requested_radios > 0) {
       radioNotFound = true;
       radio_serial_not_found.push_back(
           "(cell " + std::to_string(c) +
@@ -447,12 +448,13 @@ void BaseRadioSet::buildHoudiniBeacon(std::vector<int16_t>& iq) {
         std::lround(loop[k].imag() / peak * fs_frac * 32767));
   }
   if (std::getenv("HOUDINI_DUMP_BEACON")) {
-    FILE* f = std::fopen("/tmp/beacon_ram.bin", "wb");
+    const std::string path = Utils::dumpPath("beacon_ram.bin");
+    FILE* f = std::fopen(path.c_str(), "wb");
     if (f) {
       std::fwrite(iq.data(), sizeof(int16_t), iq.size(), f);
       std::fclose(f);
-      MLPD_INFO("HOUDINI_DUMP_BEACON: wrote %zu int16 to /tmp/beacon_ram.bin\n",
-                iq.size());
+      MLPD_INFO("HOUDINI_DUMP_BEACON: wrote %zu int16 to %s\n",
+                iq.size(), path.c_str());
     }
   }
 }

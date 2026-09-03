@@ -26,11 +26,11 @@
 #include <thread>
 #include <vector>
 
-#include "include/BaseRadioSet.h"
-#include "include/ClientRadioSet.h"
-#include "include/comms-lib.h"
-#include "include/config.h"
-#include "include/macros.h"
+#include "BaseRadioSet.h"
+#include "ClientRadioSet.h"
+#include "comms-lib.h"
+#include "config.h"
+#include "macros.h"
 
 namespace {
 using ci16 = std::complex<int16_t>;

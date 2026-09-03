@@ -27,6 +27,10 @@ class BaseRadioSetUHD {
   int radioRx(size_t radio_id, size_t cell_id, void* const* buffs, int numSamps,
               long long& frameTime);
   void radioStart(void);
+  /// Zero-pad samples the last receive inserted for a dropped packet: the
+  /// Houdini gap ledger's input; UHD has no such path. Kept so the receiver's
+  /// call compiles under RADIO_TYPE=PURE_UHD (baseline assessment B1).
+  size_t lastRxPadSamples(size_t /*radio_id*/, size_t /*cell_id*/) const { return 0; }
   void radioStop(void);
   bool getRadioNotFound() { return radioNotFound; }
 

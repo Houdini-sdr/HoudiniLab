@@ -470,7 +470,8 @@ int ClientRadioSet::radioTx(size_t radio_id, const void* const* buffs,
       frameTimeNs = ((frameTimeNs + q / 2) / q) * q;  // snap to the accepted grid
     }
     const int r = radios.at(radio_id)->xmit(buffs, numSamps, flags, frameTimeNs);
-    if (std::getenv("HOUDINI_UE_TX_DEBUG") != nullptr) {
+    static const bool kTxDebug = std::getenv("HOUDINI_UE_TX_DEBUG") != nullptr;  // read once
+    if (kTxDebug) {
       static std::atomic<int> c{0};
       if ((c.fetch_add(1) % 20) == 0) {
         try {
