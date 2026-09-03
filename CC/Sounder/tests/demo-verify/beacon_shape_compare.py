@@ -152,8 +152,17 @@ def snr_db(c, core_start, geom):
     return 10.0 * np.log10(sig / noi)
 
 
-def run_one(ue, rep, geom, corr_scale, matches, max_windows):
-    """Acquire, then track `matches` arrivals. Returns a dict of measurements."""
+def run_one(ue, rep, geom, corr_scale, matches, max_windows, dwell_s):
+    """Acquire, then track for `dwell_s` seconds. Returns a dict of measurements.
+
+    TIME-BOXED, NOT MATCH-COUNTED. The first version collected a fixed 80
+    detections, which on this bench arrive about every 2 frames, so each shape
+    was tracked for 0.19 SECONDS. Over that span a 0.01 ppm clock difference
+    moves the beacon by a fifth of a sample, so every residual quantised to
+    exactly 0 and every eps came out of a straight-line fit through a constant.
+    The run looked immaculate -- sd 0.00, max 0 -- and measured nothing about
+    tracking. A rate needs a baseline.
+    """
     off2 = core_off(geom)
     senses = [("gold", rep), ("conj", np.conj(rep))]
     anchor = None
@@ -181,8 +190,13 @@ def run_one(ue, rep, geom, corr_scale, matches, max_windows):
     conj_sense = nm == "conj"
     resids, ks, ratios, cfos, rmags, snrs = [], [], [], [], [], []
     attempts = 0
+    t_end = time.time() + dwell_s
+    # The slice needs a FULL core length of samples ahead of the beacon, or
+    # snr_db has no noise window to measure against and silently returns nan --
+    # which is what the first campaign did for every shape in every round.
+    lead = geom["core_len"] + 256
     for w in range(max_windows):
-        if len(resids) >= matches or tn.over_budget():
+        if len(resids) >= matches or tn.over_budget() or time.time() > t_end:
             break
         tk, c = ue.window()
         if tk is None:
@@ -191,9 +205,9 @@ def run_one(ue, rep, geom, corr_scale, matches, max_windows):
         pred = anchor + k * FRAME
         o = pred - tk
         span = geom["core_len"] + 384
-        if not (0 <= o < len(c) - span - 256):
+        if not (lead <= o < len(c) - span):
             continue
-        lo = max(0, o - 256)
+        lo = o - lead
         sl = c[lo:o + span]
         attempts += 1
         idx, rr = tn.find_beacon(sl, g, corr_scale)
@@ -225,6 +239,7 @@ def run_one(ue, rep, geom, corr_scale, matches, max_windows):
            "cfo_r": rmags,
            "snr_db": [None if np.isnan(x) else x for x in snrs]}
     if len(r) >= 3:
+        out["span_s"] = float((max(ks) - min(ks)) * FRAME / RATE)
         out["resid_sd"] = float(np.std(r))
         out["resid_max"] = float(np.max(np.abs(r)))
         # ppm: residual grows by (eps * FRAME) samples per frame, and k counts
@@ -235,10 +250,14 @@ def run_one(ue, rep, geom, corr_scale, matches, max_windows):
         if fin:
             out["cfo_hz_mean"] = float(np.mean(fin))
             out["cfo_hz_sd"] = float(np.std(fin))
-            # Circular resultant over the per-detection CFO phases: how much of
-            # the agreement is real rather than an average of noise.
-            phz = np.array(fin) * 2 * np.pi * geom["fine_len"] / RATE
-            out["cfo_R"] = float(abs(np.mean(np.exp(1j * phz))))
+            # THE FINE-PAIR COHERENCE, not a circular resultant over the CFO
+            # values. The first version computed the latter and it read 1.000 to
+            # three decimals for every shape in every round -- including rounds
+            # whose CFO spread was 3134 Hz -- because at these frequencies the
+            # per-detection phase is under 0.01 rad, so the resultant of a set of
+            # near-zero angles is 1 no matter how they scatter. A metric that
+            # cannot go down is not a check. |r| from the pair itself can.
+            out["cfo_R"] = float(np.mean(rmags))
         out["ratio_med"] = float(np.median(ratios))
         out["ratio_min"] = float(np.min(ratios))
         fs = [x for x in snrs if not np.isnan(x)]
@@ -254,7 +273,12 @@ def main():
     ap.add_argument("--shapes-dir", required=True)
     ap.add_argument("--shapes", default="legacy,legacy_guard,dot11,nr")
     ap.add_argument("--rounds", type=int, default=3)
-    ap.add_argument("--matches", type=int, default=60)
+    ap.add_argument("--matches", type=int, default=4000,
+                    help="hard cap on detections per shape per round; the "
+                         "DWELL is what normally ends a leg")
+    ap.add_argument("--dwell", type=float, default=30.0,
+                    help="seconds of tracking per shape per round. A rate needs "
+                         "a baseline: at 0.01 ppm, one sample of drift takes 0.8 s")
     ap.add_argument("--corr-scale", type=float, default=10.0)
     ap.add_argument("--min-ratio", type=float, default=1e-2)
     ap.add_argument("--budget", type=float, default=2400.0)
@@ -364,17 +388,17 @@ def main():
                         rec[nm] = {"locked": False, "reason": "liveness"}
                         continue
                     r = run_one(ue, rep, shapes_json[nm], args.corr_scale,
-                                args.matches, args.matches * 30)
+                                args.matches, args.matches * 30, args.dwell)
                 finally:
                     bs.close()
                 rec[nm] = r
                 if not r.get("locked"):
                     print("  %-13s NO LOCK in %d windows" % (nm, r["acq_windows"]))
                     continue
-                print("  %-13s n=%-3d det=%4.0f%%  resid sd %5.2f max %3.0f  "
-                      "eps %+.4f ppm  CFO %+8.1f Hz (sd %5.1f R %.3f)  "
-                      "ratio med %6.2f min %6.2f  SNR %4.1f dB  acq %d win"
-                      % (nm, r["n"], 100 * r["detect_frac"],
+                print("  %-13s n=%-4d %5.1fs det=%4.0f%%  resid sd %5.2f max %3.0f  "
+                      "eps %+.4f ppm  CFO %+8.1f Hz (sd %6.1f r %.4f)  "
+                      "ratio med %6.2f min %6.2f  SNR %5.1f dB  acq %d win"
+                      % (nm, r["n"], r.get("span_s", 0.0), 100 * r["detect_frac"],
                          r.get("resid_sd", float("nan")),
                          r.get("resid_max", float("nan")),
                          r.get("eps_ppm", float("nan")),
@@ -398,9 +422,9 @@ def main():
     # Summary across rounds. Reported per shape with the ROUND-TO-ROUND spread
     # beside every mean, because a single round is one sample and this bench has
     # already produced one confident conclusion from an unreplicated pair.
-    print("\n%-13s %6s %6s %8s %8s %10s %9s %8s %7s" %
-          ("shape", "rounds", "n", "resid sd", "resid max", "eps ppm",
-           "CFO Hz", "CFO R", "det %"))
+    print("\n%-13s %6s %6s %7s %8s %8s %10s %9s %8s %8s %7s" %
+          ("shape", "rounds", "n", "span s", "resid sd", "resid max", "eps ppm",
+           "CFO sd", "pair r", "SNR dB", "det %"))
     for nm in names:
         rs = [r[nm] for r in out["rounds"] if nm in r and r[nm].get("n", 0) >= 3]
         if not rs:
@@ -410,12 +434,14 @@ def main():
             v = [x[k] for x in rs if k in x]
             return (np.mean(v), np.std(v)) if v else (float("nan"),) * 2
         sd = col("resid_sd"); mx = col("resid_max"); ep = col("eps_ppm")
-        cf = col("cfo_hz_mean"); cr = col("cfo_R"); df = col("detect_frac")
-        print("%-13s %6d %6d %8.2f %8.0f %+10.4f %+9.1f %8.3f %7.0f"
-              % (nm, len(rs), int(np.sum([x["n"] for x in rs])), sd[0], mx[0],
-                 ep[0], cf[0], cr[0], 100 * df[0]))
-        print("%-13s %6s %6s %8.2f %8.0f %10.4f %9.1f %8.3f %7.0f   (spread)"
-              % ("", "", "", sd[1], mx[1], ep[1], cf[1], cr[1], 100 * df[1]))
+        cs = col("cfo_hz_sd"); cr = col("cfo_R"); df = col("detect_frac")
+        sp = col("span_s"); sn = col("snr_med")
+        print("%-13s %6d %6d %7.1f %8.2f %8.0f %+10.4f %9.1f %8.4f %8.1f %7.0f"
+              % (nm, len(rs), int(np.sum([x["n"] for x in rs])), sp[0], sd[0],
+                 mx[0], ep[0], cs[0], cr[0], sn[0], 100 * df[0]))
+        print("%-13s %6s %6s %7.1f %8.2f %8.0f %10.4f %9.1f %8.4f %8.1f %7.0f   (spread)"
+              % ("", "", "", sp[1], sd[1], mx[1], ep[1], cs[1], cr[1], sn[1],
+                 100 * df[1]))
     return rc
 
 
