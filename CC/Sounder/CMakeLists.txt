@@ -280,6 +280,11 @@ add_executable(sync_geometry_test tests/comms-func/sync_geometry_test.cc)
 target_include_directories(sync_geometry_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 add_test(NAME sync_geometry COMMAND sync_geometry_test)
 
+# The resync state machine, every transition without a radio.
+add_executable(resync_policy_test tests/comms-func/resync_policy_test.cc)
+target_include_directories(resync_policy_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_test(NAME resync_policy COMMAND resync_policy_test)
+
 # Radio-free A/B: AP-41's kalman against the shipped alpha-beta over the SAME
 # synthetic detections. The rig can only run one at a time; this pairs them.
 add_executable(grid_tracker_test tests/comms-func/grid_tracker_test.cc)

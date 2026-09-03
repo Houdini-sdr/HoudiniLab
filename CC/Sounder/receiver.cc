@@ -35,6 +35,7 @@
 #include "include/macros.h"
 #include "include/node_version.h"
 #include "sync/grid_tracker.h"
+#include "sync/resync_policy.h"
 #include "sync/sync_geometry.h"
 #include "include/utils.h"
 
@@ -1429,17 +1430,12 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   size_t frame_id = 0;
   size_t buffer_offset = 0;
   //sync on the first beacon after initial detection
-  bool resync = true;
-  bool resync_enable = (config_->frame_mode() == "continuous_resync");
-  size_t resync_retry_cnt(0);
   // AP-52 [user]: the escalation net was tuned against a grid that walked out
   // of the gate in ~1 s. Steered, it holds for MINUTES, so these numbers are
   // now absurdly conservative -- but the net stays, it is only retuned, and
   // retuning it wants an A/B on live silicon rather than a guess here. Knobs,
   // shipped at the values that were gated, so the default build is unchanged
   // and the sweep costs no rebuild.
-  size_t resync_retry_max =
-      static_cast<size_t>(config_->sync().resync.retry_max);
   // The resync bar: the configured policy (sync.detector.corr_scale, relaxed
   // by one per retry) for a single client. With several clients the legacy
   // per-client array keeps its say, because the policy holds one value.
@@ -1450,7 +1446,6 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
     return static_cast<float>(
         config_->sync().detector.bar.relaxed(static_cast<int>(retry)));
   };
-  size_t resync_success(0);
   size_t cfo_log_cnt = 0;  // throttles the beacon-CFO line
   const size_t kCfoLogEvery =
       static_cast<size_t>(config_->sync().cfo.log_every);
@@ -1533,8 +1528,19 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   // measured about them to justify it.
   const double resync_interval_s = geom.resync_interval_s;
   const size_t resync_period = static_cast<size_t>(geom.resync_period_iters);
-  size_t last_resync = frame_id;
-  auto last_resync_tp = std::chrono::steady_clock::now();
+  // THE RESYNC STATE MACHINE (sync/resync_policy.h): when to look, the miss
+  // budget, the exhausted episode, the off-grid hold and the escalation
+  // triggers, with every transition covered by resync_policy_test. The loop
+  // below reads its verdicts; nothing here counts anything itself.
+  houdini::sync::ResyncPolicyConfig policy_cfg;
+  policy_cfg.enabled = (config_->frame_mode() == "continuous_resync");
+  policy_cfg.timed = config_->is_houdini();
+  policy_cfg.interval_s = resync_interval_s;
+  policy_cfg.period_frames = resync_period;
+  policy_cfg.retry_max = static_cast<size_t>(config_->sync().resync.retry_max);
+  policy_cfg.escalate_episodes = static_cast<size_t>(config_->sync().resync.escalate_episodes);
+  policy_cfg.hold_offgrid = static_cast<size_t>(config_->sync().resync.hold_offgrid);
+  houdini::sync::ResyncPolicy policy(policy_cfg, frame_id, std::chrono::steady_clock::now());
   if (config_->running() == true) {
     MLPD_INFO(
         "Start main client txrx loop... tid=%d with resync every %.1f ms "
@@ -1693,8 +1699,6 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   // Resync hold-off state [user 2026-08-30]: a large offset is applied only
   // after MORE THAN ONE consecutive consistent observation of it; a lone
   // large offset (artifact, scatter) is held, logged, and not applied.
-  bool resync_hold_pending = false;  // one off-grid detection seen (4.18
-                                     // scatter means singles are noise)
   // AP-18 escalation [user]: give up on resync and return to the full
   // sliding-window acquisition when the anchored grid has plausibly lost the
   // beacon. Triggers: 2 CONSECUTIVE exhausted episodes OR >= 4 SNR-valid
@@ -1706,15 +1710,10 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   // are pure confirmation (Opus review M4: the old ~4.7%-by-chance figure
   // described the pre-targeting whole-window search). Hold-off itself
   // already covers the beacon-MOVED case; this covers beacon-LOST.
-  const size_t kEscalateExhaustedEpisodes = static_cast<size_t>(config_->sync().resync.escalate_episodes);
   // How many consecutive off-grid detections before the beacon counts as
   // MOVED. One is scatter (ledger 4.18); the shipped rule is two. Steered, an
   // off-grid detection is far more surprising than it was, so this is the
   // other half of the AP-52 retune and it sweeps with the same A/B.
-  const size_t kHoldOffGridCount =
-      static_cast<size_t>(config_->sync().resync.hold_offgrid);
-  size_t resync_offgrid_streak = 0;
-  size_t resync_exhausted_streak = 0;
   const size_t beacon_detect_window_esc = static_cast<size_t>(
       static_cast<float>(config_->samps_per_slot()) *
       kBeaconDetectWindowScaler);
@@ -1802,13 +1801,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
           tid);
       emitSync(kSyncReanchorFailed, 0, 0.0, 0.0, 0);
     }
-    resync_exhausted_streak = 0;
-    resync_hold_pending = false;
-    resync_offgrid_streak = 0;
-    resync = false;
-    resync_retry_cnt = 0;
-    last_resync = frame_id;
-    last_resync_tp = std::chrono::steady_clock::now();
+    policy.reset(frame_id, std::chrono::steady_clock::now());
   };
 
   while (config_->running() == true) {
@@ -1835,20 +1828,12 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
                          tx_buffer_size);
     }
 
-    if (config_->is_houdini()) {
-      const auto resync_now = std::chrono::steady_clock::now();
-      if (std::chrono::duration<double>(resync_now - last_resync_tp).count() >=
-          resync_interval_s) {
-        resync = resync_enable;
-        last_resync_tp = resync_now;
-        MLPD_TRACE("Enable resyncing at frame %zu\n", frame_id);
-      }
-    } else if ((frame_id - last_resync) >= resync_period) {
-      resync = resync_enable;
-      last_resync = frame_id;
+    // The clock is read only where the cadence is timed (Houdini).
+    if (policy.due(frame_id, config_->is_houdini() ? std::chrono::steady_clock::now()
+                                                   : std::chrono::steady_clock::time_point{})) {
       MLPD_TRACE("Enable resyncing at frame %zu\n", frame_id);
     }
-    if (resync == true) {
+    if (policy.looking()) {
       ssize_t sync_index = -1;
       bool resync_attempted = true;
       houdini::sync::Detection resync_det;  // the targeted search's evidence
@@ -1913,7 +1898,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
           // with this set to `first` and the false lock appears on silicon.
           const ssize_t idx = this->syncSearch(
               base + s0, static_cast<size_t>(slice_len),
-              resyncScale(resync_retry_cnt), sync_detector_->pick(), &resync_det);
+              resyncScale(policy.retries()), sync_detector_->pick(), &resync_det);
           if (idx >= 0) sync_index = s0 + idx;
         } else {
           resync_attempted = false;  // beacon not due in this window
@@ -1930,7 +1915,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
         sync_index = this->syncSearch(
             reinterpret_cast<std::complex<int16_t>*>(
                 rxbuff.at(kSyncDetectChannel)),
-            request_samples, resyncScale(resync_retry_cnt),
+            request_samples, resyncScale(policy.retries()),
             houdini::sync::PickRule::kFirstCrossing);
       }
       if (sync_index >= 0 && config_->is_houdini() &&
@@ -1974,7 +1959,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
                       request_samples, sync_index, snr, frame_id,
                       rx_beacon_time, houdini_pilot_ref,
                       static_cast<long long>(config_->shape().expectedEndOffset()),
-                      static_cast<double>(resyncScale(resync_retry_cnt)),
+                      static_cast<double>(resyncScale(policy.retries())),
                       houdini::sync::name(sync_detector_->form()),
                       houdini::sync::name(sync_detector_->pick()),
                       sync_detector_->firstPathWindow(),
@@ -2167,12 +2152,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
                     houdini_grid_starved, houdini_grid_updates, tid);
               }
             }
-            resync_hold_pending = false;
-            resync_offgrid_streak = 0;
-            resync_exhausted_streak = 0;
-            resync = false;
-            resync_retry_cnt = 0;
-            resync_success++;
+            policy.onAlive();
             MLPD_INFO(
                 "Re-sync frame %zu: beacon alive on the anchored grid "
                 "(resid %+lld within scatter, snr %.1f dB), tid %d\n",
@@ -2185,20 +2165,14 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
             MLPD_WARN(
                 "Re-sync frame %zu: off-grid detection %+lld (snr %.1f dB, "
                 "pending %d) -- beacon possibly moved, tid %d\n",
-                frame_id, resid, snr, resync_hold_pending ? 1 : 0, tid);
+                frame_id, resid, snr, policy.holdPending() ? 1 : 0, tid);
             emitSync(kSyncHold, resid, cfo_tracked_hz, snr, 0, cfo_hz);
-            ++resync_offgrid_streak;
-            // resync_hold_pending used to BE the escalation decision; the
-            // streak counter replaced it. It survives only as the "pending"
-            // field of the WARN above, so keep it exactly consistent with the
-            // streak rather than letting it drift as separate state -- the
-            // write-only pattern this file already deleted once.
-            if (resync_offgrid_streak >= kHoldOffGridCount) {
+            // One off-grid detection is held (scatter); hold_offgrid
+            // consecutive ones mean the beacon moved (AP-52).
+            if (policy.onOffGrid() == houdini::sync::ResyncAction::kEscalate) {
               houdiniEscalate("beacon moved");
               continue;  // rx_beacon_time is pre-hunt; restart the frame loop
             }
-            resync_hold_pending = true;
-            // stay in resync; a moved beacon repeats off-grid, noise does not
           }
         }
       } else if (sync_index >= 0) {
@@ -2210,13 +2184,11 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
           houdini_pilot_ref = rx_beacon_time;
           houdini_pilot_ref_valid = true;
         }
-        resync = false;
-        resync_retry_cnt = 0;
-        resync_success++;
+        policy.onAccept();
         MLPD_INFO(
             "Re-syncing success at frame %zu with offset: %d, after %zu tries, "
             "index: %ld, tid %d\n",
-            frame_id, new_rx_offset, resync_retry_cnt + 1, sync_index, tid);
+            frame_id, new_rx_offset, policy.retries() + 1, sync_index, tid);
 
         //Offset Alignment logic
         if (new_rx_offset < 0) {
@@ -2228,39 +2200,34 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
         }
       }
       if (sync_index < 0 && resync_attempted) {
-        resync_retry_cnt++;
-
-        if (resync_retry_cnt > resync_retry_max) {
-          if (config_->is_houdini() && houdini_pilot_ref_valid) {
-            // Under recvHoudini's drain the per-frame slot-0 window carries
-            // the beacon only a few percent of the time, so long miss runs
-            // are NORMAL. The anchored grid keeps the pilots seated (drift
-            // measured ~0), so log and retry next period instead of killing
-            // the run.
-            MLPD_WARN(
-                "Re-sync: %zu misses this period for client %d (successes "
-                "%zu); anchored grid keeps flying, retrying next period "
-                "(exhausted streak %zu)\n",
-                resync_retry_max, tid, resync_success,
-                resync_exhausted_streak + 1);
-            resync = false;
-            resync_retry_cnt = 0;
-            if (++resync_exhausted_streak >= kEscalateExhaustedEpisodes) {
-              houdiniEscalate("episodes exhausted");
-              continue;  // rx_beacon_time is pre-hunt; restart the frame loop
-            }
-          } else {
-            // Iris/UHD path (on Houdini the anchor is always valid here:
-            // acquisition either confirms or throws).
-            MLPD_WARN(
-                "Exceeded resync retry limit (%zu) for client %d reached "
-                "after %zu resync successes at frame: %zu.  Stopping!\n",
-                resync_retry_max, tid, resync_success, frame_id);
-            resync = false;
-            resync_retry_cnt = 0;
-            config_->running(false);
-            break;
+        const houdini::sync::ResyncAction act =
+            policy.onMiss(config_->is_houdini() && houdini_pilot_ref_valid);
+        if (act == houdini::sync::ResyncAction::kExhausted ||
+            act == houdini::sync::ResyncAction::kEscalate) {
+          // Under recvHoudini's drain the per-frame slot-0 window carries
+          // the beacon only a few percent of the time, so long miss runs
+          // are NORMAL. The anchored grid keeps the pilots seated (drift
+          // measured ~0), so log and retry next period instead of killing
+          // the run; consecutive exhausted episodes escalate.
+          MLPD_WARN(
+              "Re-sync: %zu misses this period for client %d (successes "
+              "%zu); anchored grid keeps flying, retrying next period "
+              "(exhausted streak %zu)\n",
+              policy.config().retry_max, tid, policy.successes(),
+              policy.exhaustedStreak());
+          if (act == houdini::sync::ResyncAction::kEscalate) {
+            houdiniEscalate("episodes exhausted");
+            continue;  // rx_beacon_time is pre-hunt; restart the frame loop
           }
+        } else if (act == houdini::sync::ResyncAction::kStop) {
+          // Iris/UHD path (on Houdini the anchor is always valid here:
+          // acquisition either confirms or throws).
+          MLPD_WARN(
+              "Exceeded resync retry limit (%zu) for client %d reached "
+              "after %zu resync successes at frame: %zu.  Stopping!\n",
+              policy.config().retry_max, tid, policy.successes(), frame_id);
+          config_->running(false);
+          break;
         }
       }
     }

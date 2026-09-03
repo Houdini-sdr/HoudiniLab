@@ -820,8 +820,13 @@ void Config::genPilots() {
   // on. An unknown name throws, naming the valid ones: a typo that quietly
   // ships the old beacon is exactly the failure this parameter exists to
   // make visible.
-  shape_ = std::make_unique<houdini::sync::BeaconShape>(houdini::sync::BeaconShape::make(
-      beacon_type_, platform(), static_cast<size_t>(prefix_)));
+  houdini::sync::Numerology num;
+  num.rate_hz = rate();
+  num.samps_per_slot = samps_per_slot();
+  num.samps_per_frame = samps_per_frame();
+  num.prefix_samples = static_cast<size_t>(prefix_);
+  shape_ = std::make_unique<houdini::sync::BeaconShape>(
+      houdini::sync::BeaconShape::make(beacon_type_, platform(), num));
   const houdini::sync::BeaconShape& shape = *shape_;
 
   // NOTE THE REPLICA'S SCALE IS LOAD-BEARING, and do not "tidy" it to unit

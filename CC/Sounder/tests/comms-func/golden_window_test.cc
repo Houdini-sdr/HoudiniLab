@@ -87,6 +87,7 @@ int main(int argc, char** argv) {
   }
   const std::string dir = argc > 1 ? argv[1] : "tests/comms-func/fixtures/golden";
   using houdini::sync::BeaconShape;
+  using houdini::sync::Numerology;
   using houdini::sync::Detector;
   using houdini::sync::DetectorConfig;
   using houdini::sync::PickRule;
@@ -100,7 +101,7 @@ int main(int argc, char** argv) {
   // firstPathWindow), and a fixed 64 would have doubled dot11's and nr's. The
   // shape owns the default; resolve() and the detector both read it.
   for (const char* name : {"dot11", "nr", "legacy", "nr_pss"}) {
-    const auto shape = BeaconShape::make(name, Platform::kHoudini, 160);
+    const auto shape = BeaconShape::make(name, Platform::kHoudini, Numerology::houdiniDefault());
     auto cfg = SyncConfig::defaults();
     cfg.resolve({shape.replicaLen(), 160.0, Platform::kHoudini});
     Detector det(shape, cfg.detector);
@@ -113,10 +114,10 @@ int main(int argc, char** argv) {
   // The shape object: names, the index convention, the expected end.
   {
     bool threw = false;
-    try { BeaconShape::make("legacyy", Platform::kHoudini, 0); } catch (const std::invalid_argument&) { threw = true; }
+    try { BeaconShape::make("legacyy", Platform::kHoudini, Numerology::houdiniDefault()); } catch (const std::invalid_argument&) { threw = true; }
     check(threw && BeaconShape::names().size() == 5, "BeaconShape: an unknown name throws; five names");
-    const auto h = BeaconShape::make("nr_pss", Platform::kHoudini, 160);
-    const auto i = BeaconShape::make("nr_pss", Platform::kIrisUhd, 160);
+    const auto h = BeaconShape::make("nr_pss", Platform::kHoudini, Numerology::houdiniDefault());
+    const auto i = BeaconShape::make("nr_pss", Platform::kIrisUhd, Numerology::houdiniDefault());
     check(h.replicaTail() == 144 && i.replicaTail() == 0,
           "BeaconShape: the replica tail is a Houdini convention (144 for nr_pss), zero on Iris/UHD");
     check(h.expectedEndOffset() == 384 + static_cast<ssize_t>(h.coreLen()) &&
@@ -125,7 +126,7 @@ int main(int argc, char** argv) {
     check(h.endFromCorrelatorIndex(-1, 1000) == -1 && h.endFromCorrelatorIndex(100, 1000) == 244 &&
               h.endFromCorrelatorIndex(900, 1000) == -1 && i.endFromCorrelatorIndex(900, 1000) == 900,
           "BeaconShape: end = index + tail, -1 when none or past the window, index itself with no tail");
-    const auto l = BeaconShape::make("legacy", Platform::kHoudini, 160);
+    const auto l = BeaconShape::make("legacy", Platform::kHoudini, Numerology::houdiniDefault());
     check(l.geometry().usable() && l.geometry().core_len == 496 && l.geometry().fine_len == 128 &&
               l.singleCopy() == false && h.singleCopy(),
           "BeaconShape: geometry from the shape; legacy repeats, nr_pss is a single copy");
@@ -151,13 +152,13 @@ int main(int argc, char** argv) {
     hou.resolve({128, 160.0, Platform::kHoudini});
     check(hou.detector.pick == PickRule::kFirstPath && hou.detector.threshold == ThresholdForm::kAuto,
           "resolve on Houdini: the shipped defaults stand");
-    const auto d = BeaconShape::make("nr_pss", Platform::kHoudini, 160);
+    const auto d = BeaconShape::make("nr_pss", Platform::kHoudini, Numerology::houdiniDefault());
     DetectorConfig dc;
     dc.first_path_window = 4095;
     Detector capped(d, dc);
     check(capped.firstPathWindow() == 2 * static_cast<int>(d.replicaLen()),
           "an explicit first-path window is capped at twice the replica (" + std::to_string(capped.firstPathWindow()) + ")");
-    Detector idet(BeaconShape::make("nr_pss", Platform::kIrisUhd, 160), iris.detector);
+    Detector idet(BeaconShape::make("nr_pss", Platform::kIrisUhd, Numerology::houdiniDefault()), iris.detector);
     check(idet.replicaTail() == 0 && idet.pick() == PickRule::kFirstCrossing &&
               idet.form() == ThresholdForm::kCoherence,
           "off Houdini: no replica tail, the derived first-crossing pick, and the replica still forces coherence");
@@ -195,7 +196,7 @@ int main(int argc, char** argv) {
     if (!houdini::sync::shapes::parse(shape, &sh)) { check(false, std::string("parse ") + shape); continue; }
     // Built the way the receiver builds them: the shape, a config resolved
     // against it, the detector, the guard from the resolved window.
-    const auto d = BeaconShape::fromDesc(houdini::sync::shapes::make(sh), Platform::kHoudini, 160);
+    const auto d = BeaconShape::fromDesc(houdini::sync::shapes::make(sh), Platform::kHoudini, Numerology::houdiniDefault());
     auto rcfg = cfg;
     rcfg.resolve({d.replicaLen(), 160.0, Platform::kHoudini});
     Detector det(d, rcfg.detector);
@@ -262,7 +263,7 @@ int main(int argc, char** argv) {
       // receiver does): finite and inside +-50 kHz at 122.88 MSPS.
       const float f = cfo.estimate(w.data(), w.size(),
                                    static_cast<int>(det_res.end_index + rcfg.cfo.index_guard));
-      const double hz = static_cast<double>(f) * 122.88e6;
+      const double hz = static_cast<double>(f) * Numerology::houdiniDefault().rate_hz;
       if (meta.has("cfo_hz")) {
         std::snprintf(what, sizeof what, "%s window %d: beacon cfo %+.0f Hz (recorded %+.0f)",
                       shape, i, hz, meta.at("cfo_hz"));

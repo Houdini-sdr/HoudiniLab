@@ -52,6 +52,8 @@
 #include <vector>
 
 #include "sync/beacon_shapes.h"
+#include "sync/numerology.h"
+#include "sync/sim/channel.h"
 #include "comms-lib.h"
 #include "utils.h"
 
@@ -76,6 +78,8 @@ void check(bool ok, const std::string& what) {
 /// Returns the returned index MINUS the true beacon end, or kMiss.
 constexpr long long kMiss = -1000000;
 
+constexpr double kRate = houdini::sync::Numerology::houdiniDefault().rate_hz;
+
 /// A channel: taps at given delays, plus a carrier offset.
 ///
 /// OVER THE AIR THE TRUTH IS THE FIRST PATH, NOT THE STRONGEST. A frame grid
@@ -95,39 +99,15 @@ long long residualCh(const Desc& b, double peak_counts, double snr_db,
                      long long lead, long long tail, float corr_scale, Pick pick,
                      unsigned seed, Thr thresh_form, const Channel& ch) {
   const long long len = static_cast<long long>(b.core.size());
-  std::mt19937 g(seed);
-  auto u01 = [&g]() { return (static_cast<double>(g()) + 0.5) / 4294967296.0; };
-  auto gauss = [&]() {
-    return std::sqrt(-2.0 * std::log(u01())) * std::cos(2.0 * M_PI * u01());
-  };
-  double mean_p = 0.0, peak_p = 0.0;
-  for (const auto& v : b.core) {
-    mean_p += std::norm(v);
-    peak_p = std::max(peak_p, static_cast<double>(std::norm(v)));
-  }
-  mean_p /= static_cast<double>(len);
-  const double scale = peak_counts / std::sqrt(peak_p);
-  const double ns = std::sqrt((mean_p / std::pow(10.0, snr_db / 10.0)) / 2.0);
-
+  houdini::sync::sim::Channel sc;
+  sc.taps.clear();
+  for (const auto& tp : ch.taps) sc.taps.push_back({tp.first, {tp.second, 0.0}});
+  sc.cfo_hz = ch.cfo_hz;
+  sc.rate_hz = kRate;
+  sc.snr_db = snr_db;
+  sc.peak_counts = peak_counts;
   const long long pos = 4000, end = pos + len, s0 = end - lead, n = lead + tail;
-  std::vector<std::complex<double>> sig(n, {0.0, 0.0});
-  for (const auto& tp : ch.taps) {
-    for (long long k = 0; k < len; ++k) {
-      const long long a = pos + tp.first + k - s0;
-      if (a < 0 || a >= n) continue;
-      const double ph = 2.0 * M_PI * ch.cfo_hz * static_cast<double>(k) / 122.88e6;
-      sig[a] += tp.second * std::complex<double>(b.core[k].real(), b.core[k].imag()) *
-                std::exp(std::complex<double>(0.0, ph));
-    }
-  }
-  std::vector<std::complex<int16_t>> buf(n);
-  for (long long i = 0; i < n; ++i) {
-    const double re = sig[i].real() * scale + gauss() * ns * scale;
-    const double im = sig[i].imag() * scale + gauss() * ns * scale;
-    buf[i] = std::complex<int16_t>(
-        static_cast<int16_t>(std::max(-32000.0, std::min(32000.0, re))),
-        static_cast<int16_t>(std::max(-32000.0, std::min(32000.0, im))));
-  }
+  std::vector<std::complex<int16_t>> buf = sc.receive(b.core, pos, s0, n, seed);
   // A single-copy replica (nr_pss) has no repeat to check: the receiver forces
   // the plain matched filter for it (syncSearch), and so does this test, so
   // every column below measures the form the shape would actually run with.
@@ -141,63 +121,19 @@ long long residualCh(const Desc& b, double peak_counts, double snr_db,
   const long long rep_tail = static_cast<long long>(b.replica_tail());
   return idx < 0 ? kMiss : s0 + idx + rep_tail - end;  // vs the DIRECT path's end
 }
-/// Delay a waveform by a fractional sample with a windowed sinc (33 taps).
-/// Returns len+1 samples so the tail is kept. The bench's link has an
-/// arbitrary fractional timing; the integer placement everywhere else in this
-/// test cannot show what a detector does BETWEEN samples.
-std::vector<cf> fracDelay(const std::vector<cf>& x, double tau, int R = 16) {
-  std::vector<cf> y(x.size() + 1, cf(0.f, 0.f));
-  for (size_t k = 0; k < y.size(); ++k) {
-    std::complex<double> acc(0.0, 0.0);
-    for (int m = static_cast<int>(k) - R; m <= static_cast<int>(k) + R; ++m) {
-      if (m < 0 || m >= static_cast<int>(x.size())) continue;
-      const double t = static_cast<double>(k) - static_cast<double>(m) - tau;
-      const double sinc = (std::fabs(t) < 1e-9) ? 1.0
-                          : std::sin(M_PI * t) / (M_PI * t);
-      const double w = 0.5 + 0.5 * std::cos(M_PI * t / (R + 1));  // Hann
-      acc += std::complex<double>(x[m].real(), x[m].imag()) * (sinc * w);
-    }
-    y[k] = cf(static_cast<float>(acc.real()), static_cast<float>(acc.imag()));
-  }
-  return y;
-}
+using houdini::sync::sim::fracDelay;
 
 long long residual(const Desc& b, double peak_counts, double snr_db,
                    long long lead, long long tail, float corr_scale, Pick pick,
                    unsigned seed, Thr thresh_form = Thr::kPowerRatio,
                    double frac = 0.0) {
-  const std::vector<cf> core = frac != 0.0 ? fracDelay(b.core, frac) : b.core;
   const long long len = static_cast<long long>(b.core.size());
-  const long long clen = static_cast<long long>(core.size());
-  std::mt19937 g(seed);
-  auto u01 = [&g]() { return (static_cast<double>(g()) + 0.5) / 4294967296.0; };
-  auto gauss = [&]() {
-    return std::sqrt(-2.0 * std::log(u01())) * std::cos(2.0 * M_PI * u01());
-  };
-  double mean_p = 0.0, peak_p = 0.0;
-  for (const auto& v : b.core) {
-    mean_p += std::norm(v);
-    peak_p = std::max(peak_p, static_cast<double>(std::norm(v)));
-  }
-  mean_p /= static_cast<double>(len);
-  // Scale by PEAK, because that is what the transmit path constrains: the core
-  // goes out at a fixed fraction of full scale. Normalising by rms instead would
-  // hand every candidate the same average power and hide the PAPR cost.
-  const double scale = peak_counts / std::sqrt(peak_p);
-  const double ns = std::sqrt((mean_p / std::pow(10.0, snr_db / 10.0)) / 2.0);
-
+  houdini::sync::sim::Channel sc;
+  sc.snr_db = snr_db;
+  sc.peak_counts = peak_counts;
+  sc.frac_delay = frac;
   const long long pos = 4000, end = pos + len, s0 = end - lead, n = lead + tail;
-  std::vector<std::complex<int16_t>> buf(n);
-  for (long long i = 0; i < n; ++i) {
-    const long long a = s0 + i;
-    cf v(0.f, 0.f);
-    if (a >= pos && a < pos + clen) v = core[a - pos];
-    const double re = v.real() * scale + gauss() * ns * scale;
-    const double im = v.imag() * scale + gauss() * ns * scale;
-    buf[i] = std::complex<int16_t>(
-        static_cast<int16_t>(std::max(-32000.0, std::min(32000.0, re))),
-        static_cast<int16_t>(std::max(-32000.0, std::min(32000.0, im))));
-  }
+  std::vector<std::complex<int16_t>> buf = sc.receive(b.core, pos, s0, n, seed);
   if (b.replica_reps < 2) thresh_form = Thr::kCoherence;  // see residualCh
   const ssize_t idx = CommsLib::find_beacon_avx(buf.data(), b.replica, n,
                                                corr_scale, pick, thresh_form);
@@ -849,7 +785,7 @@ int main() {
             const std::complex<double> c(buf[g2 + i].real(), buf[g2 + i].imag());
             r += std::conj(a) * c;
           }
-          const double hz = std::arg(r) / (2.0 * M_PI * L) * 122.88e6;
+          const double hz = std::arg(r) / (2.0 * M_PI * L) * kRate;
           sum += hz; sum2 += hz * hz; ++cnt;
         }
         if (cnt == 0) { std::printf(" %15s", "MISS"); continue; }

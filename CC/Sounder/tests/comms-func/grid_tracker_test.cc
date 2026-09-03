@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "sync/grid_tracker.h"
+#include "sync/numerology.h"
 
 namespace {
 
@@ -36,7 +37,7 @@ void check(bool ok, const std::string& what) {
   if (!ok) ++g_fail;
 }
 
-constexpr double kFrame = 122880.0;
+constexpr double kFrame = static_cast<double>(houdini::sync::Numerology::houdiniDefault().samps_per_frame);
 constexpr double kEpsPpm = 8.52;           // the measured pair
 constexpr double kTruePeriod = kFrame * (1.0 + kEpsPpm * 1e-6);
 constexpr double kScatterSd = 0.70;        // measured sync residual sd, samples

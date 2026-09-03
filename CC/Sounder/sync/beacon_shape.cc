@@ -17,7 +17,7 @@ std::vector<std::string> BeaconShape::names() {
 }
 
 BeaconShape BeaconShape::make(const std::string& name, Platform platform,
-                              size_t prefix_samples) {
+                              const Numerology& num) {
   shapes::Shape s;
   if (!shapes::parse(name, &s)) {
     std::string expected;
@@ -25,15 +25,15 @@ BeaconShape BeaconShape::make(const std::string& name, Platform platform,
     throw std::invalid_argument("unknown beacon_type \"" + name + "\" -- expected one of " +
                                 expected);
   }
-  return fromDesc(shapes::make(s), platform, prefix_samples);
+  return fromDesc(shapes::make(s, num), platform, num);
 }
 
 BeaconShape BeaconShape::fromDesc(const shapes::Desc& d, Platform platform,
-                                  size_t prefix_samples) {
+                                  const Numerology& num) {
   BeaconShape b;
   b.name_ = d.name;
   b.platform_ = platform;
-  b.prefix_ = prefix_samples;
+  b.num_ = num;
   b.core_ = d.core;
   b.replica_ = d.replica;
   b.replica_off_ = d.replica_off;
@@ -63,7 +63,7 @@ ssize_t BeaconShape::expectedEndOffset() const {
   if (platform_ == Platform::kHoudini) {
     return static_cast<ssize_t>(kHoudiniStrobeOffsetTicks) + static_cast<ssize_t>(core_.size());
   }
-  return static_cast<ssize_t>(core_.size() + prefix_);
+  return static_cast<ssize_t>(core_.size() + num_.prefix_samples);
 }
 
 }  // namespace sync

@@ -30,6 +30,7 @@
 #include <vector>
 
 #include "comms-lib.h"
+#include "sync/numerology.h"
 
 namespace houdini {
 namespace sync {
@@ -86,6 +87,10 @@ struct Desc {
   // what the CFO estimator reads. `guard_len` samples of cyclic prefix sit
   // immediately BEFORE fine_off when non-zero.
   size_t fine_off = 0, fine_len = 0, fine_reps = 0, guard_len = 0;
+
+  /// The numerology the shape was built for. Sequence-defined shapes are the
+  /// same sample counts at any rate; the NR shapes hold `numerology.scs_hz`.
+  Numerology numerology;
 
   /// Peak-to-average power ratio in dB. Not cosmetic: the transmit path scales
   /// the core to a fixed fraction of full scale by PEAK, so a higher PAPR
@@ -225,7 +230,7 @@ inline void scaleToPeak(std::vector<cf>& v, double peak) {
 /// The NR core: PSS, cyclic guard, two copies of a TRS symbol. Shared by kNr
 /// and kNrPss, which transmit the SAME burst and differ only in what the
 /// detector correlates against. Returns the PSS symbol length.
-inline size_t buildNr(Desc& d) {
+inline size_t buildNr(Desc& d, const Numerology& num) {
     // NR sends SSB and TRS as separate signals at different periodicities.
     // Under this link's constraint -- the UE sees ONE periodic downlink burst
     // and gets no pilots of its own -- the NR structure collapses to: an
@@ -234,11 +239,17 @@ inline size_t buildNr(Desc& d) {
     // sequences, not stand-ins.
     std::vector<cf> pss_tones;
     for (float v : nrPssMSeq(0)) pss_tones.push_back(cf(v, 0.f));
-    auto pss = toneIfft(pss_tones, 128);
+    // 127 tones at the numerology's subcarrier spacing: 128 points at the
+    // shipped 122.88 MSPS / 960 kHz. A rate that cannot carry them at that
+    // spacing throws here rather than redefining the spacing.
+    const size_t nfft = num.ifftSize(127);
+    auto pss = toneIfft(pss_tones, nfft);
     unitPower(pss);
     // TRS symbol: QPSK over a 38.211 Gold sequence, full band. c_init is
     // arbitrary but must be FIXED, or TX and the correlator disagree.
-    const size_t kTrsLen = 64;
+    // The TRS symbol is half the PSS symbol's length (64 at the shipped
+    // numerology), so the two scale together.
+    const size_t kTrsLen = nfft / 2;
     const auto c = gold38211(2 * kTrsLen, 0x1u);
     std::vector<cf> trs_tones(kTrsLen);
     const float r = static_cast<float>(1.0 / std::sqrt(2.0));
@@ -256,15 +267,17 @@ inline size_t buildNr(Desc& d) {
     scaleToPeak(d.core, 1.0);
     d.replica.assign(d.core.begin() + d.fine_off,
                      d.core.begin() + d.fine_off + d.fine_len);
-  return 128;  // the PSS symbol: 127 tones in a 128-point IFFT
+  return nfft;  // the PSS symbol: 127 tones in an nfft-point IFFT
 }
 
 }  // namespace detail
 
-inline Desc make(Shape s) {
+/// Build a shape for a numerology. The shipped one is the default below.
+inline Desc make(Shape s, const Numerology& num) {
   using namespace detail;
   Desc d;
   d.shape = s;
+  d.numerology = num;
   switch (s) {
     case Shape::kLegacy: {
       // BIT-IDENTICAL to what Config::genPilots builds today. Deliberately NOT
@@ -324,7 +337,7 @@ inline Desc make(Shape s) {
     }
     case Shape::kNr: {
       d.name = "nr";
-      buildNr(d);
+      buildNr(d, num);
       break;
     }
     case Shape::kNrPss: {
@@ -341,7 +354,7 @@ inline Desc make(Shape s) {
       // difference: same core, same TRS pair for the CFO estimator, replica =
       // the PSS, and the detector's repeat check necessarily off. AP-66.
       d.name = "nr_pss";
-      const size_t pss_len = buildNr(d);
+      const size_t pss_len = buildNr(d, num);
       d.replica.assign(d.core.begin(), d.core.begin() + pss_len);
       d.replica_off = 0;
       d.replica_reps = 1;
@@ -356,6 +369,8 @@ inline Desc make(Shape s) {
   }
   return d;
 }
+
+inline Desc make(Shape s) { return make(s, Numerology::houdiniDefault()); }
 
 /// Config spelling -> shape. Returns false on an unknown name rather than
 /// silently falling back, because a typo that quietly ships the old beacon is

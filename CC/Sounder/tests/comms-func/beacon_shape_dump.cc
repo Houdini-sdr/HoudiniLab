@@ -77,7 +77,7 @@ int main(int argc, char** argv) {
     // divergence): the threshold form, the pick, the replica tail, the
     // first-path window, the SNR guard, the expected end, and the coherence
     // bar at the reserved pfa over a 4096-sample window.
-    const auto shape = houdini::sync::BeaconShape::fromDesc(d, houdini::sync::Platform::kHoudini, 160);
+    const auto shape = houdini::sync::BeaconShape::fromDesc(d, houdini::sync::Platform::kHoudini, houdini::sync::Numerology::houdiniDefault());
     auto cfg = houdini::sync::SyncConfig::defaults();
     cfg.resolve({shape.replicaLen(), 160.0, houdini::sync::Platform::kHoudini});
     const houdini::sync::Detector det(shape, cfg.detector);

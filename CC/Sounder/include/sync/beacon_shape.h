@@ -37,6 +37,7 @@
 #include <vector>
 
 #include "sync/cfo_estimator.h"
+#include "sync/numerology.h"
 #include "sync/sync_config.h"
 
 namespace houdini {
@@ -61,15 +62,16 @@ class BeaconShape {
   /// Throws std::invalid_argument naming the valid names: a typo that quietly
   /// ships the old beacon is exactly the failure the parameter exists to
   /// make visible.
-  static BeaconShape make(const std::string& name, Platform platform, size_t prefix_samples);
+  static BeaconShape make(const std::string& name, Platform platform, const Numerology& num);
   /// Build from a shape the caller already has (tests, the dumper).
   static BeaconShape fromDesc(const shapes::Desc& d, Platform platform,
-                              size_t prefix_samples);
+                              const Numerology& num);
   static std::vector<std::string> names();
 
   const std::string& name() const { return name_; }
   Platform platform() const { return platform_; }
-  size_t prefixSamples() const { return prefix_; }
+  size_t prefixSamples() const { return num_.prefix_samples; }
+  const Numerology& numerology() const { return num_; }
 
   /// The transmitted burst at the shape's own scale (see config.cc on why the
   /// scale is load-bearing) and the matched-filter reference.
@@ -106,7 +108,7 @@ class BeaconShape {
   BeaconShape() = default;
   std::string name_;
   Platform platform_ = Platform::kHoudini;
-  size_t prefix_ = 0;
+  Numerology num_;
   std::vector<std::complex<float>> core_, replica_;
   size_t replica_off_ = 0, replica_reps_ = 0, guard_len_ = 0, tail_ = 0;
   double papr_db_ = 0.0;
