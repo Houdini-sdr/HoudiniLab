@@ -102,6 +102,8 @@ def main():
     sense = None
     all_resid = []
     all_resid_i = []   # the same pairs, fractional-peak phase
+    image_ratios = []  # wrong-sense over right-sense peak, per beacon
+    lobe_steps = []    # phase(strong neighbour) - phase(peak), per beacon
     all_recs = []
     lag_pairs = []
     nsamps = (a.frames + 1) * FRAME
@@ -152,6 +154,19 @@ def main():
             tau = max(-0.5, min(0.5, tau))
             vi = v*(1-abs(tau)) + (vp if tau > 0 else vm)*abs(tau)
             peaks.append(v); pos.append(j); ipeaks.append(vi)
+            # The conjugate-image ratio: the WRONG sense's peak against the
+            # right one's at this beacon. A pure beacon through a clean chain
+            # reads ~0.1 (1/sqrt(L) for a random 128-tap sequence); 2026-09-03
+            # it ranged 0.004 to 0.5 between stream re-arms, and the two runs
+            # whose integer-peak phase hopped by 0.6 and 2.4 rad were the ones
+            # where the correlation lobe's phase slope was largest. Reported per
+            # run so the receive chain's state is on the record with the result.
+            other = np.conj(sense)
+            vo = max((abs(np.vdot(other, c[jj:jj+len(sense)])) for jj in range(j-2, j+3)), default=0.0)
+            image_ratios.append(vo / a0 if a0 else 0.0)
+            nbv = vm if am >= ap_ else vp
+            if abs(nbv) > 0.3 * a0:
+                lobe_steps.append(float(np.angle(nbv / v)))
             recs.append((w, k, j, k*FRAME + idx, a0, float(np.angle(v)), am,
                          float(np.angle(vm)) if am else 0.0, ap_,
                          float(np.angle(vp)) if ap_ else 0.0, tau,
@@ -210,6 +225,14 @@ def main():
               % (Ri, sdi, " ".join("%d" % h for h in hi_)))
         print("  (integer-peak R above %.4f; a large gap says the integer peak"
               " wanders between samples)" % R)
+    if image_ratios:
+        ls = np.array(lobe_steps) if lobe_steps else np.array([0.0])
+        print("  receive-chain state: image ratio mean %.3f (min %.3f max %.3f); "
+              "lobe phase step to the strong neighbour mean %+.2f rad, sd %.2f, n %d"
+              % (np.mean(image_ratios), np.min(image_ratios), np.max(image_ratios),
+                 float(np.mean(ls)), float(np.std(ls)), len(lobe_steps)))
+        print("  (a hop between two half-sample-split samples moves the integer-peak"
+              " phase by that step; read the phase at the fractional peak instead)")
     if all_recs:
         # Flag the pairs outside 1 rad of the main cluster and show what the
         # frames on both sides looked like: did the peak position step, did
