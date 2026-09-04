@@ -15,8 +15,10 @@
  * and resyncwin_NN.txt (key value lines: n, sync_index, snr, ...). Windows
  * dumped after 2026-09-03 also carry the detector settings they were taken
  * under (corr_scale, thresh, pick, first_path_window, first_path_floor_db,
- * first_path_guard, snr_floor_db, snr_guard, replica_tail, beacon_type),
- * asserted below when present. `cfo_hz` is NOT written by the sounder: it is a baseline added by
+ * snr_floor_db, snr_guard, replica_tail, beacon_type), asserted below when
+ * present. `first_path_guard` is written by the sounder as of 2026-09-04 but
+ * NO fixture in the tree carries it yet, so that assertion is forward-looking
+ * and currently runs on none of the windows. `cfo_hz` is NOT written by the sounder: it is a baseline added by
  * hand from the library at commit 10d0fe0, so the estimator has an identity
  * check rather than a plausibility band.
  */
@@ -368,6 +370,9 @@ int main(int argc, char** argv) {
   check(windows == 30, "found " + std::to_string(windows) + " fixture windows (expected 30)");
   std::printf("INFO  %d of %d windows carry a recorded statistic; the rest check the index only\n",
               with_stat, windows);
+  // Asserted, not merely printed: a fixture set that lost its statistics would
+  // otherwise report "0 of 30" and pass (review round 7).
+  check(with_stat >= 18, "at least the 18 fixtures that recorded a statistic still carry one");
   for (const auto& kv : kExpected)
     check(per_shape[kv.first] == kv.second, kv.first + ": " + std::to_string(per_shape[kv.first]) + " of " +
                                                 std::to_string(kv.second) + " fixture windows present (a half-populated set fails here, not quietly)");
