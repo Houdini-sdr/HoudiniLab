@@ -649,6 +649,66 @@ whether an NR-shaped beacon is a live option for the OTA target.
 | 8.167 | **THE CONJUGATE-IMAGE INFERENCE IS RETRACTED, AND WHAT SURVIVES IS SMALLER AND BETTER FOUNDED.** [user: "any test should be validated again even if it matches the hypothesis"; "I am skeptical of a conjugate-image"]. The inference rested on a rule of thumb -- a pure beacon gives a wrong-sense/right-sense peak ratio of 1/sqrt(128) = 0.09 -- that this replica violates: the Gold IFFT sequence is structured and its conjugate-free self-product, computed exactly on a pure delayed beacon (`phase_probe_null.py`), is **0.16 to 0.28 depending on the fractional delay**. The identical analysis on the real windows reads **0.18 to 0.24 on the sounder's six golden windows and 0.29 to 0.34 on the probe's raw window**, i.e. at the null; and the estimator barely responds to an injected image below b = 0.3 (0.211 at b = 0, 0.212 at b = 0.2), so it could not have detected a small one anyway. The "100x variation between re-arms" was the probe's lag-product ratio for the wrong sense, a statistic that was never given a null and cannot carry a claim. **Retracted: image, chain-state variation, and the AP-70 handoff as filed.** **What survives, validated the same way:** (1) the correlation lobe's phase step between adjacent samples is **0.06 to 0.30 rad on real data in BOTH capture paths** (sounder windows -0.07 / -0.16 / -0.29 / +0.20 / -0.07 / -0.14; probe -0.06 to -0.30) against **0.01 for a pure delayed beacon**, so the received beacon's spectrum is asymmetric by a modest, benign amount (chain and cable dispersion) and an integer-peak phase readout inherits that step at every argmax hop; (2) one run had two equal-magnitude adjacent samples **2.4 rad apart**, which a single correlation lobe cannot produce and which fits a two-component arrival about one sample apart; its waveform was not captured, so it is **UNEXPLAINED**, and the probe now arms a raw dump so the next one is. (3) Incidental and verified: the probe transmits the dumped core as is while the sounder pre-conjugates its transmit, so the probe's windows correlate with conj(g) and the sounder's with g; both are consistent with the conjugating receive mixer. The AP-67 design rule stands on (1) alone | `tests/demo-verify/phase_probe_null.py` (null, calibration, both real paths) | VERIFIED-TEST; image claim RETRACTED; 2.4 rad run UNEXPLAINED |
 | 8.168 | **AP-67 MEASURED: THE BEACON PHASE IS PREDICTABLE FOUR FRAMES AHEAD TO ABOUT 1.5 DEGREES.** On the clean runs the phase innovation after removing one fitted per-frame advance is **0.021 / 0.026 / 0.024 / 0.025 rad at lags 1 / 2 / 3 / 4 frames** (192 / 180 / 168 / 156 pairs), i.e. flat: neither the linear growth of a frequency error nor the sqrt(lag) growth of a random walk is visible above the lag-1 floor, which is the estimator's own noise. So over 4 ms the transmitter's carrier phase relative to the receiver's is a constant advance to 1.5 degrees, and the 5-degree budget in `docs/UE_TIME_FREQ_SYNC.md` section 11.4 was conservative by 3x. Consequence: a beacon-only phase tracker supports 64-QAM-grade phase (about 2 degrees) across the frame on this bench, and the in-slot pilots the doc recommends are for channel change and for other hardware, not for this oscillator pair. One caveat carried: the runs were 6 to 12 windows of 17 frames on a cable at the calibrated clock state; the innovation over tens of frames and over the air is not measured | `ap67.log`, `evidence/20260903-rig/ap67_*.csv` | VERIFIED-HW |
 
+### 8an. AP-76 / SH-335, the joint leg: criteria written BEFORE the rig slot
+
+Pre-registration, in the 8v style, written 2026-09-04 while the rig is
+unallocated. Joint with the software lane: our sounder is the instrument, their
+HIL leg and dirty counter run alongside.
+
+**The mechanism under test, as they localized it.** The TX rate is global to
+the DAC group. `setSampleRate(TX)` only records it; it is APPLIED at the first
+TX `setupStream`, which resyncs the group because the vld change moved the DAC
+FIFO latency. The realign runs on every TX setupStream and corrupts only when
+the vld actually moved. Board defaults are restored at every device open, so
+our demo start moves it every run.
+
+**Why our exposure is the untested case.** The shipped config sets `channel`
+to "B", so the base station's channels are {1}, `has_ch0` is false and `mts` is
+true, and `RadioSoapy` opens an auxiliary channel-0 stream in REPLAY mode
+before the data TX stream. That auxiliary stream's setupStream is therefore the
+first after the move and absorbs the realign, every run. Every dataset either
+lane has is on PACED streams.
+
+**THE READOUT RULE, AND IT IS THE POINT OF WRITING THIS DOWN EARLY.** A replay
+stream plays from RAM rather than a host-fed FIFO, so if it is sensitive to the
+post-realign state it will most likely fail as a SILENT OR WRONG DAC OUTPUT
+rather than as drops or sequence errors. This bench has produced exactly that
+shape before: row 4.24, counters playing and no RF leaving the DAC. **So on the
+replay arm the beacon detection is the load-bearing readout and the software
+lane's dirty counter may read clean while the output is wrong. A clean counter
+with a dead or wrong beacon is a POSITIVE RESULT, not a contradiction, and it
+is recorded here in advance so it cannot be argued away as instrument
+disagreement afterwards.** The converse, a dirty counter with a healthy beacon,
+is also a positive and means the corruption does not reach the replay path.
+
+**Arms, interleaved, one binary, the shipped config, 60 s each, order rotated
+between rounds:**
+1. **As-is.** The shipped ordering: rate move, then the auxiliary replay stream
+   first, then the data stream. Also record whether the FIRST post-move stream
+   being a replay changes anything against a paced first stream, which is the
+   exact variable the software lane's hammer never had.
+2. **No move.** The device left or provisioned at the operational TX rate, so
+   `setSampleRate` records what is already there. If this arm is clean the vld
+   move is confirmed as the whole cause.
+3. **Absorbed.** A throwaway paced TX stream opened and closed at the
+   operational rate before the auxiliary stream, to eat the realign. This tests
+   our preferred interim fix.
+
+**PASS for an arm:** beacon acquired and tracked with accepts inside 15-25, 0
+escalations, 0 off-grid, and the software lane's dirty counter clean.
+**FAIL:** no beacon, a beacon whose detected level or shape is wrong, or a
+dirty counter. **The comparison that decides the row:** arm 1 dirty or
+beaconless while arms 2 and 3 are clean means our shipped ordering is exposed
+through the replay path and the fix is ours. All three arms clean, replicated,
+means replay streams are immune and AP-76 closes as clear by accident. Arm 2
+dirty means the mechanism is not the vld move and both lanes go back to it.
+
+**Stated weakness.** One evening on one cable bench with one board pair. This
+can establish that the exposure is real; it cannot establish that it is absent,
+because a corruption that fires on some fraction of rate moves needs many more
+cycles than a rig slot affords. A clean result is therefore reported as "not
+reproduced in N cycles", with N stated, and never as "does not happen".
+
 ### 8am. AP-72 review rounds 5 and 6: what the fixes broke
 
 Round 4's fixes were reviewed, and so were round 5's. Both rounds found the
