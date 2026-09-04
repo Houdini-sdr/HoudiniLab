@@ -869,12 +869,12 @@ int main() {
   // sweep measures it; the `fitted` column is what the fit achieves.
   std::printf("\n=== AP-72: sub-sample fit against the true end (RMS samples, "
               "tau = 0..1 in 0.02, 8 draws) ===\n");
-  std::printf("%-14s %5s %12s %12s %10s\n", "shape", "SNR", "integer RMS",
-              "fitted RMS", "verdict");
+  std::printf("%-14s %5s %12s %12s %8s %10s\n", "shape", "SNR", "integer RMS",
+              "fitted RMS", "no-refine", "verdict");
   for (const double snr : {45.0, 30.0}) {
     for (const auto& b : ds) {
       double si = 0.0, sf = 0.0;
-      int n = 0;
+      int n = 0, none = 0;
       for (unsigned sd = 1; sd <= 8; ++sd) {
         for (int t = 0; t <= 50; ++t) {
           const double tau = 0.02 * t;
@@ -882,7 +882,12 @@ int main() {
           if (rf.first == kMiss) continue;
           const double truth = static_cast<double>(kEndConvention) + tau;
           const double ei = static_cast<double>(rf.first) - truth;
-          const double ef = static_cast<double>(rf.first) + rf.second - truth;
+          // NaN means the estimator reported no refinement, which leaves the
+          // consumer with the integer: scored as the integer, and counted, so
+          // a column cannot look good by declining to answer.
+          if (std::isnan(rf.second)) ++none;
+          const double off = std::isnan(rf.second) ? 0.0 : rf.second;
+          const double ef = static_cast<double>(rf.first) + off - truth;
           si += ei * ei;
           sf += ef * ef;
           ++n;
@@ -890,8 +895,8 @@ int main() {
       }
       const double ri = n ? std::sqrt(si / n) : 0.0;
       const double rf2 = n ? std::sqrt(sf / n) : 0.0;
-      std::printf("%-14s %5.0f %12.3f %12.3f %10s\n", b.name.c_str(), snr, ri,
-                  rf2, rf2 < 0.289 ? "PASS" : "FAIL");
+      std::printf("%-14s %5.0f %12.3f %12.3f %8d %10s\n", b.name.c_str(), snr,
+                  ri, rf2, none, rf2 < 0.289 ? "PASS" : "FAIL");
       check(rf2 < 0.289, std::string("sub-sample fit beats rounding: ") +
                              b.name + " at " + std::to_string(int(snr)) + " dB");
     }
@@ -912,7 +917,8 @@ int main() {
       std::vector<double> v;
       for (unsigned sd = 1; sd <= 32; ++sd) {
         const auto rf = residualFrac(b, tau, sd, 45.0);
-        if (rf.first != kMiss) v.push_back(static_cast<double>(rf.first) + rf.second);
+        if (rf.first != kMiss && !std::isnan(rf.second))
+          v.push_back(static_cast<double>(rf.first) + rf.second);
       }
       double m = 0.0, q = 0.0;
       for (const double x : v) m += x;

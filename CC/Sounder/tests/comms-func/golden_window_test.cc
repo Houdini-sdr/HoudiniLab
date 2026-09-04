@@ -246,6 +246,7 @@ int main(int argc, char** argv) {
   const auto cfg = houdini::sync::SyncConfig::loadFromText("{}");
   const float kCorrScale = 10.0f;
   int windows = 0;
+  int frac_none = 0;  // windows where the sub-sample estimator reported none
   std::map<std::string, int> per_shape;
   // Windows per shape: legacy and nr_pss 00-05 (morning) + 06-11 (with the
   // statistic); dot11 00-05 recorded after round 4 for the guard rule.
@@ -342,12 +343,16 @@ int main(int argc, char** argv) {
       }
       // The sub-sample offset is not recorded in these fixtures (they predate
       // it), so what is checked is the contract every consumer relies on: it
-      // is finite and inside the fit's own bound, on every window and on both
-      // architectures. The INFO line above carries the value itself, which is
-      // how the aarch64 replay compares it against x86 (8ah).
-      std::snprintf(what, sizeof what, "%s window %d: frac_offset %+.4f is finite and within bound",
+      // is either NaN, meaning no refinement was available, or inside the
+      // estimator's bound of two samples of climb plus half a sample. NaN is
+      // ALLOWED here on purpose: a backend that does not report the field
+      // (CUDA) returns it, and asserting finiteness would fail a build whose
+      // production contract permits none. The INFO line above carries the
+      // value, which is how the aarch64 replay compares it against x86 (8ah).
+      std::snprintf(what, sizeof what, "%s window %d: frac_offset %+.4f is NaN or within bound",
                     shape, i, det_res.frac_offset);
-      check(std::isfinite(det_res.frac_offset) && std::fabs(det_res.frac_offset) <= 1.5, what);
+      check(std::isnan(det_res.frac_offset) || std::fabs(det_res.frac_offset) <= 2.5, what);
+      if (std::isnan(det_res.frac_offset)) ++frac_none;
       const double snr = guard.snrDb(w.data(), w.size(), det_res.end_index);
       std::snprintf(what, sizeof what, "%s window %d: snr %.2f dB (recorded %.2f)", shape, i,
                     snr, meta.at("snr"));
@@ -369,6 +374,11 @@ int main(int argc, char** argv) {
     }
   }
   check(windows == 30, "found " + std::to_string(windows) + " fixture windows (expected 30)");
+  // Reported, not asserted: NaN is a legal answer, but these windows are all
+  // mid-slice detections with room to bracket, so a nonzero count on the
+  // portable backend means the estimator stopped refining and is worth reading
+  // before it is trusted (8ai).
+  std::printf("INFO  sub-sample offset reported none on %d of %d windows\n", frac_none, windows);
   for (const auto& kv : kExpected)
     check(per_shape[kv.first] == kv.second, kv.first + ": " + std::to_string(per_shape[kv.first]) + " of " +
                                                 std::to_string(kv.second) + " fixture windows present (a half-populated set fails here, not quietly)");

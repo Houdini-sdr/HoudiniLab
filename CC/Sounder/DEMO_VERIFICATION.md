@@ -711,6 +711,27 @@ at the fractional peak and AP-74's tracker will want the same.
 - **FAIL** on any of these reports the measurement and withdraws the change
   rather than adjusting the criterion.
 
+**Amendment, written after review round 1 and BEFORE the re-runs (2026-09-03,
+8ai).** The reviewer disproved the estimator's stated rationale, not the
+criteria. Two HIGH findings: the climb bound of two samples was unreachable
+because the magnitude bound discarded every two-step result, so `nr` (the one
+shape needing it) always reported none; and "a parabola through three points
+of a triangle finds its apex" is false, with a measured S-curve bias to 0.234
+samples and a threefold gain error near half a sample, because the
+autocorrelation of a full-rate pseudorandom sequence is a delta (the peak's
+neighbours carry 0.008 and 0.002 of it at zero offset) and three samples of a
+near-delta are the worst case for a parabola. **The estimator is therefore
+replaced before the re-runs by the ratio of the two samples bracketing the
+top, `side / (mid + side)`, which is EXACT for the ideal bandlimited sinc and
+for the triangle, the two kernels that bracket the physical case.** The
+pre-registered bars above are unchanged and the same runs judge it; what
+changed is the arithmetic between the samples and the answer. Also applied
+from the round: no refinement now reports NaN rather than zero, so "unknown"
+cannot read as "exactly centred"; the amplitude is taken in double from the
+parts; non-finite samples, window edges and shoulders with no top in reach all
+report none; and the documented range is the true one, plus or minus 2.5
+samples rather than half a sample.
+
 ### 8ag. AP-64, the launcher's automatic release of the boards: criteria written BEFORE the runs
 
 Pre-registration, in the 8v style (2026-09-03 19:40). Root cause (8.127,

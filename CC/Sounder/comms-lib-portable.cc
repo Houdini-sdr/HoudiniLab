@@ -13,12 +13,14 @@
 #include <atomic>
 #include <cassert>
 #include <chrono>
+#include <cmath>
 #include <complex>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <mutex>
 #include <queue>
 #include <thread>
@@ -314,37 +316,58 @@ static double firstPathFloorFrac(CommsLib::BeaconThresh form, double db) {
 
 // SUB-SAMPLE POSITION OF THE LOBE AN INDEX SITS ON (BeaconResult::frac_offset).
 //
-// Fitted on the correlator AMPLITUDE, not its power: a pseudorandom sequence's
-// autocorrelation main lobe is triangular in amplitude, and a parabola through
-// three points of a triangle finds its apex, while the same parabola through
-// the squared triangle is biased toward the sample it is centred on.
+// THE ESTIMATOR IS A RATIO OF THE TWO SAMPLES THAT BRACKET THE TOP, NOT A
+// PARABOLA THROUGH THREE OF THEM. A full-rate pseudorandom sequence's
+// autocorrelation is a delta: measured on this bench at zero fractional delay,
+// the peak's neighbours carry 0.008 and 0.002 of it. So the three samples
+// around the top do not trace the beacon's own lobe at all -- they trace the
+// FRACTIONAL-DELAY KERNEL, and for the two kernels that bracket the physical
+// case, the ideal bandlimited sinc and the triangle, `side / (mid + side)` is
+// exactly the offset. Both are checked in beacon_geometry_test. A parabola
+// through a near-delta instead under-reports by up to 0.234 samples with a
+// threefold gain error near half a sample, which is a nonlinear timing
+// discriminator rather than a measurement (review of 2026-09-03, 8ai).
 //
-// The returned index is not always the lobe's top -- the first-path rule
-// deliberately picks the earlier tap of a split peak (8ah) -- so this first
-// climbs to the local maximum and then fits there, reporting the result
-// relative to `i`. The climb is bounded by the measured reach of a lobe: one
-// sample for every shipped shape, two for `nr` (8ah's reach sweep). An
-// unbounded climb would walk off a shoulder onto a different path.
+// Residual: a kernel whose two neighbours are BOTH non-negligible at zero
+// offset biases this by about their ratio to the peak, 0.008 samples here.
+//
+// The returned index is not always the top -- the first-path rule deliberately
+// picks the earlier tap of a split peak (8ah) -- so this climbs to the local
+// maximum first, by at most the measured reach of a lobe (one sample for every
+// shipped shape, two for `nr`), and reports the result relative to `i`. The
+// magnitude is therefore at most kMaxClimb + 0.5 samples.
+//
+// NaN, NOT ZERO, when no refinement is available. Zero is a measurement, a top
+// sitting exactly on the index, and must never double as "no information";
+// `statistic` in this library already carries that convention.
 static double fracOffsetAt(const std::vector<std::complex<float>>& corr, size_t i) {
-  constexpr int kMaxClimb = 2;         // the measured lobe reach, 8ah
-  constexpr double kMaxOffset = 1.5;   // beyond this the three points are not one lobe
+  constexpr int kMaxClimb = 2;  // the measured lobe reach (8ah)
+  const double kNone = std::numeric_limits<double>::quiet_NaN();
   const size_t n = corr.size();
-  if (n < 3 || i >= n) return 0.0;
-  const auto amp = [&corr](size_t k) { return static_cast<double>(std::abs(corr[k])); };
+  if (n < 3 || i >= n) return kNone;
+  // In double from the parts: |z| taken in float rounds a near-flat top to a
+  // tenth of a sample of offset that is nothing but float spacing.
+  const auto amp = [&corr](size_t k) {
+    return std::hypot(static_cast<double>(corr[k].real()),
+                      static_cast<double>(corr[k].imag()));
+  };
   size_t c = i;
   for (int step = 0; step < kMaxClimb; ++step) {
-    if (c + 1 < n && amp(c + 1) > amp(c)) { ++c; continue; }
-    if (c >= 1 && amp(c - 1) > amp(c)) { --c; continue; }
+    if (c + 1 < n && amp(c + 1) > amp(c)) { ++c; continue; }  // strict: a
+    if (c >= 1 && amp(c - 1) > amp(c)) { --c; continue; }     // plateau stops
     break;
   }
-  if (c < 1 || c + 1 >= n) return 0.0;  // no room for the fit at the window edge
-  const double ym = amp(c - 1), y0 = amp(c), yp = amp(c + 1);
-  const double den = ym + yp - 2.0 * y0;
-  if (!(den < 0.0)) return 0.0;  // not concave: not a lobe top (NaN falls here too)
-  const double p = (ym - yp) / (2.0 * den);
-  if (!std::isfinite(p)) return 0.0;
-  const double off = static_cast<double>(c) - static_cast<double>(i) + p;
-  return std::fabs(off) <= kMaxOffset ? off : 0.0;
+  if (c < 1 || c + 1 >= n) return kNone;  // no room to bracket at the edge
+  const double lo = amp(c - 1), mid = amp(c), hi = amp(c + 1);
+  if (!std::isfinite(lo) || !std::isfinite(mid) || !std::isfinite(hi)) return kNone;
+  // The climb is bounded, so `c` need not have reached a local maximum: the
+  // index can sit on a shoulder with no top within reach. Refining there would
+  // report a position no lobe has, so it reports none instead.
+  if (mid <= 0.0 || mid < lo || mid < hi) return kNone;
+  const double side = hi >= lo ? hi : lo;
+  const double frac = side / (mid + side);  // 0 .. 0.5 by construction
+  return static_cast<double>(c) - static_cast<double>(i) +
+         (hi >= lo ? frac : -frac);
 }
 
 int CommsLib::find_beacon_avx(

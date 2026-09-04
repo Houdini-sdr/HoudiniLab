@@ -25,6 +25,7 @@
 #include <string.h> /* for memcpy */
 #include <unistd.h>
 
+#include <limits>
 #include <algorithm>
 #include <cstring>
 #include <fstream>  // std::ifstream
@@ -290,15 +291,27 @@ class CommsLib {
     /// WHERE THE LOBE'S TOP ACTUALLY SITS, RELATIVE TO `index`, IN SAMPLES.
     /// A beacon that arrives between samples splits the matched-filter peak
     /// over two adjacent taps, so the integer index carries up to half a
-    /// sample of quantisation and (with the first-path rule) up to one sample
-    /// of bias -- measured, DEMO_VERIFICATION 8ah. This is a three-point
-    /// parabolic fit on the correlator AMPLITUDE at the lobe `index` sits on,
-    /// so `index + frac_offset` is the sub-sample position of that path.
-    /// Zero when no refinement is available (an edge of the search window, or
-    /// three points that do not describe a lobe) and NaN when the backend does
-    /// not report it, so "no information" never reads as "exactly centred".
-    /// ADDITIVE: `index` is unchanged by it.
-    double frac_offset = 0.0;
+    /// sample of quantisation and, under the first-path rule, up to one sample
+    /// of bias: measured, DEMO_VERIFICATION 8ah. `index + frac_offset` is the
+    /// sub-sample position of the detected path.
+    ///
+    /// RANGE IS NOT +-0.5. The rule can pick a tap up to two samples before the
+    /// top, so this runs to +-2.5 and real captures reach +0.93 (8ah). A
+    /// consumer that clamps it to half a sample corrupts exactly the split
+    /// peaks it exists for.
+    ///
+    /// NaN MEANS NO REFINEMENT, and zero is a measurement (a top exactly on the
+    /// index), never a stand-in for "unknown". NaN arises at a search-window
+    /// edge, on a shoulder with no lobe top within reach, and from a backend
+    /// that does not report the field at all.
+    ///
+    /// It describes the correlation lobe the index sits on; it does not
+    /// re-judge whether that index is a beacon. Read `statistic` against the
+    /// bar for that, exactly as before: a detection admitted on noise carries a
+    /// sub-sample position for its noise bump.
+    ///
+    /// ADDITIVE: `index`, `statistic` and `peak` are bit-unchanged by it.
+    double frac_offset = std::numeric_limits<double>::quiet_NaN();
   };
   /// The radio's samples as the correlator takes them: full scale to +-1.
   static std::vector<std::complex<float>> toCorrelatorScale(
