@@ -1,0 +1,249 @@
+1:468305 INFOR: 
+Input config:
+
+  Config: {"_beacon_type_note":"Which beacon waveform the BS transmits: legacy | legacy_guard | dot11 | nr | nr_pss. All five are defined in include/sync/beacon_shapes.h (nr_pss is the nr burst detected on its PSS, DEMO_VERIFICATION 8.154-8.162) and measured on this bench (DEMO_VERIFICATION 8.111-8.116, 4 interleaved rounds, ~8000 detections each). legacy is the default because it has the best detection margin -- worst-case detector ratio 1.21 against a 0.1 bar, versus 1.20 / 0.72 / 0.23 for the others -- and because every prior result in that ledger was taken against it. Timing is indistinguishable across all four (adjacent-difference jitter 0.13-0.17 samples). An unknown name THROWS rather than falling back, so a typo cannot quietly ship a different beacon.","_bs_hw_framer_note":"true selects the BS native-Houdini-TDD framer path. The TDD symbol now EQUALS the sounder slot (4096 ticks; the old 0.5 ms symbol and its multi-copy beacon fill are retired, DEMO_VERIFICATION.md 4.12/4.16). samps_per_slot must stay <= 4096 (FPGA TX_RAM depth).","_comment":"Houdini RFSoC single-UE client, slot-granular native-TDD demo. BS arms a 30-symbol TDD ring built from frame_schedule (one 4096-tick symbol per slot, '6' beacon strobe on the B slot, rx on every other slot -- a gate close would abandon the continuous capture, see DEMO_VERIFICATION.md). The beacon is a SINGLE 496-sample core per frame at slot_start+384 (strobe offs), played from the TX replay RAM with explicit zeros to the window close. UE: stamp-based hunt -> confirm(x2) -> anchor acquisition with a 30 dB sync-SNR floor (HOUDINI_SYNC_SNR_DB; the metric reads true link dB since the guard-band fix, DEMO_VERIFICATION.md 4.42), resync = gated drift tracking. Run procedure: CSI_DEMO_WALKTHROUGH.md; evidence ledger: DEMO_VERIFICATION.md. Matched-NCO Zone-1: TX ch1 -> RX ch1, NCO 500 MHz. 30 slots x 4096 = 122880 samps = EXACTLY 1 ms per frame = 320 steps of the 384-tick TX grid. The UE composes one zero-padded burst per frame ([front-pad | P | gap zeros | U] anchored at the floored grid point), so pilot/data placement is sample-exact -- the old per-run snap draws are gone (DEMO_VERIFICATION.md 4.48).","_corr_scale_init_note":"Acquisition-only detection threshold; SMALLER is STRICTER (test: corr_scale * peak > trailing local energy). The 2026-08 measured populations (no-beacon 3.4e-07, beacon 0.31..4.2) were taken in the multi-copy-beacon era; acquisition now ALSO requires the 30 dB in-window SNR floor and two grid-consistent confirms, which is what actually rejects the noise-artifact class (DEMO_VERIFICATION.md 4.25/4.32). Re-sync uses corr_scale and relaxes per retry, gated by the same floor.","_tx_advance_note":"BENCH CALIBRATION for the wired setup, not a live mechanism. Derived 2026-08-30 from the BS-side pilot_grid_off measurement (DEMO_VERIFICATION.md 4.31/4.35): with the zero-padded burst (sample-exact placement, DEMO_VERIFICATION.md 4.48) the seat residual is a CONSTANT; 247 = the 205 snap-era value + the measured +42 residual, landing the pilot at its nominal +128 prefix seat. Re-derive after any cabling/latency change: run with HOUDINI_BS_RX_DEBUG=1 across a few restarts and shift tx_advance by the mean pilot_grid_off.","_ue_tdd_pilot_note":"UE streams its pilot with the tdd=1 TX stream arg -> the driver TxTickAnchor accepts beacon-referenced starts on the 3.125us/384-tick TDD grid (SH-248/SH-301). ue_tx_advance_ticks is QUANTIZED to the 384-tick anchor grid (values under 192 vanish; leave 0); the 3125 ns anchor grid only constrains the BURST anchor; the burst interior is tick-exact, which the zero-padded composition exploits (DEMO_VERIFICATION.md 4.48).","beacon_type":"dot11","beamsweep":false,"bs_hw_framer":true,"channel":"B","corr_scale":[100],"corr_scale_init":[10],"cp_size":16,"fft_size":64,"frame_schedule":["BGGGGGGGGGGGGGGGPGUGGGGGGGGGGG"],"frequency":500000000.0,"max_frame":600,"nco_frequency":500000000.0,"ofdm_symbol_per_slot":48,"ofdm_tx_zero_postfix":128,"ofdm_tx_zero_prefix":128,"radio_type":"houdini","remote_port":"55132","sample_rate":122880000.0,"serial_file":"files/topology-houdini.json","sync":{"detector":{"first_path_guard":1}},"tx_advance":[247],"ue_channel":"B","ue_frame_schedule":["GGGGGGGGGGGGGGGGPGUGGGGGGGGGGG"],"ue_modulation":"QPSK","ue_pilot_horizon":96,"ue_rx_gain_a":[65],"ue_rx_gain_b":[65],"ue_tdd_pilot":true,"ue_tx_advance_ticks":0,"ue_tx_gain_a":[81],"ue_tx_gain_b":[81]}
+
+1:468345 INFOR: Loading devices - cell 0, sdrs 1, antennas: 1, total bs srds: 1
+Topology: 
+BS0 Hub:
+ 	- 168.6.244.21
+Topology: 
+ Number of cells: 1
+ Number of BS sdrs in cell 0: 1
+ Client SDRs: 1
+BGGGGGGGGGGGGGGGPGUGGGGGGGGGGG
+Client 0 schedule: GGGGGGGGGGGGGGGGPGUGGGGGGGGGGG
+Slots: 30
+ Pilots: 1
+ Noise: 0
+ UL Slots: 1
+ DL Slots: 0
+ Client SDRs: 1
+1:468393 INFOR: sync configuration (value  provenance):
+  beacon.type = dot11  [json]
+  beacon.tx_full_scale = 0.6  [default]
+  detector.threshold = auto  [default]
+  detector.pfa_per_window = 0.001  [default]
+  detector.pick = first_path  [default]
+  detector.first_path_window = 32  [derived]
+  detector.first_path_floor_db = -9  [default]
+  detector.first_path_guard = 1  [json]
+  detector.corr_scale = 100  [json]
+  detector.corr_scale_init = 10  [json]
+  detector.corr_threads = 1  [default]
+  confirm.snr_floor_db = 30  [default]
+  cfo.index_guard = 8  [default]
+  cfo.window_margin = 0  [default]
+  cfo.log_every = 10  [default]
+  tracker.type = alpha_beta  [default]
+  tracker.alpha = 0.5  [default]
+  tracker.beta = 0.1  [default]
+  tracker.step_ppm = 0.5  [default]
+  tracker.max_ppm = 100  [default]
+  tracker.trust_ppm = 1  [default]
+  tracker.kalman.meas_var = 0.5  [default]
+  tracker.kalman.rate_rw = 1e-09  [default]
+  tracker.kalman.innov_gate = 4  [default]
+  resync.residual_ppm = 0.1  [default]
+  resync.scatter_tol_us = 2  [default]
+  resync.confirm_tol_us = 5.2083  [default]
+  resync.sync_tol_samples = 32  [derived]
+  resync.retry_max = 100  [default]
+  resync.escalate_episodes = 2  [default]
+  resync.hold_offgrid = 2  [default]
+  resync.acq_refine_span = 200  [default]
+  resync.acq_max_ppm = 100  [default]
+  allow_env_overrides = false  [default]
+  note: confirm.snr_floor_db is the legacy default with beacon.type "dot11": a quieter waveform is rejected wholesale at a level legacy clears (8.157); derive the floor from this beacon's in-window SNR
+Beacon: type dot11, core 320 samples, matched field 2 x 64 at offset 192 (beacon end = index + 0) (cyclic guard 32), PAPR 3.16581 dB
+Max pilot amplitude = 0.16
+TX peaks (int16 counts): pilot 16226 (49.5% FS), UE data 16128 (49.2% FS), tx_scale 3.0825
+1:468748 INFOR: Wrote UE UL freq-domain reference (3072 complex) to logs/ul_data_f_QPSK_52_64_48_1_1_B_0.bin
+1:468778 INFOR: Cores found 20 ... 
+1:468779 INFOR: Allocating 1 cores to receive threads ... 
+1:468780 INFOR: Allocating 1 cores to record threads ... 
+1:468780 INFOR: Allocating 1 cores to read threads ... 
+1:468781 INFOR: Allocating 1 cores to client threads ... 
+Config: 1 BS, 1 BS radios (total), 1 UE antennas, 1 pilot symbols per frame,
+	1 uplink data symbols per frame, 0 downlink data symbols per frame,
+	64 OFDM subcarriers (52 data subcarriers), modulation QPSK, frame time 1000.000 usec 
+Thread Config: 1 BS receive threads, 1 Client receive threads, 1 recording threads, 1 reading thread
+2:498223 WARNG: ClientRadioSet radio 0 (168.6.244.22, houdini) setup failed: SoapyRPCUnpacker::recv() TIMEOUT
+[1;31m168.6.244.22[0m
+[1;31mERROR: the above client radio(s) could not be opened. The reason is logged above each address; note that a radio can be discoverable (SoapySDRUtil --find) and still fail here, e.g. no route to its data-plane address.[0m
+[INFO] SoapyHoudiniSDR_device: bringing up FPGA driver layer, data_iface=192.168.5.9 (identity source: /etc/houdini/sdr.conf)
+[INFO] clock: calibrated hold in force at MAN_DAC=408 (RB_DAC_VALUE=408)
+[INFO] FPGA identity (top_core @0xa0060000): version=1.30 commit=c88e0b5f board=rfsoc4x2 build=2026-08-28T00:50:42 magic=RFSC (raw 0x0001001E/0xE4340CAA/0x52465343/0xC88E0B5F/0x00000000/0x00000004)
+[INFO] reset: ADC tile 0 PLL Fs 1228.80 -> 1228.80 MHz pre-StartUp (boot 3932.16)
+[INFO] reset: ADC tile 2 PLL Fs 1228.80 -> 1228.80 MHz pre-StartUp (boot 3932.16)
+[INFO] reset: DAC tile 0 PLL Fs 1966.08 -> 1966.08 MHz pre-StartUp (boot 5898.24)
+[INFO] reset: DAC tile 2 PLL Fs 1966.08 -> 1966.08 MHz pre-StartUp (boot 5898.24)
+[INFO] tick_rate_hz = 122.880000 MHz (design nominal), HW-verified: PL_CLK locked vs SYSREF (PL phase-tap).
+[INFO] dac_clk = 122.880000 MHz (TX default), HW-verified vs SYSREF (DAC phase-tap).
+[INFO] discovered 4 RX channels, 2 TX channels
+[INFO]   RX[0] = ADC0.0  canon=0  eff=245.760 MSPS
+[INFO]   RX[1] = ADC0.1  canon=1  eff=245.760 MSPS
+[INFO]   RX[2] = ADC2.0  canon=8  eff=245.760 MSPS
+[INFO]   RX[3] = ADC2.1  canon=9  eff=245.760 MSPS
+[INFO]   TX[0] = DAC0.0  canon=0  eff=983.040 MSPS
+[INFO]   TX[1] = DAC2.0  canon=8  eff=983.040 MSPS
+[INFO] SoapyHoudiniSDR_device: construction complete.
+[INFO] RFDC: interrupt-driven mode (default; set HOUDINI_RFDC_IRQ=0 to force the poll fallback) (SH-113)
+[INFO] RFDC IRQ-driven (irq=17): global armed, per-block sources off until stream start
+[INFO] setSampleRate(RX): 122.88 MSPS = vld_code 2 at RX_FAB_CLK 30.72 MHz, applied to the RFDC at the next setupStream
+[INFO] setSampleRate(TX): 122.88 MSPS = vld_code 0 (vld=1) at TX_FAB_CLK 122.88 MHz, applied to the DAC + TX_RATE at the next setupStream
+[INFO] SoapyRemote::setupTxStream(remoteFormat=CS16, localFormat=CS16, scaleFactor=32768, mtu=1500, window=44040192)
+[INFO] Client side stream bound to 168.6.244.64:50177
+[INFO] Client side status bound to 168.6.244.64:38848
+[INFO] setupStream(TX): applying 122.88 MSPS (dac_clk_code=0 vld=1 wr_items=2 interp=16 dac_fs=1966.08 MHz) to the DAC group; §11: tx_clear held + interp + DAC valid-words + TX_RATE (interp derived from the LIVE Fs; MTS resync follows to realign FIFO latency)
+[INFO] MTS: group synced (ADC=0x0 DAC=0x1)
+[INFO] setupStream(TX,replay): DAC tiles 0+2 up, ch0 replay-ready (load TX_RAM0, then activateStream)
+[1m[33m[WARNING] RFDC DAC2.0 IntrStatus=0x80000008 [FIFOMRGNIND_UF FIFO_OVR] (first event this session)[0m
+[INFO] Server side stream bound to [::ffff:168.6.244.21]:52257
+[INFO] Server side stream connected to [::ffff:168.6.244.64]:50177
+[INFO] Server side status connected to [::ffff:168.6.244.64]:38848
+[INFO] Configured receiver endpoint: dgram=1452 bytes, 357 elements @ 4 bytes, window=43008 KiB
+[INFO] Client side stream connected to 168.6.244.21:52257
+[INFO] Configured sender endpoint: dgram=1452 bytes, 357 elements @ 4 bytes, window=43008 KiB
+[INFO] SoapyRemote::setupTxStream(remoteFormat=CS16, localFormat=CS16, scaleFactor=32768, mtu=1500, window=44040192)
+[INFO] Client side stream bound to 168.6.244.64:38599
+[INFO] Client side status bound to 168.6.244.64:47865
+[INFO] setupStream(TX): applying 122.88 MSPS (dac_clk_code=0 vld=1 wr_items=2 interp=16 dac_fs=1966.08 MHz) to the DAC group; §11: tx_clear held + interp + DAC valid-words + TX_RATE (interp derived from the LIVE Fs; MTS resync follows to realign FIFO latency)
+[INFO] MTS: group synced (ADC=0x0 DAC=0x5)
+[INFO] setupStream(TX,replay): DAC tiles 0+2 up, ch1 replay-ready (load TX_RAM1, then activateStream)
+[INFO] Server side stream bound to [::ffff:168.6.244.21]:47712
+[INFO] Server side stream connected to [::ffff:168.6.244.64]:38599
+[INFO] Server side status connected to [::ffff:168.6.244.64]:47865
+[INFO] Configured receiver endpoint: dgram=1452 bytes, 357 elements @ 4 bytes, window=43008 KiB
+[INFO] Client side stream connected to 168.6.244.21:47712
+[INFO] Configured sender endpoint: dgram=1452 bytes, 357 elements @ 4 bytes, window=43008 KiB
+[INFO] stream timebase: tick_rate=122.880000 MHz sample_rate=122.880000 MHz -> samples_per_tick=1.0000 (derived live) RX MTS target_latency=0
+[INFO] setupStream: rx_xsk=auto -> kernel-socket path (wire frame (HOUDINI_MTU=8192) exceeds the single-buffer zero-copy budget of 3840 bytes per 4 KiB UMEM chunk; pair the stream with a smaller device frame, e.g. open_device(make_args={'HOUDINI_MTU': '3512'}) (SH-259))
+[INFO] UDPComm socket 9 bound 192.168.5.10:10002 (requested 192.168.5.10:10002)
+
+[INFO] SoapyRemote::setupRxStream(remoteFormat=CS16, localFormat=CS16, scaleFactor=32768, mtu=1500, window=44040192)
+[INFO] Client side stream bound to 168.6.244.64:59248
+[INFO] Client side status bound to 168.6.244.64:41663
+[INFO] setupStream(RX ch=1 fmt=CS16): fpga_port=10002 host=192.168.5.10:10002 frame_words=1016
+[INFO] setupStream(RX): applying 122.88 MSPS (adc_clk_code=2 vld=4 decim=10 adc_fs=1228.80 MHz) to the live RFDC; §5b: RX_CLEAR hold + decimation + valid-words + RX_RATE (decim derived from the LIVE Fs; clock set eagerly)
+[INFO] MTS: group synced (ADC=0x1 DAC=0x5)
+[1m[33m[WARNING] RFDC ADC0.0 IntrStatus=0x34000000 [OVR_VOLTAGE CMODE_OVR CMODE_UNDR] (first event this session)[0m
+[INFO] Server side stream bound to [::ffff:168.6.244.21]:39956
+[1m[33m[WARNING] RFDC ADC0.1 IntrStatus=0x34000000 [OVR_VOLTAGE CMODE_OVR CMODE_UNDR] (first event this session)[0m
+[INFO] Server side stream connected to [::ffff:168.6.244.64]:59248
+[INFO] Server side status connected to [::ffff:168.6.244.64]:41663
+[INFO] Configured sender endpoint: dgram=1452 bytes, 357 elements @ 4 bytes, window=43008 KiB
+[INFO] Client side stream connected to 168.6.244.21:39956
+[INFO] Configured receiver endpoint: dgram=1452 bytes, 357 elements @ 4 bytes, window=43008 KiB
+3:072763 INFOR: Houdini channel 1: rate 122.88 MSPS, NCO 500.00 MHz
+BS 168.6.244.21: Houdini RFSoC, RX 122.88 MSPS, TX 122.88 MSPS
+[INFO] TDD_CMD: abort
+[INFO] writeRegister(RFCORE, 0x24) <- 0x00000001
+[INFO] writeRegister(RFCORE, 0x24) <- 0x00000000
+[INFO] TDD_CMD: gate_release
+[INFO] writeRegisters(TX_RAM1, addr=0, n_addrs=4096)
+[1m[33m[WARNING] TDD_SCHED: entry 29 (rx) abuts entry 0 (tx-ish) ACROSS THE FRAME WRAP -- that boundary is the power board's WARM RETURN and HOST_CONTROL wants >= 1 us of separation, which the TRSW lead cannot provide. Insert a guard symbol (0) between them; a guard only carries 1 us when symbol_ticks >= 123. The fabric reports this as TDD_STAT.sched_abut_rx_tx and will still arm and run.[0m
+[1m[33m[WARNING] TDD_ARM: the ring this arm will PLAY (symbols_per_frame=30) has entry 29 (rx) abutting entry 0 (tx-ish) ACROSS THE FRAME WRAP -- the power board's WARM RETURN with no guard, where HOST_CONTROL wants >= 1 us and the TRSW lead cannot provide it. Insert a guard symbol (0) between them. NOTE this is the ring, not the fill: 30 entries were written and only the first 30 play.[0m
+[INFO] TDD_ARM: epoch=67617024 stop=0 state=armed accepted=1
+3:080093 INFOR: Houdini BS TDD armed: sched=622222222222222222222222222222 epoch=67617024 frame=122880 ticks, 2 pilot slot(s)  beacon strobe 4096 samp
+3:080103 INFOR: BaseRadioSet done (Houdini native TDD framer)!
+3:080106 WARNG: Invalid Base Radio Setup: 0
+[INFO] TDD_CMD: abort
+[INFO] writeRegister(RFCORE, 0x24) <- 0x00000001
+[INFO] writeRegister(RFCORE, 0x24) <- 0x00000000
+[INFO] TDD_CMD: gate_release
+[INFO] MTS: group sync cleared (a member tile was shut down)
+[INFO] RFDC IRQ teardown: interrupt fired 141 time(s) this session
+3:276242 WARNG: Invalid Client Radio Setup: 0
+Invalid Radio Setup
+Exception: Radios Not Found. Will attempt a retry... Re-Try Now!
+5:310681 WARNG: ClientRadioSet radio 0 (168.6.244.22, houdini) setup failed: SoapyRPCUnpacker::recv() TIMEOUT
+[1;31m168.6.244.22[0m
+[1;31mERROR: the above client radio(s) could not be opened. The reason is logged above each address; note that a radio can be discoverable (SoapySDRUtil --find) and still fail here, e.g. no route to its data-plane address.[0m
+[INFO] SoapyHoudiniSDR_device: bringing up FPGA driver layer, data_iface=192.168.5.9 (identity source: /etc/houdini/sdr.conf)
+[INFO] clock: calibrated hold in force at MAN_DAC=408 (RB_DAC_VALUE=408)
+[INFO] FPGA identity (top_core @0xa0060000): version=1.30 commit=c88e0b5f board=rfsoc4x2 build=2026-08-28T00:50:42 magic=RFSC (raw 0x0001001E/0xE4340CAA/0x52465343/0xC88E0B5F/0x00000000/0x00000004)
+[INFO] reset: ADC tile 0 PLL Fs 1228.80 -> 1228.80 MHz pre-StartUp (boot 3932.16)
+[INFO] reset: ADC tile 2 PLL Fs 1228.80 -> 1228.80 MHz pre-StartUp (boot 3932.16)
+[INFO] reset: DAC tile 0 PLL Fs 1966.08 -> 1966.08 MHz pre-StartUp (boot 5898.24)
+[INFO] reset: DAC tile 2 PLL Fs 1966.08 -> 1966.08 MHz pre-StartUp (boot 5898.24)
+[INFO] tick_rate_hz = 122.880000 MHz (design nominal), HW-verified: PL_CLK locked vs SYSREF (PL phase-tap).
+[INFO] dac_clk = 122.880000 MHz (TX default), HW-verified vs SYSREF (DAC phase-tap).
+[INFO] discovered 4 RX channels, 2 TX channels
+[INFO]   RX[0] = ADC0.0  canon=0  eff=245.760 MSPS
+[INFO]   RX[1] = ADC0.1  canon=1  eff=245.760 MSPS
+[INFO]   RX[2] = ADC2.0  canon=8  eff=245.760 MSPS
+[INFO]   RX[3] = ADC2.1  canon=9  eff=245.760 MSPS
+[INFO]   TX[0] = DAC0.0  canon=0  eff=983.040 MSPS
+[INFO]   TX[1] = DAC2.0  canon=8  eff=983.040 MSPS
+[INFO] SoapyHoudiniSDR_device: construction complete.
+[INFO] RFDC: interrupt-driven mode (default; set HOUDINI_RFDC_IRQ=0 to force the poll fallback) (SH-113)
+[INFO] RFDC IRQ-driven (irq=17): global armed, per-block sources off until stream start
+[INFO] setSampleRate(RX): 122.88 MSPS = vld_code 2 at RX_FAB_CLK 30.72 MHz, applied to the RFDC at the next setupStream
+[INFO] setSampleRate(TX): 122.88 MSPS = vld_code 0 (vld=1) at TX_FAB_CLK 122.88 MHz, applied to the DAC + TX_RATE at the next setupStream
+[INFO] SoapyRemote::setupTxStream(remoteFormat=CS16, localFormat=CS16, scaleFactor=32768, mtu=1500, window=44040192)
+[INFO] Client side stream bound to 168.6.244.64:55232
+[INFO] Client side status bound to 168.6.244.64:49421
+[INFO] setupStream(TX): applying 122.88 MSPS (dac_clk_code=0 vld=1 wr_items=2 interp=16 dac_fs=1966.08 MHz) to the DAC group; §11: tx_clear held + interp + DAC valid-words + TX_RATE (interp derived from the LIVE Fs; MTS resync follows to realign FIFO latency)
+[INFO] MTS: group synced (ADC=0x0 DAC=0x1)
+[INFO] setupStream(TX,replay): DAC tiles 0+2 up, ch0 replay-ready (load TX_RAM0, then activateStream)
+[1m[33m[WARNING] RFDC DAC2.0 IntrStatus=0x80000008 [FIFOMRGNIND_UF FIFO_OVR] (first event this session)[0m
+[INFO] Server side stream bound to [::ffff:168.6.244.21]:56350
+[INFO] Server side stream connected to [::ffff:168.6.244.64]:55232
+[INFO] Server side status connected to [::ffff:168.6.244.64]:49421
+[INFO] Client side stream connected to 168.6.244.21:56350
+[INFO] Configured receiver endpoint: dgram=1452 bytes, 357 elements @ 4 bytes, window=43008 KiB
+[INFO] Configured sender endpoint: dgram=1452 bytes, 357 elements @ 4 bytes, window=43008 KiB
+[INFO] SoapyRemote::setupTxStream(remoteFormat=CS16, localFormat=CS16, scaleFactor=32768, mtu=1500, window=44040192)
+[INFO] Client side stream bound to 168.6.244.64:46138
+[INFO] Client side status bound to 168.6.244.64:59562
+[INFO] setupStream(TX): applying 122.88 MSPS (dac_clk_code=0 vld=1 wr_items=2 interp=16 dac_fs=1966.08 MHz) to the DAC group; §11: tx_clear held + interp + DAC valid-words + TX_RATE (interp derived from the LIVE Fs; MTS resync follows to realign FIFO latency)
+[INFO] MTS: group synced (ADC=0x0 DAC=0x5)
+[INFO] setupStream(TX,replay): DAC tiles 0+2 up, ch1 replay-ready (load TX_RAM1, then activateStream)
+[INFO] Server side stream bound to [::ffff:168.6.244.21]:42381
+[INFO] Server side stream connected to [::ffff:168.6.244.64]:46138
+[INFO] Server side status connected to [::ffff:168.6.244.64]:59562
+[INFO] Client side stream connected to 168.6.244.21:42381
+[INFO] Configured sender endpoint: dgram=1452 bytes, 357 elements @ 4 bytes, window=43008 KiB
+[INFO] Configured receiver endpoint: dgram=1452 bytes, 357 elements @ 4 bytes, window=43008 KiB
+[INFO] stream timebase: tick_rate=122.880000 MHz sample_rate=122.880000 MHz -> samples_per_tick=1.0000 (derived live) RX MTS target_latency=0
+[INFO] setupStream: rx_xsk=auto -> kernel-socket path (wire frame (HOUDINI_MTU=8192) exceeds the single-buffer zero-copy budget of 3840 bytes per 4 KiB UMEM chunk; pair the stream with a smaller device frame, e.g. open_device(make_args={'HOUDINI_MTU': '3512'}) (SH-259))
+[INFO] UDPComm socket 9 bound 192.168.5.10:10002 (requested 192.168.5.10:10002)
+
+[INFO] SoapyRemote::setupRxStream(remoteFormat=CS16, localFormat=CS16, scaleFactor=32768, mtu=1500, window=44040192)
+[INFO] Client side stream bound to 168.6.244.64:41934
+[INFO] Client side status bound to 168.6.244.64:58814
+[INFO] setupStream(RX ch=1 fmt=CS16): fpga_port=10002 host=192.168.5.10:10002 frame_words=1016
+[INFO] setupStream(RX): applying 122.88 MSPS (adc_clk_code=2 vld=4 decim=10 adc_fs=1228.80 MHz) to the live RFDC; §5b: RX_CLEAR hold + decimation + valid-words + RX_RATE (decim derived from the LIVE Fs; clock set eagerly)
+[INFO] MTS: group synced (ADC=0x1 DAC=0x5)
+[1m[33m[WARNING] RFDC ADC0.0 IntrStatus=0x34000000 [OVR_VOLTAGE CMODE_OVR CMODE_UNDR] (first event this session)[0m
+[INFO] Server side stream bound to [::ffff:168.6.244.21]:45429
+[1m[33m[WARNING] RFDC ADC0.1 IntrStatus=0x34000000 [OVR_VOLTAGE CMODE_OVR CMODE_UNDR] (first event this session)[0m
+[INFO] Server side stream connected to [::ffff:168.6.244.64]:41934
+[INFO] Server side status connected to [::ffff:168.6.244.64]:58814
+[INFO] Client side stream connected to 168.6.244.21:45429
+[INFO] Configured receiver endpoint: dgram=1452 bytes, 357 elements @ 4 bytes, window=43008 KiB
+[INFO] Configured sender endpoint: dgram=1452 bytes, 357 elements @ 4 bytes, window=43008 KiB
+5:885998 INFOR: Houdini channel 1: rate 122.88 MSPS, NCO 500.00 MHz
+BS 168.6.244.21: Houdini RFSoC, RX 122.88 MSPS, TX 122.88 MSPS
+[INFO] TDD_CMD: abort
+[INFO] writeRegister(RFCORE, 0x24) <- 0x00000001
+[INFO] writeRegister(RFCORE, 0x24) <- 0x00000000
+[INFO] TDD_CMD: gate_release
+[INFO] writeRegisters(TX_RAM1, addr=0, n_addrs=4096)
+[1m[33m[WARNING] TDD_SCHED: entry 29 (rx) abuts entry 0 (tx-ish) ACROSS THE FRAME WRAP -- that boundary is the power board's WARM RETURN and HOST_CONTROL wants >= 1 us of separation, which the TRSW lead cannot provide. Insert a guard symbol (0) between them; a guard only carries 1 us when symbol_ticks >= 123. The fabric reports this as TDD_STAT.sched_abut_rx_tx and will still arm and run.[0m
+5:900679 INFOR: Houdini BS TDD armed: sched=622222222222222222222222222222 epoch=68611200 frame=122880 ticks, 2 pilot slot(s)  beacon strobe 4096 samp
+5:900683 INFOR: BaseRadioSet done (Houdini native TDD framer)!
+5:900686 WARNG: Invalid Base Radio Setup: 0
+[1m[33m[WARNING] TDD_ARM: the ring this arm will PLAY (symbols_per_frame=30) has entry 29 (rx) abutting entry 0 (tx-ish) ACROSS THE FRAME WRAP -- the power board's WARM RETURN with no guard, where HOST_CONTROL wants >= 1 us and the TRSW lead cannot provide it. Insert a guard symbol (0) between them. NOTE this is the ring, not the fill: 30 entries were written and only the first 30 play.[0m
+[INFO] TDD_ARM: epoch=68611200 stop=0 state=armed accepted=1
+[INFO] TDD_CMD: abort
+[INFO] writeRegister(RFCORE, 0x24) <- 0x00000001
+[INFO] writeRegister(RFCORE, 0x24) <- 0x00000000
+[INFO] TDD_CMD: gate_release
+[INFO] MTS: group sync cleared (a member tile was shut down)
+[INFO] RFDC IRQ teardown: interrupt fired 102 time(s) this session
+[INFO] IntrEngine::Teardown: done (GIC line masked + handler unbound)
+6:089648 WARNG: Invalid Client Radio Setup: 0
+Invalid Radio Setup
+Exception: Radios Not Found. Will attempt a retry... Re-Try Now!
