@@ -88,7 +88,7 @@ own. They are the candidate `fix/legacy-sounder` series.
 | UE UL data slot, fine-grid TX | `ue_tdd_pilot`, `ue_tx_advance_ticks`, `ue_pilot_horizon` | off | |
 | Gap ledger / rx-recorder | `is_houdini()` | | |
 | Acquisition threshold | `corr_scale_init` / `sync.detector.corr_scale_init` | = corr_scale | |
-| Environment overrides of the sync knobs | `sync.allow_env_overrides` | true this release | flip planned next release |
+| Environment overrides of the sync knobs | `sync.allow_env_overrides` | false (S0, 2026-09-03) | the bench scripts use the JSON overlay |
 | Correlator threads | `sync.detector.corr_threads` | 1 | `SOUNDER_CORR_THREADS` as the logged alias |
 | Radio-free tests and bench tools | `SOUNDER_BUILD_TESTS` | ON | |
 | Diagnostic dumps | `HOUDINI_DUMP_*`, under `HOUDINI_DUMP_DIR` | off, `/tmp` | |
