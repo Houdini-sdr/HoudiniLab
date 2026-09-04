@@ -918,6 +918,14 @@ survive a stated test instead of being argued into place afterwards. 8.109 says
 the criteria have to be restated before the re-run and this is that restatement.
 Nothing below is a result.
 
+**Added 2026-09-03 (8.192, 8.193):** a residual-sd or jitter bound over a 60 s
+run measures the clock pair as much as the detector; two of six gate runs
+exceeded both on smooth wanders of 18 samples, on different shapes in
+different rounds. Later pre-registrations should carry the clock-side numbers
+as reported values with an interleaved control, and put the PASS/FAIL weight
+on the criteria that measure the code path: accepts, escalations, off-grid,
+low-SNR rejections, the startup record.
+
 **What the merge would ship that 8.79's gate did not cover.** Three changes, all
 on the resync path: the cadence is 10x slower (8.107), the scatter gate is 4.2x
 tighter (8.108), and the targeted search now returns the STRONGEST crossing in
