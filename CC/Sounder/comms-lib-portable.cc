@@ -336,17 +336,23 @@ static double firstPathFloorFrac(CommsLib::BeaconThresh form, double db) {
 // refines, and well inside the 0.289 bar. A shape with a wider lobe still
 // would want a kernel-matched estimator rather than this one.
 //
-// The returned index is not always the top -- the first-path rule deliberately
-// picks the earlier tap of a split peak (8ah) -- so this climbs to the local
-// maximum first, by at most the measured reach of a lobe (one sample for every
-// shipped shape, two for `nr`), and reports the result relative to `i`. The
-// magnitude is therefore at most kMaxClimb + 0.5 samples.
+// The returned index is not always the top -- with the first-path guard off,
+// the rule picks the earlier tap of a split peak -- so this climbs one sample
+// to the local maximum and reports the result relative to `i`. The magnitude
+// is therefore at most 1.5 samples.
 //
 // NaN, NOT ZERO, when no refinement is available. Zero is a measurement, a top
 // sitting exactly on the index, and must never double as "no information";
 // `statistic` in this library already carries that convention.
 static double fracOffsetAt(const std::vector<std::complex<float>>& corr, size_t i) {
-  constexpr int kMaxClimb = 2;  // the measured lobe reach (8ah)
+  // ONE SAMPLE, AND THE REASON IS PHYSICAL, NOT MEASURED. A split peak's
+  // partner is exactly one tap away, so one step reaches the top of the SAME
+  // path. A longer climb can cross to a DIFFERENT path: on genuine multipath
+  // the first-path rule returns a weak early arrival on purpose, and climbing
+  // to the stronger echo beside it would report that echo's position under the
+  // name of the detected path (review, 8aj). An earlier version used two, on a
+  // reach figure that measured the -9 dB floor rather than any lobe.
+  constexpr int kMaxClimb = 1;
   const double kNone = std::numeric_limits<double>::quiet_NaN();
   const size_t n = corr.size();
   if (n < 3 || i >= n) return kNone;
@@ -391,7 +397,7 @@ CommsLib::BeaconResult CommsLib::find_beacon_ex(
     const std::vector<std::complex<float>>& raw_samples,
     const std::vector<std::complex<float>>& match_samples, float corr_scale,
     BeaconPick pick, BeaconThresh thresh_form, int first_path_window,
-    double first_path_db) {
+    double first_path_db, int first_path_guard) {
   const int seqLen = static_cast<int>(match_samples.size());
 #ifdef TEST_BENCH
   const auto t0 = std::chrono::steady_clock::now();
@@ -557,8 +563,14 @@ CommsLib::BeaconResult CommsLib::find_beacon_ex(
     const int win = std::max(0, std::min(first_path_window, seqLen * 2));
     const double floor_ratio =
         firstPathFloorFrac(thresh_form, first_path_db) * best_ratio;
+    // THE GUARD SKIPS THE PEAK'S OWN SPLIT PARTNER. A beacon between samples
+    // puts the same path on two adjacent taps; the earlier one is not an
+    // earlier arrival and cannot be told from one, so admitting it trades a
+    // sample of accuracy on a clean link for nothing (kDefaultFirstPathGuard).
+    // Guard 0 reproduces every release so far.
+    const int guard = std::max(0, std::min(first_path_guard, win));
     int first = best;
-    for (int i = std::max(0, best - win); i < best; ++i) {
+    for (int i = std::max(0, best - win); i < best - guard; ++i) {
       if (ranking(static_cast<size_t>(i)) >= floor_ratio) { first = i; break; }
     }
     return result(first);
@@ -584,9 +596,10 @@ int CommsLib::find_beacon_avx(
     const std::vector<std::complex<float>>& raw_samples,
     const std::vector<std::complex<float>>& match_samples, float corr_scale,
     BeaconPick pick, BeaconThresh thresh_form, int first_path_window,
-    double first_path_db) {
+    double first_path_db, int first_path_guard) {
   return static_cast<int>(find_beacon_ex(raw_samples, match_samples, corr_scale, pick,
-                                         thresh_form, first_path_window, first_path_db)
+                                         thresh_form, first_path_window, first_path_db,
+                                         first_path_guard)
                               .index);
 }
 
@@ -605,19 +618,19 @@ ssize_t CommsLib::find_beacon_avx(
     const std::complex<int16_t>* raw_samples,
     const std::vector<std::complex<float>>& match_samples, size_t check_window,
     float corr_scale, BeaconPick pick, BeaconThresh thresh_form,
-    int first_path_window, double first_path_db) {
+    int first_path_window, double first_path_db, int first_path_guard) {
   return CommsLib::find_beacon_avx(CommsLib::toCorrelatorScale(raw_samples, check_window), match_samples,
                                    corr_scale, pick, thresh_form, first_path_window,
-                                   first_path_db);
+                                   first_path_db, first_path_guard);
 }
 
 CommsLib::BeaconResult CommsLib::find_beacon_ex(
     const std::complex<int16_t>* raw_samples,
     const std::vector<std::complex<float>>& match_samples, size_t check_window,
     float corr_scale, BeaconPick pick, BeaconThresh thresh_form,
-    int first_path_window, double first_path_db) {
+    int first_path_window, double first_path_db, int first_path_guard) {
   return find_beacon_ex(CommsLib::toCorrelatorScale(raw_samples, check_window), match_samples, corr_scale,
-                        pick, thresh_form, first_path_window, first_path_db);
+                        pick, thresh_form, first_path_window, first_path_db, first_path_guard);
 }
 
 // Element-wise complex multiply, portable equivalent of the float

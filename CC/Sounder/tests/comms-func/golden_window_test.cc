@@ -247,6 +247,7 @@ int main(int argc, char** argv) {
   const float kCorrScale = 10.0f;
   int windows = 0;
   int frac_none = 0;  // windows where the sub-sample estimator reported none
+  int with_stat = 0;  // fixtures too old to carry a statistic are not silently counted
   std::map<std::string, int> per_shape;
   // Windows per shape: legacy and nr_pss 00-05 (morning) + 06-11 (with the
   // statistic); dot11 00-05 recorded after round 4 for the guard rule.
@@ -324,6 +325,7 @@ int main(int argc, char** argv) {
       // Detection widening of 2026-09-03): a change that leaves the argmax
       // alone but moves the margin is visible here.
       if (meta.has("statistic") && std::isfinite(meta.at("statistic"))) {  // NaN = recorded by a backend without evidence
+        ++with_stat;
         std::snprintf(what, sizeof what, "%s window %d: statistic %.5g (recorded %.5g)", shape, i,
                       det_res.statistic, meta.at("statistic"));
         check(std::fabs(det_res.statistic - meta.at("statistic")) <= 1e-4 * std::max(1.0, std::fabs(meta.at("statistic"))), what);
@@ -331,8 +333,8 @@ int main(int argc, char** argv) {
       // Informational, not a check: where the strongest crossing sits and how
       // much stronger it is than the picked first path. The fixtures' recorded
       // statistic (8.176) showed picks as low as 2 dB above the bar on legacy.
+      const auto am = det.run(w.data(), w.size(), corr_scale, PickRule::kArgmax);
       {
-        const auto am = det.run(w.data(), w.size(), corr_scale, PickRule::kArgmax);
         std::printf("INFO  %s window %d: picked %lld stat %.4g | argmax %lld stat %.4g | pick - argmax = %lld samples, %.1f dB below | frac_offset %+.4f (sub-sample end %.4f)\n",
                     shape, i, static_cast<long long>(det_res.end_index), det_res.statistic,
                     static_cast<long long>(am.end_index), am.statistic,
@@ -341,18 +343,33 @@ int main(int argc, char** argv) {
                     det_res.frac_offset,
                     static_cast<double>(det_res.end_index) + det_res.frac_offset);
       }
-      // The sub-sample offset is not recorded in these fixtures (they predate
-      // it), so what is checked is the contract every consumer relies on: it
-      // is either NaN, meaning no refinement was available, or inside the
-      // estimator's bound of two samples of climb plus half a sample. NaN is
-      // ALLOWED here on purpose: a backend that does not report the field
-      // (CUDA) returns it, and asserting finiteness would fail a build whose
-      // production contract permits none. The INFO line above carries the
-      // value, which is how the aarch64 replay compares it against x86 (8ah).
-      std::snprintf(what, sizeof what, "%s window %d: frac_offset %+.4f is NaN or within bound",
-                    shape, i, det_res.frac_offset);
-      check(std::isnan(det_res.frac_offset) || std::fabs(det_res.frac_offset) <= 2.5, what);
-      if (std::isnan(det_res.frac_offset)) ++frac_none;
+      // THE SUB-SAMPLE OFFSET, CHECKED AGAINST THE PICK RATHER THAN AGAINST
+      // ITS OWN BOUND. An earlier version asserted only "finite and within the
+      // estimator's clamp", which the estimator guarantees by construction and
+      // which would stay green if the fit were replaced by `return 0` (review,
+      // 8aj). What is asserted instead is a relation between two quantities
+      // computed independently: the offset says where the lobe's top is, the
+      // argmax says which sample carries it, and they have to agree. When the
+      // pick IS the argmax the top is within half a sample of it; when the
+      // pick is the tap before the argmax the top lies beyond half a sample,
+      // toward the argmax. NaN is allowed: a backend that does not report the
+      // field (CUDA) returns it, and asserting finiteness would fail a build
+      // whose production contract permits none.
+      if (std::isnan(det_res.frac_offset)) {
+        ++frac_none;
+      } else {
+        const long long gap = static_cast<long long>(am.end_index) -
+                              static_cast<long long>(det_res.end_index);
+        const double f = det_res.frac_offset;
+        const bool consistent =
+            gap == 0 ? std::fabs(f) <= 0.5 + 1e-9
+                     : (gap == 1 ? f > 0.5 - 1e-9 && f <= 1.5 + 1e-9
+                                 : std::fabs(f) <= 1.5 + 1e-9);
+        std::snprintf(what, sizeof what,
+                      "%s window %d: frac_offset %+.4f agrees with the argmax %lld sample(s) away",
+                      shape, i, f, gap);
+        check(consistent, what);
+      }
       const double snr = guard.snrDb(w.data(), w.size(), det_res.end_index);
       std::snprintf(what, sizeof what, "%s window %d: snr %.2f dB (recorded %.2f)", shape, i,
                     snr, meta.at("snr"));
@@ -379,6 +396,11 @@ int main(int argc, char** argv) {
   // portable backend means the estimator stopped refining and is worth reading
   // before it is trusted (8ai).
   std::printf("INFO  sub-sample offset reported none on %d of %d windows\n", frac_none, windows);
+  // Said out loud because "all 30 windows return their recorded index AND
+  // statistic" would be false: the morning's fixtures predate the statistic
+  // and only the later ones carry it (review, 8aj).
+  std::printf("INFO  %d of %d windows carry a recorded statistic; the rest check the index only\n",
+              with_stat, windows);
   for (const auto& kv : kExpected)
     check(per_shape[kv.first] == kv.second, kv.first + ": " + std::to_string(per_shape[kv.first]) + " of " +
                                                 std::to_string(kv.second) + " fixture windows present (a half-populated set fails here, not quietly)");

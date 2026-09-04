@@ -137,6 +137,10 @@ struct DetectorConfig {
   /// fills it in from the shape.
   int first_path_window = -1;
   double first_path_floor_db = -9.0;  ///< how much weaker an earlier path may be
+  /// Samples before the peak the first-path back-scan skips: the split
+  /// partner of the same arrival, which is not an earlier path (8aj).
+  /// 0 is what every release so far has shipped.
+  int first_path_guard = 0;
   ThresholdPolicy bar;
   /// Threads for the correlator's matched filter (CommsLib::correlate_mt).
   /// 1 shipped; the rig host measured threading a net loss below ~4 threads.

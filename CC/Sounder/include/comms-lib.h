@@ -266,6 +266,20 @@ class CommsLib {
   // them here, so a run has ONE source of truth and nothing in the correlator
   // reads the environment.
   static constexpr double kDefaultFirstPathFloorDb = -9.0;
+  /// HOW MANY SAMPLES BEFORE THE PEAK THE FIRST-PATH BACK-SCAN MUST SKIP.
+  ///
+  /// A beacon arrives between samples, so the matched-filter peak splits over
+  /// two ADJACENT taps and the earlier one is the same physical path, not an
+  /// earlier one. Admitting it as a "first path" costs accuracy on a link with
+  /// no multipath at all: measured single path, the rule reads 0.365 to 0.449
+  /// samples RMS against the true arrival where the plain argmax reads 0.286,
+  /// the ideal rounder (8aj). A guard of 1 skips exactly that tap, leaving
+  /// every resolvable earlier arrival to the rule.
+  ///
+  /// 0 is the behaviour every release so far has shipped and stays the default
+  /// until a silicon gate says otherwise, because this moves the reported
+  /// index on about a third of windows.
+  static constexpr int kDefaultFirstPathGuard = 0;
   /// Threads for correlate_mt (sync.detector.corr_threads); 0 leaves the
   /// current setting. Read at dispatch, so set it before the first search.
   static void setCorrelatorThreads(unsigned n);
@@ -275,12 +289,13 @@ class CommsLib {
       const std::vector<std::complex<float>>& raw_samples,
       const std::vector<std::complex<float>>& match_samples, float corr_scale,
       BeaconPick pick, BeaconThresh thresh_form, int first_path_window,
-      double first_path_db);
+      double first_path_db, int first_path_guard = 0);
   static ssize_t find_beacon_avx(
       const std::complex<int16_t>* raw_samples,
       const std::vector<std::complex<float>>& match_samples,
       size_t check_window, float corr_scale, BeaconPick pick,
-      BeaconThresh thresh_form, int first_path_window, double first_path_db);
+      BeaconThresh thresh_form, int first_path_window, double first_path_db,
+      int first_path_guard = 0);
   // The detection with its evidence: the index, the decision statistic at it
   // (in the form's units) and the correlator output there (the matched
   // field's complex peak). The find_beacon_avx overloads return .index.
@@ -320,12 +335,13 @@ class CommsLib {
       const std::vector<std::complex<float>>& raw_samples,
       const std::vector<std::complex<float>>& match_samples, float corr_scale,
       BeaconPick pick, BeaconThresh thresh_form, int first_path_window,
-      double first_path_db);
+      double first_path_db, int first_path_guard = 0);
   static BeaconResult find_beacon_ex(
       const std::complex<int16_t>* raw_samples,
       const std::vector<std::complex<float>>& match_samples,
       size_t check_window, float corr_scale, BeaconPick pick,
-      BeaconThresh thresh_form, int first_path_window, double first_path_db);
+      BeaconThresh thresh_form, int first_path_window, double first_path_db,
+      int first_path_guard = 0);
   // GPU beacon detector (find_beacon_cuda.cu), defined only when built with
   // -DUSE_CUDA (CMake HOUDINI_USE_CUDA), which is OFF by default and OFF on the
   // rig. NOTE it still returns the FIRST crossing (atomicMin over the index), so

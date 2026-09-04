@@ -649,6 +649,106 @@ whether an NR-shaped beacon is a live option for the OTA target.
 | 8.167 | **THE CONJUGATE-IMAGE INFERENCE IS RETRACTED, AND WHAT SURVIVES IS SMALLER AND BETTER FOUNDED.** [user: "any test should be validated again even if it matches the hypothesis"; "I am skeptical of a conjugate-image"]. The inference rested on a rule of thumb -- a pure beacon gives a wrong-sense/right-sense peak ratio of 1/sqrt(128) = 0.09 -- that this replica violates: the Gold IFFT sequence is structured and its conjugate-free self-product, computed exactly on a pure delayed beacon (`phase_probe_null.py`), is **0.16 to 0.28 depending on the fractional delay**. The identical analysis on the real windows reads **0.18 to 0.24 on the sounder's six golden windows and 0.29 to 0.34 on the probe's raw window**, i.e. at the null; and the estimator barely responds to an injected image below b = 0.3 (0.211 at b = 0, 0.212 at b = 0.2), so it could not have detected a small one anyway. The "100x variation between re-arms" was the probe's lag-product ratio for the wrong sense, a statistic that was never given a null and cannot carry a claim. **Retracted: image, chain-state variation, and the AP-70 handoff as filed.** **What survives, validated the same way:** (1) the correlation lobe's phase step between adjacent samples is **0.06 to 0.30 rad on real data in BOTH capture paths** (sounder windows -0.07 / -0.16 / -0.29 / +0.20 / -0.07 / -0.14; probe -0.06 to -0.30) against **0.01 for a pure delayed beacon**, so the received beacon's spectrum is asymmetric by a modest, benign amount (chain and cable dispersion) and an integer-peak phase readout inherits that step at every argmax hop; (2) one run had two equal-magnitude adjacent samples **2.4 rad apart**, which a single correlation lobe cannot produce and which fits a two-component arrival about one sample apart; its waveform was not captured, so it is **UNEXPLAINED**, and the probe now arms a raw dump so the next one is. (3) Incidental and verified: the probe transmits the dumped core as is while the sounder pre-conjugates its transmit, so the probe's windows correlate with conj(g) and the sounder's with g; both are consistent with the conjugating receive mixer. The AP-67 design rule stands on (1) alone | `tests/demo-verify/phase_probe_null.py` (null, calibration, both real paths) | VERIFIED-TEST; image claim RETRACTED; 2.4 rad run UNEXPLAINED |
 | 8.168 | **AP-67 MEASURED: THE BEACON PHASE IS PREDICTABLE FOUR FRAMES AHEAD TO ABOUT 1.5 DEGREES.** On the clean runs the phase innovation after removing one fitted per-frame advance is **0.021 / 0.026 / 0.024 / 0.025 rad at lags 1 / 2 / 3 / 4 frames** (192 / 180 / 168 / 156 pairs), i.e. flat: neither the linear growth of a frequency error nor the sqrt(lag) growth of a random walk is visible above the lag-1 floor, which is the estimator's own noise. So over 4 ms the transmitter's carrier phase relative to the receiver's is a constant advance to 1.5 degrees, and the 5-degree budget in `docs/UE_TIME_FREQ_SYNC.md` section 11.4 was conservative by 3x. Consequence: a beacon-only phase tracker supports 64-QAM-grade phase (about 2 degrees) across the frame on this bench, and the in-slot pilots the doc recommends are for channel change and for other hardware, not for this oscillator pair. One caveat carried: the runs were 6 to 12 windows of 17 frames on a cable at the calibrated clock state; the innovation over tens of frames and over the air is not measured | `ap67.log`, `evidence/20260903-rig/ap67_*.csv` | VERIFIED-HW |
 
+### 8aj. AP-72 review round 2: THE 8ah CONCLUSION WAS WRONG, and the guard is back
+
+**Retraction, stated first.** 8ah concluded "the rule is a stabiliser, not a
+jitter source" and withdrew the guard fix on the strength of it. **That
+conclusion was an artefact of three bad instruments, all mine, and it is
+withdrawn.** A reviewer attacked the measurement code rather than the
+production code and found:
+
+- The dither table swept tau on a grid of 0.1. **That grid lands exactly on
+  the argmax's undecided point (tau = 0.5, where the truth is halfway between
+  two samples and both answers are equally right) and steps straight over the
+  first-path rule's own transition, which for legacy is at tau = 0.74.** The
+  measurement as designed could not have found the opposite result.
+- Its statistic, the count of DISTINCT indices over 32 draws, cannot tell a
+  95/5 split from a coin toss, reads "decided" at 32 draws and "dithering" at
+  256, and scored a case where the rule's spread is three times the argmax's
+  as a tie.
+- The "adjacent-difference jitter along tau" of 0.14 samples was
+  `1/sqrt(N-1)` of my own tau grid, not a jitter magnitude, and was set beside
+  the rig's frame-to-frame 0.7 to 1.7 as though the two were the same
+  statistic.
+
+**What the corrected measurement says** (grid 0.01, 16 draws per point, sd
+across draws, RMS against the true arrival):
+
+| | argmax | first-path, guard 0 | first-path, guard 1 |
+|---|---|---|---|
+| RMS vs the true arrival, samples | **0.289** | 0.372 to 0.458 | **0.289** (nr 0.310) |
+
+0.289 is 1/sqrt(12), the ideal rounder. **The first-path rule costs 29 % to
+58 % accuracy on a link with no multipath, and a one-sample guard recovers all
+of it for every shipped shape.** The guard is therefore reinstated, as
+`sync.detector.first_path_guard`.
+
+**And it does not cost what the rule exists for.** On the three resolvable
+multipath channels the geometry test already carried (echo +8, +24, and a weak
+direct with an echo at +40, all stronger than the direct path), guard 1
+returns exactly what guard 0 returns: the direct path, every draw. A fourth
+channel was added, an echo ONE sample later: there guard 0 finds the direct
+path and guard 1 returns the echo. That case is honest and is not a
+regression, because no rule can separate a one-sample echo from a split peak
+in a single window; the guard trades a coin flip for a stable one-sample bias,
+which is the trade this system's timing reference asks for.
+
+**Shipped default stays 0**, the behaviour of every release so far, because
+this moves the reported index on about a third of windows. The silicon gate is
+pre-registered as 8ak.
+
+**On the sub-sample estimator, which is a separate claim:** the accuracy
+criterion passes comfortably (0.018 to 0.096 samples RMS against 0.286 to
+0.458 for the integer). **The "decided" criterion FAILS on 4 of 10 rows and is
+reported failed, not moved.** Two reasons, both mine: the statistic 8ah named
+is the sd of the FRACTION alone, which swings by a whole sample wherever the
+integer steps and the fraction compensates, while the physical quantity
+(`index + frac_offset`) stays at 0.000 to 0.002 median and 0.034 to 0.124
+worst; and 0.1 was chosen without a noise model on a grid ten times coarser
+than the one that now finds the transitions. The test prints both statistics,
+marks the 8ah verdict per row, and asserts only a regression guard that is
+labelled as a different claim.
+
+**Also applied from the round:** the reach table that claimed to measure "lobe
+width" measured the -9 dB FLOOR (one more dB of floor, or 20 dB SNR, moves it
+from 1 to 2 on four of five shapes) and is deleted, along with the unsupported
+climb bound it justified; the climb is one sample on a physical argument, and
+a longer one could report a neighbouring echo's position under the name of the
+detected path; the golden-window check asserted a bound the estimator
+guarantees by construction and would have stayed green with the fit replaced
+by `return 0`, and now asserts agreement between the offset and the
+independently computed argmax; the tau sweep counted tau = 0 and tau = 1, the
+same phase, twice; the claim "all 30 windows return their recorded index and
+statistic" was false, 18 of 30 carry a statistic and the test now says so; a
+dead constant carrying the instructions for an already-fixed instrument bug
+was removed.
+
+### 8ak. The first-path guard on silicon: criteria written BEFORE the runs
+
+Pre-registration, in the 8v style. `sync.detector.first_path_guard` = 1 skips
+the tap immediately before the peak, which offline recovers the ideal rounder
+(8aj). It moves the reported index by one sample on the windows where the
+split favours the earlier tap, about a third of them, so the claim under test
+is that the sync loop is at least as good with it as without.
+
+**Runs:** legacy at 60 s, four interleaved legs A B B A, A = shipped
+(`guard 0`), B = `SYNC_OVERLAY {"detector":{"first_path_guard":1}}`, through
+`run_shape_campaign.sh`.
+
+**PASS, per leg:** 0 escalations, 0 off-grid, at most 1 low-SNR rejection,
+accepts 15-25. **And the comparison that decides it:** the B legs' adjacent-
+difference jitter is no worse than the A legs' on the same evening, and their
+residual sd is no worse by more than the clock's own leg-to-leg spread
+measured in 8.192 (which reached 8.15 against 1.77 across shapes, so the clock
+is the dominant term and this is a weak test by construction: it can only
+falsify a LARGE regression, and that limit is stated here rather than
+discovered afterwards).
+
+**FAIL** on the envelope bisects the guard. A jitter improvement is NOT
+expected to be visible: the offline effect is 0.08 samples of RMS on a bench
+whose clock moves 18 samples in a minute, so this gate tests for harm, not for
+benefit. The benefit is the offline measurement and is reported as such.
+
 ### 8ah. AP-72, the split-peak pick: what the measurement said, and the criteria for what follows
 
 **The measurement came first and it contradicts the row (2026-09-03, offline,

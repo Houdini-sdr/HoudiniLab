@@ -86,6 +86,7 @@ class Detector {
   size_t replicaTail() const { return shape_.replicaTail(); }
   bool singleCopy() const { return shape_.singleCopy(); }
   int firstPathWindow() const { return first_path_window_; }
+  int firstPathGuard() const { return first_path_guard_; }
   double firstPathFloorDb() const { return first_path_floor_db_; }
   /// True when the bar comes from the configured false-alarm probability
   /// rather than corr_scale (coherence form, pfa set).
@@ -117,6 +118,7 @@ class Detector {
   PickRule pick_;
   int first_path_window_;
   double first_path_floor_db_;
+  int first_path_guard_;
   bool pfa_applies_;
   double pfa_;
   DetectorBackend backend_;
