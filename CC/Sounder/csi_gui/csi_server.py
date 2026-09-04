@@ -431,91 +431,136 @@ def _topology_of(sounder_dir, conf):
         return None
 
 
-def _launch_sounder(args, udp_dest):
-    """Run the sounder in viewing mode on this host (teardown + env + retries)."""
-    env = os.environ.copy()
-    env["HOUDINI_CSI_UDP"] = udp_dest
-    env["HOUDINI_MAX_FRAME"] = str(args.max_frame)
-    if args.csi_fps:
-        env["HOUDINI_CSI_FPS"] = str(args.csi_fps)
-    sd = args.sounder_dir
-    # Tear down against the radios THIS run will use: the config names its own
-    # topology file, so a config pointed at a different bench tears down that
-    # bench rather than whatever the default topology happens to list.
-    topo = _topology_of(sd, args.conf)
-    td = 'csi_gui/teardown_framer.py' + (' --topology "%s"' % topo if topo else '')
-    # A tiny shell wrapper: teardown any stuck framer, then run sounder --view,
-    # retrying the flaky cold-start. Mirrors the HIL test harness. The teardown's
-    # output is kept (not sent to /dev/null): it exits non-zero when a radio could
-    # not be cleared, and that is usually the reason the sounder then fails.
-    # STATUS 2026-09-02: THIS AUTOMATIC TEARDOWN IS NOT YET VERIFIED WORKING.
-    # Three attempts, each tested on silicon and each still leaving the boards
-    # held after a SIGKILL to this launcher: (1) the between-attempts guard alone
-    # only stopped the NEXT sounder while the running one kept both boards; (2)
-    # the watch captured sed's pid, because bash sets $! to the last element of a
-    # pipeline; (3) with process substitution the pid is right and the watch
-    # still never logged "supervisor gone", cause not yet found -- possibly the
-    # test killed a different csi_server instance, which is why the loop now
-    # echoes the pid it is watching. The code below is kept because it is
-    # correct as far as it goes and harmless, but DO NOT RELY ON IT: the
-    # verified recovery is `python3 tools/rig_release_holders.py`, documented in
-    # CSI_DEMO_WALKTHROUGH section 8.0, which does clear the boards and needs no
-    # sudo. Tracked as its own item.
-    #
-    # THE RETRY LOOP MUST NOT OUTLIVE THIS PROCESS. Measured 2026-09-02: kill
-    # this launcher and the loop is orphaned, starts ANOTHER sounder, and that
-    # sounder holds both boards' RX streams; every later run is then refused at
-    # setSampleRate(RX) and writes an EMPTY log, so it reads as "nothing
-    # happened" rather than as an error. Six consecutive gate runs and three
-    # probe legs died that way before the empty logs were recognised as
-    # failures. The clean-shutdown path below already killpg's the group, but a
-    # SIGKILL to this process skips it entirely, and a bench harness that times
-    # out or force-kills is exactly the case that leaves the boards stuck.
-    #
-    # The sounder itself is NOT the problem: measured directly, a bare sounder
-    # releases both boards on SIGINT and on SIGKILL. Only the supervising layer
-    # needs the guard, so the loop now checks that its supervisor is still alive
-    # before each attempt and exits if not.
-    script = (
-        'source "%s"/bin/activate 2>/dev/null; '
-        'export LD_LIBRARY_PATH="%s"/lib '
-        'SOAPY_SDR_PLUGIN_PATH="%s"/lib/SoapySDR/modules0.8-3; '
-        'cd "%s"; '
-        'SUP=%d; echo "[csi] supervisor pid $SUP, retry loop pid $$"; '
-        'for a in 1 2 3 4; do '
-        '  kill -0 "$SUP" 2>/dev/null || { echo "[sounder] supervisor gone, not retrying"; break; }; '
-        '  timeout 60 python3 %s 2>&1 | sed -u "s/^/[teardown] /"; sleep 8; '
-        '  kill -0 "$SUP" 2>/dev/null || { echo "[sounder] supervisor gone, not starting"; break; }; '
-        # Run it in the BACKGROUND and watch the supervisor. The guard above only
-        # fires between attempts, so on its own it stops a NEW sounder starting
-        # while leaving the running one holding both boards until it happens to
-        # exit -- which, for a --view run, is never. Polling the supervisor once
-        # a second and killing the sounder when it disappears is what actually
-        # frees the boards. Measured: a sounder releases both boards on SIGTERM,
-        # SIGINT and SIGKILL alike, so ending it is sufficient.
-        # PROCESS SUBSTITUTION, NOT A PIPELINE. After `a | b &`, bash sets $! to
-        # b -- so the first version of this watch held sed's pid and dutifully
-        # killed sed while the sounder kept both boards. Verified on silicon:
-        # boards still held, zero "supervisor gone" lines. `a > >(b) &` leaves $!
-        # as the sounder, which is the process that has to die.
-        '  ./build/sounder --view --conf_file "%s" --storepath "%s" '
-        '     > >(sed -u "s/^/[sounder] /") 2>&1 & '
-        '  SPID=$!; '
-        '  while kill -0 "$SPID" 2>/dev/null; do '
-        '    kill -0 "$SUP" 2>/dev/null || { echo "[sounder] supervisor gone, stopping sounder"; '
-        '      pkill -INT -P "$SPID" 2>/dev/null; kill -INT "$SPID" 2>/dev/null; sleep 4; '
-        '      pkill -KILL -P "$SPID" 2>/dev/null; kill -KILL "$SPID" 2>/dev/null; break; }; '
-        '    sleep 1; '
-        '  done; '
-        '  wait "$SPID" 2>/dev/null; '
-        '  kill -0 "$SUP" 2>/dev/null || break; '
-        '  echo "[sounder] exited, retrying..."; sleep 5; '
-        'done'
-    ) % (args.venv, args.venv, args.venv, sd, os.getpid(), td, args.conf,
-         args.storepath)
-    print("[csi] launching sounder --view in %s" % sd, flush=True)
-    return subprocess.Popen(["bash", "-lc", script], env=env,
-                            preexec_fn=os.setsid)
+_PR_SET_PDEATHSIG = 1  # linux/prctl.h
+
+
+def _die_with_parent():
+    """preexec_fn for the sounder: the kernel SIGTERMs it when this launcher dies.
+
+    A launcher that is SIGKILLed (a bench harness timing out, an operator's
+    kill -9) skips every cleanup path in this file. Before this, the sounder
+    outlived it holding both boards' RX streams, and every later run was
+    refused at setSampleRate(RX) with an empty log (DEMO_VERIFICATION 8.127,
+    AP-64). Three supervisors that watched the launcher from a shell loop
+    failed on silicon; PR_SET_PDEATHSIG is the kernel doing the watching, and
+    a sounder releases both boards on SIGTERM (measured, 8.127). The signal is
+    tied to the thread that forked, so the supervisor runs on the main thread.
+    """
+    try:
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+        if libc.prctl(_PR_SET_PDEATHSIG, int(signal.SIGTERM), 0, 0, 0) != 0:
+            os.write(2, b"[csi] prctl(PR_SET_PDEATHSIG) failed: errno %d\n"
+                     % ctypes.get_errno())
+    except (OSError, AttributeError):
+        os.write(2, b"[csi] PR_SET_PDEATHSIG unavailable on this platform\n")
+    os.setsid()  # its own session: the clean-shutdown path signals the group
+
+
+def _pump(stream, prefix):
+    """Copy a child's output to ours, one prefix per line (was a sed)."""
+    for line in iter(stream.readline, b""):
+        sys.stdout.write(prefix + line.decode("utf-8", errors="replace"))
+        sys.stdout.flush()
+
+
+class SounderSupervisor:
+    """Runs sounder --view under this process: teardown, launch, retry, stop.
+
+    Mirrors the HIL harness: tear down any stuck framer, start the sounder,
+    retry the flaky cold start a few times. The teardown's output is kept: it
+    exits non-zero when a radio could not be cleared, and that is usually the
+    reason the sounder then fails.
+    """
+
+    ATTEMPTS = 4
+    SETTLE_AFTER_TEARDOWN_S = 8.0  # the boards' server needs this to release
+    RETRY_DELAY_S = 5.0
+    STOP_GRACE_S = 4.0
+
+    def __init__(self, args, udp_dest):
+        self.sd = args.sounder_dir
+        self.env = os.environ.copy()
+        self.env["HOUDINI_CSI_UDP"] = udp_dest
+        self.env["HOUDINI_MAX_FRAME"] = str(args.max_frame)
+        if args.csi_fps:
+            self.env["HOUDINI_CSI_FPS"] = str(args.csi_fps)
+        # What `source venv/bin/activate` would set, plus the plugin path.
+        venv = args.venv
+        self.env["VIRTUAL_ENV"] = venv
+        self.env["PATH"] = os.path.join(venv, "bin") + os.pathsep + self.env.get("PATH", "")
+        self.env["LD_LIBRARY_PATH"] = os.path.join(venv, "lib")
+        self.env["SOAPY_SDR_PLUGIN_PATH"] = os.path.join(venv, "lib", "SoapySDR", "modules0.8-3")
+        # Tear down against the radios THIS run will use: the config names its
+        # own topology file, so a config pointed at a different bench tears down
+        # that bench rather than whatever the default topology happens to list.
+        topo = _topology_of(self.sd, args.conf)
+        self.td_cmd = ["python3", "csi_gui/teardown_framer.py"]
+        if topo:
+            self.td_cmd += ["--topology", topo]
+        self.cmd = ["./build/sounder", "--view", "--conf_file", args.conf,
+                    "--storepath", args.storepath]
+        self.proc = None
+        self.stopping = False
+
+    def _teardown(self):
+        try:
+            out = subprocess.run(self.td_cmd, cwd=self.sd, env=self.env, timeout=60,
+                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            text = out.stdout.decode("utf-8", errors="replace")
+        except subprocess.TimeoutExpired as exc:
+            text = (exc.stdout or b"").decode("utf-8", errors="replace") + "timed out\n"
+        for line in text.splitlines():
+            print("[teardown] " + line, flush=True)
+
+    def _start(self):
+        print("[csi] launching sounder --view in %s" % self.sd, flush=True)
+        proc = subprocess.Popen(self.cmd, cwd=self.sd, env=self.env,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                preexec_fn=_die_with_parent)
+        threading.Thread(target=_pump, args=(proc.stdout, "[sounder] "),
+                         daemon=True).start()
+        return proc
+
+    def run(self):
+        """Supervise until the sounder gives up or stop() is called. Main thread only."""
+        for attempt in range(1, self.ATTEMPTS + 1):
+            if self.stopping:
+                return
+            self._teardown()
+            time.sleep(self.SETTLE_AFTER_TEARDOWN_S)
+            if self.stopping:
+                return
+            self.proc = self._start()
+            print("[csi] sounder pid %d, attempt %d of %d"
+                  % (self.proc.pid, attempt, self.ATTEMPTS), flush=True)
+            while self.proc.poll() is None and not self.stopping:
+                time.sleep(0.5)
+            if self.stopping:
+                return
+            print("[sounder] exited rc=%s, retrying..." % self.proc.returncode, flush=True)
+            time.sleep(self.RETRY_DELAY_S)
+        print("[csi] sounder gave up after %d attempts; dashboard stays up"
+              % self.ATTEMPTS, flush=True)
+
+    def stop(self):
+        """SIGTERM the sounder's group, then SIGKILL what is left. Safe to repeat."""
+        self.stopping = True
+        proc = self.proc
+        if proc is None or proc.poll() is not None:
+            return
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        deadline = time.time() + self.STOP_GRACE_S
+        while proc.poll() is None and time.time() < deadline:
+            time.sleep(0.1)
+        if proc.poll() is None:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
 
 def main():
@@ -551,7 +596,7 @@ def main():
     ap.add_argument("--dest-host", default="127.0.0.1",
                     help="host the sounder streams CSI to (when --launch)")
     args = ap.parse_args()
-    # Validate BEFORE anything launches: a SystemExit after _launch_sounder
+    # Validate BEFORE anything launches: a SystemExit after the supervisor starts
     # orphaned the sounder group holding the radios (second review 2.5).
     if not (math.isfinite(args.mag_top) and math.isfinite(args.mag_span)
             and args.mag_span > 0):
@@ -561,9 +606,9 @@ def main():
                          daemon=True)
     t.start()
 
-    child = None
+    sup = None
     if args.launch:
-        child = _launch_sounder(args, "%s:%d" % (args.dest_host, args.udp_port))
+        sup = SounderSupervisor(args, "%s:%d" % (args.dest_host, args.udp_port))
 
     def _stats_loop():
         while True:
@@ -609,11 +654,8 @@ def main():
           % (url, args.http_port, args.http_port), flush=True)
 
     def _cleanup():
-        if child is not None:  # kill the whole sounder process group
-            try:
-                os.killpg(os.getpgid(child.pid), signal.SIGTERM)
-            except ProcessLookupError:
-                pass
+        if sup is not None:  # SIGTERM then SIGKILL the sounder's process group
+            sup.stop()
 
     def _sigterm(*_):
         print("\n[csi] shutting down (SIGTERM)", flush=True)
@@ -622,6 +664,8 @@ def main():
     signal.signal(signal.SIGTERM, _sigterm)
 
     try:
+        if sup is not None:
+            sup.run()  # main thread: PR_SET_PDEATHSIG is tied to the forking thread
         while True:
             time.sleep(0.5)
     except KeyboardInterrupt:
