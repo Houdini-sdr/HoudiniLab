@@ -804,16 +804,6 @@ int main() {
       for (int r = 0; r < 3; ++r)
         std::printf(" %8.3f@%.2f", minority[r], at[r]);
       std::printf("\n");
-      // WHAT IS ASSERTED HAS TO BE CAPABLE OF FAILING, and of failing for the
-      // right build. "Guard 1 is no worse than guard 0" was true by
-      // construction. This is not: guard 1 must land NEAR THE ARGMAX, which
-      // guard 0 misses by 0.083 to 0.169 samples of RMS. 0.05 passes every
-      // shape including `nr` at 0.321 and fails guard 0 on every shape.
-      // Printed in the table above; the checks below are per point, which is
-      // why these are unused here.
-      [[maybe_unused]] const double r_am = nq[0] ? std::sqrt(sq[0] / nq[0]) : 999.0;
-      [[maybe_unused]] const double r_g0 = nq[1] ? std::sqrt(sq[1] / nq[1]) : 999.0;
-      [[maybe_unused]] const double r_g1 = nq[2] ? std::sqrt(sq[2] / nq[2]) : 999.0;
       // EVERY POINT MUST HAVE BEEN DETECTED, not merely one of them. `nq > 0`
       // was satisfied by a single detection in 4800 and a build dropping half
       // of them passed all thirty checks with the RMS columns unmoved, because
@@ -999,7 +989,7 @@ int main() {
     const auto& b = ds[0];
     const int w = shippedWindow(b);
     double jit[2] = {0.0, 0.0}, sd[2] = {0.0, 0.0};
-    int legs = 0;
+    int legs = 0, arms_differed = 0;
     // One master seed is one realisation: the difference between the two
     // settings changes sign between seeds (+0.018, -0.007, +0.003 measured),
     // so the block reports the span over three and the check is on the span.
@@ -1010,12 +1000,14 @@ int main() {
         const double tau =
             (static_cast<double>(phase_rng()) + 0.5) / 4294967296.0;
         const unsigned seed = static_cast<unsigned>(leg * 23 + k + 1);
+        long long got[2] = {kMiss, kMiss};
         for (int g = 0; g < 2; ++g) {
-          const long long v = runAt(b, tau, seed, w, 45.0, g);
-          if (v != kMiss)
-            res[g].push_back(static_cast<double>(v) -
+          got[g] = runAt(b, tau, seed, w, 45.0, g);
+          if (got[g] != kMiss)
+            res[g].push_back(static_cast<double>(got[g]) -
                              (static_cast<double>(kEndConvention) + tau));
         }
+        if (got[0] != kMiss && got[1] != kMiss && got[0] != got[1]) ++arms_differed;
       }
       // EVERY DETECTION, NOT MERELY TWO. Without this a build that drops most
       // detections still reports 39 of 40 legs and prints a jitter four times
@@ -1054,6 +1046,20 @@ int main() {
     // The prediction the gate rests on: the two settings are indistinguishable
     // in these statistics. A tenth of a sample is far inside the 1.3 the gate
     // allows and inside the leg-to-leg spread of the bench itself.
+    // POSITIVE CONTROL FIRST, because the claim below is an EQUALITY and an
+    // equality passes vacuously when both arms are the same configuration.
+    // Measured: this block alone passed under all six guard mutations,
+    // including the knob ignored, printing the two arms as one number with
+    // nothing objecting (review round 8). On a clean single path guard 0
+    // returns the earlier tap on about a quarter of phases, so the two arms'
+    // residual sequences must differ even though their jitter does not.
+    // Fails under: the knob ignored, the guard off, or the guard applied
+    // unconditionally.
+    check(arms_differed > 0,
+          "the two simulated arms are different configurations: " +
+              std::to_string(arms_differed) + " of 920 detections differ");
+    // Fails under: nothing in the guard; this is the gate's own prediction and
+    // it is insensitive to the guard by design, which is the point 8ak makes.
     check(std::fabs(jit[0] - jit[1]) / n < 0.1,
           "a simulated leg cannot tell the two guard settings apart by jitter: " +
               std::to_string(jit[0] / n) + " against " + std::to_string(jit[1] / n));

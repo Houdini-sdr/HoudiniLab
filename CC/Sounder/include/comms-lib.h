@@ -307,7 +307,7 @@ class CommsLib {
   //
   // A guard of 0 is the behaviour every release so far has shipped and remains
   // the default until the silicon gate of DEMO_VERIFICATION 8ak says
-  // otherwise, because a guard of 1 moves the reported index on 23 % to 36 %
+  // otherwise, because a guard of 1 moves the reported index on 22 % to 36 %
   // of arrival phases, by shape.
   //   first_path_window  samples of back-search from the peak (0..2*seqLen)
   //   first_path_db      how much weaker an earlier path may be, dB <= 0

@@ -851,8 +851,8 @@ per-point differences above come from it; the single-path check was true by
 construction; the dither screen ran at 16 draws, which misses a one-in-twenty
 flip 44 % of the time, and now runs at 48; a lobe figure from the superseded
 seed-unstable table survived in a comment; the fixture replay gained an assertion on the guard, which
-**runs on 0 of the 30 windows** because no fixture predates the knob and none
-has been recaptured since: it is forward-looking only, and the file header
+**runs on 0 of the 30 windows**, because EVERY fixture predates the knob and
+none has been recaptured since, which is exactly why none carries the field: it is forward-looking only, and the file header
 claiming the newer fixtures carry the field is corrected; and the sections were out of
 order with two references to an 8ai that did not exist as a section, which it
 now does.
@@ -899,7 +899,9 @@ a candidate for the NEXT gate and not folded into this one, because
 back-dating a criterion into a pre-registration is precisely what a
 pre-registration exists to prevent. It is also weaker than it looks: a guard
 of 2 would produce a 2-sample-early acquisition, which sits inside the bound.
-For the record the 8.196 legs do meet it (residuals 0, -1, 0, 0, 0, 0, 0, 0). That line proves the knob was PARSED and reached the detector,
+For the record the 8.196 legs do meet it (residuals 0, -1, 0, 0, 0, 0, 0, 0).
+
+**Back to the startup line in the PASS list above.** It proves the knob was PARSED and reached the detector,
 not that the backend applied it; the portable correlator does apply it, and a
 backend that does not already triggers the "first-path knobs are NOT applied"
 warning beside the same line, so the two together are the evidence.
