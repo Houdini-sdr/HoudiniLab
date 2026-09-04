@@ -73,6 +73,11 @@ Config::Config(const std::string& jsonfile, const std::string& directory,
   }
 
   internal_measurement_ = tddConf.value("internal_measurement", false);
+  // Diagnostic only (AP-73 / SH-348): skip the TX_CLEAR pulse in the Houdini
+  // framer's teardown ladder so the replay-RAM reload after an abort can be
+  // measured without it. Never set in a shipped config; the framer warns
+  // loudly when it is.
+  diag_skip_tx_clear_ = tddConf.value("houdini_diag_skip_tx_clear", false);
   /* Used for internal measurements. If internal_measurement is enabled,
        the default is to use a reference node for reciprocity calibration.
        Users have the option of "disabling" the reference node to get a full

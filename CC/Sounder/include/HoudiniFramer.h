@@ -43,7 +43,7 @@ class HoudiniFramer : public BeaconFramer {
   /// 4096-deep RAM, peak-scaled to sync.beacon.tx_full_scale.
   void buildBeacon(std::vector<int16_t>& iq);
   /// The teardown ladder for one device.
-  static void tddLadder(SoapySDR::Device* dev);
+  static void tddLadder(SoapySDR::Device* dev, bool skip_tx_clear);
 
  private:
   void armReplayBeacon();

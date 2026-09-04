@@ -168,10 +168,16 @@ constexpr long long kTddArmMargin = 36864000;  // ~300 ms of ticks
 // TX_CLEAR can leave the TX bank in a state where strobe bursts ack and count
 // as played but NO RF leaves the DAC ("a consumed arm parks the source until
 // the arm clears or TX_CLEAR").
-void HoudiniFramer::tddLadder(SoapySDR::Device* dev) {
+void HoudiniFramer::tddLadder(SoapySDR::Device* dev, bool skip_tx_clear) {
   dev->writeSetting("TDD_CMD", "abort");
-  dev->writeRegister("RFCORE", 0x24, 1);  // TX_CLEAR_ALL pulse
-  dev->writeRegister("RFCORE", 0x24, 0);
+  if (skip_tx_clear) {
+    // AP-73 / SH-348: the measurement that asks whether the reload after an
+    // abort lands without this pulse. A diagnostic, never a shipped setting.
+    MLPD_WARN("DIAGNOSTIC houdini_diag_skip_tx_clear: TX_CLEAR skipped in the ladder\n");
+  } else {
+    dev->writeRegister("RFCORE", 0x24, 1);  // TX_CLEAR_ALL pulse
+    dev->writeRegister("RFCORE", 0x24, 0);
+  }
   dev->writeSetting("TDD_CMD", "gate_release");
 }
 
@@ -194,7 +200,7 @@ long long HoudiniFramer::armTddOnce(SoapySDR::Device* dev,
       dev->writeSetting("TDD_ARM", arm);
     } catch (const std::exception& e) {
       MLPD_WARN("TDD_ARM attempt %d refused: %s\n", attempt, e.what());
-      tddLadder(dev);
+      tddLadder(dev, cfg_->diag_skip_tx_clear());
       // The ladder's TX_CLEAR invalidates the loaded replay RAM / schedule /
       // strobe state (the setup path itself runs the ladder BEFORE loading
       // them, for exactly that reason). Retrying the arm without re-running
@@ -214,7 +220,7 @@ long long HoudiniFramer::armTddOnce(SoapySDR::Device* dev,
       if (k == "accepted") accepted = (v == "1");
     }
     if (!accepted) {
-      tddLadder(dev);
+      tddLadder(dev, cfg_->diag_skip_tx_clear());
       if (resetup) resetup();  // same reason as the throw path above
     }
   }
@@ -259,7 +265,7 @@ void HoudiniFramer::armTdd(void) {
       if (i != cfg_->beacon_radio()) continue;
       Radio* r = radios_.at(c).at(i).get();
       auto* dev = r->RawDev();
-      tddLadder(dev);  // full ladder, never abort alone (3.2 + 4.24)
+      tddLadder(dev, cfg_->diag_skip_tx_clear());  // full ladder, never abort alone (3.2 + 4.24)
 
       // The sounder pilot/uplink slots to receive (tag with these indices).
       const std::string& sched = cfg_->bs_array_frames().at(c).at(i);
@@ -727,7 +733,7 @@ void HoudiniFramer::stop() {
     for (size_t i = 0; i < radios_.at(c).size(); i++)
       if (radios_.at(c).at(i) != nullptr) {
         try {
-          tddLadder(radios_.at(c).at(i)->RawDev());
+          tddLadder(radios_.at(c).at(i)->RawDev(), cfg_->diag_skip_tx_clear());
         } catch (...) {
         }
       }

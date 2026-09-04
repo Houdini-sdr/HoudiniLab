@@ -185,6 +185,7 @@ class Config {
   inline bool internal_measurement(void) const {
     return this->internal_measurement_;
   }
+  inline bool diag_skip_tx_clear(void) const { return this->diag_skip_tx_clear_; }
   inline bool ref_node_enable(void) const { return this->ref_node_enable_; }
   inline size_t cal_ref_sdr_id(void) const { return this->cal_ref_sdr_id_; }
   inline const std::vector<std::vector<std::string>>& bs_array_frames(
@@ -452,6 +453,7 @@ class Config {
   std::string trace_file_;
   std::vector<std::vector<std::string>> bs_array_frames_;
   bool internal_measurement_;
+  bool diag_skip_tx_clear_ = false;
   bool ref_node_enable_;
   size_t cal_ref_sdr_id_;
   size_t tx_frame_delta_;
