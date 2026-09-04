@@ -740,9 +740,11 @@ int main() {
       double sq[3] = {0.0, 0.0, 0.0}, minority[3] = {0.0, 0.0, 0.0};
       double at[3] = {0.0, 0.0, 0.0};
       int nq[3] = {0, 0, 0};
+      int g0_vs_g1_diff = 0, g1_at_am_minus_1 = 0, g0_at_am_minus_1 = 0;
       for (int t = 0; t < 100; ++t) {
         const double tau = 0.01 * t;
         const double truth = static_cast<double>(kEndConvention) + tau;
+        long long idx[3] = {kMiss, kMiss, kMiss};
         for (int rule = 0; rule < 3; ++rule) {
           const int win = rule == 0 ? 0 : w;
           const int guard = rule == 2 ? 1 : 0;
@@ -769,11 +771,21 @@ int main() {
             ++kept;
           }
           if (kept == 0) continue;
+          idx[rule] = hist.begin()->first;  // the modal index is enough here
+          int best_n = 0;
+          for (const auto& kv : hist)
+            if (kv.second > best_n) { best_n = kv.second; idx[rule] = kv.first; }
           int mode = 0;
           for (const auto& kv : hist) mode = std::max(mode, kv.second);
           const double m = 1.0 - static_cast<double>(mode) / static_cast<double>(kept);
           if (m > minority[rule]) { minority[rule] = m; at[rule] = tau; }
         }
+        // Per-phase comparisons on the modal index of each rule.
+        if (idx[0] != kMiss && idx[2] != kMiss && idx[2] == idx[0] - 1)
+          ++g1_at_am_minus_1;
+        if (idx[0] != kMiss && idx[1] != kMiss && idx[1] == idx[0] - 1)
+          ++g0_at_am_minus_1;
+        if (idx[1] != kMiss && idx[2] != kMiss && idx[1] != idx[2]) ++g0_vs_g1_diff;
       }
       std::printf("%-14s %5.0f", b.name.c_str(), snr);
       for (int r = 0; r < 3; ++r)
@@ -795,19 +807,57 @@ int main() {
       const double r_am = nq[0] ? std::sqrt(sq[0] / nq[0]) : 999.0;
       const double r_g0 = nq[1] ? std::sqrt(sq[1] / nq[1]) : 999.0;
       const double r_g1 = nq[2] ? std::sqrt(sq[2] / nq[2]) : 999.0;
-      // A no-detection column reads 999, not 0: every check here would
-      // otherwise pass perfectly on a build that finds nothing.
-      check(nq[0] > 0 && nq[1] > 0 && nq[2] > 0,
-            std::string("all three rules detect on ") + b.name);
-      check(r_g1 <= r_am + 0.05,
-            std::string("guard 1 lands within 0.05 samples of the argmax: ") +
-                b.name + " " + std::to_string(r_g1) + " vs " + std::to_string(r_am));
-      // POSITIVE CONTROL: guard 0 must be measurably the UNGUARDED rule. A
-      // build that applies the guard whatever the knob says would otherwise
-      // pass this whole table while silently changing shipped behaviour.
-      check(r_g0 > r_am + 0.05,
-            std::string("guard 0 is the unguarded rule and is measurably worse: ") +
-                b.name + " " + std::to_string(r_g0) + " vs " + std::to_string(r_am));
+      (void)r_g1;  // printed in the table above; the checks below are per point
+      // EVERY POINT MUST HAVE BEEN DETECTED, not merely one of them. `nq > 0`
+      // was satisfied by a single detection in 4800 and a build dropping half
+      // of them passed all thirty checks with the RMS columns unmoved, because
+      // the survivors were a biased subset (review round 6).
+      const int expect = 100 * 48;
+      check(nq[0] == expect && nq[1] == expect && nq[2] == expect,
+            std::string("every phase and draw detected on ") + b.name + " (" +
+                std::to_string(nq[0]) + "/" + std::to_string(nq[1]) + "/" +
+                std::to_string(nq[2]) + " of " + std::to_string(expect) + ")");
+      // GUARD 1 AGAINST THE ARGMAX, AS AN EXACT PER-POINT CLAIM. The RMS form
+      // of this was true by construction on four of the five shapes: with the
+      // split partner excluded there is usually no other candidate above the
+      // floor, so guard 1 simply returns the argmax and the inequality cannot
+      // fail (review round 6). What is asserted instead is the measured
+      // structure: guard 1 agrees with the argmax everywhere except on `nr`,
+      // which has a second tap above the floor on about 1 % of phases, and it
+      // never differs by more than one sample. A guard reaching further breaks
+      // this; a guard doing nothing does not, which is what the control below
+      // is for.
+      // THE GUARD'S CONTRACT, ASSERTED LITERALLY: it must never return the tap
+      // IMMEDIATELY before the argmax, because that tap is the split partner
+      // of the same arrival. Guard 0 does return it, often, which is the whole
+      // finding. This is exact, it is not true by construction, and it fails
+      // for a guard that is off, inverted, or applied to the wrong index.
+      //
+      // It deliberately does NOT bound how far guard 1 may sit from the
+      // argmax: `nr` has a second tap above the floor on about 1 % of phases
+      // and legitimately lands TWO samples early there. A first version of
+      // this check asserted "within one sample" without measuring first and
+      // duly failed on `nr` -- the same error, made once more, caught by the
+      // test rather than by a reviewer this time.
+      check(g1_at_am_minus_1 == 0,
+            std::string("guard 1 never returns the tap immediately before the "
+                        "argmax: ") + b.name + " " +
+                std::to_string(g1_at_am_minus_1) + " of " + std::to_string(100));
+      check(g0_at_am_minus_1 > 0,
+            std::string("guard 0 DOES return that tap, so the guard has "
+                        "something to prevent: ") + b.name + " " +
+                std::to_string(g0_at_am_minus_1) + " of " + std::to_string(100));
+      // POSITIVE CONTROL, ON REACHABILITY RATHER THAN ON QUALITY. An earlier
+      // version asserted that guard 0 is measurably WORSE than the argmax,
+      // which ties the suite to the shipped rule's quality: a legitimate
+      // improvement to the unguarded rule would have broken ten rows. What
+      // must be true for the knob to mean anything is only that the two
+      // settings differ somewhere.
+      check(g0_vs_g1_diff > 0,
+            std::string("the two guard settings differ somewhere on ") + b.name +
+                " (0 would mean the knob never reaches the correlator; guard 0 " +
+                "reads " + std::to_string(r_g0) + " against the argmax's " +
+                std::to_string(r_am) + ")");
     }
   }
 
@@ -823,9 +873,9 @@ int main() {
   // swept the guarded tap is live, and the comparison has something to fail.
   // All five shapes, including dot11, whose lobe is the widest.
   std::printf("\n=== AP-72: the guard against genuine multipath (phase grid "
-              "0.05, 4 draws; err = worst |residual - truth|) ===\n");
-  std::printf("%-32s %-14s %8s %8s %9s %9s\n", "channel", "shape", "err g0",
-              "err g1", "differed", "g1 worse");
+              "0.02, 4 draws; err = worst |residual - truth|) ===\n");
+  std::printf("%-32s %-14s %8s %8s %9s %9s %9s\n", "channel", "shape",
+              "err g0", "err g1", "differed", "g1 worse", "g1 better");
   {
     // The direct path sits 8.9 dB under the echo in the "weak direct" case,
     // against a -9.0 dB floor whose own comment records the case flipping
@@ -843,14 +893,17 @@ int main() {
       for (const auto& b : ds) {
         std::printf("%-32s %-14s", ch.name, b.name.c_str());
         double worst[2] = {0.0, 0.0};
-        int differed = 0, g1_worse = 0, points = 0, found = 0;
-        // A GRID OF 0.05, NOT 0.25. At 0.25 the +2 echo read "no point
-        // differs" and the test asserted it; the two settings in fact differ
-        // over a band near phase 0.4 that a quarter-sample grid steps over
-        // (review round 5). The band is where guard 1 is BETTER, so the
-        // coarse grid hid a benefit while asserting a falsehood.
-        for (int t = 0; t < 20; ++t) {
-          const double tau = 0.05 * t;
+        int differed = 0, g1_worse = 0, g1_better = 0, points = 0, found = 0;
+        // A GRID OF 0.02, NOT 0.25 AND NOT 0.05. At 0.25 the +2 echo read "no
+        // point differs" and the test asserted it; the settings in fact differ
+        // over a band roughly [0.34, 0.43] that a quarter-sample grid steps
+        // over (review round 5). A 0.05 grid caught that band by a single
+        // point, so a small shift would have made the assertion vacuous again
+        // without anything noticing (review round 6). The band is where guard
+        // 1 is BETTER, so the coarse grids hid a benefit while asserting a
+        // falsehood.
+        for (int t = 0; t < 50; ++t) {
+          const double tau = 0.02 * t;
           const double truth = static_cast<double>(kEndConvention) + tau;
           for (unsigned sd = 1; sd <= 4; ++sd) {
             long long v[2];
@@ -869,10 +922,11 @@ int main() {
             if (v[0] != kMiss && v[1] != kMiss) ++found;
             if (v[0] != v[1]) ++differed;
             if (err[1] > err[0] + 1e-9) ++g1_worse;
+            if (err[1] < err[0] - 1e-9) ++g1_better;
           }
         }
-        std::printf(" %8.2f %8.2f %9d %9d\n", worst[0], worst[1], differed,
-                    g1_worse);
+        std::printf(" %8.2f %8.2f %9d %9d %9d\n", worst[0], worst[1], differed,
+                    g1_worse, g1_better);
         control_differed += differed;
         // A DETECTION FLOOR FIRST. Every statistic here reads perfectly when
         // nothing is detected: `differed` counts agreement, so two settings
@@ -890,10 +944,12 @@ int main() {
         const std::string nm(ch.name);
         if (nm.find("UNRESOLVABLE") == std::string::npos &&
             nm.find("weak direct") == std::string::npos)
-          check(g1_worse == 0,
-                std::string("guard 1 is never worse than guard 0 on ") +
-                    ch.name + ", " + b.name + " (" + std::to_string(g1_worse) +
-                    " of " + std::to_string(points) + " points worse)");
+          check(g1_worse == 0 && g1_better == differed,
+                std::string("on ") + ch.name + ", " + b.name +
+                    ": every point where guard 1 differs is an IMPROVEMENT (" +
+                    std::to_string(g1_better) + " better, " +
+                    std::to_string(g1_worse) + " worse, of " +
+                    std::to_string(differed) + " differing)");
       }
     }
     // POSITIVE CONTROL. Without this the whole block passes on a build that
@@ -904,6 +960,71 @@ int main() {
           "the two guard settings differ somewhere: " +
               std::to_string(control_differed) +
               " points (0 would mean the knob is not reaching the correlator)");
+  }
+
+  // WHAT A 60 s SILICON LEG WOULD SEE, SIMULATED, BECAUSE THE GATE RESTS ON IT.
+  // DEMO_VERIFICATION 8ak claims its own PASS statistics are blind to the
+  // guard: the guard moves the rounding threshold in arrival phase rather than
+  // adding a toggle, so both settings step once per cycle and an adjacent-
+  // difference jitter differences it away. That claim decided the gate's
+  // design, it came from a reviewer's scratch probe, and nothing in the tree
+  // regenerated it (review round 6). It does now.
+  //
+  // The model, and why it is the right one: the shipped resync cadence is
+  // 2604 ms, and at the measured clock rate the arrival phase advances tens of
+  // samples between accepts, so successive detections see INDEPENDENT phase,
+  // not a slow walk. Each leg draws 23 detections at uniform phase, which is
+  // what a 60 s leg collects. `jitter` here is the adjacent-difference sd
+  // divided by sqrt(2), the same statistic shape_campaign_summary.py reports,
+  // so the number is comparable with the rig's.
+  std::printf("\n=== AP-72: a simulated 60 s leg, both guard settings "
+              "(40 legs x 23 detections, legacy, 45 dB) ===\n");
+  {
+    const auto& b = ds[0];
+    const int w = shippedWindow(b);
+    double jit[2] = {0.0, 0.0}, sd[2] = {0.0, 0.0};
+    int legs = 0;
+    std::mt19937 phase_rng(20260904u);
+    for (int leg = 0; leg < 40; ++leg) {
+      std::vector<double> res[2];
+      for (int k = 0; k < 23; ++k) {
+        const double tau =
+            (static_cast<double>(phase_rng()) + 0.5) / 4294967296.0;
+        const unsigned seed = static_cast<unsigned>(leg * 23 + k + 1);
+        for (int g = 0; g < 2; ++g) {
+          const long long v = runAt(b, tau, seed, w, 45.0, g);
+          if (v != kMiss)
+            res[g].push_back(static_cast<double>(v) -
+                             (static_cast<double>(kEndConvention) + tau));
+        }
+      }
+      if (res[0].size() < 2 || res[1].size() < 2) continue;
+      ++legs;
+      for (int g = 0; g < 2; ++g) {
+        double q = 0.0;
+        for (size_t i = 1; i < res[g].size(); ++i) {
+          const double d = res[g][i] - res[g][i - 1];
+          q += d * d;
+        }
+        jit[g] += std::sqrt(q / static_cast<double>(res[g].size() - 1)) / std::sqrt(2.0);
+        double m = 0.0, v = 0.0;
+        for (const double x : res[g]) m += x;
+        m /= static_cast<double>(res[g].size());
+        for (const double x : res[g]) v += (x - m) * (x - m);
+        sd[g] += std::sqrt(v / static_cast<double>(res[g].size() - 1));
+      }
+    }
+    const double n = legs > 0 ? static_cast<double>(legs) : 1.0;
+    std::printf("%-10s %14s %14s\n", "setting", "mean jitter", "mean sd");
+    for (int g = 0; g < 2; ++g)
+      std::printf("guard %-4d %14.3f %14.3f\n", g, jit[g] / n, sd[g] / n);
+    // The prediction the gate rests on: the two settings are indistinguishable
+    // in these statistics. A tenth of a sample is far inside the 1.3 the gate
+    // allows and inside the leg-to-leg spread of the bench itself.
+    check(std::fabs(jit[0] - jit[1]) / n < 0.1,
+          "a simulated leg cannot tell the two guard settings apart by jitter: " +
+              std::to_string(jit[0] / n) + " against " + std::to_string(jit[1] / n));
+    check(legs >= 35, "the simulated legs mostly detected: " + std::to_string(legs) + " of 40");
   }
 
   // THE SHAPE OF THE CORRELATION LOBE, WHICH IS THE SPECIFICATION FOR AP-75.
