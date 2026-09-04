@@ -48,6 +48,7 @@
 #include <complex>
 #include <cstdio>
 #include <random>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -142,11 +143,27 @@ long long residual(const Desc& b, double peak_counts, double snr_db,
   return idx < 0 ? kMiss : s0 + idx + rep_tail - end;
 }
 
+/// Residual on a SINGLE-PATH channel at fractional delay `frac`, taken with an
+/// explicit first-path back-scan window. Window 0 disables the back-scan, so
+/// the returned index is the argmax; that is the reference the AP-72 section
+/// measures every other window against.
+long long residualPick(const Desc& b, double frac, unsigned seed,
+                       int first_path_window, double snr_db);
+/// The first-path back-scan window SyncConfig::resolve() derives for a shape:
+/// half its replica (sync_config.cc), 64 for a 128-tap replica and 32 for a
+/// 64-tap one. Measuring at one fixed width instead read dot11 as 64 samples
+/// biased, which is this test's error and not the detector's.
+int shippedWindow(const Desc& b);
+
 // The shipped resync slice at 122.88 MSPS with the 2026-09-02 defaults
 // (scatter_tol 246): lead = 246 + 256, tail = 246 + 64. sync_geometry.h owns the
 // derivation; these are the values it produces, restated so this test says what
 // geometry it is testing rather than pulling in the whole header.
 constexpr long long kLead = 502, kTail = 310;
+// What SyncConfig::resolve() derives for the shipped Houdini config: half a
+// replica, capped (8.176 records 64, and 32 for dot11 whose replica is short).
+// The AP-72 sweep uses the one value for every shape so the columns compare.
+constexpr int kShippedFirstPathWindow = 64;
 constexpr float kResyncCorrScale = 100.0f;  // files/houdini-*.json corr_scale
 constexpr double kSnrDb = 45.0;             // measured in-window beacon SNR
 // The detector reports the last sample of the matched field, so the true beacon
@@ -183,6 +200,31 @@ void cell(const Row& r) {
   else if (r.lo == r.hi) std::snprintf(buf, sizeof buf, "%+lld", r.lo);
   else std::snprintf(buf, sizeof buf, "%+lld..%+lld", r.lo, r.hi);
   std::printf(" %13s", buf);
+}
+
+
+int shippedWindow(const Desc& b) {
+  return static_cast<int>(b.replica.size() / 2);
+}
+
+long long residualPick(const Desc& b, double frac, unsigned seed,
+                       int first_path_window, double snr_db) {
+  const long long len = static_cast<long long>(b.core.size());
+  houdini::sync::sim::Channel sc;
+  sc.snr_db = snr_db;
+  sc.peak_counts = 1600.0;
+  sc.frac_delay = frac;
+  const long long pos = 4000, end = pos + len, s0 = end - kLead,
+                  n = kLead + kTail;
+  const std::vector<std::complex<int16_t>> buf =
+      sc.receive(b.core, pos, s0, n, seed);
+  const Thr tf = b.replica_reps < 2 ? Thr::kCoherence : Thr::kNormalizedXCorr;
+  const CommsLib::BeaconResult r = CommsLib::find_beacon_ex(
+      buf.data(), b.replica, static_cast<size_t>(n), kResyncCorrScale,
+      Pick::kFirstPath, tf, first_path_window,
+      CommsLib::kDefaultFirstPathFloorDb);
+  const long long rep_tail = static_cast<long long>(b.replica_tail());
+  return r.index < 0 ? kMiss : s0 + r.index + rep_tail - end;
 }
 
 }  // namespace
@@ -656,6 +698,138 @@ int main() {
         std::printf(" %13s", c);
       }
       std::printf("\n");
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // AP-72: HOW WIDE IS THE CORRELATION LOBE, AND HOW OFTEN DOES THE FIRST-PATH
+  // RULE PICK INSIDE IT? 8.177 found the pick one sample before the argmax on
+  // 7 of 24 golden windows, with the earlier neighbour's statistic 3.6 to
+  // 14.9 dB down. The proposed mechanism: a beacon between samples splits the
+  // matched-filter peak over two adjacent taps, and the -9 dB first-path floor
+  // admits the earlier one whenever the fractional timing puts enough energy
+  // there. This measures the mechanism instead of assuming it, on a SINGLE
+  // PATH channel where the only correct answer is the sample nearest the true
+  // end, using the shipped detector through its window argument:
+  //   window 0 -> no back-scan at all, so the pick IS the argmax;
+  //   window k -> the back-scan may reach k samples before the argmax.
+  // The first window at which the returned index stops moving is the lobe's
+  // half-width in samples: how far the same physical path reaches. Anything
+  // the rule picks inside that reach is the peak's own skirt, not an earlier
+  // path, and it toggles with tau rather than describing the channel.
+  std::printf("\n=== AP-72: first-path reach into its own peak, single path "
+              "(cells = index - argmax over tau = 0.05..0.95, 8 draws) ===\n");
+  std::printf("%-14s", "shape");
+  for (const int w : {1, 2, 3, 4}) std::printf("  window %-6d", w);
+  std::printf("  %-13s\n", "shipped");
+  for (const auto& b : ds) {
+    std::printf("%-14s", b.name.c_str());
+    for (const int w : {1, 2, 3, 4, shippedWindow(b)}) {
+      long long lo = 1LL << 40, hi = -(1LL << 40);
+      for (int t = 1; t <= 19; ++t) {
+        const double tau = 0.05 * t;
+        for (unsigned sd = 1; sd <= 8; ++sd) {
+          const long long a = residualPick(b, tau, sd, 0, kSnrDb);
+          const long long v = residualPick(b, tau, sd, w, kSnrDb);
+          if (a == kMiss || v == kMiss) continue;
+          lo = std::min(lo, v - a);
+          hi = std::max(hi, v - a);
+        }
+      }
+      char c[32];
+      if (lo > hi) std::snprintf(c, sizeof c, "MISS");
+      else if (lo == hi) std::snprintf(c, sizeof c, "%+lld", lo);
+      else std::snprintf(c, sizeof c, "%+lld..%+lld", lo, hi);
+      std::printf("  %-13s", c);
+    }
+    std::printf("\n");
+  }
+
+  // And the share of the jitter it explains. Over a fine tau sweep the correct
+  // index steps ONCE (at tau = 0.5, where the nearest sample changes); every
+  // other change of the returned index between adjacent tau is the rule
+  // moving inside its own peak. `toggles` counts the (tau, seed) points where
+  // the pick differs from the argmax at all; the two jitter columns are the
+  // adjacent-difference sd of each series, per seed and averaged, which is the
+  // statistic the silicon campaigns report (0.7 to 1.7 samples there).
+  std::printf("\n=== AP-72: pick against argmax over tau = 0..1 in 0.02, 8 "
+              "draws, shipped window ===\n");
+  std::printf("%-14s %5s %10s %12s %12s %12s\n", "shape", "SNR", "toggles",
+              "of points", "argmax jit", "pick jit");
+  for (const double snr : {45.0, 30.0}) {
+    for (const auto& b : ds) {
+      const int w = shippedWindow(b);
+      int toggles = 0, points = 0;
+      double jam = 0.0, jpk = 0.0;
+      int seeds = 0;
+      for (unsigned sd = 1; sd <= 8; ++sd) {
+        std::vector<long long> am, pk;
+        for (int t = 0; t <= 50; ++t) {
+          const double tau = 0.02 * t;
+          const long long a = residualPick(b, tau, sd, 0, snr);
+          const long long v = residualPick(b, tau, sd, w, snr);
+          if (a == kMiss || v == kMiss) continue;
+          ++points;
+          if (a != v) ++toggles;
+          am.push_back(a);
+          pk.push_back(v);
+        }
+        const auto jitter = [](const std::vector<long long>& x) {
+          if (x.size() < 2) return 0.0;
+          double q = 0.0;
+          for (size_t i = 1; i < x.size(); ++i) {
+            const double d = static_cast<double>(x[i] - x[i - 1]);
+            q += d * d;
+          }
+          return std::sqrt(q / static_cast<double>(x.size() - 1));
+        };
+        if (am.size() > 1) {
+          jam += jitter(am);
+          jpk += jitter(pk);
+          ++seeds;
+        }
+      }
+      const double n = seeds > 0 ? static_cast<double>(seeds) : 1.0;
+      std::printf("%-14s %5.0f %10d %12d %12.2f %12.2f\n", b.name.c_str(), snr,
+                  toggles, points, jam / n, jpk / n);
+    }
+  }
+
+  // THE SWEEP ABOVE MOVES TAU AND THE NOISE TOGETHER, WHICH IS NOT THE SILICON
+  // CASE. On the rig the clock walks tau slowly while a fresh noise draw
+  // arrives every frame, so what the campaigns measure as adjacent-difference
+  // jitter is the spread AT FIXED TAU across draws. That is the only condition
+  // under which the split-peak rule can add jitter rather than merely move
+  // where the one correct step happens: near the tau where the earlier
+  // neighbour's statistic sits ON the floor, noise decides the pick frame by
+  // frame. Below: 32 draws at each tau, the number of DISTINCT indices the
+  // pick returns (1 = decided, 2 = dithering), for the argmax and for the
+  // shipped first-path rule.
+  std::printf("\n=== AP-72: dither at FIXED tau across 32 draws (values = "
+              "distinct indices returned; 1 is decided) ===\n");
+  std::printf("%-14s %5s", "shape", "SNR");
+  for (int t = 0; t <= 9; ++t) std::printf(" %4.1f", 0.1 * t);
+  std::printf("   worst\n");
+  for (const double snr : {45.0, 30.0}) {
+    for (const auto& b : ds) {
+      const int w = shippedWindow(b);
+      std::printf("%-14s %5.0f", b.name.c_str(), snr);
+      int worst_am = 1, worst_pk = 1;
+      for (int t = 0; t <= 9; ++t) {
+        const double tau = 0.1 * t;
+        std::set<long long> am, pk;
+        for (unsigned sd = 1; sd <= 32; ++sd) {
+          const long long a = residualPick(b, tau, sd, 0, snr);
+          const long long v = residualPick(b, tau, sd, w, snr);
+          if (a != kMiss) am.insert(a);
+          if (v != kMiss) pk.insert(v);
+        }
+        worst_am = std::max(worst_am, static_cast<int>(am.size()));
+        worst_pk = std::max(worst_pk, static_cast<int>(pk.size()));
+        std::printf(" %d/%d", static_cast<int>(am.size()),
+                    static_cast<int>(pk.size()));
+      }
+      std::printf("   argmax %d, pick %d\n", worst_am, worst_pk);
     }
   }
 
