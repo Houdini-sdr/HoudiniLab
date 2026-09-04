@@ -115,6 +115,16 @@ inspection-only with a build matrix; the packet width and the portable
 correlator are accepted; Agora's radio abstraction is adopted in shape, not
 in code, for now.
 
+DECIDED 2026-09-03 (branch model, [user]): `master` is the last stable
+release and `develop` the latest tested state, promoted to `master` rarely.
+So the feature branch lands as ONE pull request into `develop`, carrying the
+fifteen fixes with it; the separate fix series of section 4 becomes a
+stable-line patch onto `master` only if a patch release is wanted, and would
+need its own verification against `master`'s tree. Order of operations: push
+`develop` (it is ahead of `origin/develop`), then the feature branch, then
+the PR; the raw captures leave the tip before the PR (section 4, item 3,
+folded into the landing).
+
 
 - Whether to flip `sync.allow_env_overrides` to false now (the bench scripts
   still sweep through the environment) or next release as planned.
