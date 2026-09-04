@@ -49,6 +49,7 @@
 #include <cstdio>
 #include <random>
 #include <set>
+#include <utility>
 #include <string>
 #include <vector>
 
@@ -149,6 +150,11 @@ long long residual(const Desc& b, double peak_counts, double snr_db,
 /// measures every other window against.
 long long residualPick(const Desc& b, double frac, unsigned seed,
                        int first_path_window, double snr_db);
+/// The same run, reporting the sub-sample estimate: `.first` is the integer
+/// residual (kMiss when nothing was found) and `.second` the detector's
+/// frac_offset at that index.
+std::pair<long long, double> residualFrac(const Desc& b, double frac,
+                                          unsigned seed, double snr_db);
 /// The first-path back-scan window SyncConfig::resolve() derives for a shape:
 /// half its replica (sync_config.cc), 64 for a 128-tap replica and 32 for a
 /// 64-tap one. Measuring at one fixed width instead read dot11 as 64 samples
@@ -205,6 +211,27 @@ void cell(const Row& r) {
 
 int shippedWindow(const Desc& b) {
   return static_cast<int>(b.replica.size() / 2);
+}
+
+std::pair<long long, double> residualFrac(const Desc& b, double frac,
+                                          unsigned seed, double snr_db) {
+  const long long len = static_cast<long long>(b.core.size());
+  houdini::sync::sim::Channel sc;
+  sc.snr_db = snr_db;
+  sc.peak_counts = 1600.0;
+  sc.frac_delay = frac;
+  const long long pos = 4000, end = pos + len, s0 = end - kLead,
+                  n = kLead + kTail;
+  const std::vector<std::complex<int16_t>> buf =
+      sc.receive(b.core, pos, s0, n, seed);
+  const Thr tf = b.replica_reps < 2 ? Thr::kCoherence : Thr::kNormalizedXCorr;
+  const CommsLib::BeaconResult r = CommsLib::find_beacon_ex(
+      buf.data(), b.replica, static_cast<size_t>(n), kResyncCorrScale,
+      Pick::kFirstPath, tf, shippedWindow(b),
+      CommsLib::kDefaultFirstPathFloorDb);
+  const long long rep_tail = static_cast<long long>(b.replica_tail());
+  if (r.index < 0) return {kMiss, 0.0};
+  return {s0 + r.index + rep_tail - end, r.frac_offset};
 }
 
 long long residualPick(const Desc& b, double frac, unsigned seed,
@@ -831,6 +858,72 @@ int main() {
       }
       std::printf("   argmax %d, pick %d\n", worst_am, worst_pk);
     }
+  }
+
+  // AP-72's OTHER NAMED FIX, MEASURED AGAINST THE INTEGER IT REFINES (8ah).
+  // `frac_offset` is a three-point parabolic fit on the correlator amplitude
+  // at the lobe the returned index sits on, so `index + frac_offset` should
+  // estimate the true fractional end. The bar was set before the run: it has
+  // to beat the quantisation it replaces, sd 1/sqrt(12) = 0.289 samples, or it
+  // is not worth shipping. The `integer` column is that quantisation as this
+  // sweep measures it; the `fitted` column is what the fit achieves.
+  std::printf("\n=== AP-72: sub-sample fit against the true end (RMS samples, "
+              "tau = 0..1 in 0.02, 8 draws) ===\n");
+  std::printf("%-14s %5s %12s %12s %10s\n", "shape", "SNR", "integer RMS",
+              "fitted RMS", "verdict");
+  for (const double snr : {45.0, 30.0}) {
+    for (const auto& b : ds) {
+      double si = 0.0, sf = 0.0;
+      int n = 0;
+      for (unsigned sd = 1; sd <= 8; ++sd) {
+        for (int t = 0; t <= 50; ++t) {
+          const double tau = 0.02 * t;
+          const auto rf = residualFrac(b, tau, sd, snr);
+          if (rf.first == kMiss) continue;
+          const double truth = static_cast<double>(kEndConvention) + tau;
+          const double ei = static_cast<double>(rf.first) - truth;
+          const double ef = static_cast<double>(rf.first) + rf.second - truth;
+          si += ei * ei;
+          sf += ef * ef;
+          ++n;
+        }
+      }
+      const double ri = n ? std::sqrt(si / n) : 0.0;
+      const double rf2 = n ? std::sqrt(sf / n) : 0.0;
+      std::printf("%-14s %5.0f %12.3f %12.3f %10s\n", b.name.c_str(), snr, ri,
+                  rf2, rf2 < 0.289 ? "PASS" : "FAIL");
+      check(rf2 < 0.289, std::string("sub-sample fit beats rounding: ") +
+                             b.name + " at " + std::to_string(int(snr)) + " dB");
+    }
+  }
+
+  // And it must be DECIDED where the integer dithers: at fixed tau across 32
+  // draws the estimate's own spread has to stay under 0.1 samples (8ah).
+  std::printf("\n=== AP-72: sub-sample fit spread at FIXED tau, 32 draws "
+              "(sd in samples, 45 dB) ===\n");
+  std::printf("%-14s", "shape");
+  for (int t = 0; t <= 9; ++t) std::printf(" %5.1f", 0.1 * t);
+  std::printf("   worst\n");
+  for (const auto& b : ds) {
+    std::printf("%-14s", b.name.c_str());
+    double worst = 0.0;
+    for (int t = 0; t <= 9; ++t) {
+      const double tau = 0.1 * t;
+      std::vector<double> v;
+      for (unsigned sd = 1; sd <= 32; ++sd) {
+        const auto rf = residualFrac(b, tau, sd, 45.0);
+        if (rf.first != kMiss) v.push_back(static_cast<double>(rf.first) + rf.second);
+      }
+      double m = 0.0, q = 0.0;
+      for (const double x : v) m += x;
+      if (!v.empty()) m /= static_cast<double>(v.size());
+      for (const double x : v) q += (x - m) * (x - m);
+      const double sd = v.size() > 1 ? std::sqrt(q / (v.size() - 1)) : 0.0;
+      worst = std::max(worst, sd);
+      std::printf(" %5.3f", sd);
+    }
+    std::printf("   %.3f\n", worst);
+    check(worst < 0.1, std::string("sub-sample fit is decided: ") + b.name);
   }
 
   // ---------------------------------------------------------------------

@@ -312,6 +312,41 @@ static double firstPathFloorFrac(CommsLib::BeaconThresh form, double db) {
 // half the echo's power" and that was wishful. Widen with HOUDINI_FIRST_PATH_DB
 // if a channel needs it, and re-run beacon_geometry_test when you do.
 
+// SUB-SAMPLE POSITION OF THE LOBE AN INDEX SITS ON (BeaconResult::frac_offset).
+//
+// Fitted on the correlator AMPLITUDE, not its power: a pseudorandom sequence's
+// autocorrelation main lobe is triangular in amplitude, and a parabola through
+// three points of a triangle finds its apex, while the same parabola through
+// the squared triangle is biased toward the sample it is centred on.
+//
+// The returned index is not always the lobe's top -- the first-path rule
+// deliberately picks the earlier tap of a split peak (8ah) -- so this first
+// climbs to the local maximum and then fits there, reporting the result
+// relative to `i`. The climb is bounded by the measured reach of a lobe: one
+// sample for every shipped shape, two for `nr` (8ah's reach sweep). An
+// unbounded climb would walk off a shoulder onto a different path.
+static double fracOffsetAt(const std::vector<std::complex<float>>& corr, size_t i) {
+  constexpr int kMaxClimb = 2;         // the measured lobe reach, 8ah
+  constexpr double kMaxOffset = 1.5;   // beyond this the three points are not one lobe
+  const size_t n = corr.size();
+  if (n < 3 || i >= n) return 0.0;
+  const auto amp = [&corr](size_t k) { return static_cast<double>(std::abs(corr[k])); };
+  size_t c = i;
+  for (int step = 0; step < kMaxClimb; ++step) {
+    if (c + 1 < n && amp(c + 1) > amp(c)) { ++c; continue; }
+    if (c >= 1 && amp(c - 1) > amp(c)) { --c; continue; }
+    break;
+  }
+  if (c < 1 || c + 1 >= n) return 0.0;  // no room for the fit at the window edge
+  const double ym = amp(c - 1), y0 = amp(c), yp = amp(c + 1);
+  const double den = ym + yp - 2.0 * y0;
+  if (!(den < 0.0)) return 0.0;  // not concave: not a lobe top (NaN falls here too)
+  const double p = (ym - yp) / (2.0 * den);
+  if (!std::isfinite(p)) return 0.0;
+  const double off = static_cast<double>(c) - static_cast<double>(i) + p;
+  return std::fabs(off) <= kMaxOffset ? off : 0.0;
+}
+
 int CommsLib::find_beacon_avx(
     const std::vector<std::complex<float>>& raw_samples,
     const std::vector<std::complex<float>>& match_samples, float corr_scale,
@@ -420,6 +455,7 @@ CommsLib::BeaconResult CommsLib::find_beacon_ex(
     if (i >= 0 && static_cast<size_t>(i) < gold_corr.size()) {
       r.statistic = ranking(static_cast<size_t>(i));
       r.peak = gold_corr[static_cast<size_t>(i)];
+      r.frac_offset = fracOffsetAt(gold_corr, static_cast<size_t>(i));
     }
     return r;
   };

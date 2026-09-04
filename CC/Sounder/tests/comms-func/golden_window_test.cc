@@ -332,12 +332,22 @@ int main(int argc, char** argv) {
       // statistic (8.176) showed picks as low as 2 dB above the bar on legacy.
       {
         const auto am = det.run(w.data(), w.size(), corr_scale, PickRule::kArgmax);
-        std::printf("INFO  %s window %d: picked %lld stat %.4g | argmax %lld stat %.4g | pick - argmax = %lld samples, %.1f dB below\n",
+        std::printf("INFO  %s window %d: picked %lld stat %.4g | argmax %lld stat %.4g | pick - argmax = %lld samples, %.1f dB below | frac_offset %+.4f (sub-sample end %.4f)\n",
                     shape, i, static_cast<long long>(det_res.end_index), det_res.statistic,
                     static_cast<long long>(am.end_index), am.statistic,
                     static_cast<long long>(det_res.end_index - am.end_index),
-                    am.statistic > 0 ? 10.0 * std::log10(am.statistic / std::max(1e-12, det_res.statistic)) : 0.0);
+                    am.statistic > 0 ? 10.0 * std::log10(am.statistic / std::max(1e-12, det_res.statistic)) : 0.0,
+                    det_res.frac_offset,
+                    static_cast<double>(det_res.end_index) + det_res.frac_offset);
       }
+      // The sub-sample offset is not recorded in these fixtures (they predate
+      // it), so what is checked is the contract every consumer relies on: it
+      // is finite and inside the fit's own bound, on every window and on both
+      // architectures. The INFO line above carries the value itself, which is
+      // how the aarch64 replay compares it against x86 (8ah).
+      std::snprintf(what, sizeof what, "%s window %d: frac_offset %+.4f is finite and within bound",
+                    shape, i, det_res.frac_offset);
+      check(std::isfinite(det_res.frac_offset) && std::fabs(det_res.frac_offset) <= 1.5, what);
       const double snr = guard.snrDb(w.data(), w.size(), det_res.end_index);
       std::snprintf(what, sizeof what, "%s window %d: snr %.2f dB (recorded %.2f)", shape, i,
                     snr, meta.at("snr"));

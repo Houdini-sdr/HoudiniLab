@@ -287,6 +287,18 @@ class CommsLib {
     ssize_t index = -1;
     double statistic = 0.0;
     std::complex<float> peak{0.0f, 0.0f};
+    /// WHERE THE LOBE'S TOP ACTUALLY SITS, RELATIVE TO `index`, IN SAMPLES.
+    /// A beacon that arrives between samples splits the matched-filter peak
+    /// over two adjacent taps, so the integer index carries up to half a
+    /// sample of quantisation and (with the first-path rule) up to one sample
+    /// of bias -- measured, DEMO_VERIFICATION 8ah. This is a three-point
+    /// parabolic fit on the correlator AMPLITUDE at the lobe `index` sits on,
+    /// so `index + frac_offset` is the sub-sample position of that path.
+    /// Zero when no refinement is available (an edge of the search window, or
+    /// three points that do not describe a lobe) and NaN when the backend does
+    /// not report it, so "no information" never reads as "exactly centred".
+    /// ADDITIVE: `index` is unchanged by it.
+    double frac_offset = 0.0;
   };
   /// The radio's samples as the correlator takes them: full scale to +-1.
   static std::vector<std::complex<float>> toCorrelatorScale(

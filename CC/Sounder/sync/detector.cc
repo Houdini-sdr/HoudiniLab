@@ -107,6 +107,7 @@ Detection Detector::run(const std::complex<int16_t>* samples, size_t n,
     d.form = ThresholdForm::kPowerRatio;
     d.statistic = std::numeric_limits<double>::quiet_NaN();  // not reported by this backend
     d.bar = std::numeric_limits<double>::quiet_NaN();
+    d.frac_offset = std::numeric_limits<double>::quiet_NaN();
     return d;
   }
 #endif
@@ -120,6 +121,9 @@ Detection Detector::run(const std::complex<int16_t>* samples, size_t n,
   if (d.end_index >= 0) {
     d.statistic = r.statistic;
     d.peak = r.peak;
+    // The correlator's index and the beacon end differ by the replica tail, a
+    // constant, so the sub-sample offset of the lobe carries across unchanged.
+    d.frac_offset = r.frac_offset;
   }
   return d;
 }

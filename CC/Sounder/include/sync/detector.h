@@ -45,6 +45,13 @@ struct Detection {
   /// The correlator output at the index: the matched field's complex peak,
   /// which a phase tracker reads (architecture plan, P5).
   std::complex<float> peak{0.0f, 0.0f};
+  /// The sub-sample position of the detected path relative to `end_index`, in
+  /// samples: `end_index + frac_offset` is where the lobe's top actually sits
+  /// (CommsLib::BeaconResult::frac_offset; measured in 8ah). Zero when no
+  /// refinement is available, NaN when the backend does not report one. The
+  /// integer `end_index` is unchanged by it, so the index convention is the
+  /// same with and without this field.
+  double frac_offset = 0.0;
   bool found() const { return end_index >= 0; }
 };
 
