@@ -49,8 +49,8 @@
 #include <cstdio>
 #include <map>
 #include <random>
-#include <utility>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "sync/beacon_shapes.h"
@@ -147,20 +147,11 @@ long long residual(const Desc& b, double peak_counts, double snr_db,
   return idx < 0 ? kMiss : s0 + idx + rep_tail - end;
 }
 
-long long runAt(const Desc& b, double frac, unsigned seed,
-                int first_path_window, double snr_db, int guard);
-/// The first-path back-scan window SyncConfig::resolve() derives for a shape:
-/// half its replica (sync_config.cc), 64 for a 128-tap replica and 32 for a
-/// 64-tap one. Measuring at one fixed width instead read dot11 as 64 samples
-/// biased, which is this test's error and not the detector's.
-int shippedWindow(const Desc& b);
-
 // The shipped resync slice at 122.88 MSPS with the 2026-09-02 defaults
 // (scatter_tol 246): lead = 246 + 256, tail = 246 + 64. sync_geometry.h owns the
 // derivation; these are the values it produces, restated so this test says what
 // geometry it is testing rather than pulling in the whole header.
 constexpr long long kLead = 502, kTail = 310;
-
 constexpr float kResyncCorrScale = 100.0f;  // files/houdini-*.json corr_scale
 constexpr double kSnrDb = 45.0;             // measured in-window beacon SNR
 // The detector reports the last sample of the matched field, so the true beacon
@@ -199,7 +190,10 @@ void cell(const Row& r) {
   std::printf(" %13s", buf);
 }
 
-
+/// The first-path back-scan window SyncConfig::resolve() derives for a shape:
+/// half its replica (sync_config.cc), 64 for a 128-tap replica and 32 for a
+/// 64-tap one. Measuring at one fixed width instead read dot11 as 64 samples
+/// biased, which is this test's error and not the detector's.
 int shippedWindow(const Desc& b) {
   return static_cast<int>(b.replica.size() / 2);
 }
@@ -228,7 +222,6 @@ long long runAt(const Desc& b, double frac, unsigned seed,
   const long long rep_tail = static_cast<long long>(b.replica_tail());
   return r.index < 0 ? kMiss : s0 + r.index + rep_tail - end;
 }
-
 
 }  // namespace
 
@@ -1075,10 +1068,9 @@ int main() {
   // of the bracketing pair assumes the neighbours are SYMMETRIC at zero delay
   // and they are not (at the DETECTED index legacy reads 0.0079 one side and
   // 0.0024 the other, and `nr` 0.0157 and 0.0305; the table below prints
-  // them), so
-  // near a whole-sample arrival the fixed asymmetry outweighs the delay's and
-  // the estimate takes the wrong sign. Any replacement has to use the
-  // replica's own autocorrelation, which is what this table measures.
+  // them), so near a whole-sample arrival the fixed asymmetry outweighs the
+  // delay's and the estimate takes the wrong sign. Any replacement has to use
+  // the replica's own autocorrelation, which is what this table measures.
   std::printf("\n=== AP-72: the correlation lobe at zero fractional delay "
               "(amplitude relative to the peak) ===\n");
   std::printf("%-14s %9s %9s %9s %9s\n", "shape", "peak-2", "peak-1", "peak+1",

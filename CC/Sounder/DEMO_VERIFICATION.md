@@ -649,6 +649,81 @@ whether an NR-shaped beacon is a live option for the OTA target.
 | 8.167 | **THE CONJUGATE-IMAGE INFERENCE IS RETRACTED, AND WHAT SURVIVES IS SMALLER AND BETTER FOUNDED.** [user: "any test should be validated again even if it matches the hypothesis"; "I am skeptical of a conjugate-image"]. The inference rested on a rule of thumb -- a pure beacon gives a wrong-sense/right-sense peak ratio of 1/sqrt(128) = 0.09 -- that this replica violates: the Gold IFFT sequence is structured and its conjugate-free self-product, computed exactly on a pure delayed beacon (`phase_probe_null.py`), is **0.16 to 0.28 depending on the fractional delay**. The identical analysis on the real windows reads **0.18 to 0.24 on the sounder's six golden windows and 0.29 to 0.34 on the probe's raw window**, i.e. at the null; and the estimator barely responds to an injected image below b = 0.3 (0.211 at b = 0, 0.212 at b = 0.2), so it could not have detected a small one anyway. The "100x variation between re-arms" was the probe's lag-product ratio for the wrong sense, a statistic that was never given a null and cannot carry a claim. **Retracted: image, chain-state variation, and the AP-70 handoff as filed.** **What survives, validated the same way:** (1) the correlation lobe's phase step between adjacent samples is **0.06 to 0.30 rad on real data in BOTH capture paths** (sounder windows -0.07 / -0.16 / -0.29 / +0.20 / -0.07 / -0.14; probe -0.06 to -0.30) against **0.01 for a pure delayed beacon**, so the received beacon's spectrum is asymmetric by a modest, benign amount (chain and cable dispersion) and an integer-peak phase readout inherits that step at every argmax hop; (2) one run had two equal-magnitude adjacent samples **2.4 rad apart**, which a single correlation lobe cannot produce and which fits a two-component arrival about one sample apart; its waveform was not captured, so it is **UNEXPLAINED**, and the probe now arms a raw dump so the next one is. (3) Incidental and verified: the probe transmits the dumped core as is while the sounder pre-conjugates its transmit, so the probe's windows correlate with conj(g) and the sounder's with g; both are consistent with the conjugating receive mixer. The AP-67 design rule stands on (1) alone | `tests/demo-verify/phase_probe_null.py` (null, calibration, both real paths) | VERIFIED-TEST; image claim RETRACTED; 2.4 rad run UNEXPLAINED |
 | 8.168 | **AP-67 MEASURED: THE BEACON PHASE IS PREDICTABLE FOUR FRAMES AHEAD TO ABOUT 1.5 DEGREES.** On the clean runs the phase innovation after removing one fitted per-frame advance is **0.021 / 0.026 / 0.024 / 0.025 rad at lags 1 / 2 / 3 / 4 frames** (192 / 180 / 168 / 156 pairs), i.e. flat: neither the linear growth of a frequency error nor the sqrt(lag) growth of a random walk is visible above the lag-1 floor, which is the estimator's own noise. So over 4 ms the transmitter's carrier phase relative to the receiver's is a constant advance to 1.5 degrees, and the 5-degree budget in `docs/UE_TIME_FREQ_SYNC.md` section 11.4 was conservative by 3x. Consequence: a beacon-only phase tracker supports 64-QAM-grade phase (about 2 degrees) across the frame on this bench, and the in-slot pilots the doc recommends are for channel change and for other hardware, not for this oscillator pair. One caveat carried: the runs were 6 to 12 windows of 17 frames on a cable at the calibrated clock state; the innovation over tens of frames and over the air is not measured | `ap67.log`, `evidence/20260903-rig/ap67_*.csv` | VERIFIED-HW |
 
+### 8ap. AP-72 review round 8: the loop stops, and the matrix that stopped it
+
+Round 8 verified round 7's ten fixes: eight genuine, two partial. It found
+five leftovers, applied here, and **none of them was in the production
+change** -- the fifth consecutive reviewer to find it clean. The loop stops at
+this round because the thing that kept it going has been removed rather than
+because the reviewers ran out of findings.
+
+**The one with substance, and it is round 7's own repair failing the same way
+its predecessors did.** The simulated-leg block asserts an EQUALITY -- that a
+60 s leg cannot tell the two guard settings apart by jitter -- and an equality
+passes vacuously when both arms are the same configuration. Measured: that
+block alone passed under ALL SIX guard mutations, including the knob ignored
+entirely, printing the two arms as one number with nothing objecting. It now
+carries the positive control its two sibling blocks already had (211 of 920
+detections differ between the arms), so the equality is asserted on two arms
+that are demonstrably different. The other four were a comment describing a
+criterion removed two rounds earlier together with the three variables computed
+only for it, a reason given backwards, an orphaned antecedent, and the stale
+23 % where the measurement reads 22 %.
+
+**THE MUTATION MATRIX, WHICH IS THE STRONGEST EVIDENCE ON THIS BRANCH.** Round
+7's structural change was that every assertion in the AP-72 blocks names the
+mutation that makes it fail. Round 8 BUILT them: six distinct guard defects --
+the guard off, inverted, forced to 2, applied unconditionally, the knob never
+reaching the correlator -- and a single dropped detection. Every one fails the
+suite, each with the shape its comment predicts. "Capable of failing" is no
+longer something a round rediscovers by hand; it is a property the file states
+and a matrix that has been run.
+
+**What eight rounds cost and what they bought.** Five reviewers found the
+production change clean, and every defect any round found was in the
+measurement code or the prose around it. That asymmetry is the durable finding
+of AP-72, and it is the one promoted out of this branch (AP-77).
+
+### 8ao. AP-72 review round 7: the structural change that ended the loop
+
+Round 7 verified round 6's fixes (three genuinely fixed, three partially, one
+in name only) and found three HIGH and seven MEDIUM, again none in the
+production code -- four consecutive reviewers have now found it clean. The
+three HIGH are the pattern in miniature, and all three were introduced BY
+round 6's repairs: 8.196 still quoted the simulation figure that round 6's own
+rewrite of 8ak had just retracted; the new simulated-leg block was written
+without the detection floor round 6 had added to the two blocks either side of
+it, and a build dropping detections regenerated the headline number as garbage
+and passed; and an assertion round 6 deleted left both its comment and 8aj
+still claiming the suite makes it.
+
+Two integrity items are worth naming separately because neither is a bug.
+**A PASS criterion was proposed for 8ak after the gate of 8.196 had already
+run.** It is now recorded as a candidate for the next gate and explicitly NOT
+part of what 8.196 was judged against, since back-dating a criterion into a
+pre-registration is the one thing a pre-registration exists to prevent. And
+**the fixture assertion on the guard runs on 0 of the 30 windows**, because no
+fixture predates the knob and none has been recaptured; 8al listed it as an
+applied fix, and it is forward-looking only.
+
+**The structural change this round asked for, and it is adopted.** Six rounds
+each broke the previous round's repair, and the recurring species is an
+assertion nobody checked could fail. Every assertion in the AP-72 blocks now
+carries a comment naming the mutation that makes it fail, verified by building
+that mutation: the guard off, inverted, forced to 2, applied unconditionally,
+the knob ignored, detections dropped. "Capable of failing" stops being
+something each round rediscovers by hand.
+
+**Also this round:** the simulated leg's jitter did not match the statistic
+`shape_campaign_summary.py` computes and now does (0.287 and 0.305 rather than
+0.281 and 0.298); its quoted difference is one realisation whose sign changes
+between seeds, and the section says so; the multipath block claimed a sweep
+over signal level that it never ran and now runs one; a comment telling the
+reader that guard 0's worst dither always sits at its own transition was
+contradicted by its own table on one row; the widening argument for one
+tolerance ran backwards; and the shipped client is on channel "B" too, so both
+nodes take the auxiliary-replay path that AP-76 turns on.
+
 ### 8an. AP-76 / SH-335, the joint leg: criteria written BEFORE the rig slot
 
 Pre-registration, in the 8v style, written 2026-09-04 while the rig is
@@ -710,46 +785,6 @@ because a corruption that fires on some fraction of rate moves needs many more
 cycles than a rig slot affords. A clean result is therefore reported as "not
 reproduced in N cycles", with N stated, and never as "does not happen".
 
-### 8ao. AP-72 review round 7: the loop closes, and how
-
-Round 7 verified round 6's fixes (three genuinely fixed, three partially, one
-in name only) and found three HIGH and seven MEDIUM, again none in the
-production code -- four consecutive reviewers have now found it clean. The
-three HIGH are the pattern in miniature, and all three were introduced BY
-round 6's repairs: 8.196 still quoted the simulation figure that round 6's own
-rewrite of 8ak had just retracted; the new simulated-leg block was written
-without the detection floor round 6 had added to the two blocks either side of
-it, and a build dropping detections regenerated the headline number as garbage
-and passed; and an assertion round 6 deleted left both its comment and 8aj
-still claiming the suite makes it.
-
-Two integrity items are worth naming separately because neither is a bug.
-**A PASS criterion was proposed for 8ak after the gate of 8.196 had already
-run.** It is now recorded as a candidate for the next gate and explicitly NOT
-part of what 8.196 was judged against, since back-dating a criterion into a
-pre-registration is the one thing a pre-registration exists to prevent. And
-**the fixture assertion on the guard runs on 0 of the 30 windows**, because no
-fixture predates the knob and none has been recaptured; 8al listed it as an
-applied fix, and it is forward-looking only.
-
-**The structural change this round asked for, and it is adopted.** Six rounds
-each broke the previous round's repair, and the recurring species is an
-assertion nobody checked could fail. Every assertion in the AP-72 blocks now
-carries a comment naming the mutation that makes it fail, verified by building
-that mutation: the guard off, inverted, forced to 2, applied unconditionally,
-the knob ignored, detections dropped. "Capable of failing" stops being
-something each round rediscovers by hand.
-
-**Also this round:** the simulated leg's jitter did not match the statistic
-`shape_campaign_summary.py` computes and now does (0.287 and 0.305 rather than
-0.281 and 0.298); its quoted difference is one realisation whose sign changes
-between seeds, and the section says so; the multipath block claimed a sweep
-over signal level that it never ran and now runs one; a comment telling the
-reader that guard 0's worst dither always sits at its own transition was
-contradicted by its own table on one row; the widening argument for one
-tolerance ran backwards; and the shipped client is on channel "B" too, so both
-nodes take the auxiliary-replay path that AP-76 turns on.
-
 ### 8am. AP-72 review rounds 5 and 6: what the fixes broke
 
 Round 4's fixes were reviewed, and so were round 5's. Both rounds found the
@@ -771,15 +806,16 @@ is missed two times in three and then prints the value a decided rule prints.
 
 **Round 6** verified round 5's fixes and found three more. The single-path
 check, rewritten to compare guard 1 against the argmax by RMS, was true by
-construction on four of the five shapes: with the split partner excluded there
-is usually no other candidate above the floor, so guard 1 simply IS the argmax.
-It now asserts the guard's contract literally, that guard 1 never returns the
-tap immediately before the argmax, with a control that guard 0 does return it
-(22 to 36 of 100 phases by shape, from a second statistic in the same
-instrument rather than an independent one). Round 6 also found a worked example in 8ak's tolerance
-paragraph that was a single leg-pair difference, the exact after-the-fact
-aggregation that paragraph forbids, and that 8aj still carried the claim round
-5 had disproved. Both are corrected above.
+construction on four of the five shapes: with the split partner excluded
+there is usually no other candidate above the floor, so guard 1 simply IS
+the argmax. It now asserts the guard's contract literally, that guard 1
+never returns the tap immediately before the argmax, with a control that
+guard 0 does return it (22 to 36 of 100 phases by shape, from a second
+statistic in the same instrument rather than an independent one). Round 6
+also found a worked example in 8ak's tolerance paragraph that was a single
+leg-pair difference, the exact after-the-fact aggregation that paragraph
+forbids, and that 8aj still carried the claim round 5 had disproved. Both
+are corrected above.
 
 **And a fourth, found by the test rather than by a reviewer.** The replacement
 single-path check first asserted that guard 1 stays within one sample of the
@@ -840,22 +876,23 @@ and the geometry test now records it rather than hiding it by moving the
 amplitude.
 
 **Round 4 (the guard alone, after the withdrawal).** The guard itself came
-back clean: bit-identical to the base commit at guard 0 over 86 400 calls with
-matched compiler flags, correct at every boundary tried, and never leaking into
-a pick rule that should ignore it. Everything the round found was again in the
-measurements and the prose, and all of it is applied: the silicon gate's
-tolerances were TIGHTER than the clock swings they were derived from and would
-have failed on the clock; the multipath check compared two maxima and would
-have passed a full-sample regression, so it is paired per point now and the
-per-point differences above come from it; the single-path check was true by
-construction; the dither screen ran at 16 draws, which misses a one-in-twenty
-flip 44 % of the time, and now runs at 48; a lobe figure from the superseded
-seed-unstable table survived in a comment; the fixture replay gained an assertion on the guard, which
-**runs on 0 of the 30 windows**, because EVERY fixture predates the knob and
-none has been recaptured since, which is exactly why none carries the field: it is forward-looking only, and the file header
-claiming the newer fixtures carry the field is corrected; and the sections were out of
-order with two references to an 8ai that did not exist as a section, which it
-now does.
+back clean: bit-identical to the base commit at guard 0 over 86 400 calls
+with matched compiler flags, correct at every boundary tried, and never
+leaking into a pick rule that should ignore it. Everything the round found
+was again in the measurements and the prose, and all of it is applied: the
+silicon gate's tolerances were TIGHTER than the clock swings they were
+derived from and would have failed on the clock; the multipath check
+compared two maxima and would have passed a full-sample regression, so it is
+paired per point now and the per-point differences above come from it; the
+single-path check was true by construction; the dither screen ran at 16
+draws, which misses a one-in-twenty flip 44 % of the time, and now runs at
+48; a lobe figure from the superseded seed-unstable table survived in a
+comment; the fixture replay gained an assertion on the guard, which **runs
+on 0 of the 30 windows**, because EVERY fixture predates the knob and none
+has been recaptured since, which is exactly why none carries the field: it
+is forward-looking only, and the file header claiming the newer fixtures
+carry the field is corrected; and the sections were out of order with two
+references to an 8ai that did not exist as a section, which it now does.
 
 **Applied to the guard from round 3:** `first_path_guard` accepts only
 0 and 1 now, because 2 loses a genuine two-sample-earlier arrival and 3 a
@@ -901,31 +938,38 @@ pre-registration exists to prevent. It is also weaker than it looks: a guard
 of 2 would produce a 2-sample-early acquisition, which sits inside the bound.
 For the record the 8.196 legs do meet it (residuals 0, -1, 0, 0, 0, 0, 0, 0).
 
-**Back to the startup line in the PASS list above.** It proves the knob was PARSED and reached the detector,
-not that the backend applied it; the portable correlator does apply it, and a
-backend that does not already triggers the "first-path knobs are NOT applied"
-warning beside the same line, so the two together are the evidence.
+**Back to the startup line in the PASS list above.** It proves the knob was
+PARSED and reached the detector, not that the backend applied it; the
+portable correlator does apply it, and a backend that does not already
+triggers the "first-path knobs are NOT applied" warning beside the same
+line, so the two together are the evidence.
 
 **The comparison, with its statistic AND its tolerance stated.** Compare the
-**mean over the two legs of each arm**, not leg maxima against leg minima: with
-two legs an arm, the choice of aggregation can otherwise be made after the data
-and it changes the answer. mean(B) - mean(A) must not exceed **1.3 samples** of
-adjacent-difference jitter or **4.2 samples** of residual sd. Those come from what a FIXED
-configuration did between rounds on this bench in 8.192: legacy's jitter moved
-2.43 to 1.21, a swing of 1.22, and its residual sd 8.15 to 4.06, a swing of
-4.09, with nothing changed but the clock; 1.22 and 4.09 rounded up to 1.3 and 4.2. A draft justified the extra tenth on the second by saying the swing is a single-leg figure while the statistic is a mean of two; that argument runs BACKWARDS, since a mean of two legs has LESS spread than one leg, and it would tighten the bound rather than loosen it. The tenth is slack, plainly, and is kept only because a tolerance that has to be loosened after the runs is worse than one that was generous before them.
-**Two drafts of this paragraph were wrong before the runs and both were caught
-by review:** the first set 0.5 and 3, TIGHTER than the swings it cited, which
-would have failed the gate on the clock; the second named no aggregation rule,
-and 8.193's own four legs on this bench, same evening, one knob
-changed, spanned 4.42 in residual sd, above the 4.2 bound. On leg extremes that
-gate fails; **on per-arm means the same four legs read 0.57 and pass with a
-sevenfold margin** (A legs 3.32 and 7.02, mean 5.17; B legs 6.60 and 2.60, mean
-4.60). A draft of this paragraph quoted 3.28 for that comparison, which is
-`leg2 - leg1`, a single leg-pair difference and precisely the after-the-fact
-aggregation the paragraph exists to forbid; the correct figure makes the
-argument stronger, not weaker. The statistic is named above, before any leg
-runs.
+**mean over the two legs of each arm**, not leg maxima against leg minima:
+with two legs an arm, the choice of aggregation can otherwise be made after
+the data and it changes the answer. mean(B) - mean(A) must not exceed **1.3
+samples** of adjacent-difference jitter or **4.2 samples** of residual sd.
+Those come from what a FIXED configuration did between rounds on this bench
+in 8.192: legacy's jitter moved 2.43 to 1.21, a swing of 1.22, and its
+residual sd 8.15 to 4.06, a swing of 4.09, with nothing changed but the
+clock; 1.22 and 4.09 rounded up to 1.3 and 4.2. A draft justified the extra
+tenth on the second by saying the swing is a single-leg figure while the
+statistic is a mean of two; that argument runs BACKWARDS, since a mean of
+two legs has LESS spread than one leg, and it would tighten the bound rather
+than loosen it. The tenth is slack, plainly, and is kept only because a
+tolerance that has to be loosened after the runs is worse than one that was
+generous before them. **Two drafts of this paragraph were wrong before the
+runs and both were caught by review:** the first set 0.5 and 3, TIGHTER than
+the swings it cited, which would have failed the gate on the clock; the
+second named no aggregation rule, and 8.193's own four legs on this bench,
+same evening, one knob changed, spanned 4.42 in residual sd, above the 4.2
+bound. On leg extremes that gate fails; **on per-arm means the same four
+legs read 0.57 and pass with a sevenfold margin** (A legs 3.32 and 7.02,
+mean 5.17; B legs 6.60 and 2.60, mean 4.60). A draft of this paragraph
+quoted 3.28 for that comparison, which is `leg2 - leg1`, a single leg-pair
+difference and precisely the after-the-fact aggregation the paragraph exists
+to forbid; the correct figure makes the argument stronger, not weaker. The
+statistic is named above, before any leg runs.
 
 **WHY THIS GATE IS WEAK, STATED IN ADVANCE RATHER THAN AFTERWARDS.** The
 guard's principal effect is a CONSTANT one-sample shift of the reported index
@@ -937,33 +981,35 @@ construction, and what remains visible is only the part
 that varies phase to phase.
 
 **And that part is measured, in the tree, by `beacon_geometry_test`.** Forty
-simulated legs of 23 detections through the library's own channel model, in exactly the statistic
-`shape_campaign_summary.py` reports, so the number is comparable with the
-rig's: **jitter 0.287 at guard 0 against 0.305 at guard 1, and residual sd
-0.277 against 0.292.** A difference of 0.018 samples against a gate tolerance
-of 1.3. **That 0.018 is one realisation and its SIGN is not stable** -- across
-master seeds the difference reads +0.018, -0.007 and +0.003, and under a
-deterministic phase walk instead of independent draws it is 0.000. What is
-stable, and all the gate needs, is that every one of those is far inside the
-tolerance. The guard does not add or remove a toggle; it moves the
-rounding threshold in arrival phase, so both settings step once per cycle. The
-phase between accepts is INDEPENDENT rather than walking, because the shipped
-2604 ms cadence advances it by tens of samples each time. (Two earlier versions of this paragraph were wrong. The first quoted a
-reviewer's scratch figure of 0.415 against 0.414 which nothing in the tree
-regenerated. The second put the simulation in the tree but computed the RMS
-about zero divided by the sample count, where the rig's statistic removes the
-mean and divides by the count of DIFFERENCES, and read 2.3 % low as a result.) **So the gate
-is predicted to see nothing, and that prediction is on the record before the
-legs run.** A difference that does appear is therefore the clock or a defect,
-not the guard's intended effect. (The offline RMS accuracy gap, 0.083 samples
-on legacy and 0.169 on dot11, is an accuracy figure and is not comparable to a
-jitter; setting the two side by side was the category error that round 2 was
-written about.) **This gate can
-falsify a large regression and nothing else.** It cannot see the benefit, which
-is offline and reported as such, and it cannot see the one harm the offline
-work identified: a one-sample echo, where guard 1 returns the echo and guard 0
-returns the direct path. This bench is a cable with no such echo, so that harm
-is not testable here at all and stays an open risk for the over-the-air work.
+simulated legs of 23 detections through the library's own channel model, in
+exactly the statistic `shape_campaign_summary.py` reports, so the number is
+comparable with the rig's: **jitter 0.287 at guard 0 against 0.305 at guard
+1, and residual sd 0.277 against 0.292.** A difference of 0.018 samples
+against a gate tolerance of 1.3. **That 0.018 is one realisation and its
+SIGN is not stable** -- across master seeds the difference reads +0.018,
+-0.007 and +0.003, and under a deterministic phase walk instead of
+independent draws it is 0.000. What is stable, and all the gate needs, is
+that every one of those is far inside the tolerance. The guard does not add
+or remove a toggle; it moves the rounding threshold in arrival phase, so
+both settings step once per cycle. The phase between accepts is INDEPENDENT
+rather than walking, because the shipped 2604 ms cadence advances it by tens
+of samples each time. (Two earlier versions of this paragraph were wrong.
+The first quoted a reviewer's scratch figure of 0.415 against 0.414 which
+nothing in the tree regenerated. The second put the simulation in the tree
+but computed the RMS about zero divided by the sample count, where the rig's
+statistic removes the mean and divides by the count of DIFFERENCES, and read
+2.3 % low as a result.) **So the gate is predicted to see nothing, and that
+prediction is on the record before the legs run.** A difference that does
+appear is therefore the clock or a defect, not the guard's intended effect.
+(The offline RMS accuracy gap, 0.083 samples on legacy and 0.169 on dot11,
+is an accuracy figure and is not comparable to a jitter; setting the two
+side by side was the category error that round 2 was written about.) **This
+gate can falsify a large regression and nothing else.** It cannot see the
+benefit, which is offline and reported as such, and it cannot see the one
+harm the offline work identified: a one-sample echo, where guard 1 returns
+the echo and guard 0 returns the direct path. This bench is a cable with no
+such echo, so that harm is not testable here at all and stays an open risk
+for the over-the-air work.
 
 **FAIL** on the envelope bisects the guard. A jitter or sd improvement is NOT
 expected and, if one appears, is to be read as the clock unless it replicates
@@ -1001,18 +1047,18 @@ or an sd on integers distinguishes one flip in twenty from a coin toss):
 | RMS vs the true arrival, samples | **0.289** | 0.372 to 0.458 | **0.289**, and `nr` 0.310 to 0.321 |
 
 0.289 is 1/sqrt(12), the ideal rounder. **The first-path rule costs 29 % to
-58 % accuracy on a link with no multipath, and a one-sample guard recovers all
-of it for four of the five shapes.** `nr` keeps 0.310 to 0.321, and not
+58 % accuracy on a link with no multipath, and a one-sample guard recovers
+all of it for four of the five shapes.** `nr` keeps 0.310 to 0.321, and not
 because its lobe is wide -- dot11's is the widest and dot11 is fully
 recovered. `nr` is the one shape whose back-scan reaches TWO samples before
-the peak on a small fraction of arrival phases (8 of 800 in the histogram, and
-0 for every other shape), which a one-sample guard does not cover; the guard is not claimed to fix it and
-the test asserts the guard's contract
+the peak on a small fraction of arrival phases (8 of 800 in the histogram,
+and 0 for every other shape), which a one-sample guard does not cover; the
+guard is not claimed to fix it and the test asserts the guard's contract
 literally -- guard 1 never returns the tap immediately before the argmax --
-with a control that guard 0 does return it, on 22 to 36 of 100 arrival phases
-by shape. An RMS form of that claim was asserted for one round and deleted: it
-was true by construction on four of the five shapes. The guard is therefore reinstated, as
-`sync.detector.first_path_guard`.
+with a control that guard 0 does return it, on 22 to 36 of 100 arrival
+phases by shape. An RMS form of that claim was asserted for one round and
+deleted: it was true by construction on four of the five shapes. The guard
+is therefore reinstated, as `sync.detector.first_path_guard`.
 
 **And what it costs on multipath, measured per point rather than per column.**
 Two channels were added to the three the geometry test carried, and the whole
@@ -1068,18 +1114,19 @@ was removed.
 
 ### 8ai. AP-72 review round 1: the estimator was replaced before the re-runs
 
-**Written after review round 1 and BEFORE the re-runs.** The reviewer disproved the estimator's stated rationale, not the
-criteria. Two HIGH findings: the climb bound of two samples was unreachable
-because the magnitude bound discarded every two-step result, so `nr` (the one
-shape needing it) always reported none; and "a parabola through three points
-of a triangle finds its apex" is false, with a measured S-curve bias to 0.234
+**Written after review round 1 and BEFORE the re-runs.** The reviewer
+disproved the estimator's stated rationale, not the criteria. Two HIGH
+findings: the climb bound of two samples was unreachable because the
+magnitude bound discarded every two-step result, so `nr` (the one shape
+needing it) always reported none; and "a parabola through three points of a
+triangle finds its apex" is false, with a measured S-curve bias to 0.234
 samples and a threefold gain error near half a sample, because the
 autocorrelation of a full-rate pseudorandom sequence is a delta (the peak's
-neighbours carry 0.008 and 0.002 of it at zero offset) and three samples of a
-near-delta are the worst case for a parabola. **The estimator is therefore
+neighbours carry 0.008 and 0.002 of it at zero offset) and three samples of
+a near-delta are the worst case for a parabola. **The estimator is therefore
 replaced before the re-runs by the ratio of the two samples bracketing the
-top, `side / (mid + side)`, which is EXACT for the ideal bandlimited sinc and
-for the triangle, the two kernels that bracket the physical case.**
+top, `side / (mid + side)`, which is EXACT for the ideal bandlimited sinc
+and for the triangle, the two kernels that bracket the physical case.**
 **Correction to the reviewer's own premise, found by measuring it in-tree
 instead of quoting it:** "the lobe is essentially a delta" holds for legacy
 (neighbours 0.008 of the peak), nr_pss (0.014) and nr (0.030) and NOT for
@@ -1087,12 +1134,12 @@ dot11, whose replica is a band-limited training field and whose neighbours
 carry 0.18; the review measured legacy and generalised. The estimator's
 premise is therefore per shape, dot11 is duly the worst accuracy column, and
 `beacon_geometry_test` prints the lobe table so the numbers in the code
-comment are reproducible rather than quoted. The
-pre-registered bars above are unchanged and the same runs judge it; what
-changed is the arithmetic between the samples and the answer. Also applied
-from the round: no refinement now reports NaN rather than zero, so "unknown"
-cannot read as "exactly centred"; the amplitude is taken in double from the
-parts; non-finite samples, window edges and shoulders with no top in reach all
+comment are reproducible rather than quoted. The pre-registered bars above
+are unchanged and the same runs judge it; what changed is the arithmetic
+between the samples and the answer. Also applied from the round: no
+refinement now reports NaN rather than zero, so "unknown" cannot read as
+"exactly centred"; the amplitude is taken in double from the parts;
+non-finite samples, window edges and shoulders with no top in reach all
 report none; and the documented range is the true one, plus or minus 2.5
 samples rather than half a sample.
 
