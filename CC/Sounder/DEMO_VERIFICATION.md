@@ -723,7 +723,15 @@ neighbours carry 0.008 and 0.002 of it at zero offset) and three samples of a
 near-delta are the worst case for a parabola. **The estimator is therefore
 replaced before the re-runs by the ratio of the two samples bracketing the
 top, `side / (mid + side)`, which is EXACT for the ideal bandlimited sinc and
-for the triangle, the two kernels that bracket the physical case.** The
+for the triangle, the two kernels that bracket the physical case.**
+**Correction to the reviewer's own premise, found by measuring it in-tree
+instead of quoting it:** "the lobe is essentially a delta" holds for legacy
+(neighbours 0.008 of the peak), nr_pss (0.014) and nr (0.030) and NOT for
+dot11, whose replica is a band-limited training field and whose neighbours
+carry 0.18; the review measured legacy and generalised. The estimator's
+premise is therefore per shape, dot11 is duly the worst accuracy column, and
+`beacon_geometry_test` prints the lobe table so the numbers in the code
+comment are reproducible rather than quoted. The
 pre-registered bars above are unchanged and the same runs judge it; what
 changed is the arithmetic between the samples and the answer. Also applied
 from the round: no refinement now reports NaN rather than zero, so "unknown"

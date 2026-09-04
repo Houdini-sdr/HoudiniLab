@@ -317,19 +317,24 @@ static double firstPathFloorFrac(CommsLib::BeaconThresh form, double db) {
 // SUB-SAMPLE POSITION OF THE LOBE AN INDEX SITS ON (BeaconResult::frac_offset).
 //
 // THE ESTIMATOR IS A RATIO OF THE TWO SAMPLES THAT BRACKET THE TOP, NOT A
-// PARABOLA THROUGH THREE OF THEM. A full-rate pseudorandom sequence's
-// autocorrelation is a delta: measured on this bench at zero fractional delay,
-// the peak's neighbours carry 0.008 and 0.002 of it. So the three samples
-// around the top do not trace the beacon's own lobe at all -- they trace the
-// FRACTIONAL-DELAY KERNEL, and for the two kernels that bracket the physical
-// case, the ideal bandlimited sinc and the triangle, `side / (mid + side)` is
-// exactly the offset. Both are checked in beacon_geometry_test. A parabola
-// through a near-delta instead under-reports by up to 0.234 samples with a
-// threefold gain error near half a sample, which is a nonlinear timing
-// discriminator rather than a measurement (review of 2026-09-03, 8ai).
+// PARABOLA THROUGH THREE OF THEM. For a replica that is a full-rate
+// pseudorandom sequence the autocorrelation is nearly a delta -- measured at
+// zero fractional delay, the peak's neighbours carry 0.008 of it for legacy,
+// 0.014 for nr_pss, 0.030 for nr (beacon_geometry_test prints the table) -- so
+// the three samples around the top trace the FRACTIONAL-DELAY KERNEL and not
+// the beacon. For the two kernels that bracket that case, the ideal
+// bandlimited sinc and the triangle, `side / (mid + side)` is EXACTLY the
+// offset. A parabola through a near-delta instead under-reports by up to 0.234
+// samples with a threefold gain error near half a sample, which is a
+// nonlinear timing discriminator rather than a measurement (8ai).
 //
-// Residual: a kernel whose two neighbours are BOTH non-negligible at zero
-// offset biases this by about their ratio to the peak, 0.008 samples here.
+// dot11 IS THE EXCEPTION AND IT IS MEASURED, NOT ASSUMED: its replica is a
+// band-limited training field, so its neighbours carry 0.18 and its main lobe
+// is genuinely wider than a delta. Symmetric leakage of that size biases this
+// estimator, and dot11 is duly the worst column in the accuracy table at 0.095
+// samples RMS -- still five times better than the 0.449 of the integer it
+// refines, and well inside the 0.289 bar. A shape with a wider lobe still
+// would want a kernel-matched estimator rather than this one.
 //
 // The returned index is not always the top -- the first-path rule deliberately
 // picks the earlier tap of a split peak (8ah) -- so this climbs to the local

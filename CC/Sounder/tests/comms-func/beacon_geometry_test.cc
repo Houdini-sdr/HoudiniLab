@@ -860,6 +860,55 @@ int main() {
     }
   }
 
+  // WHY THE ESTIMATOR IS A RATIO AND NOT A PARABOLA, MEASURED RATHER THAN
+  // ASSERTED (8ai). comms-lib-portable.cc says the beacon's autocorrelation is
+  // a delta, so the three samples around the top trace the fractional-delay
+  // kernel and not the beacon; that claim is a number, so here it is. At zero
+  // fractional delay a delta-like lobe leaves its neighbours near zero, and a
+  // parabola through three points of such a lobe is at its worst.
+  std::printf("\n=== AP-72: the correlation lobe at zero fractional delay "
+              "(amplitude relative to the peak) ===\n");
+  std::printf("%-14s %9s %9s %9s %9s\n", "shape", "peak-2", "peak-1", "peak+1",
+              "peak+2");
+  for (const auto& b : ds) {
+    houdini::sync::sim::Channel sc;
+    sc.snr_db = 60.0;
+    sc.peak_counts = 1600.0;
+    const long long len = static_cast<long long>(b.core.size());
+    const long long pos = 4000, end = pos + len, s0 = end - kLead,
+                    n = kLead + kTail;
+    const std::vector<std::complex<int16_t>> buf =
+        sc.receive(b.core, pos, s0, n, 1);
+    const std::vector<std::complex<float>> raw =
+        CommsLib::toCorrelatorScale(buf.data(), static_cast<size_t>(n));
+    const std::vector<std::complex<float>> corr =
+        CommsLib::correlate_mt(raw, b.replica);
+    size_t top = 0;
+    double best = -1.0;
+    for (size_t k = 0; k < corr.size(); ++k) {
+      const double a = std::abs(corr[k]);
+      if (a > best) { best = a; top = k; }
+    }
+    std::printf("%-14s", b.name.c_str());
+    for (const int d : {-2, -1, 1, 2}) {
+      const long long k = static_cast<long long>(top) + d;
+      const double a = (k >= 0 && k < static_cast<long long>(corr.size()))
+                           ? std::abs(corr[static_cast<size_t>(k)]) / best
+                           : 0.0;
+      std::printf(" %9.4f", a);
+    }
+    std::printf("\n");
+    // Informational, deliberately not a threshold. The first version of this
+    // asserted "delta-like" for every shape at 0.05 and dot11 FAILED it at
+    // 0.18: dot11's replica is a band-limited training field, not a full-rate
+    // pseudorandom sequence, so its main lobe is genuinely wider and the
+    // review's "essentially a delta" was measured on legacy and generalised.
+    // The estimator's premise survives per shape rather than in general, and
+    // the consequence is visible in the RMS table below, where dot11 is the
+    // worst column (0.095) and legacy the best (0.018). What is asserted is
+    // that outcome, which is pre-registered, not a threshold invented here.
+  }
+
   // AP-72's OTHER NAMED FIX, MEASURED AGAINST THE INTEGER IT REFINES (8ah).
   // `frac_offset` is a three-point parabolic fit on the correlator amplitude
   // at the lobe the returned index sits on, so `index + frac_offset` should
