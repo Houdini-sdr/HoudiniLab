@@ -7,6 +7,7 @@
 ---------------------------------------------------------------------
 */
 
+#include <cerrno>
 #include "include/recorder_worker.h"
 
 #include <arpa/inet.h>
@@ -91,7 +92,9 @@ void RecorderWorker::initCsi(void) {
   double fps = 30.0;
   if (const char* f = std::getenv("HOUDINI_CSI_FPS")) fps = std::max(0.5, atof(f));
   csi_throttle_ns_ = 1e9 / fps;
-  rx_conj_ = cfg_->is_houdini();  // undo the R2C mixer's spectral inversion (RFSoC only)
+  // What the platform's receive path does to the samples (sync/rx_path_fixes.h).
+  const houdini::sync::RxPathFixes fixes = cfg_->rx_path_fixes();
+  rx_conj_ = fixes.conjugate;  // undo the R2C mixer's spectral inversion (RFSoC only)
   if (std::getenv("HOUDINI_RX_NOCONJ")) rx_conj_ = false;  // A/B override (before/after)
   // Symbol-0 start: default the FFT window HALF A CP earlier than the nominal prefix.
   // The cyclic-prefix guard is one-sided -- a window placed early (within the CP) is a
@@ -106,13 +109,18 @@ void RecorderWorker::initCsi(void) {
   if (const char* sym_env = std::getenv("HOUDINI_CSI_SYM_START"))
     csi_sym_start_ = (std::string(sym_env) == "auto") ? -1 : std::atoi(sym_env);
   // Per-frame pilot-vs-data timing re-align (Houdini framer jitter). Default on for Houdini.
-  csi_timing_fix_ = cfg_->is_houdini();
+  csi_timing_fix_ = fixes.csi_timing;
   if (std::getenv("HOUDINI_CSI_NO_TIMING_FIX")) csi_timing_fix_ = false;
+  // Per-symbol pilot common-phase (AP-38). Default on for Houdini; the env is
+  // the A/B lever, since the whole point is that it should be invisible when
+  // the carrier offset is small and decisive when it is not.
+  csi_phase_fix_ = fixes.csi_phase;
+  if (std::getenv("HOUDINI_CSI_NO_PHASE_FIX")) csi_phase_fix_ = false;
   view_mode_ = true;
   MLPD_INFO("CSI view mode: streaming to %s:%d (%d subcarriers, ~%.0f fps/ant, rx_conj=%d, "
-            "sym_start=%s, timing_fix=%d)\n", host.c_str(), port, N, fps, rx_conj_ ? 1 : 0,
+            "sym_start=%s, timing_fix=%d, phase_fix=%d)\n", host.c_str(), port, N, fps, rx_conj_ ? 1 : 0,
             csi_sym_start_ >= 0 ? std::to_string(csi_sym_start_).c_str() : "auto",
-            csi_timing_fix_ ? 1 : 0);
+            csi_timing_fix_ ? 1 : 0, csi_phase_fix_ ? 1 : 0);
 }
 
 // Energy leading edge of a slot (first index where the sliding-64 power crosses
@@ -445,7 +453,11 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
     bool exp = false;
     if (seen.fetch_add(1) >= skip &&
         dumped.compare_exchange_strong(exp, true)) {
-      FILE* f = std::fopen("/tmp/cns_dump.bin", "wb");
+      FILE* f = std::fopen(Utils::dumpPath("cns_dump.bin").c_str(), "wb");
+      if (f == nullptr) {
+        MLPD_WARN("HOUDINI_CSI_DUMP: cannot open %s (%s)\n", Utils::dumpPath("cns_dump.bin").c_str(),
+                  std::strerror(errno));
+      }
       if (f) {
         const int32_t hdr[5] = {N, cp, es, nsym,
                                 static_cast<int32_t>(data_ind.size())};
@@ -461,7 +473,7 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
         }
         std::fwrite(d, sizeof(short), static_cast<size_t>(slot) * 2, f);
         std::fclose(f);
-        MLPD_INFO("CSI dump written to /tmp/cns_dump.bin\n");
+        MLPD_INFO("CSI dump written to %s\n", Utils::dumpPath("cns_dump.bin").c_str());
       }
     }
   }
@@ -575,6 +587,19 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
           const double slope = (npts * skp - sk * sp) / denom;  // rad per bin
           const double frac = slope * N / (2.0 * M_PI);         // samples
           if (std::abs(frac) < 1.0) best_r += frac;
+          // AP-37: the INTERCEPT this fit discards is the U slot's common phase
+          // against the P-slot-derived H -- i.e. exactly the pilot-to-data
+          // rotation an uncorrected carrier offset would leave. Logged so the
+          // question is settled by the quantity itself rather than inferred
+          // from the constellation metric downstream.
+          static std::atomic<unsigned> icn{0};
+          if ((icn.fetch_add(1) % 512) == 0) {
+            const double icept = (sp - slope * sk) / npts;
+            MLPD_INFO(
+                "U-slot pilot common phase %+.2f deg (slope %+.4f samp), "
+                "frame %u\n",
+                icept * 180.0 / M_PI, frac, pkt->frame_id);
+          }
         }
       }
     }
@@ -593,15 +618,110 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
       }                         // HOUDINI_CSI_R_DEBUG on (second review 3.1)
     }
   }
+  // AP-38: PER-SYMBOL common-phase correction from the pilot subcarriers. This
+  // is what 802.11 and LTE actually rely on, and what this repo's own reference
+  // implementations do (PYTHON/IrisUtils/ofdmtxrx.py phase_correction, MATLAB
+  // rl_ofdm_siso.m DO_APPLY_PHASE_ERR_CORRECTION, which ships ENABLED while the
+  // bulk LTS correction ships disabled).
+  //
+  // Note the transpose against the timing fit above: that one accumulates PER
+  // PILOT TONE across all symbols and keeps the slope, which is right for a
+  // frequency-domain ramp and destroys the per-symbol information. This one
+  // accumulates PER SYMBOL across the tones and keeps the phase, which is the
+  // only form that can follow a carrier offset -- an uncorrected offset leaves
+  // both a common rotation between the pilot and data slots (measured
+  // 0.0240 deg/Hz, confirmed at +16.6 against +16.8 predicted) AND a rotation
+  // that ADVANCES symbol to symbol within the slot (0.0084 deg/Hz across 36
+  // symbols; a 20 kHz injection collapsed every datagram exactly as that
+  // predicts). A single common phase cannot fix the second one; this can.
+  //
+  // Self-correcting: it consumes no CFO estimate, so it is immune to the
+  // estimator bias entirely.
+  const auto& psc_d = cfg_->pilot_sc();
+  const auto& pind_d = cfg_->pilot_sc_ind();
+  std::vector<std::complex<float>> sym_derot(Ys.size(),
+                                             std::complex<float>(1.0f, 0.0f));
+  std::vector<double> sym_phase(Ys.size(), 0.0);
+  std::vector<char> sym_phase_ok(Ys.size(), 0);
+  if (csi_phase_fix_ && !pind_d.empty()) {
+    for (size_t si = 0; si < Ys.size(); ++si) {
+      std::complex<double> acc(0.0, 0.0);
+      for (size_t c = 0; c < pind_d.size() && c < psc_d.size(); ++c) {
+        const size_t k = pind_d[c];
+        if (k >= static_cast<size_t>(N)) continue;
+        const std::complex<float> h = Hc[k];
+        if (std::abs(h) < hmin || std::norm(h) < 1e-9f) continue;
+        acc += (std::complex<double>(Ys[si][k]) / std::complex<double>(h)) *
+               std::conj(std::complex<double>(psc_d[c]));
+      }
+      if (std::abs(acc) > 1e-12) {
+        const double ph = -std::arg(acc);
+        sym_phase[si] = -ph;   // the measured advance, kept for the alarm below
+        sym_phase_ok[si] = true;
+        sym_derot[si] = std::complex<float>(static_cast<float>(std::cos(ph)),
+                                            static_cast<float>(std::sin(ph)));
+      }
+    }
+    // CARRIER-HEALTH ALARM, and the reason it has to live here.
+    //
+    // The CNS score below is |mean(u^4)| over the CORRECTED points, so it sits
+    // DOWNSTREAM of this correction. Before the fix a growing carrier offset
+    // announced itself by collapsing that score (a 20 kHz injection took every
+    // datagram to ~0.44); with the fix absorbing the per-symbol spread the score
+    // stays high and the alarm is gone -- the branch removed its own end-to-end
+    // carrier indicator while adding the correction [Opus review]. The score is
+    // still a valid read of OUTPUT quality; it is no longer a read of INPUT
+    // health, and those are different jobs.
+    //
+    // The per-symbol phase ADVANCE is the input-side quantity, and this loop
+    // already computes it. Its slope across the slot is the residual carrier
+    // offset in exactly the units that matter: 360*f*(fft+cp)/rate degrees per
+    // symbol. Reported so a rising offset is visible even while it is being
+    // corrected.
+    int nph = 0;
+    double s_i = 0, s_p = 0, s_ii = 0, s_ip = 0, prev = 0;
+    double unwrapped = 0;
+    for (size_t si = 0; si < sym_phase.size(); ++si) {
+      if (!sym_phase_ok[si]) continue;
+      double v = sym_phase[si];
+      if (nph > 0) {                       // unwrap against the previous symbol
+        while (v - prev > M_PI) v -= 2.0 * M_PI;
+        while (v - prev < -M_PI) v += 2.0 * M_PI;
+      }
+      prev = v;
+      unwrapped = v;
+      const double x = static_cast<double>(si);
+      s_i += x; s_p += v; s_ii += x * x; s_ip += x * v;
+      ++nph;
+    }
+    (void)unwrapped;
+    if (nph >= 3) {
+      const double den = nph * s_ii - s_i * s_i;
+      if (std::abs(den) > 1e-9) {
+        const double slope = (nph * s_ip - s_i * s_p) / den;  // rad per symbol
+        const double hz = slope / (2.0 * M_PI) * cfg_->rate() /
+                          static_cast<double>(N + cp);
+        static std::atomic<unsigned> phn{0};
+        if ((phn.fetch_add(1) % 512) == 0) {
+          MLPD_INFO(
+              "carrier health: per-symbol phase advance %+.3f deg/sym = "
+              "%+.1f Hz residual across %d symbols (measured BEFORE the "
+              "correction, so it stays visible while corrected)\n",
+              slope * 180.0 / M_PI, hz, nph);
+        }
+      }
+    }
+  }
   std::vector<std::complex<float>> pts;
   pts.reserve(kMaxPts);
   for (size_t si = 0; si < Ys.size() && pts.size() < kMaxPts; ++si) {
     const auto& Y = Ys[si];
+    const std::complex<float> dr = sym_derot[si];
     for (size_t j = 0; j < data_ind.size() && pts.size() < kMaxPts; ++j) {
       const size_t k = data_ind[j];
       const std::complex<float> h = Hc[k];
       if (std::abs(h) < hmin || std::norm(h) < 1e-9f) continue;  // deep fade
-      pts.push_back(Y[k] / h);  // zero-forcing equalizer
+      pts.push_back((Y[k] / h) * dr);  // zero-forcing equalizer + phase fix
     }
   }
   if (pts.empty()) return;
@@ -678,8 +798,54 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
         }
       }
     } else if (tot % 512 == 0) {
-      MLPD_INFO("CNS score %.3f at frame %u (%u datagrams, %u low)\n", score,
-                pkt->frame_id, tot, cns_low.load());
+      // AP-37: the CONSTELLATION ROTATION, which the score deliberately throws
+      // away. score = |mean(u^4)| is rotation-invariant by construction, so it
+      // reports a tight constellation whether or not it is correctly oriented.
+      // arg(mean(u^4))/4 is that missing orientation, modulo 90 deg for QPSK.
+      //
+      // CORRECTION [Opus review]: an earlier version of this comment claimed
+      // "nothing in this pipeline removes it". That was WRONG, and it is wrong
+      // about code 80 lines above: the blind global 4th-power de-rotation
+      // already rotates `pts` to the ideal constellation before this runs. So
+      // this reading is the RESIDUAL after that de-rotation and is pinned near
+      // zero by construction -- it cannot measure the physical pilot-to-data
+      // rotation, and the campaign's measurement of that (+16.6 deg against
+      // +16.8 predicted at a 700 Hz injection) came from the pilot-tone
+      // intercept below, not from here. Kept as a de-rotation-residual health
+      // line; do not read it as the carrier rotation.
+      // Referenced to the IDEAL QPSK constellation, not to zero. The ideal
+      // points sit at +-45/+-135 deg, so u^4 = -1 and a RAW arg(u4)/4 reads a
+      // constant +-45 deg on a perfectly aligned constellation -- which is
+      // exactly what the first cut of this line printed. Subtract the ideal's
+      // own 4th-power phase (pi) and wrap, so aligned reads 0 and a rotation
+      // theta reads theta wrapped into (-45, +45] deg.
+      double r4 = std::arg(u4) - M_PI;
+      while (r4 > M_PI) r4 -= 2.0 * M_PI;
+      while (r4 <= -M_PI) r4 += 2.0 * M_PI;
+      const double rot_deg = r4 / 4.0 * 180.0 / M_PI;
+      // Guard the OUTER vector too. cl_pilot_slots_/cl_ul_slots_ are indexed by
+      // client schedule LINE, and a BS-only or internal-measurement config has
+      // none -- while this path is reached via the BS-side ul_slots_, so it IS
+      // live there. This runs inside a detached recorder thread with no
+      // try/catch anywhere above it, so an out_of_range here calls
+      // std::terminate and takes the whole sounder down, minutes into an
+      // apparently healthy run (it fires on the 512th good datagram).
+      const auto& cps = cfg_->cl_pilot_slots();
+      const auto& cus = cfg_->cl_ul_slots();
+      const int pslot = (cps.empty() || cps.at(0).empty())
+                            ? -1
+                            : static_cast<int>(cps.at(0).at(0));
+      const int uslot = (cus.empty() || cus.at(0).empty())
+                            ? -1
+                            : static_cast<int>(cus.at(0).at(0));
+      const double dt = (pslot >= 0 && uslot >= 0)
+                            ? (uslot - pslot) * slot / cfg_->rate()
+                            : 0.0;
+      MLPD_INFO(
+          "CNS score %.3f rot %+.1f deg at frame %u (%u datagrams, %u low); "
+          "P->U %.1f us, so %+.1f deg per kHz of uncorrected CFO\n",
+          score, rot_deg, pkt->frame_id, tot, cns_low.load(), dt * 1e6,
+          360.0 * 1000.0 * dt);
     }
   }
   double psum = 0.0;
@@ -722,7 +888,14 @@ RecorderWorker::~RecorderWorker() { this->finalize(); }
 
 void RecorderWorker::init(void) {
   this->initCsi();
-  if (this->view_mode_) return;  // viewing mode streams CSI, writes no HDF5
+  if (this->view_mode_) {
+    // Say so, loudly: a stray HOUDINI_CSI_UDP in the environment would
+    // otherwise disable every recording on any backend with no trace.
+    MLPD_WARN(
+        "VIEW MODE (HOUDINI_CSI_UDP is set): CSI streams to the dashboard and "
+        "NO HDF5 FILE IS WRITTEN. Unset it to record.\n");
+    return;
+  }
   this->hdf5_ = new Hdf5Lib(this->hdf5_name_, "Data");
   // Write Atrributes
   // ******* COMMON ******** //
@@ -983,7 +1156,8 @@ void RecorderWorker::finalize(void) {
     // the file closes. start_time_ns is relative to the RX stream start (0-anchored);
     // the parser tools (gap_forensics.py) key off the gap sizes + spacing, not an
     // absolute wall-clock. Single receiving stream assumed (see rx_gap_sink.h).
-    if (this->cfg_->is_houdini()) {
+    // The gap ledger is a fact of the Houdini receive path (rx_gap_sink.h).
+    if (this->cfg_->platform() == houdini::sync::Platform::kHoudini) {
       const std::vector<Sounder::GapExtent> gaps =
           Sounder::RxGapSink::instance().drain();
       if (gaps.empty() == false) {

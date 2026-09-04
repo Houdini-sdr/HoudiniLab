@@ -27,10 +27,10 @@
 #include <string>
 #include <vector>
 
-#include "include/BaseRadioSet.h"
-#include "include/ClientRadioSet.h"
-#include "include/comms-lib.h"
-#include "include/config.h"
+#include "BaseRadioSet.h"
+#include "ClientRadioSet.h"
+#include "comms-lib.h"
+#include "config.h"
 
 int main(int argc, char** argv) {
   std::string conf = "files/houdini-1u.json";

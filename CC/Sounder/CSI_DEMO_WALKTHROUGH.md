@@ -167,6 +167,18 @@ You should end up with `build/sounder`. The GPU beacon correlator is a separate
 option, off by default, and the demo does not need it. Leave
 `HOUDINI_USE_CUDA` alone unless you are specifically testing that path.
 
+The build also produces the radio-free tests and bench tools (six `ctest`
+suites: the sync configuration, the golden beacon windows, the resync policy,
+the slice geometry, the grid tracker and the beacon geometry). Run them once
+after building:
+
+```bash
+cd build && ctest
+```
+
+They need no radio and take under a minute. A packager who wants only the
+sounder can configure with `-DSOUNDER_BUILD_TESTS=OFF`.
+
 ### 2.6 Point the demo at your bench
 
 Edit `files/topology-houdini.json` and replace the two addresses with your own.
@@ -446,9 +458,9 @@ The badge reads one of:
 
 | Badge | Meaning |
 |---|---|
-| `LOCKED` | Beacon found where the anchored grid predicted it. Normal. |
+| `LOCKED` | Beacon found where the anchored grid predicted it. Normal. The UE still nudges its schedule on one of these, by a fraction of the measured residual, so a locked run is a tracking run and not a frozen one. |
 | `HOLD PENDING` | One off-grid detection seen. Deliberately NOT acted on: single large offsets are scatter, so the sounder waits for a second consistent one. |
-| `RE-ANCHORED` | The UE gave up tracking and re-acquired. The readout names the schedule step applied. This is the only place the UE moves its own schedule. |
+| `RE-ANCHORED` | The UE gave up tracking and re-acquired. The readout names the schedule step applied. This is the LARGE move; the small per detection nudge on a `LOCKED` record is the other one. |
 | `WEAK BEACON` | Something was detected but it failed the SNR floor. Different from no beacon at all, and usually means levels or cabling. |
 | `RE-ANCHOR FAILED` | An escalation ran and re-acquisition did not confirm. The previous anchor is being kept. |
 | `NOT SYNCED` | No detections at all, or the stream has been silent for a minute. |
@@ -459,18 +471,43 @@ predicts the beacon inside the read window, so seconds of silence between bursts
 are normal on a perfectly healthy link. The plot dims while quiet so you can see
 at a glance that you are looking at held data rather than live data.
 
-The readout line carries two figures in ppm: the **timing** slope, fitted from
-the resid trace, and the **carrier** offset from the beacon CFO estimate. These
-are the same oscillator error reached two independent ways. They should agree
-when the error is real and large; they need not agree near zero, because a pure
-carrier offset moves the carrier figure and leaves the timing figure untouched,
-and a short-lag carrier reading is dominated by phase noise. Treat a mismatch
-below a few kHz as normal rather than as a fault.
-They are printed next to each other so a disagreement is visible rather than
-silent. The carrier figure carries its own spread, and is annotated when it
-falls inside the phase-noise floor: a short correlation lag turns a tiny phase
-error into an apparently large frequency, so treat sub-kilohertz carrier
-readings as instrument noise rather than a real offset.
+How long is normal changed on 2026-09-02. The client now looks at the beacon
+every 2.6 seconds by default rather than every 260 milliseconds, because the
+measured clock stability supports coasting far longer than the old cadence
+assumed. So a healthy link is quiet most of the time, and the badge only means
+something if it is much longer than the cadence. The page works this out for
+itself: it measures the interval between the reports it actually receives and
+marks the card quiet at three times that, so the badge keeps its meaning if the
+cadence is changed again. Nothing to configure.
+
+The readout line carries three figures in ppm, and they are not three views of
+one number. Read them in this order.
+
+1. **clock** is the total offset the client's timing tracker currently holds. It
+   comes from the frame period the tracker has learned, and on a two board bench
+   running on internal references it reads several ppm. It is a filtered state
+   rather than a set of samples, so it is printed as a value with no error bar.
+2. **residual** is what is left after the tracker has done its work, fitted from
+   the slope of the resid trace. It should sit near zero. This is the number that
+   tells you the loop is closed.
+3. **beacon** is a separate instrument. It measures the same total offset from
+   the beacon's own carrier phase, independently of the timing channel, and it
+   carries a standard error because each detection is an independent reading.
+
+The cross check that means something is **clock against beacon**, because those
+two measure the same quantity two different ways. Do not compare clock against
+residual: residual is clock's own error term, so the two are meant to differ by
+whatever factor the tracker is winning by, and a large ratio there is the loop
+working rather than a fault.
+
+Expect the beacon figure to sit off the clock figure by a fixed amount on any
+given bench. The beacon estimator is precise but carries a configuration
+dependent bias, so treat it as a liveness and sanity instrument rather than the
+value to correct with. It is annotated when it falls inside the phase noise
+floor: a short correlation lag turns a tiny phase error into an apparently large
+frequency, so treat sub kilohertz beacon readings as instrument noise rather
+than a real offset. It reads `beacon n/a` when the visible segment holds no
+detection to estimate from.
 
 ### 5.3 The ADC tab
 
@@ -576,6 +613,138 @@ same shell that launches it.
 | `HOUDINI_CFO_LOG_EVERY` | 10 | How many beacon detections pass per `Beacon CFO` line. The default logs one in ten, so a quiet run is expected. Set it to 1 for a calibration run where you want every estimate. |
 | `HOUDINI_CNS_DUMP_LOW` | unset | Directory for autopsy dumps of the first few low scoring constellations. The directory must already exist. |
 
+### 7.0 Choosing the beacon waveform
+
+The base station transmits a short burst at the top of every frame and the
+client finds it by correlation. Which burst it sends is a config field,
+`beacon_type`, in the `tdd_conf` block. Five are available:
+
+| value | what it is |
+| --- | --- |
+| `legacy` | The default. Fifteen repeats of a 16 sample training symbol, then two repeats of a 128 sample Gold sequence. |
+| `legacy_guard` | The same, with a 32 sample cyclic guard inserted before the Gold field, in the style of an 802.11 long training field. |
+| `dot11` | The 802.11a/g/n legacy preamble as the standard defines it: the short training field, then the guard and two long training symbols. |
+| `nr` | The 5G NR primary synchronisation signal, then a guard and two repeats of a tracking symbol built from the NR reference sequence. The client finds it on the repeated tracking symbol. |
+| `nr_pss` | The same burst as `nr`, sample for sample, but the client finds it the way an NR handset does: a plain matched filter on the primary synchronisation signal, with no repeat check. The log says `threshold form forced to nolag` when this is in effect. |
+
+The first four were measured on the bench, four rounds each with the order
+rotated, about 8000 detections apiece, and all five have since been run end to
+end through the client (`nr_pss` on 2026-09-03, `DEMO_VERIFICATION.md` 8z). The margin figures below were measured with the older
+comparison rule, so read them as a ranking rather than as absolute numbers. **Timing is the same for all of them**, within
+measurement error. What separates them is detection margin: the worst detection
+of the run cleared the threshold by 12x for `legacy` and `legacy_guard`, 7x for
+`dot11`, and only 2.3x for `nr`.
+
+**Leave it at `legacy` unless you have a reason.** The margin is the best of the
+four, and it is the waveform every other measurement in this repository was
+taken against. If you set a value that is not in the table the client refuses to
+start rather than falling back, so a typo cannot quietly leave you on a
+different beacon than you think.
+
+The one thing the alternatives are better at is the beacon's own frequency
+estimate, where `dot11` is about a third more stable. That number is a
+secondary reading on the sync panel, not what the client actually tracks
+frequency with, so it does not currently justify the margin it costs.
+
+### 7.1 Sync knobs: the `sync` block of the config
+
+These belong to the timing tracker, the beacon detector, its SNR confirm and the
+beacon's own frequency estimate. Since 2026-09-03 they live in ONE place: a
+`sync` object in the JSON config, loaded into one validated structure whose
+every value is printed at startup with where it came from (`default`, `json`
+or `env`). Every default below is a measured value, not a guess, and the run
+is expected to be correct with all of them left alone.
+
+Three things to know:
+
+1. The table is GENERATED from the code (`./build/sync_config_schema`) and
+   checked by `sync_config_test`, which fails when the committed copy
+   differs from the schema, so it cannot drift from what the client actually
+   reads. If you edit a knob in the code, regenerate this table.
+   `sync.detector.corr_scale` and `corr_scale_init` are the detection bars;
+   the legacy top-level `corr_scale` arrays are still read when the block
+   does not set them (the first client's value), so no old file needs a new
+   key.
+2. A key the loader does not know, or a value outside its range, stops the
+   client with a message naming the key. A typo cannot quietly leave a knob at
+   its default.
+3. The `was` column is the environment variable each knob replaces. Those
+   variables are OFF by default: a stale export in your shell is reported as
+   IGNORED at startup and changes nothing. A config that sets
+   `sync.allow_env_overrides` true gets them back, each override logged; a
+   number outside a knob's range is then pulled to the nearest bound with a
+   note, except for the three knobs whose old readers ignored such a value
+   (`beacon.tx_full_scale`, `detector.first_path_window`,
+   `detector.first_path_floor_db`), which keep their default with a note.
+   Bench sweeps go through the JSON: `run_shape_campaign.sh` merges
+   `SYNC_OVERLAY` (a JSON object) into the `sync` block of every config it
+   writes. The environment path is removed next release.
+
+Example, in `files/houdini-ul.json`:
+
+```json
+"sync": {
+  "confirm":  { "snr_floor_db": 30 },
+  "resync":   { "scatter_tol_us": 2.0, "residual_ppm": 0.1 },
+  "tracker":  { "type": "alpha_beta", "alpha": 0.5, "beta": 0.1 }
+}
+```
+
+<!-- sync-knob-table:begin (generated by ./build/sync_config_schema; sync_config_test diffs it, do not edit by hand) -->
+| key | default | was | range | env out of range | what it does |
+| --- | --- | --- | --- | --- | --- |
+| `sync.beacon.type` | `legacy` |  |  |  | Which beacon waveform the base station transmits (legacy, legacy_guard, dot11, nr, nr_pss). |
+| `sync.beacon.tx_full_scale` | 0.6 | `HOUDINI_BEACON_FS` | 0.001 to 1 | ignored, value kept | Transmit peak of the beacon as a fraction of DAC full scale. 0.6 shipped; lower it to stand in for path loss on a cable. |
+| `sync.detector.threshold` | `auto` | `HOUDINI_BEACON_THRESH` | auto, power, xcorr, coherence | refused | Decision statistic: auto picks coherence for a single-copy replica and the normalised cross-correlation otherwise; power is the pre-2026-09 form and the Iris/UHD default. |
+| `sync.detector.pfa_per_window` | 0.001 |  | 1e-09 to 0.5 |  | The coherence form's bar when set: the false-alarm probability per search window, turned into a bar by the replica and window lengths (8.163). Unset, corr_scale applies; ignored for the repeated-field forms. |
+| `sync.detector.pick` | `first_path` | `HOUDINI_BEACON_PICK` | first_crossing, cluster_refined, argmax, first_path | refused | Which crossing is returned: first_path (the Houdini default), argmax, cluster_refined, or first_crossing (the Iris/UHD default; unsafe on a strong link). |
+| `sync.detector.first_path_window` | derived | `HOUDINI_FIRST_PATH_WIN` | -1 to 4095 | ignored, value kept | Samples the first-path search looks back from the peak; -1 (default) means half the replica length. Must stay inside the preamble's self-coherent plateau. A correlator quantity: samples, not scaled with the rate. |
+| `sync.detector.first_path_floor_db` | -9 | `HOUDINI_FIRST_PATH_DB` | -30 to 0 | ignored, value kept | How much weaker, in dB of path power, an earlier arrival may be and still be taken as the first path. |
+| `sync.detector.corr_scale` | 10 |  | 0.0001 to 1e+07 |  | Resync detection threshold: the bar is 1 / corr_scale, relaxed by one per retry. Read from the legacy per-client top-level array when absent. |
+| `sync.detector.corr_scale_init` | 10 |  | 0.0001 to 1e+07 |  | Acquisition detection threshold (bar 1 / corr_scale_init); defaults to corr_scale. |
+| `sync.detector.corr_threads` | 1 | `SOUNDER_CORR_THREADS` | 1 to 256 | clamped | Threads for the correlator's matched filter. 1 shipped; measured a net loss below ~4 on the rig host. |
+| `sync.confirm.snr_floor_db` | 30 | `HOUDINI_SYNC_SNR_DB` | -10 to 80 | clamped | In-window SNR a detection must clear. A property of the link and the waveform: re-derive it when either changes. |
+| `sync.cfo.index_guard` | 8 | `HOUDINI_CFO_INDEX_GUARD` | 0 to 64 | clamped | Samples the carrier estimator's windows slide later than the detected end (AP-39). A correlator quantity: samples, not scaled with the rate. |
+| `sync.cfo.window_margin` | 0 |  | 0 to 32 |  | Samples shrunk from both ends of each estimator window so neither touches the burst's edge (8.164). A correlator quantity: samples, not scaled with the rate. |
+| `sync.cfo.log_every` | 10 | `HOUDINI_CFO_LOG_EVERY` | 1 to 1e+06 | clamped | Print one beacon-CFO log line in this many. |
+| `sync.tracker.type` | `alpha_beta` | `HOUDINI_TRACKER` | alpha_beta, kalman | refused | Which estimator tracks the base station frame grid: alpha_beta (shipped) or kalman. |
+| `sync.tracker.alpha` | 0.5 | `HOUDINI_GRID_ALPHA` | 0 to 1 | clamped | Fraction of each accepted residual applied to the schedule. |
+| `sync.tracker.beta` | 0.1 | `HOUDINI_GRID_BETA` | 0 to 1 | clamped | Fraction of the residual applied to the frame period estimate. |
+| `sync.tracker.step_ppm` | 0.5 | `HOUDINI_GRID_STEP_PPM` | 0 to 1000 | clamped | Most one detection may move the period estimate, ppm. 0 disables the limit. |
+| `sync.tracker.max_ppm` | 100 | `HOUDINI_GRID_MAX_PPM` | 0.1 to 10000 | clamped | Absolute band the period estimate may occupy either side of nominal, ppm. |
+| `sync.tracker.trust_ppm` | 1 | `HOUDINI_GRID_TRUST_PPM` | 0 to 1000 | clamped | How far the tracked period and a fresh acquisition confirm may disagree before the confirm is preferred, ppm. |
+| `sync.tracker.kalman.meas_var` | 0.5 | `HOUDINI_KF_MEAS_VAR` | 1e-06 to 1e+06 | clamped | Kalman only: assumed detector scatter variance, samples squared. |
+| `sync.tracker.kalman.rate_rw` | 1e-09 | `HOUDINI_KF_RATE_RW` | 0 to 1 | clamped | Kalman only: how fast the frame period wanders, samples squared per frame cubed. |
+| `sync.tracker.kalman.innov_gate` | 4 | `HOUDINI_KF_INNOV_GATE` | 0 to 100 | clamped | Kalman only: sigmas an observation may sit from the prediction before it is ignored. 0 disables. |
+| `sync.resync.residual_ppm` | 0.1 | `HOUDINI_SYNC_RESIDUAL_PPM` | 0.0001 to 1000 | clamped | Assumed worst-case clock error after tracking; with sync_tol_samples it sets how often the beacon is looked at. |
+| `sync.resync.scatter_tol_us` | 2 | `HOUDINI_SCATTER_TOL_US` | 0.01 to 1000 | clamped | How far a detection may land from the tracked grid and still count as the same beacon, microseconds. |
+| `sync.resync.confirm_tol_us` | 5.2083 | `HOUDINI_CONFIRM_TOL_US` | 0.01 to 1000 | clamped | The same tolerance during acquisition. Never applied looser than the tracking gate. |
+| `sync.resync.sync_tol_samples` | derived | `HOUDINI_SYNC_TOL_SAMPLES` | 0.5 to 1e+06 | clamped | Timing slack budgeted to drift between looks, samples. Default: a quarter of the OFDM zero prefix. |
+| `sync.resync.retry_max` | 100 | `HOUDINI_RESYNC_RETRY_MAX` | 1 to 100000 | clamped | Misses in one resync period before the client logs an exhausted episode. |
+| `sync.resync.escalate_episodes` | 2 | `HOUDINI_ESCALATE_EPISODES` | 1 to 1000 | clamped | Consecutive exhausted episodes before the client abandons tracking and re-acquires. |
+| `sync.resync.hold_offgrid` | 2 | `HOUDINI_HOLD_OFFGRID` | 1 to 1000 | clamped | Consecutive off-grid detections before the beacon counts as moved. |
+| `sync.resync.acq_refine_span` | 200 | `HOUDINI_ACQ_REFINE_SPAN` | 2 to 100000 | clamped | Frames of baseline acquisition wants before it trusts its rate estimate. |
+| `sync.resync.acq_max_ppm` | 100 | `HOUDINI_ACQ_MAX_PPM` | 0.1 to 10000 | clamped | Plausibility band applied to a rate that acquisition hands back, ppm. |
+| `sync.allow_env_overrides` | false |  |  |  | Whether HOUDINI_* environment variables may override these values (each override is logged; see the policy column). Off by default: sweep through the JSON overlay instead. |
+<!-- sync-knob-table:end -->
+
+Diagnostics that dump files or print profiles (`HOUDINI_LOOP_PROFILE`,
+`HOUDINI_RX_PROFILE`, `HOUDINI_COALESCE_SLOTS`, `HOUDINI_CSI_NO_PHASE_FIX`,
+`HOUDINI_BS_RX_EVERY`, `HOUDINI_DUMP_*`) stay environment variables: they are
+not configuration, and a dump switch in a shipped JSON is a trap. Every
+`HOUDINI_DUMP_*` file lands under `HOUDINI_DUMP_DIR` (default `/tmp`), so a
+bench can keep its dumps out of `/tmp` with one variable. View mode
+(`HOUDINI_CSI_UDP`, set by `--view`) writes NO HDF5 file and now says so at
+startup, so a stray value in your shell cannot silently disable recording.
+
+
+The last four are the escalation net. Their defaults were tuned when the client
+grid drifted out of tolerance in about a second. With the clock steered it holds
+for minutes, so the defaults are conservative by a wide margin and are expected
+to be retuned. Change them one at a time against a known good baseline run, and
+keep the net rather than removing it: it is what stands between a lost beacon
+and a client that flies on stale timing without saying so.
+
 `HOUDINI_CSI_SYM_START` is the one worth understanding. The cyclic prefix guard
 is one sided. A window placed early, still inside the prefix, is a valid
 circular shift and produces a pure phase ramp that the timing fix recovers. A
@@ -592,6 +761,49 @@ can trigger on pre symbol leakage and misalign the windows, so prefer a fixed
 integer once you know the right value for your bench.
 
 ## 8. If something goes wrong
+
+### 8.0 The run produces almost no output, or says it cannot find a radio
+
+This is the most common failure on a busy bench and it is almost never the
+radio. Look for a line like this early in the log:
+
+```
+setSampleRate(RX): an RX stream is open; a rate change is NOT live
+```
+
+A previous run left a receive stream open on the board. The board will refuse
+every new run until that stream is released, and a refused run writes almost
+nothing to its log, so it looks like nothing happened rather than like an error.
+If you are running several captures in a row, the first one that fails this way
+makes all the rest fail too.
+
+The usual cause is how the previous run ended. A sounder started by the
+launcher now ends when the launcher ends, however the launcher was killed, and
+a sounder you started yourself releases both boards when you stop it. What can
+still hold a board is a sounder started some other way (another window, another
+user, a test harness) that is still running.
+
+Release it, from the rig, in the sounder directory:
+
+```sh
+python3 tools/rig_release_holders.py
+python3 csi_gui/teardown_framer.py
+```
+
+The first command finds and stops any leftover sounder on the rig host. The
+second confirms the boards are clear; it prints `all 2 radio(s) clear` when they
+are. Then start your run again.
+
+If the release tool finds nothing and the boards are still held, something
+outside your session is holding them, and the board's own server has to be
+restarted:
+
+```sh
+sudo systemctl restart SoapySDRServer
+```
+
+That needs a password, so on a shared bench it is worth asking whether a
+colleague is using the boards before reaching for it.
 
 ### 8.1 The dashboard shows "connecting" and never populates
 

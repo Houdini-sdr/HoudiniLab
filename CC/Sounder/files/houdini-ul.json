@@ -41,6 +41,8 @@
     "tx_advance": [
         247
     ],
+    "_beacon_type_note": "Which beacon waveform the BS transmits: legacy | legacy_guard | dot11 | nr | nr_pss. All five are defined in include/sync/beacon_shapes.h (nr_pss is the nr burst detected on its PSS, DEMO_VERIFICATION 8.154-8.162) and measured on this bench (DEMO_VERIFICATION 8.111-8.116, 4 interleaved rounds, ~8000 detections each). legacy is the default because it has the best detection margin -- worst-case detector ratio 1.21 against a 0.1 bar, versus 1.20 / 0.72 / 0.23 for the others -- and because every prior result in that ledger was taken against it. Timing is indistinguishable across all four (adjacent-difference jitter 0.13-0.17 samples). An unknown name THROWS rather than falling back, so a typo cannot quietly ship a different beacon.",
+    "beacon_type": "legacy",
     "corr_scale": [
         100
     ],

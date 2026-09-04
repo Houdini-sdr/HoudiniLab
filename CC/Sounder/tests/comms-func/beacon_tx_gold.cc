@@ -32,7 +32,7 @@
 #include <thread>
 #include <vector>
 
-#include "include/comms-lib.h"
+#include "comms-lib.h"
 
 namespace {
 using cf32 = std::complex<float>;

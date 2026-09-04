@@ -1,0 +1,65 @@
+[INFO] SoapyHoudiniSDR_device: bringing up FPGA driver layer, data_iface=192.168.5.9 (identity source: /etc/houdini/sdr.conf)
+[INFO] clock: calibrated hold in force at MAN_DAC=408 (RB_DAC_VALUE=408)
+[INFO] FPGA identity (top_core @0xa0060000): version=1.30 commit=c88e0b5f board=rfsoc4x2 build=2026-08-28T00:50:42 magic=RFSC (raw 0x0001001E/0xE4340CAA/0x52465343/0xC88E0B5F/0x00000000/0x00000004)
+[INFO] reset: ADC tile 0 PLL Fs 1228.80 -> 1228.80 MHz pre-StartUp (boot 3932.16)
+[INFO] reset: ADC tile 2 PLL Fs 1228.80 -> 1228.80 MHz pre-StartUp (boot 3932.16)
+[INFO] reset: DAC tile 0 PLL Fs 1966.08 -> 1966.08 MHz pre-StartUp (boot 5898.24)
+[INFO] reset: DAC tile 2 PLL Fs 1966.08 -> 1966.08 MHz pre-StartUp (boot 5898.24)
+[INFO] tick_rate_hz = 122.880000 MHz (design nominal), HW-verified: PL_CLK locked vs SYSREF (PL phase-tap).
+[INFO] dac_clk = 122.880000 MHz (TX default), HW-verified vs SYSREF (DAC phase-tap).
+[INFO] discovered 4 RX channels, 2 TX channels
+[INFO]   RX[0] = ADC0.0  canon=0  eff=245.760 MSPS
+[INFO]   RX[1] = ADC0.1  canon=1  eff=245.760 MSPS
+[INFO]   RX[2] = ADC2.0  canon=8  eff=245.760 MSPS
+[INFO]   RX[3] = ADC2.1  canon=9  eff=245.760 MSPS
+[INFO]   TX[0] = DAC0.0  canon=0  eff=983.040 MSPS
+[INFO]   TX[1] = DAC2.0  canon=8  eff=983.040 MSPS
+[INFO] SoapyHoudiniSDR_device: construction complete.
+[INFO] RFDC: interrupt-driven mode (default; set HOUDINI_RFDC_IRQ=0 to force the poll fallback) (SH-113)
+[INFO] RFDC IRQ-driven (irq=17): global armed, per-block sources off until stream start
+  open_device: 7.27 s over 3 attempt(s) [1: discover 0.31 s, make - s RuntimeError: SoapyRPCUnpacker::recv() TIMEOUT] [2: discover 0.00 s, make - s RuntimeError: SoapyRPCUnpacker::recv() TIMEOUT] [3: discover 0.00 s, make 0.34 s]
+[INFO] TDD_CMD: abort
+[INFO] writeRegister(RFCORE, 0x24) <- 0x00000001
+[INFO] writeRegister(RFCORE, 0x24) <- 0x00000000
+[INFO] TDD_CMD: gate_release
+[INFO] TDD_CMD: abort
+[INFO] writeRegister(RFCORE, 0x24) <- 0x00000001
+[INFO] writeRegister(RFCORE, 0x24) <- 0x00000000
+[INFO] TDD_CMD: gate_release
+[INFO] setSampleRate(RX): 245.76 MSPS = vld_code 3 at RX_FAB_CLK 30.72 MHz, applied to the RFDC at the next setupStream
+[INFO] SoapyHoudiniSDR_device: bringing up FPGA driver layer, data_iface=192.168.6.8 (identity source: /etc/houdini/sdr.conf)
+[INFO] clock: calibrated hold in force at MAN_DAC=404 (RB_DAC_VALUE=404)
+[INFO] FPGA identity (top_core @0xa0060000): version=1.30 commit=c88e0b5f board=rfsoc4x2 build=2026-08-28T00:50:42 magic=RFSC (raw 0x0001001E/0xE4340CAA/0x52465343/0xC88E0B5F/0x00000000/0x00000004)
+[INFO] reset: ADC tile 0 PLL Fs 1228.80 -> 1228.80 MHz pre-StartUp (boot 3932.16)
+[INFO] reset: ADC tile 2 PLL Fs 1228.80 -> 1228.80 MHz pre-StartUp (boot 3932.16)
+[INFO] reset: DAC tile 0 PLL Fs 1966.08 -> 1966.08 MHz pre-StartUp (boot 5898.24)
+[INFO] reset: DAC tile 2 PLL Fs 1966.08 -> 1966.08 MHz pre-StartUp (boot 5898.24)
+[INFO] tick_rate_hz = 122.880000 MHz (design nominal), HW-verified: PL_CLK locked vs SYSREF (PL phase-tap).
+[INFO] dac_clk = 122.880000 MHz (TX default), HW-verified vs SYSREF (DAC phase-tap).
+[INFO] discovered 4 RX channels, 2 TX channels
+[INFO]   RX[0] = ADC0.0  canon=0  eff=245.760 MSPS
+[INFO]   RX[1] = ADC0.1  canon=1  eff=245.760 MSPS
+[INFO]   RX[2] = ADC2.0  canon=8  eff=245.760 MSPS
+[INFO]   RX[3] = ADC2.1  canon=9  eff=245.760 MSPS
+[INFO]   TX[0] = DAC0.0  canon=0  eff=983.040 MSPS
+[INFO]   TX[1] = DAC2.0  canon=8  eff=983.040 MSPS
+[INFO] SoapyHoudiniSDR_device: construction complete.
+[INFO] RFDC: interrupt-driven mode (default; set HOUDINI_RFDC_IRQ=0 to force the poll fallback) (SH-113)
+[INFO] RFDC IRQ-driven (irq=17): global armed, per-block sources off until stream start
+[INFO] TDD_CMD: abort
+[INFO] writeRegister(RFCORE, 0x24) <- 0x00000001
+[INFO] writeRegister(RFCORE, 0x24) <- 0x00000000
+[INFO] TDD_CMD: gate_release
+[INFO] TDD_CMD: abort
+[INFO] writeRegister(RFCORE, 0x24) <- 0x00000001
+[INFO] writeRegister(RFCORE, 0x24) <- 0x00000000
+[INFO] TDD_CMD: gate_release
+[INFO] setSampleRate(RX): 245.76 MSPS = vld_code 3 at RX_FAB_CLK 30.72 MHz, applied to the RFDC at the next setupStream
+[INFO] RFDC IRQ teardown: interrupt fired 1 time(s) this session
+[INFO] IntrEngine::Teardown: done (GIC line masked + handler unbound)
+[teardown] releasing the framer on 2 radio(s): 168.6.244.21, 168.6.244.22
+  168.6.244.21: torn down (TDD_ARM: no arm attempted)
+  168.6.244.22: torn down (TDD_ARM: no arm attempted)
+[teardown] all 2 radio(s) clear
+[INFO] RFDC IRQ teardown: interrupt fired 1 time(s) this session
+[INFO] IntrEngine::Teardown: done (GIC line masked + handler unbound)

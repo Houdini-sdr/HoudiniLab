@@ -13,9 +13,14 @@
 
 #include <complex.h>
 
+#include <memory>
 #include <algorithm>
 #include <atomic>
 #include <vector>
+
+#include "sync/beacon_shape.h"
+#include "sync/rx_path_fixes.h"
+#include "sync/sync_config.h"
 
 class Config {
  public:
@@ -138,6 +143,36 @@ class Config {
   inline const std::string& trace_file(void) const { return this->trace_file_; }
   inline const std::string& cl_channel(void) const { return this->cl_channel_; }
   inline const std::string& beacon_seq(void) const { return this->beacon_seq_; }
+  inline const std::string& beacon_type(void) const { return beacon_type_; }
+  /// The UE synchronisation configuration: the JSON `sync` block, validated,
+  /// resolved against the shape, with every value's provenance
+  /// (sync/sync_config.h). One home for what used to be thirty HOUDINI_*
+  /// environment reads.
+  inline const houdini::sync::SyncConfig& sync(void) const { return sync_; }
+  /// The configured beacon as one object (sync/beacon_shape.h): waveform,
+  /// replica, field geometry and the index convention. beacon_size() is its
+  /// core length, kept for the framer callers that predate it.
+  inline const houdini::sync::BeaconShape& shape(void) const { return *shape_; }
+  inline houdini::sync::Platform platform(void) const {
+    return is_houdini() ? houdini::sync::Platform::kHoudini
+                        : houdini::sync::Platform::kIrisUhd;
+  }
+  /// The client's synchronisation model, which is what the receiver's
+  /// remaining platform branches are about (seam step S4): the Iris/UHD
+  /// framer triggers the client and the base station transmits the beacon
+  /// and the uplink data from files per frame; the Houdini client anchors a
+  /// tracked frame grid on beacon timestamps, composes its bursts in
+  /// process, and resyncs on a wall-clock cadence. Two algorithms, not two
+  /// devices; unifying them is a later phase.
+  enum class SyncModel { kTriggerFramed, kStampAnchored };
+  inline SyncModel sync_model(void) const {
+    return is_houdini() ? SyncModel::kStampAnchored : SyncModel::kTriggerFramed;
+  }
+  /// What the platform's receive path does to the samples (the mixer
+  /// conjugation, the CSI fixes), for the consumers that undo it.
+  inline houdini::sync::RxPathFixes rx_path_fixes(void) const {
+    return houdini::sync::RxPathFixes::forPlatform(platform());
+  }
   inline const std::string& pilot_seq(void) const { return this->pilot_seq_; }
   inline const std::string& data_mod(void) const { return this->data_mod_; }
   inline const std::string& cl_data_mod(void) const {
@@ -150,6 +185,7 @@ class Config {
   inline bool internal_measurement(void) const {
     return this->internal_measurement_;
   }
+  inline bool diag_skip_tx_clear(void) const { return this->diag_skip_tx_clear_; }
   inline bool ref_node_enable(void) const { return this->ref_node_enable_; }
   inline size_t cal_ref_sdr_id(void) const { return this->cal_ref_sdr_id_; }
   inline const std::vector<std::vector<std::string>>& bs_array_frames(
@@ -359,6 +395,9 @@ class Config {
   float pilot_scale_;
   std::string pilot_seq_;
   std::string beacon_seq_;
+  std::string beacon_type_;
+  houdini::sync::SyncConfig sync_;
+  std::unique_ptr<houdini::sync::BeaconShape> shape_;
   bool ul_data_slot_present_;
   bool dl_data_slot_present_;
   std::string data_mod_;
@@ -414,6 +453,7 @@ class Config {
   std::string trace_file_;
   std::vector<std::vector<std::string>> bs_array_frames_;
   bool internal_measurement_;
+  bool diag_skip_tx_clear_ = false;
   bool ref_node_enable_;
   size_t cal_ref_sdr_id_;
   size_t tx_frame_delta_;

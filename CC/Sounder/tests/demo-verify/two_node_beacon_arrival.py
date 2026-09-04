@@ -28,6 +28,17 @@ import numpy as np
 import SoapySDR
 from SoapySDR import SOAPY_SDR_CS16, SOAPY_SDR_RX, SOAPY_SDR_TX
 
+# SoapyRemote's `timeout` device arg is MICROSECONDS, and it bounds the
+# make() RPC. Measured 2026-09-01 on this bench: a COLD make (the server
+# holds no live device instance, so construction runs the full RFDC
+# bring-up) takes 3.34 s; a WARM one 0.34 s. The long-standing 1000000
+# (= 1 s) therefore sits INSIDE the normal spread, and make() failed with
+# "SoapyRPCUnpacker::recv() TIMEOUT" three times in one session depending
+# only on whether a previous run still held the instance. That is a slow
+# call against a short deadline, NOT an unresponsive server -- do not
+# read it as one.
+RPC_TIMEOUT_US = "30000000"
+
 RATE = 122.88e6
 FRAME = 122880
 SLOT = 4096
@@ -94,10 +105,10 @@ class Ue:
         else:
             self.dev = SoapySDR.Device(dict(driver="houdinisdr",
                                             remote="tcp://%s:55132" % ip,
-                                            timeout="1000000"))
+                                            timeout=RPC_TIMEOUT_US))
             ident(self.dev, ip, "UE")
             self.dev.setSampleRate(SOAPY_SDR_RX, ch, RATE)
-            self.dev.setFrequency(SOAPY_SDR_RX, ch, 500e6)
+            tune(self.dev, SOAPY_SDR_RX, ch, 500e6)
             self.rxs = self.dev.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CS16, [ch],
                                             dict(local_port=str(10001 + ch),
                                                  rx_gap_break="1"))
@@ -137,6 +148,35 @@ class Ue:
             pass
 
 
+# HOW THE RADIO IS TUNED. The plugin exposes ONE tunable element, "RF", whose
+# range is +-983.04 MHz: it is the RFDC NCO, and there is no "BB" element
+# (asked 2026-09-03: "unknown tunable element 'BB'"). The sounder's Houdini
+# path (Radio.cc constructor) makes exactly these calls -- setSampleRate then a
+# plain setFrequency(dir, ch, nco) -- so the probes and the sounder tune the
+# radios identically. The Iris-era "RF"/"BB" split in Radio::dev_init is not
+# reached on Houdini.
+STREAM_MTS = [True]
+MTS_POWER_CH0 = [False]
+
+
+STREAM_MTS_RX = [False]
+
+
+def rx_stream_args(ch):
+    # The UE's RX stream joins the MTS group only when asked: the driver's
+    # first-up rule needs a DAC0/TX stream on the SAME device set up with
+    # mts=true first, which the sounder's UE has (its TX stream) and this
+    # capture-only probe does not.
+    args = dict(local_port=str(10001 + ch), rx_gap_break="1")
+    if STREAM_MTS[0] and STREAM_MTS_RX[0]:
+        args["mts"] = "true"
+    return args
+
+
+def tune(dev, direction, ch, freq_hz):
+    dev.setFrequency(direction, ch, freq_hz)
+
+
 class Bs:
     def __init__(self, ip, ram_iq, ch=1):
         self.ip = ip
@@ -174,17 +214,34 @@ class Bs:
             self.shared = False
             self.dev = SoapySDR.Device(dict(driver="houdinisdr",
                                             remote="tcp://%s:55132" % self.ip,
-                                            timeout="1000000"))
+                                            timeout=RPC_TIMEOUT_US))
             ident(self.dev, self.ip, "BS")
+            # EXACTLY the sounder's order (Radio.cc constructor): rate and
+            # NCO on the data channel, then the streams -- with MTS, a
+            # never-activated ch0 replay stream FIRST for tile-0 membership
+            # (the plugin's first-up rule), then the data TX stream, then RX.
+            # The TDD ladder and the RAM load come after, as in BaseRadioSet.
             self.dev.setSampleRate(SOAPY_SDR_TX, self.ch, RATE)
-            self.dev.setFrequency(SOAPY_SDR_TX, self.ch, 500e6)
+            tune(self.dev, SOAPY_SDR_TX, self.ch, 500e6)
             if not tx_only:
                 self.dev.setSampleRate(SOAPY_SDR_RX, self.ch, RATE)
-                self.dev.setFrequency(SOAPY_SDR_RX, self.ch, 500e6)
-            if not tx_only:
-                self.rxs = self.dev.setupStream(
-                    SOAPY_SDR_RX, SOAPY_SDR_CS16, [self.ch],
-                    dict(local_port=str(10001 + self.ch), rx_gap_break="1"))
+                tune(self.dev, SOAPY_SDR_RX, self.ch, 500e6)
+        txargs = dict(tx_mode="replay")
+        self.aux_txs = None
+        if STREAM_MTS[0]:
+            txargs["mts"] = "true"
+            if self.ch != 0 and not self.shared:
+                if MTS_POWER_CH0[0]:
+                    # Variant under test: give tile 0 a rate and NCO before it
+                    # is asked to join the MTS group.
+                    self.dev.setSampleRate(SOAPY_SDR_TX, 0, RATE)
+                    tune(self.dev, SOAPY_SDR_TX, 0, 500e6)
+                self.aux_txs = self.dev.setupStream(
+                    SOAPY_SDR_TX, SOAPY_SDR_CS16, [0], dict(tx_mode="replay", mts="true"))
+        self.txs = self.dev.setupStream(SOAPY_SDR_TX, SOAPY_SDR_CS16, [self.ch], txargs)
+        if not self.shared and not tx_only:
+            self.rxs = self.dev.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CS16, [self.ch],
+                                            rx_stream_args(self.ch))
         # map_scan's exact pre-arm cleanup: FULL ladder + both strobes off
         # (the arrival flow's abort-only differed; bisecting the weak-RF gap)
         self.ladder()
@@ -193,8 +250,6 @@ class Bs:
                 self.dev.writeSetting("TDD_REPLAY_STROBE", "ch%d:off" % c)
             except Exception:  # noqa: BLE001
                 pass
-        self.txs = self.dev.setupStream(SOAPY_SDR_TX, SOAPY_SDR_CS16, [self.ch],
-                                        dict(tx_mode="replay"))
         r = self.dev.writeStream(self.txs, [self.ram_iq], 4096)
         if r.ret != 4096:
             raise RuntimeError("RAM load ret=%d" % r.ret)
@@ -249,6 +304,12 @@ class Bs:
                     self.dev.closeStream(self.txs)
                 except Exception:  # noqa: BLE001
                     pass
+            if getattr(self, "aux_txs", None) is not None:
+                try:
+                    self.dev.closeStream(self.aux_txs)
+                except Exception:  # noqa: BLE001
+                    pass
+                self.aux_txs = None
             self.dev = None
             self.txs = None
             return

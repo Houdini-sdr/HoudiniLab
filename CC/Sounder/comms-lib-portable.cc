@@ -10,6 +10,7 @@
  * this compiles on the DGX Spark.
  */
 #include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <chrono>
 #include <complex>
@@ -23,18 +24,29 @@
 #include <thread>
 #include <vector>
 
-#include "include/comms-lib.h"
+#include "comms-lib.h"
 
 namespace {
-// Thread count for correlate_mt: explicit request wins; else SOUNDER_CORR_THREADS
-// env; else 1. Capped at the pool size (hardware concurrency) at dispatch.
+// Thread count for correlate_mt: an explicit request wins; else the value
+// set through CommsLib::setCorrelatorThreads (sync.detector.corr_threads,
+// SOUNDER_CORR_THREADS as its logged env alias); else 1. Capped at the pool
+// size (hardware concurrency) at dispatch.
+// 0 = nothing set through the API yet: the environment is then read ONCE,
+// which is how the bench tools that link this library without a Config
+// (bench-correlator-rate, beacon_geometry_test, houdini_loopback) take it.
+std::atomic<unsigned> g_corr_threads{0u};
 unsigned ResolveThreads(unsigned requested) {
   if (requested > 0) return requested;
-  if (const char* e = std::getenv("SOUNDER_CORR_THREADS")) {
-    const int v = std::atoi(e);
-    if (v > 0) return static_cast<unsigned>(v);
-  }
-  return 1u;
+  const unsigned set = g_corr_threads.load(std::memory_order_relaxed);
+  if (set > 0) return set;
+  static const unsigned from_env = [] {
+    if (const char* e = std::getenv("SOUNDER_CORR_THREADS")) {
+      const int v = std::atoi(e);
+      if (v > 0) return static_cast<unsigned>(v);
+    }
+    return 1u;
+  }();
+  return from_env;
 }
 
 // Persistent fork-join pool: worker threads are created once and reused, so
@@ -243,7 +255,7 @@ std::vector<float> TrailingWindowSum(const std::vector<float>& f,
 // Correlate against the 2-rep Gold beacon, reinforce the double peak, threshold
 // against trailing local energy, return a peak index (or -1).
 //
-// `refine_first_cluster` selects WHICH crossing is returned, and the choice matters
+// `pick` selects WHICH crossing is returned, and the choice matters
 // because the frame anchor is derived from it.
 //
 // The threshold admits every index whose peak-to-local-energy ratio clears
@@ -267,10 +279,56 @@ std::vector<float> TrailingWindowSum(const std::vector<float>& f,
 //
 // So: take the earliest crossing, then refine within one sequence length of it. That
 // is deterministic across runs and still lands on the peak rather than its skirt.
+// How far back kFirstPath looks, and how strong an earlier path must be.
+//
+// THE WINDOW MUST STAY INSIDE THE PREAMBLE PLATEAU. The shipped beacon's STS
+// field manufactures crossings ~365 samples before the true peak; a back window
+// anywhere near that reintroduces the fault kTargetedArgmax removes. Half a
+// sequence length (64 samples at L=128) is 0.52 us, which covers indoor excess
+// delay (RMS spread 20-100 ns) with margin and is 5x inside the plateau. An
+// outdoor channel with 1-2 us of spread needs a longer window AND a preamble
+// whose plateau is further away than that; do not raise one without the other.
+// The default back window: half a replica (see the note above), what the
+// two-argument-shorter overloads pass. The configured value arrives through
+// the explicit overloads.
+static int defaultFirstPathWindow(int seq_len) { return seq_len / 2; }
+
+// THE FLOOR DEPENDS ON THE STATISTIC'S ORDER, AND THE FIRST VERSION SQUARED IT
+// UNCONDITIONALLY. kPowerRatio, kNormalized and kNormalizedXCorr are all 4th
+// order in path AMPLITUDE, so a path at x times the peak's POWER scores x^2 and
+// the floor is 10^(db/10) squared. kCoherence is |gc|^2/(E*E_rep) -- 2nd order
+// in amplitude, FIRST order in power -- so squaring makes a nominal -9 dB floor
+// an actual -18 dB one, and a sidelobe 18 dB down gets promoted to "first path".
+// Measured: nolag+first-path read -190 samples on a SINGLE-PATH channel with the
+// squared floor and -129 with the corrected one.
+static double firstPathFloorFrac(CommsLib::BeaconThresh form, double db) {
+  const double p = std::pow(10.0, db / 10.0);
+  return form == CommsLib::BeaconThresh::kCoherence ? p : p * p;
+}
+// -9 dB is close to the margin: bisected offline, the hardest gated multipath
+// case (weak direct, echo +40, stronger) flips from correct to +39 between
+// -8.8 dB and -8.0 dB. So the shipped default clears it by under 1 dB, which is
+// thin -- an earlier comment here claimed it "admits a direct path well under
+// half the echo's power" and that was wishful. Widen with HOUDINI_FIRST_PATH_DB
+// if a channel needs it, and re-run beacon_geometry_test when you do.
+
 int CommsLib::find_beacon_avx(
     const std::vector<std::complex<float>>& raw_samples,
     const std::vector<std::complex<float>>& match_samples, float corr_scale,
-    bool refine_first_cluster) {
+    BeaconPick pick, BeaconThresh thresh_form) {
+  // The pre-SyncConfig entry: first-path knobs from the environment (read
+  // once) with the historical defaults.
+  return find_beacon_avx(raw_samples, match_samples, corr_scale, pick,
+                         thresh_form,
+                         defaultFirstPathWindow(static_cast<int>(match_samples.size())),
+                         kDefaultFirstPathFloorDb);
+}
+
+CommsLib::BeaconResult CommsLib::find_beacon_ex(
+    const std::vector<std::complex<float>>& raw_samples,
+    const std::vector<std::complex<float>>& match_samples, float corr_scale,
+    BeaconPick pick, BeaconThresh thresh_form, int first_path_window,
+    double first_path_db) {
   const int seqLen = static_cast<int>(match_samples.size());
 #ifdef TEST_BENCH
   const auto t0 = std::chrono::steady_clock::now();
@@ -292,13 +350,87 @@ int CommsLib::find_beacon_avx(
   const auto t3 = std::chrono::steady_clock::now();
 #endif
   assert(peak_metric.size() == thresh.size());
+  // The decision statistic. kNormalized divides by the energy term SQUARED,
+  // which makes it dimensionless -- see BeaconThresh. Computed in double
+  // because thresh^2 underflows a float on a quiet window (thresh runs down to
+  // ~1e-20 on this bench, and 1e-40 is a denormal), and an underflowed
+  // denominator would admit every index instead of none.
+  const bool normalized = thresh_form == BeaconThresh::kNormalized;
+  const bool nolag = thresh_form == BeaconThresh::kCoherence;
+  const bool xcorr = thresh_form == BeaconThresh::kNormalizedXCorr || nolag;
+  // For kNormalizedXCorr: trailing energy of the RAW samples, and the replica's
+  // energy. |gc[i]|^2 / (E_raw[i] * E_rep) is the normalised cross-correlation,
+  // 2nd order over 2nd order, so it is a coherence in [0,1] and does not move
+  // with received level.
+  //
+  // ALIGNMENT, WHICH THE FIRST VERSION GOT WRONG TWICE. gc[i] correlates the
+  // window [i-L+1, i] against the replica -- measured, not assumed: for a core
+  // placed at `pos`, the peak lands at pos + core_len - 1, the LAST sample of
+  // the matched field. So the energy term has to cover exactly that window.
+  //   (1) TrailingWindowSum is EXCLUSIVE of i: it returns sum over [i-L, i-1].
+  //       That convention is deliberate for `thresh` (compare a peak against
+  //       the energy BEFORE it) and wrong here, so this computes its own.
+  //   (2) correlate_mt returns N + M - 1 samples, so the metric arrays are
+  //       longer than the raw input by L-1; sizing the energy array from the
+  //       raw length silently zeroed the tail of the search window.
+  std::vector<double> raw_energy;
+  double rep_energy = 0.0;
+  if (xcorr) {
+    const std::vector<float> raw_abs = Abs2(raw_samples);
+    raw_energy.assign(peak_metric.size(), 0.0);
+    double run = 0.0;
+    for (size_t i = 0; i < raw_abs.size() && i < raw_energy.size(); ++i) {
+      run += static_cast<double>(raw_abs[i]);
+      if (i >= static_cast<size_t>(seqLen))
+        run -= static_cast<double>(raw_abs[i - seqLen]);
+      raw_energy[i] = run;
+    }
+    for (const auto& v : match_samples) rep_energy += std::norm(v);
+  }
+  auto ranking = [&](size_t i) {
+    const double t = static_cast<double>(thresh[i]);
+    if (nolag) {
+      // |gc[i]|^2 / (E_raw[i] * E_rep): a coherence in [0,1]. No second window,
+      // so no repeat check -- the peak stands on its own.
+      if (i >= raw_energy.size() || i >= corr_abs.size()) return 0.0;
+      const double e = raw_energy[i] * rep_energy;
+      if (e <= 0.0) return 0.0;
+      return static_cast<double>(corr_abs[i]) / e;
+    }
+    if (xcorr) {
+      // peak_metric[i] = |gc[i]|^2 * |gc[i-L]|^2, so normalising it needs BOTH
+      // windows' energies. Below the lag there is no second window and the
+      // index cannot be a repeat, so it scores zero rather than dividing by a
+      // window that does not exist.
+      if (i < static_cast<size_t>(seqLen) || i >= raw_energy.size()) return 0.0;
+      const double e1 = raw_energy[i] * rep_energy;
+      const double e2 = raw_energy[i - seqLen] * rep_energy;
+      if (e1 <= 0.0 || e2 <= 0.0) return 0.0;
+      return static_cast<double>(peak_metric[i]) / (e1 * e2);
+    }
+    const double den = normalized ? t * t : t;
+    return static_cast<double>(peak_metric[i]) / (den + 1e-30);
+  };
+  const double bar = 1.0 / static_cast<double>(corr_scale);
+  // The result carries the evidence at the index: the statistic the pick
+  // rule ranked and the correlator output there.
+  const auto result = [&](int i) {
+    BeaconResult r;
+    r.index = i;
+    if (i >= 0 && static_cast<size_t>(i) < gold_corr.size()) {
+      r.statistic = ranking(static_cast<size_t>(i));
+      r.peak = gold_corr[static_cast<size_t>(i)];
+    }
+    return r;
+  };
   std::queue<int> valid_peaks;
   for (size_t i = 0; i < peak_metric.size(); ++i) {
-    if (corr_scale * peak_metric[i] > thresh[i]) {
+    if (ranking(i) > bar) {
       valid_peaks.push(static_cast<int>(i));
     }
   }
-  if (std::getenv("FIND_BEACON_DEBUG") != nullptr) {
+  static const bool kDebug = std::getenv("FIND_BEACON_DEBUG") != nullptr;  // read once
+  if (kDebug) {
     double best_ratio = 0.0;
     size_t best_i = 0, best_pm_i = 0;
     float best_pm = 0.0f;
@@ -324,8 +456,49 @@ int CommsLib::find_beacon_avx(
             << "Threshold took " << us(t2, t3) << " usec\n"
             << "PeakDetect took " << us(t3, t4) << " usec" << std::endl;
 #endif
-  if (valid_peaks.empty()) return -1;
-  if (!refine_first_cluster) return valid_peaks.front();
+  if (valid_peaks.empty()) return BeaconResult{};
+  if (pick == BeaconPick::kFirstCrossing) return result(valid_peaks.front());
+  if (pick == BeaconPick::kTargetedArgmax) {
+    // The caller has asserted the window cannot hold two beacon copies, so there
+    // is no copy ambiguity to be repeatable ABOUT and the strongest crossing is
+    // simply the beacon. Ranking by ratio rather than by peak_metric alone keeps
+    // this consistent with the refine branch below and with the threshold test
+    // itself, which is a ratio.
+    int best = valid_peaks.front();
+    double best_ratio = -1.0;
+    while (!valid_peaks.empty()) {
+      const int i = valid_peaks.front();
+      valid_peaks.pop();
+      const double r = ranking(i);
+      if (r > best_ratio) { best_ratio = r; best = i; }
+    }
+    return result(best);
+  }
+  if (pick == BeaconPick::kFirstPath) {
+    // Peak first, exactly as kTargetedArgmax.
+    int best = valid_peaks.front();
+    double best_ratio = -1.0;
+    while (!valid_peaks.empty()) {
+      const int i = valid_peaks.front();
+      valid_peaks.pop();
+      const double r = ranking(i);
+      if (r > best_ratio) { best_ratio = r; best = i; }
+    }
+    // Then the earliest index within the delay-spread window that still clears
+    // `kFirstPathFrac` of the peak. Searched over ALL indices, not only the
+    // threshold crossings: a weak first path can sit under the absolute bar
+    // while being unambiguous relative to the peak beside it, which is the
+    // whole reason the test is a FRACTION of the peak.
+    // Bounded the way the env reader bounds it: at most two replica lengths.
+    const int win = std::max(0, std::min(first_path_window, seqLen * 2));
+    const double floor_ratio =
+        firstPathFloorFrac(thresh_form, first_path_db) * best_ratio;
+    int first = best;
+    for (int i = std::max(0, best - win); i < best; ++i) {
+      if (ranking(static_cast<size_t>(i)) >= floor_ratio) { first = i; break; }
+    }
+    return result(first);
+  }
   // valid_peaks is built in increasing index order, so front() is the earliest
   // crossing and therefore selects the earliest beacon copy in the window. Refine
   // only inside that copy: anything more than a sequence length later is a different
@@ -337,26 +510,50 @@ int CommsLib::find_beacon_avx(
     const int i = valid_peaks.front();
     valid_peaks.pop();
     if (i - first > seqLen) break;
-    const double r = peak_metric[i] / (thresh[i] + 1e-30);
+    const double r = ranking(i);
     if (r > best_ratio) { best_ratio = r; best = i; }
   }
-  return best;
+  return result(best);
+}
+
+int CommsLib::find_beacon_avx(
+    const std::vector<std::complex<float>>& raw_samples,
+    const std::vector<std::complex<float>>& match_samples, float corr_scale,
+    BeaconPick pick, BeaconThresh thresh_form, int first_path_window,
+    double first_path_db) {
+  return static_cast<int>(find_beacon_ex(raw_samples, match_samples, corr_scale, pick,
+                                         thresh_form, first_path_window, first_path_db)
+                              .index);
 }
 
 // Real-time entry: cint16 samples straight from the radio -> cfloat -> detect.
 ssize_t CommsLib::find_beacon_avx(
     const std::complex<int16_t>* raw_samples,
     const std::vector<std::complex<float>>& match_samples, size_t check_window,
-    float corr_scale, bool refine_first_cluster) {
-  static constexpr float kShortMaxFloat = 32767.0f;
-  std::vector<std::complex<float>> sync_compare(check_window);
-  for (size_t i = 0; i < check_window; ++i) {
-    sync_compare[i] = std::complex<float>(
-        static_cast<float>(raw_samples[i].real()) / kShortMaxFloat,
-        static_cast<float>(raw_samples[i].imag()) / kShortMaxFloat);
-  }
-  return CommsLib::find_beacon_avx(sync_compare, match_samples, corr_scale,
-                                   refine_first_cluster);
+    float corr_scale, BeaconPick pick, BeaconThresh thresh_form) {
+  return find_beacon_avx(raw_samples, match_samples, check_window, corr_scale,
+                         pick, thresh_form,
+                         defaultFirstPathWindow(static_cast<int>(match_samples.size())),
+                         kDefaultFirstPathFloorDb);
+}
+
+ssize_t CommsLib::find_beacon_avx(
+    const std::complex<int16_t>* raw_samples,
+    const std::vector<std::complex<float>>& match_samples, size_t check_window,
+    float corr_scale, BeaconPick pick, BeaconThresh thresh_form,
+    int first_path_window, double first_path_db) {
+  return CommsLib::find_beacon_avx(CommsLib::toCorrelatorScale(raw_samples, check_window), match_samples,
+                                   corr_scale, pick, thresh_form, first_path_window,
+                                   first_path_db);
+}
+
+CommsLib::BeaconResult CommsLib::find_beacon_ex(
+    const std::complex<int16_t>* raw_samples,
+    const std::vector<std::complex<float>>& match_samples, size_t check_window,
+    float corr_scale, BeaconPick pick, BeaconThresh thresh_form,
+    int first_path_window, double first_path_db) {
+  return find_beacon_ex(CommsLib::toCorrelatorScale(raw_samples, check_window), match_samples, corr_scale,
+                        pick, thresh_form, first_path_window, first_path_db);
 }
 
 // Element-wise complex multiply, portable equivalent of the float
@@ -370,6 +567,21 @@ std::vector<std::complex<float>> CommsLib::complex_mult(
   std::vector<std::complex<float>> out(n);
   for (size_t i = 0; i < n; ++i) {
     out[i] = conj ? f[i] * std::conj(g[i]) : f[i] * g[i];
+  }
+  return out;
+}
+
+void CommsLib::setCorrelatorThreads(unsigned n) {
+  if (n > 0) g_corr_threads.store(n, std::memory_order_relaxed);
+}
+
+std::vector<std::complex<float>> CommsLib::toCorrelatorScale(const std::complex<int16_t>* raw,
+                                                             size_t n) {
+  static constexpr float kShortMaxFloat = 32767.0f;
+  std::vector<std::complex<float>> out(n);
+  for (size_t i = 0; i < n; ++i) {
+    out[i] = std::complex<float>(static_cast<float>(raw[i].real()) / kShortMaxFloat,
+                                 static_cast<float>(raw[i].imag()) / kShortMaxFloat);
   }
   return out;
 }

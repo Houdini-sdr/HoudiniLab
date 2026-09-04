@@ -9,19 +9,24 @@
 #include <cstddef>
 
 #include "RadioUHD.h"
+#include "RadioSetInterfaces.h"
 #include "config.h"
 
-class ClientRadioSetUHD {
+class ClientRadioSetUHD : public IClientRadioSet {
  public:
   ClientRadioSetUHD(Config* cfg);
-  ~ClientRadioSetUHD(void);
-  int triggers(int i);
+  ~ClientRadioSetUHD(void) override;
+  int triggers(int i) override;
   int radioRx(size_t radio_id, void* const* buffs, int numSamps,
-              long long& frameTime);
+              long long& frameTime) override;
   int radioTx(size_t radio_id, const void* const* buffs, int numSamps,
-              int flags, long long& frameTime);
-  void radioStop(void);
-  bool getRadioNotFound() { return radioNotFound; }
+              int flags, long long& frameTime) override;
+  void radioStop(void) override;
+  /// Drain asynchronous TX status; UHD reports it through its own stream and
+  /// there is nothing to drain here. Kept so the receiver's call compiles
+  /// under RADIO_TYPE=PURE_UHD (baseline assessment B1).
+  int drainTxStatus(size_t /*radio_id*/) override { return 0; }
+  bool getRadioNotFound() override { return radioNotFound; }
 
  private:
   struct ClientRadioContext {

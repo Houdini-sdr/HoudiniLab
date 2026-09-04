@@ -1,0 +1,17 @@
+n 4096
+sync_index 975
+snr 47.35
+frame 61
+rx_beacon_time 184929992
+pilot_ref 149049360
+beacon_end 656
+corr_scale 10
+thresh coherence
+pick first_path
+first_path_window 64
+first_path_floor_db -9.0
+snr_floor_db 30.0
+snr_guard 64
+replica_tail 144
+beacon_type nr_pss
+cfo_hz -1476.927

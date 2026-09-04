@@ -32,17 +32,27 @@ Wire formats (little-endian), one datagram per (frame, antenna) per kind:
         accepted.
   CNS1  [magic][frame][ant][num_pts][mod_order]      then num_pts * (I f32, Q f32)
   SYN1  [magic][frame][tid][state][resid i32][cfo_hz f32][snr f32][shift i32]
-        [samps_per_frame u32][carrier_hz f32][scatter_tol u32]
+        [samps_per_frame u32][carrier_hz f32][scatter_tol u32][cfo_beacon f32]
         One datagram per resync DETECTION from the UE sync thread (not the
         recording path), so it is NOT per-antenna and carries no payload array.
         state: 1=LOCKED (beacon alive on the anchored grid), 2=HOLD (one
         off-grid detection seen, deliberately NOT acted on), 3=ESCALATING (the
-        anchor was re-acquired; `shift` is the schedule step applied, already
-        reduced modulo the frame period and centred), 4=WEAK (detected but under
-        the SNR floor -- distinct from no beacon at all), 5=REANCHOR FAILED (an
-        escalation ran and re-acquisition did not confirm). NOT SYNCED is inferred
-        from staleness -- while the acquisition loop hunts there is no detection
-        to hang a datagram on.
+        anchor was re-acquired), 4=WEAK (detected but under the SNR floor --
+        distinct from no beacon at all), 5=REANCHOR FAILED (an escalation ran
+        and re-acquisition did not confirm). NOT SYNCED is inferred from
+        staleness -- while the acquisition loop hunts there is no detection to
+        hang a datagram on.
+        `shift` is the schedule step the UE actually applied, already reduced
+        modulo the tracked frame period and centred. It is nonzero on an
+        ESCALATING record (the large re-anchor move) AND on a LOCKED one, where
+        the tracker's alpha half moves the schedule by alpha * resid.
+        TWO CFO FIELDS. `cfo_hz` is the TRACKED value, derived from the timing
+        grid, and is the accurate one. `cfo_beacon` is the beacon phase
+        estimator's independent reading, which is precise but carries a
+        configuration-dependent bias. The pair is the real cross-check; the
+        resid-slope figure the panel also prints is the tracking RESIDUAL and is
+        not a third opinion on the same quantity. `cfo_beacon` is NaN on any
+        record with no detection behind it, and the field is then dropped.
   ADC2  [magic][frame][ant][cols][samps][rate f32][peak][clipped][slot][any_peak]
         [any_clipped]  then cols * (I_min, I_max, Q_min, Q_max) as int16.  A min/max
         envelope of the whole slot rather than decimated samples, so a brief clip
@@ -77,7 +87,7 @@ CSI2_HDR = struct.Struct("<IIIIfI")  # ... plus reps (pilot symbols averaged)
 CNS_HDR = struct.Struct("<IIIII")   # magic, frame, ant, num_pts, mod_order
 ADC_HDR = struct.Struct("<IIIIIfII")   # magic, frame, ant, cols, samps, rate, peak, clipped
 ADC2_HDR = struct.Struct("<IIIIIfIIIII")  # ... plus slot, any_peak, any_clipped
-SYN_HDR = struct.Struct("<IIIIiffiIfI")  # ... plus samps_per_frame, carrier_hz, scatter_tol
+SYN_HDR = struct.Struct("<IIIIiffiIfIf")  # ... + samps_per_frame, carrier_hz, scatter_tol, cfo_beacon
 
 # ---- shared state: latest CSI + constellation per antenna ------------------
 _lock = threading.Lock()
@@ -194,7 +204,7 @@ def _parse_syn(payload):
                   % (len(payload), SYN_HDR.size, _sync_bad[0]), flush=True)
         return None
     (_m, frame, tid, state, resid, cfo, snr, shift, sfr, carrier,
-     tol) = SYN_HDR.unpack_from(payload, 0)
+     tol, cfo_b) = SYN_HDR.unpack_from(payload, 0)
     # A NaN or inf float would serialise as bare NaN/Infinity, which is invalid
     # JSON: the browser's JSON.parse throws, onData's catch swallows it, and the
     # dashboard silently stops updating for as long as the record stays in the
@@ -202,10 +212,17 @@ def _parse_syn(payload):
     if not (math.isfinite(cfo) and math.isfinite(snr) and math.isfinite(carrier)):
         _sync_bad[0] += 1
         return None
-    return {"frame": int(frame), "tid": int(tid), "state": int(state),
-            "resid": int(resid), "cfo": float(cfo), "snr": float(snr),
-            "shift": int(shift), "sfr": int(sfr), "fc": float(carrier),
-            "tol": int(tol)}
+    # The beacon estimate is only taken where there WAS a detection, so
+    # escalation / re-anchor-failure / weak records carry NaN. Drop the field,
+    # not the datagram: those records still carry a valid state and shift, and
+    # dropping them would hide exactly the events the panel exists to show.
+    rec = {"frame": int(frame), "tid": int(tid), "state": int(state),
+           "resid": int(resid), "cfo": float(cfo), "snr": float(snr),
+           "shift": int(shift), "sfr": int(sfr), "fc": float(carrier),
+           "tol": int(tol)}
+    if math.isfinite(cfo_b):
+        rec["cfob"] = float(cfo_b)
+    return rec
 
 
 def _udp_loop(bind_host, bind_port):
@@ -414,38 +431,136 @@ def _topology_of(sounder_dir, conf):
         return None
 
 
-def _launch_sounder(args, udp_dest):
-    """Run the sounder in viewing mode on this host (teardown + env + retries)."""
-    env = os.environ.copy()
-    env["HOUDINI_CSI_UDP"] = udp_dest
-    env["HOUDINI_MAX_FRAME"] = str(args.max_frame)
-    if args.csi_fps:
-        env["HOUDINI_CSI_FPS"] = str(args.csi_fps)
-    sd = args.sounder_dir
-    # Tear down against the radios THIS run will use: the config names its own
-    # topology file, so a config pointed at a different bench tears down that
-    # bench rather than whatever the default topology happens to list.
-    topo = _topology_of(sd, args.conf)
-    td = 'csi_gui/teardown_framer.py' + (' --topology "%s"' % topo if topo else '')
-    # A tiny shell wrapper: teardown any stuck framer, then run sounder --view,
-    # retrying the flaky cold-start. Mirrors the HIL test harness. The teardown's
-    # output is kept (not sent to /dev/null): it exits non-zero when a radio could
-    # not be cleared, and that is usually the reason the sounder then fails.
-    script = (
-        'source "%s"/bin/activate 2>/dev/null; '
-        'export LD_LIBRARY_PATH="%s"/lib '
-        'SOAPY_SDR_PLUGIN_PATH="%s"/lib/SoapySDR/modules0.8-3; '
-        'cd "%s"; '
-        'for a in 1 2 3 4; do '
-        '  timeout 60 python3 %s 2>&1 | sed -u "s/^/[teardown] /"; sleep 8; '
-        '  ./build/sounder --view --conf_file "%s" --storepath "%s" 2>&1 | '
-        '     sed -u "s/^/[sounder] /"; '
-        '  echo "[sounder] exited, retrying..."; sleep 5; '
-        'done'
-    ) % (args.venv, args.venv, args.venv, sd, td, args.conf, args.storepath)
-    print("[csi] launching sounder --view in %s" % sd, flush=True)
-    return subprocess.Popen(["bash", "-lc", script], env=env,
-                            preexec_fn=os.setsid)
+_PR_SET_PDEATHSIG = 1  # linux/prctl.h
+
+
+def _die_with_parent():
+    """preexec_fn for the sounder: the kernel SIGTERMs it when this launcher dies.
+
+    A launcher that is SIGKILLed (a bench harness timing out, an operator's
+    kill -9) skips every cleanup path in this file. Before this, the sounder
+    outlived it holding both boards' RX streams, and every later run was
+    refused at setSampleRate(RX) with an empty log (DEMO_VERIFICATION 8.127,
+    AP-64). Three supervisors that watched the launcher from a shell loop
+    failed on silicon; PR_SET_PDEATHSIG is the kernel doing the watching, and
+    a sounder releases both boards on SIGTERM (measured, 8.127). The signal is
+    tied to the thread that forked, so the supervisor runs on the main thread.
+    """
+    try:
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+        if libc.prctl(_PR_SET_PDEATHSIG, int(signal.SIGTERM), 0, 0, 0) != 0:
+            os.write(2, b"[csi] prctl(PR_SET_PDEATHSIG) failed: errno %d\n"
+                     % ctypes.get_errno())
+    except (OSError, AttributeError):
+        os.write(2, b"[csi] PR_SET_PDEATHSIG unavailable on this platform\n")
+    os.setsid()  # its own session: the clean-shutdown path signals the group
+
+
+def _pump(stream, prefix):
+    """Copy a child's output to ours, one prefix per line (was a sed)."""
+    for line in iter(stream.readline, b""):
+        sys.stdout.write(prefix + line.decode("utf-8", errors="replace"))
+        sys.stdout.flush()
+
+
+class SounderSupervisor:
+    """Runs sounder --view under this process: teardown, launch, retry, stop.
+
+    Mirrors the HIL harness: tear down any stuck framer, start the sounder,
+    retry the flaky cold start a few times. The teardown's output is kept: it
+    exits non-zero when a radio could not be cleared, and that is usually the
+    reason the sounder then fails.
+    """
+
+    ATTEMPTS = 4
+    SETTLE_AFTER_TEARDOWN_S = 8.0  # the boards' server needs this to release
+    RETRY_DELAY_S = 5.0
+    STOP_GRACE_S = 4.0
+
+    def __init__(self, args, udp_dest):
+        self.sd = args.sounder_dir
+        self.env = os.environ.copy()
+        self.env["HOUDINI_CSI_UDP"] = udp_dest
+        self.env["HOUDINI_MAX_FRAME"] = str(args.max_frame)
+        if args.csi_fps:
+            self.env["HOUDINI_CSI_FPS"] = str(args.csi_fps)
+        # What `source venv/bin/activate` would set, plus the plugin path.
+        venv = args.venv
+        self.env["VIRTUAL_ENV"] = venv
+        self.env["PATH"] = os.path.join(venv, "bin") + os.pathsep + self.env.get("PATH", "")
+        self.env["LD_LIBRARY_PATH"] = os.path.join(venv, "lib")
+        self.env["SOAPY_SDR_PLUGIN_PATH"] = os.path.join(venv, "lib", "SoapySDR", "modules0.8-3")
+        # Tear down against the radios THIS run will use: the config names its
+        # own topology file, so a config pointed at a different bench tears down
+        # that bench rather than whatever the default topology happens to list.
+        topo = _topology_of(self.sd, args.conf)
+        self.td_cmd = ["python3", "csi_gui/teardown_framer.py"]
+        if topo:
+            self.td_cmd += ["--topology", topo]
+        self.cmd = ["./build/sounder", "--view", "--conf_file", args.conf,
+                    "--storepath", args.storepath]
+        self.proc = None
+        self.stopping = False
+
+    def _teardown(self):
+        try:
+            out = subprocess.run(self.td_cmd, cwd=self.sd, env=self.env, timeout=60,
+                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            text = out.stdout.decode("utf-8", errors="replace")
+        except subprocess.TimeoutExpired as exc:
+            text = (exc.stdout or b"").decode("utf-8", errors="replace") + "timed out\n"
+        for line in text.splitlines():
+            print("[teardown] " + line, flush=True)
+
+    def _start(self):
+        print("[csi] launching sounder --view in %s" % self.sd, flush=True)
+        proc = subprocess.Popen(self.cmd, cwd=self.sd, env=self.env,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                preexec_fn=_die_with_parent)
+        threading.Thread(target=_pump, args=(proc.stdout, "[sounder] "),
+                         daemon=True).start()
+        return proc
+
+    def run(self):
+        """Supervise until the sounder gives up or stop() is called. Main thread only."""
+        for attempt in range(1, self.ATTEMPTS + 1):
+            if self.stopping:
+                return
+            self._teardown()
+            time.sleep(self.SETTLE_AFTER_TEARDOWN_S)
+            if self.stopping:
+                return
+            self.proc = self._start()
+            print("[csi] sounder pid %d, attempt %d of %d"
+                  % (self.proc.pid, attempt, self.ATTEMPTS), flush=True)
+            while self.proc.poll() is None and not self.stopping:
+                time.sleep(0.5)
+            if self.stopping:
+                return
+            print("[sounder] exited rc=%s, retrying..." % self.proc.returncode, flush=True)
+            time.sleep(self.RETRY_DELAY_S)
+        print("[csi] sounder gave up after %d attempts; dashboard stays up"
+              % self.ATTEMPTS, flush=True)
+
+    def stop(self):
+        """SIGTERM the sounder's group, then SIGKILL what is left. Safe to repeat."""
+        self.stopping = True
+        proc = self.proc
+        if proc is None or proc.poll() is not None:
+            return
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        deadline = time.time() + self.STOP_GRACE_S
+        while proc.poll() is None and time.time() < deadline:
+            time.sleep(0.1)
+        if proc.poll() is None:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
 
 def main():
@@ -481,7 +596,7 @@ def main():
     ap.add_argument("--dest-host", default="127.0.0.1",
                     help="host the sounder streams CSI to (when --launch)")
     args = ap.parse_args()
-    # Validate BEFORE anything launches: a SystemExit after _launch_sounder
+    # Validate BEFORE anything launches: a SystemExit after the supervisor starts
     # orphaned the sounder group holding the radios (second review 2.5).
     if not (math.isfinite(args.mag_top) and math.isfinite(args.mag_span)
             and args.mag_span > 0):
@@ -491,9 +606,9 @@ def main():
                          daemon=True)
     t.start()
 
-    child = None
+    sup = None
     if args.launch:
-        child = _launch_sounder(args, "%s:%d" % (args.dest_host, args.udp_port))
+        sup = SounderSupervisor(args, "%s:%d" % (args.dest_host, args.udp_port))
 
     def _stats_loop():
         while True:
@@ -539,11 +654,8 @@ def main():
           % (url, args.http_port, args.http_port), flush=True)
 
     def _cleanup():
-        if child is not None:  # kill the whole sounder process group
-            try:
-                os.killpg(os.getpgid(child.pid), signal.SIGTERM)
-            except ProcessLookupError:
-                pass
+        if sup is not None:  # SIGTERM then SIGKILL the sounder's process group
+            sup.stop()
 
     def _sigterm(*_):
         print("\n[csi] shutting down (SIGTERM)", flush=True)
@@ -552,6 +664,8 @@ def main():
     signal.signal(signal.SIGTERM, _sigterm)
 
     try:
+        if sup is not None:
+            sup.run()  # main thread: PR_SET_PDEATHSIG is tied to the forking thread
         while True:
             time.sleep(0.5)
     except KeyboardInterrupt:
@@ -1081,7 +1195,23 @@ const cardObserver=(typeof ResizeObserver!=='undefined') ? new ResizeObserver(()
 let pktCount=0,t0=Date.now();
 // ---- beacon sync / CFO panel (AP-32) --------------------------------------
 // One card per client tid, matching how every other stream here is keyed.
-const SYNC_SHOW=120, SYNC_QUIET_MS=2500, SYNC_DEAD_MS=60000;
+const SYNC_SHOW=120, SYNC_QUIET_FLOOR_MS=2500, SYNC_DEAD_MS=60000;
+// THE QUIET THRESHOLD MUST TRACK THE RESYNC CADENCE, NOT A CONSTANT. 2500 ms was
+// chosen when the client resynced every 260 ms, so it meant "about ten missed
+// opportunities". The cadence default became 2604 ms on 2026-09-02, which put
+// every NORMAL detection past a fixed 2500 and would have dimmed the card and
+// shown "quiet 2.6s" permanently -- destroying the one badge whose whole job is
+// to distinguish held data from live data.
+//
+// SYN1 does not carry the cadence, so the page measures it: the median interval
+// between arriving records for this tid, over the last few. Self-calibrating, no
+// wire change, and it survives the next cadence change too.
+function syncQuietMs(card){
+  const g=card.gaps||[];
+  if(g.length<3) return SYNC_QUIET_FLOOR_MS;
+  const m=g.slice().sort((a,b)=>a-b)[Math.floor(g.length/2)];
+  return Math.max(SYNC_QUIET_FLOOR_MS, 3*m);
+}
 // The lane MEASURED a 1.9 kHz run-to-run spread with the clocks locked (two
 // zero-injection runs, +756 vs -1147 Hz), because a short correlation lag turns
 // a tiny phase error into a large apparent frequency. Anything under this is an
@@ -1145,14 +1275,27 @@ function drawSyncCard(tid, sync){
   card.rec=sync;
   const hist=(sync.hist||[]).slice(-SYNC_SHOW);
   const age=(sync.age_ms===null||sync.age_ms===undefined)?Infinity:sync.age_ms;
+  // Learn this link's own detection cadence from the records as they arrive. A
+  // FRESH record (small age) that carries a new last-frame is one arrival; the
+  // gap since the previous arrival is one sample of the cadence.
+  const lastFrame=hist.length?hist[hist.length-1].frame:null;
+  const nowMs=Date.now();
+  if(lastFrame!==null && lastFrame!==card.lastFrameSeen){
+    if(card.lastArrival) {
+      card.gaps=(card.gaps||[]).concat(nowMs-card.lastArrival).slice(-8);
+    }
+    card.lastArrival=nowMs;
+    card.lastFrameSeen=lastFrame;
+  }
+  const quietMs=syncQuietMs(card);
   const last=hist.length?hist[hist.length-1]:null;
   let [label,cls]=syncChip(last,age);
-  if(last && age>=SYNC_QUIET_MS && age<SYNC_DEAD_MS){
+  if(last && age>=quietMs && age<SYNC_DEAD_MS){
     label+=' \u00b7 quiet '+(age/1000).toFixed(1)+'s';
   }
   card.chip.textContent=label;
   card.chip.className='badge '+cls;
-  if(card.plot) card.plot.style.opacity=(age>=SYNC_QUIET_MS)?'0.4':'1';
+  if(card.plot) card.plot.style.opacity=(age>=quietMs)?'0.4':'1';
 
   const d=fitCanvas(card.cv,true), ctx=d.ctx;
   ctx.clearRect(0,0,d.w,d.h);
@@ -1221,21 +1364,38 @@ function drawSyncCard(tid, sync){
   let num=0,den=0;
   for(const p of loc){num+=(p.frame-mx)*(p.resid-my);den+=(p.frame-mx)*(p.frame-mx);}
   const sfr=loc[n-1].sfr||1, fc=loc[n-1].fc||0;
+  // THREE FIGURES, AND THEY ARE NOT THREE VIEWS OF ONE NUMBER. Reading this
+  // line wrong is the failure the panel had before: `clock` is the TOTAL
+  // offset the tracker holds, `residual` is what is LEFT after tracking it,
+  // and `beacon` is a separate instrument measuring the total offset its own
+  // way. Comparing clock against residual is comparing a quantity with its own
+  // error term, which can never agree and is not meant to; the cross-check
+  // that means something is clock against beacon.
   const tppm=(den>0?num/den:0)/sfr*1e6;
-  let cs=0; for(const p of loc)cs+=p.cfo;
-  const cm=cs/n;
-  let cq=0; for(const p of loc)cq+=(p.cfo-cm)*(p.cfo-cm);
-  // SEM, not the population SD: the figure quoted is the MEAN, so its error bar
-  // shrinks as sqrt(n). Printing the per-sample spread made a resolved offset
-  // look unresolvable.
-  const sem=Math.sqrt(cq/n)/Math.sqrt(n);
-  const cppm=(fc>0?cm/fc*1e6:0), cppmsem=(fc>0?sem/fc*1e6:0);
-  const noisy=Math.abs(cm)<CFO_NOISE_HZ;
+  // The tracked offset is a FILTERED STATE, not a set of independent samples,
+  // so it is quoted as a value with no error bar. A SEM over it would shrink
+  // as sqrt(n) while describing nothing but the filter's own smoothness.
+  let ks=0; for(const p of loc)ks+=p.cfo;
+  const km=ks/n, kppm=(fc>0?km/fc*1e6:0);
+  // The beacon estimator IS a set of independent per-detection readings, so a
+  // SEM is the right error bar here: the figure quoted is the mean.
+  const bl=loc.filter(p=>p.cfob!==undefined);
+  let bstr='beacon n/a';
+  if(bl.length){
+    let bs=0; for(const p of bl)bs+=p.cfob;
+    const bm=bs/bl.length;
+    let bq=0; for(const p of bl)bq+=(p.cfob-bm)*(p.cfob-bm);
+    const bsem=Math.sqrt(bq/bl.length)/Math.sqrt(bl.length);
+    const bppm=(fc>0?bm/fc*1e6:0), bsemppm=(fc>0?bsem/fc*1e6:0);
+    bstr='beacon '+bppm.toFixed(3)+' +/- '+bsemppm.toFixed(3)+' ppm ('
+        +bm.toFixed(0)+' +/- '+bsem.toFixed(0)+' Hz'
+        +(Math.abs(bm)<CFO_NOISE_HZ?', inside the ~2 kHz phase-noise floor':'')
+        +')';
+  }
   card.read.textContent=
-    'timing '+tppm.toFixed(4)+' ppm (resid slope)  |  carrier '
-    +cppm.toFixed(3)+' +/- '+cppmsem.toFixed(3)+' ppm ('+cm.toFixed(0)+' +/- '
-    +sem.toFixed(0)+' Hz'+(noisy?', inside the ~2 kHz phase-noise floor':'')
-    +')  |  '+n+' locked over '+span+' frames'+note;
+    'clock '+kppm.toFixed(3)+' ppm (tracked)  |  residual '
+    +tppm.toFixed(4)+' ppm (resid slope)  |  '+bstr
+    +'  |  '+n+' locked over '+span+' frames'+note;
 }
 
 function drawSync(sync){

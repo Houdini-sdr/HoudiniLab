@@ -1,100 +1,135 @@
 /** @file Radio.h
-  * @brief Declaration file for the Radio class.
-  * 
-  * Copyright (c) 2018-2022, Rice University 
+  * @brief The radio seam: one abstract radio, a value of parameters instead of
+  *        a configuration pointer, and a factory that is the only place that
+  *        knows which backend a platform uses.
+  *
+  * Copyright (c) 2018-2022, Rice University
   * RENEW OPEN SOURCE LICENSE: http://renew-wireless.org/license
+  *
+  * docs/RADIO_PLATFORM_SEAM.md. The shape follows Agora's radio layer where
+  * that layer is rigorous (an abstract radio, a runtime factory over
+  * backends) and departs from it where it is not: the base class here is
+  * NARROW -- streams, time, device facts -- takes a RadioParams value rather
+  * than the whole Config, has one receive form, and carries no other
+  * platform's framer hooks. What a platform has and another does not (the
+  * transmit time grid, the receive gap ledger, a hardware trigger, an AGC)
+  * is a capability a backend reports: a query the caller can branch on, or
+  * an honest "none" (0 pad, 0 status events) where the old code reported the
+  * same. What there is not is a hook that claims to have acted and did not.
+  *
+  * Backends: RadioSoapy (Iris and SoapyUHD, the SoapySDR plumbing),
+  * RadioHoudini (RadioSoapy plus the Houdini stream arguments, the
+  * pre-stream rates, the drain and gap ledger, the TDD grid), and, when
+  * built with USE_UHD, the native UHD radio (seam step S3).
 */
 #ifndef RADIO_H_
 #define RADIO_H_
 
+#include <cstddef>
+#include <cstdint>
 #include <cstdlib>
+#include <memory>
+#include <string>
 #include <vector>
 
-#include <cstdint>
+#include "sync/sync_config.h"  // houdini::sync::Platform
 
-#include "SoapySDR/Device.hpp"
-#include "SoapySDR/Types.hpp"
-#include "config.h"
+namespace SoapySDR {
+class Device;
+}
+
+/// What a radio needs to open and set itself up. Filled by the radio sets
+/// from Config; the radio never sees Config.
+struct RadioParams {
+  std::string id;             ///< Iris serial, UHD address, or the Houdini board IP
+  std::string label;          ///< how logs name it ("BS <id>", "UE <id>")
+  std::string remote_port;    ///< Houdini: the SoapyRemote port on the board
+  std::vector<size_t> channels;
+  double rate_hz = 0.0;
+  double nco_hz = 0.0;        ///< Houdini: the mixer NCO; Iris: the BB frequency
+  double rf_freq_hz = 0.0;    ///< Iris/UHD: the RF tune
+  double bw_filter_hz = 0.0;  ///< Iris: the analog filter
+  bool single_gain = false;   ///< Iris: one unified gain per direction
+  double rx_freq_offset_hz = 0.0;  ///< deliberate detune for CFO validation (AP-33)
+  double tx_freq_offset_hz = 0.0;
+  // Houdini stream facts.
+  int rx_local_port = 10002;  ///< host UDP port the RX stream binds
+  std::string tx_mode = "stream";  ///< "replay" (the BS beacon RAM) or "stream" (the UE)
+  bool tdd = false;           ///< the driver's TDD tick anchor for the UE pilot
+  bool mts = true;            ///< multi-tile sync on every stream (AP-23)
+  std::string timeout = "1000000";
+};
 
 class Radio {
  public:
-  inline SoapySDR::Device* RawDev() const { return dev_; };
+  enum class Type { kSoapyIris, kSoapyUhd, kSoapyHoudini, kUhdNative };
 
-  // preStreamRxRate/preStreamTxRate/preStreamFreq (when non-zero) are applied
-  // BEFORE the streams are opened -- required for backends (Houdini) that forbid
-  // a live sample-rate change once a stream is open. RX and TX rates are set
-  // independently because the Houdini BS beacon replays at the DAC max rate
-  // while its RX runs at the sounder rate. preStreamTxRate < 0 means "use the
-  // device's maximum TX sample rate" (Houdini replay). 0 leaves a rate to
-  // dev_init (Iris path unchanged).
-  Radio(const SoapySDR::Kwargs& args, const char soapyFmt[],
-        const std::vector<size_t>& channels,
-        const SoapySDR::Kwargs& rxStreamArgs = SoapySDR::Kwargs(),
-        const SoapySDR::Kwargs& txStreamArgs = SoapySDR::Kwargs(),
-        double preStreamRxRate = 0.0, double preStreamTxRate = 0.0,
-        double preStreamFreq = 0.0, double rxFreqOffset = 0.0,
-        double txFreqOffset = 0.0);
-  ~Radio(void);
-  int recv(void* const* buffs, int samples, long long& frameTime);
-  int activateRecv(const long long rxTime = 0, const size_t numSamps = 0,
-                   int flags = 0);
-  void deactivateRecv(void);
-  int xmit(const void* const* buffs, int samples, int flags,
-           long long& frameTime);
-  void activateXmit(void);
-  void deactivateXmit(void);
-  int getTriggers(void) const;
-  // Samples zero-padded into the window the LAST recv() filled (0 = clean). Valid
-  // until the next recv() on this radio. Lets a consumer tell a window that carries
-  // inserted zeros from one that is all real samples, which the CSI/view path needs
-  // and which the /Data/Gaps table alone cannot answer (it is drained only by the
-  // HDF5 writer, and viewing mode writes no file). See AP-10.
-  size_t lastPadSamples(void) const { return last_pad_samples_; }
-  // Drain queued asynchronous TX status events and report how many indicated a
-  // problem. writeStream returning the full count only means the burst was ACCEPTED;
-  // a burst sent late or dropped for being off-grid shows up only here. The driver
-  // merges device-side events for live TX streams (tx_mode=stream), so on the fine
-  // TDD grid this is the difference between a silent phase jump and a logged one.
-  // Latches off if the stream does not support status. See AP-10.
-  int drainTxStatus(void);
-  void drain_buffers(std::vector<void*> buffs, int symSamp);
+  /// The one place that knows which backend a type is. Throws
+  /// std::invalid_argument for a type this build has no backend for.
+  static std::unique_ptr<Radio> create(Type type, const RadioParams& params);
+  static const char* name(Type type);
 
-  void reset_DATA_clk_domain(void);
-  void dev_init(Config* _cfg, int ch, double rxgain, double txgain);
+  // (radioTypeFor(const Config&) in Radio.h below: the config's radio_type and
+  // the build's Soapy-vs-UHD choice decide the backend.)
 
- private:
-  int recvHoudini(void* const* buffs, int samples, long long& frameTime);
+  virtual ~Radio() = default;
 
-  SoapySDR::Device* dev_;
-  // nullptr NSDMI is load-bearing: the ctor's cleanup-and-rethrow reads
-  // these before every setupStream has assigned them (second review 2.1 --
-  // an indeterminate txs_ meant closeStream on a wild pointer on the
-  // transient-board-wedge retry path).
-  SoapySDR::Stream* rxs_ = nullptr;
-  SoapySDR::Stream* txs_ = nullptr;
-  // MTS membership helper: DAC tile 0 must be a GROUP MEMBER (not merely
-  // powered), so a single-channel ch1 stream needs this never-activated
-  // ch0 replay stream opened first (the canonical mts_check group shape).
-  SoapySDR::Stream* aux_mts_txs_ = nullptr;
-  bool houdini_ = false;
-  size_t num_rx_ch_ = 1;
-  // Sample-gap awareness (Houdini UDP RX). recvHoudini() detects a dropped-packet gap
-  // spliced mid-window (see grid tracker) and zero-pads it so post-gap samples keep
-  // their offset; the extent is pushed to the process-wide RxGapSink (rx_gap_sink.h)
-  // for the recorder's /Data/Gaps table.
-  double rx_rate_ = 0.0;        // cached RX sample rate for the grid tracker
-  int64_t rx_sample_pos_ = 0;  // absolute samples emitted across recvHoudini calls
+  // ---- device facts -------------------------------------------------------
+  virtual Type type() const = 0;
+  virtual houdini::sync::Platform platform() const = 0;
+  const RadioParams& params() const { return params_; }
+  /// Print what the device reports it is running at (rates, gains, antennas
+  /// where they exist) and register the node for the version-skew check.
+  virtual void printSettings() const = 0;
 
- public:
-  // Stream-relative sample position after the last recv, for callers that
-  // record gap extents against the same axis recvHoudini uses.
-  int64_t rxSamplePos() const { return rx_sample_pos_; }
+  // ---- capabilities: what this backend HAS, never a silent no-op ----------
+  /// A hardware trigger and correlator block (Iris): the base station measures
+  /// sync delays against it and the client waits on it.
+  virtual bool hasHardwareTrigger() const = 0;
+  /// An AGC block to configure (Iris).
+  virtual bool hasAgc() const = 0;
+  /// The transmit time this backend wants for a burst the sounder schedules at
+  /// `frame_ticks` (sample ticks at `rate_hz`): the plain conversion for a
+  /// backend without a grid; the Houdini backend adds its tick advance and
+  /// snaps to the TDD window grid it accepts.
+  virtual long long txTimeNs(long long frame_ticks, double rate_hz, bool tdd_pilot,
+                             long long advance_ticks) const = 0;
+  /// Samples zero-padded into the window the LAST recv() filled (0 = clean, and
+  /// 0 always for a backend without a gap ledger). See AP-10.
+  virtual size_t lastPadSamples() const { return 0; }
+  /// Stream-relative sample position after the last recv, for a backend that
+  /// records gap extents against that axis.
+  virtual int64_t rxSamplePos() const { return 0; }
+  /// Drain queued asynchronous TX status events; the count that indicated a
+  /// problem. 0 for a backend whose stream reports none.
+  virtual int drainTxStatus() { return 0; }
 
- private:
-  size_t last_pad_samples_ = 0;  // zeros inserted into the last window (lastPadSamples)
-  bool tx_status_unsupported_ = false;  // stream reported no status surface: stop asking
-  size_t tx_status_events_ = 0;         // cumulative problem events seen
-  long long tx_status_log_ns_ = 0;      // warn throttle
+  // ---- streams ------------------------------------------------------------
+  virtual void setup(int ch, double rxgain, double txgain) = 0;
+  virtual int recv(void* const* buffs, int samples, long long& frameTime) = 0;
+  virtual int activateRecv(long long rxTime = 0, size_t numSamps = 0, int flags = 0) = 0;
+  virtual void deactivateRecv() = 0;
+  virtual int xmit(const void* const* buffs, int samples, int flags, long long& frameTime) = 0;
+  virtual void activateXmit() = 0;
+  virtual void deactivateXmit() = 0;
+  virtual int getTriggers() const = 0;
+  virtual void drain_buffers(std::vector<void*> buffs, int symSamp) = 0;
+  virtual void reset_DATA_clk_domain() = 0;
+
+  /// The SoapySDR device behind a Soapy backend, nullptr otherwise. Used by
+  /// the base-station framer code that still programs the Iris TDD block
+  /// directly; seam step S2 moves those callers into the framer objects.
+  virtual SoapySDR::Device* RawDev() const { return nullptr; }
+
+ protected:
+  explicit Radio(const RadioParams& params) : params_(params) {}
+  RadioParams params_;
 };
+
+class Config;
+/// The backend a configuration asks for: radio_type "houdini" is the Houdini
+/// backend; otherwise the build's Soapy flavour (Iris, or UHD through Soapy
+/// when built with RADIO_TYPE=SOAPY_UHD).
+Radio::Type radioTypeFor(const Config& cfg);
 
 #endif  // RADIO_H_

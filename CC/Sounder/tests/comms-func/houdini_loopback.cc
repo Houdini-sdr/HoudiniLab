@@ -26,11 +26,11 @@
 #include <thread>
 #include <vector>
 
-#include "include/BaseRadioSet.h"
-#include "include/ClientRadioSet.h"
-#include "include/comms-lib.h"
-#include "include/config.h"
-#include "include/macros.h"
+#include "BaseRadioSet.h"
+#include "ClientRadioSet.h"
+#include "comms-lib.h"
+#include "config.h"
+#include "macros.h"
 
 namespace {
 using ci16 = std::complex<int16_t>;
@@ -94,7 +94,7 @@ int main(int argc, char** argv) {
   // streams the pilot continuously (flags=0 = immediate) from a background
   // thread, so a pilot is always on the wire whenever the BS captures.
   // Start the BS RX only now (fresh), so it hasn't overflowed during the sync.
-  bs.activateHoudiniRx();
+  bs.radioStart();  // the framer starts the continuous BS RX (was activateHoudiniRx)
   const size_t bwin = static_cast<size_t>(2 * frame);
   std::vector<ci16> bbuf(bwin);
   std::printf("[rev] UE streaming pilot continuously; BS RX window %zu\n\n",

@@ -9,10 +9,15 @@
 
 #include "include/config.h"
 
+#include <cerrno>
+#include <cstring>
 #include <cstdio>
 #include <cstdlib>
+#include <optional>
 #include <random>
 
+#include "sync/beacon_shapes.h"
+#include "sync/detector.h"
 #include "include/comms-lib.h"
 #include "include/constants.h"
 #include "include/logger.h"
@@ -33,6 +38,29 @@ Config::Config(const std::string& jsonfile, const std::string& directory,
   Utils::loadTDDConfig(jsonfile, conf_str);
   // Enable comments in json file
   const auto tddConf = json::parse(conf_str, nullptr, true, true);
+  // The sync block, loaded and validated as ONE struct with provenance. Throws
+  // std::invalid_argument on an unknown key or an out-of-range value, which
+  // main.cc reports as a configuration error rather than a crash. Its
+  // sentinels are resolved, and the record printed, once the beacon shape is
+  // built below.
+  {
+    // The library never sees the config FILE: the block and the legacy
+    // top-level keys are handed to it explicitly.
+    std::optional<std::string> sync_block;
+    if (tddConf.contains("sync") && !tddConf["sync"].is_null()) {
+      sync_block = tddConf["sync"].dump();
+    }
+    std::optional<std::string> legacy_type;
+    if (tddConf.contains("beacon_type")) {
+      if (!tddConf["beacon_type"].is_string()) {
+        throw std::invalid_argument("beacon_type: expects a string");
+      }
+      legacy_type = tddConf["beacon_type"].get<std::string>();
+    }
+    sync_ = houdini::sync::SyncConfig::load(sync_block, legacy_type);
+    // The legacy corr_scale arrays are adopted below, once they are parsed
+    // with their own fallbacks (an absent key is 1, as it always was).
+  }
   std::stringstream ss;
   ss << "  Config: " << tddConf << "\n" << std::endl;
   MLPD_INFO("\nInput config:\n\n%s", ss.str().c_str());
@@ -45,6 +73,11 @@ Config::Config(const std::string& jsonfile, const std::string& directory,
   }
 
   internal_measurement_ = tddConf.value("internal_measurement", false);
+  // Diagnostic only (AP-73 / SH-348): skip the TX_CLEAR pulse in the Houdini
+  // framer's teardown ladder so the replay-RAM reload after an abort can be
+  // measured without it. Never set in a shipped config; the framer warns
+  // loudly when it is.
+  diag_skip_tx_clear_ = tddConf.value("houdini_diag_skip_tx_clear", false);
   /* Used for internal measurements. If internal_measurement is enabled,
        the default is to use a reference node for reciprocity calibration.
        Users have the option of "disabling" the reference node to get a full
@@ -123,6 +156,12 @@ Config::Config(const std::string& jsonfile, const std::string& directory,
   cal_tx_gain_.shrink_to_fit();
 
   beam_sweep_ = tddConf.value("beamsweep", false);
+  // WHICH beacon waveform. Parsed here because this is where tddConf lives;
+  // genPilots builds from it. Unknown names throw there rather than falling
+  // back, so a typo cannot quietly ship the old beacon.
+  // sync.beacon.type, or the legacy top-level "beacon_type" (SyncConfig
+  // accepts either and refuses the two disagreeing).
+  beacon_type_ = sync_.beacon.type;
   beacon_ant_ = tddConf.value("beacon_antenna", 0);
   beacon_radio_ = beacon_ant_ / bs_sdr_ch_;
   beacon_ch_ = beacon_ant_ % bs_sdr_ch_;
@@ -257,6 +296,19 @@ Config::Config(const std::string& jsonfile, const std::string& directory,
       exit(1);
     }
     corr_scale_init_.assign(corr_scale_init.begin(), corr_scale_init.end());
+  }
+  // The detection bars the library records and the receiver applies for a
+  // single client: the first client's, with the sounder's fallbacks (an
+  // absent corr_scale is 1, an absent corr_scale_init is corr_scale), marked
+  // json or derived accordingly. With several clients the arrays apply.
+  // A config with no clients has an empty corr_scale_ (BS-only, calibration,
+  // beam sweep): the sounder's fallback of 1 applies, marked derived, per
+  // array, so an explicit corr_scale_init in such a file is still recorded.
+  {
+    const double cs = corr_scale_.empty() ? 1.0 : static_cast<double>(corr_scale_.at(0));
+    const double csi =
+        corr_scale_init_.empty() ? cs : static_cast<double>(corr_scale_init_.at(0));
+    sync_.adoptLegacyThreshold(cs, csi, !corr_scale.empty(), !corr_scale_init.empty());
   }
   ul_data_frame_num_ = tddConf.value("ul_data_frame_num", 1);
   dl_data_frame_num_ = tddConf.value("dl_data_frame_num", 1);
@@ -478,7 +530,7 @@ void Config::loadTopology(std::string serials_file, const bool bs_only,
         n_bs_antennas_.at(i) = bs_sdr_ch_ * n_bs_sdrs_.at(i);
         num_bs_sdrs_all_ += n_bs_sdrs_.at(i);
         num_bs_antennas_all_ += n_bs_antennas_.at(i);
-        cal_ref_sdr_id_ = n_bs_sdrs_.at(i) - 1;
+        cal_ref_sdr_id_ = n_bs_sdrs_.at(i) > 0 ? n_bs_sdrs_.at(i) - 1 : 0;
         MLPD_INFO(
             "Loading devices - cell %zu, sdrs %zu, antennas: %zu, "
             "total bs srds: %zu\n",
@@ -540,7 +592,7 @@ void Config::genBsSchedule(BsSchedType type) {
   switch (type) {
     case CALIB_STAR_TOPO:
       for (size_t c = 0; c < num_cells_; c++) {
-        cal_ref_sdr_id_ = n_bs_sdrs_[c] - 1;
+        cal_ref_sdr_id_ = n_bs_sdrs_[c] > 0 ? n_bs_sdrs_[c] - 1 : 0;
         bs_array_frames_[c].resize(n_bs_sdrs_[c]);
         size_t beacon_slot = 0;
         if (num_cl_antennas_ > 0)
@@ -573,7 +625,7 @@ void Config::genBsSchedule(BsSchedType type) {
     case CALIB_FULLY_CONN:
       // For full matrix measurements (all bs nodes transmit and receive)
       for (size_t c = 0; c < num_cells_; c++) {
-        cal_ref_sdr_id_ = n_bs_sdrs_[c] - 1;
+        cal_ref_sdr_id_ = n_bs_sdrs_[c] > 0 ? n_bs_sdrs_[c] - 1 : 0;
         bs_array_frames_[c].resize(n_bs_sdrs_[c]);
         size_t frame_length = num_channels * n_bs_sdrs_[c] * guard_mult_;
         for (size_t i = 0; i < n_bs_sdrs_[c]; i++) {
@@ -768,72 +820,121 @@ void Config::genPilots() {
   std::vector<std::complex<int16_t>> prefix_zpad(prefix_, 0);
   std::vector<std::complex<int16_t>> postfix_zpad(postfix_, 0);
 
-  // compose Beacon slot:
-  // STS Sequence (for AGC) + GOLD Sequence (for Sync)
-  // 15reps of STS(16) + 2reps of gold_ifft(128)
+  // Compose the beacon slot. WHICH beacon is a config choice since 2026-09-02
+  // ("beacon_type": legacy | legacy_guard | dot11 | nr), and every candidate is
+  // defined once in include/sync/beacon_shapes.h -- the same header the offline
+  // geometry test and the bench probes build from, so the waveform this
+  // transmits is sample-for-sample the waveform they measured. That agreement
+  // is the point: AP-34(a) cost a bench session because the bench and the build
+  // disagreed about a beacon.
+  //
+  // DEFAULT IS `legacy`, WHICH IS BIT-IDENTICAL TO WHAT THIS FUNCTION BUILT
+  // BEFORE (asserted by beacon_geometry_test against this very recipe), because
+  // it measured the best detection margin of the four and every prior result in
+  // DEMO_VERIFICATION was taken against it. See 8.111-8.116 for the comparison.
   srand(time(NULL));
-  const int seq_len = 128;
-  std::vector<std::vector<float>> gold_ifft =
-      CommsLib::getSequence(CommsLib::GOLD_IFFT);
-  auto gold_ifft_ci16 = Utils::float_to_cint16(gold_ifft);
-  gold_cf32_.clear();
-  for (size_t i = 0; i < seq_len; i++) {
-    gold_cf32_.push_back(std::complex<float>(gold_ifft[0][i], gold_ifft[1][i]));
+  // The configured beacon as ONE object (sync/beacon_shape.h): waveform,
+  // replica, field geometry and the index convention every consumer rests
+  // on. An unknown name throws, naming the valid ones: a typo that quietly
+  // ships the old beacon is exactly the failure this parameter exists to
+  // make visible.
+  houdini::sync::Numerology num;
+  num.rate_hz = rate();
+  num.samps_per_slot = samps_per_slot();
+  num.samps_per_frame = samps_per_frame();
+  num.prefix_samples = static_cast<size_t>(prefix_);
+  shape_ = std::make_unique<houdini::sync::BeaconShape>(
+      houdini::sync::BeaconShape::make(beacon_type_, platform(), num));
+  const houdini::sync::BeaconShape& shape = *shape_;
+
+  // NOTE THE REPLICA'S SCALE IS LOAD-BEARING, and do not "tidy" it to unit
+  // power. find_beacon's test is `corr_scale * |gc|^2|gc_lag|^2 > sum|gc|^2`,
+  // 4th order against 2nd, so scaling the replica by k scales the decision ratio
+  // by k^2. Every detector ratio in DEMO_VERIFICATION 8.112 was measured with
+  // the replica exactly as it comes out of beacon_shapes, and renormalising it
+  // would move every threshold without touching a threshold.
+  auto gold_ifft_ci16 = Utils::cfloat_to_cint16(shape.replica());
+  gold_cf32_.assign(shape.replica().begin(), shape.replica().end());
+  // The sentinels resolve against the shape and the slot layout now that both
+  // are known; what is printed here is the configuration actually used.
+  if (!shape.numerologyHeld()) {
+    MLPD_WARN(
+        "beacon_type %s: %.6g MSPS has no whole power-of-two symbol size for the NR "
+        "subcarrier spacing (%.0f kHz); the shipped 128-point symbols are built "
+        "instead, so the spacing on the air is %.1f kHz\n",
+        beacon_type_.c_str(), rate() / 1e6, num.scs_hz / 1e3, rate() / 128.0 / 1e3);
   }
+  houdini::sync::ResolveContext rctx;
+  rctx.replica_len = shape.replicaLen();
+  rctx.prefix_samples = static_cast<double>(prefix_);
+  rctx.platform = platform();
+  rctx.single_copy_replica = shape.singleCopy();
+  rctx.clients = num_cl_sdrs_;
+  rctx.backend_applies_config = houdini::sync::Detector::backendAppliesConfigByDefault();
+  sync_.resolve(rctx);
+  CommsLib::setCorrelatorThreads(static_cast<unsigned>(sync_.detector.corr_threads));
+  MLPD_INFO("%s", sync_.describe().c_str());
+  std::cout << "Beacon: type " << beacon_type_ << ", core " << shape.coreLen()
+            << " samples, matched field " << shape.replicaReps() << " x "
+            << shape.replicaLen() << " at offset "
+            << shape.replicaOff() << " (beacon end = index + "
+            << shape.replicaTail() << ")"
+            << (shape.guardLen() ? " (cyclic guard " : " (no guard")
+            << (shape.guardLen()
+                    ? std::to_string(shape.guardLen()) + ")"
+                    : ")")
+            << ", PAPR " << shape.paprDb() << " dB" << std::endl;
+
   if (getenv("HOUDINI_DUMP_GOLD") != nullptr) {  // the exact find_beacon match
-    FILE* f = std::fopen("/tmp/gold.bin", "wb");
+    FILE* f = std::fopen(Utils::dumpPath("gold.bin").c_str(), "wb");
+    if (f == nullptr) {
+      MLPD_WARN("HOUDINI_DUMP_GOLD: cannot open %s (%s)\n", Utils::dumpPath("gold.bin").c_str(),
+                std::strerror(errno));
+    }
     if (f) {
       for (const auto& c : gold_cf32_) {
         float v[2] = {c.real(), c.imag()};
         std::fwrite(v, sizeof(float), 2, f);
       }
       std::fclose(f);
-      std::printf("Dumped gold_cf32 (%zu samp) to /tmp/gold.bin\n",
-                  gold_cf32_.size());
+      std::printf("Dumped gold_cf32 (%zu samp) to %s\n", gold_cf32_.size(),
+                  Utils::dumpPath("gold.bin").c_str());
     }
   }
 
-  std::vector<std::vector<float>> sts_seq =
-      CommsLib::getSequence(CommsLib::STS_SEQ);
-  auto sts_seq_ci16 = Utils::float_to_cint16(sts_seq);
-
-  // Populate STS (stsReps repetitions)
-  int stsReps = 15;
-  for (int i = 0; i < stsReps; i++) {
-    beacon_ci16_.insert(beacon_ci16_.end(), sts_seq_ci16.begin(),
-                        sts_seq_ci16.end());
-  }
-
-  // NOTE: a 32-sample cyclic guard was inserted HERE (802.11 GI2 pattern) to
-  // remove the STS->gold channel transient that puts +157 deg on the first term
-  // of conj(rep1)*rep2. REVERTED 2026-08-31: it moves the correlator's returned
-  // index by a measured -274 samples, so the invariant the whole timing chain
-  // rests on -- sync_index == houdiniBeaconEnd() == strobe + beacon_size -- no
-  // longer holds, beaconSnrDb() then measures a window of pre-beacon noise and
-  // reports 10.5 dB against a true 48.3 dB, and the 30 dB floor rejects every
-  // resync detection. Acquisition still worked; only the liveness path died.
-  // The benefit was also unmeasurable: skipping the contaminated head does not
-  // improve the CFO estimate (it worsens it). Any retry must re-derive the
-  // find_beacon index convention and tx_advance TOGETHER. See BACKLOG AP-34.
-  // Populate gold sequence (two reps, 128 each)
-  int goldReps = 2;
-  for (int i = 0; i < goldReps; i++) {
-    beacon_ci16_.insert(beacon_ci16_.end(), gold_ifft_ci16.begin(),
-                        gold_ifft_ci16.end());
-  }
-
+  // HISTORICAL NOTE, kept because it names a cause that turned out to be wrong.
+  // A 32-sample cyclic guard was inserted between the STS run and the gold field
+  // (the 802.11 GI2 pattern) and reverted on 2026-08-31, because the returned
+  // detector index moved by a measured -274 samples and the invariant the whole
+  // timing chain rests on -- sync_index == houdiniBeaconEnd() == strobe +
+  // beacon_size -- stopped holding, so beaconSnrDb measured pre-beacon noise and
+  // the 30 dB floor rejected every resync while acquisition still worked. THE
+  // GUARD WAS NOT THE CAUSE. The resync search took the EARLIEST threshold
+  // crossing, and the STS preamble is 16-periodic against a 128-sample
+  // correlator lag, so it is perfectly lag-128 self-coherent and manufactures
+  // crossings hundreds of samples early once the link is strong enough. The
+  // guard only lowered the level at which that happens. Fixed 2026-09-02 by
+  // CommsLib::BeaconPick::kTargetedArgmax; `legacy_guard` is now a selectable
+  // shape and measures the same index as every other. See BACKLOG AP-34.
+  beacon_ci16_ = Utils::cfloat_to_cint16(shape.core());
   beacon_size_ = beacon_ci16_.size();
   if (getenv("HOUDINI_DUMP_GOLD") != nullptr) {
-    // The 496-sample STS+gold core (pre-prefix, unconjugated, unit scale) --
-    // what buildHoudiniBeacon conjugates and scales into the replay RAM.
-    // Lets offline tools (tests/demo-verify) construct the exact TX waveform.
-    FILE* f = std::fopen("/tmp/beacon_core.bin", "wb");
+    // The beacon core for the CONFIGURED shape (pre-prefix, unconjugated, at
+    // the shape's own scale) -- what buildHoudiniBeacon conjugates and scales
+    // into the replay RAM. Lets offline tools (tests/demo-verify) construct the
+    // exact TX waveform. Length is beacon_size(), NOT a constant: 496 for
+    // legacy, 528 / 320 / 272 for the others.
+    FILE* f = std::fopen(Utils::dumpPath("beacon_core.bin").c_str(), "wb");
+    if (f == nullptr) {
+      MLPD_WARN("HOUDINI_DUMP_GOLD: cannot open %s (%s)\n",
+                Utils::dumpPath("beacon_core.bin").c_str(), std::strerror(errno));
+    }
     if (f) {
       std::fwrite(beacon_ci16_.data(), sizeof(std::complex<int16_t>),
                   beacon_ci16_.size(), f);
       std::fclose(f);
-      std::printf("Dumped beacon core (%zu samp ci16) to /tmp/beacon_core.bin\n",
-                  beacon_ci16_.size());
+      std::printf("Dumped beacon core (%zu samp ci16) to %s\n", beacon_ci16_.size(),
+                  Utils::dumpPath("beacon_core.bin").c_str());
     }
   }
 

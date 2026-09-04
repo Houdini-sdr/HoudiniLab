@@ -1,0 +1,13 @@
+### control
+18:267060 INFOR: Start main client txrx loop... tid=0 with resync period of 81, grid tracker alpha 0.000 beta 0.000 (0/0 = fixed-period grid)
+19:012737 INFOR: Re-sync frame 150: beacon alive on the anchored grid (resid +794 within scatter, snr 48.6 dB), tid 0
+52:158256 WARNG: Re-sync: 100 misses this period for client 0 (successes 1); anchored grid keeps flying, retrying next period (exhausted streak 1)
+85:088784 WARNG: Re-sync: 100 misses this period for client 0 (successes 1); anchored grid keeps flying, retrying next period (exhausted streak 2)
+85:088792 WARNG: Re-sync ESCALATION (episodes exhausted) at frame 13722: returning to the full beacon acquisition, tid 0
+85:115818 INFOR: Re-sync ESCALATION: re-anchored at 8353248274, tid 0
+19:179916 WARNG: Re-sync: 100 misses this period for client 0 (successes 1); anchored grid keeps flying, retrying next period (exhausted streak 1)
+### tracker
+19:934085 INFOR: Start main client txrx loop... tid=0 with resync period of 81, grid tracker alpha 0.500 beta 0.100 (0/0 = fixed-period grid)
+### tracklow
+91:707436 INFOR: Start main client txrx loop... tid=0 with resync period of 81, grid tracker alpha 0.500 beta 0.100 (0/0 = fixed-period grid)
+10:270729 WARNG: Re-sync frame 4284: off-grid detection -1040 (snr 15.4 dB, pending 0) -- beacon possibly moved, tid 0

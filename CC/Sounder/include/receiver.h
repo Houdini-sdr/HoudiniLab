@@ -18,15 +18,16 @@
 #include <memory>
 #include <vector>
 
-#if defined(USE_UHD)
-#include "BaseRadioSetUHD.h"
-#include "ClientRadioSetUHD.h"
-#else
-#include "BaseRadioSet.h"
-#include "ClientRadioSet.h"
-#endif
+
+#include "RadioSetInterfaces.h"
 #include "concurrentqueue.h"
 #include "config.h"
+#include "sync/beacon_shape.h"
+#include "sync/cfo_estimator.h"
+#include "sync/confirm.h"
+#include "sync/detector.h"
+#include "sync/grid_tracker.h"
+#include "sync/sync_geometry.h"
 #include "macros.h"
 
 class ReceiverException : public std::runtime_error {
@@ -73,41 +74,60 @@ class Receiver {
   static void* clientTxRx_launch(void* in_context);
   void clientTxRx(int tid);
   void clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer);
-  // refine_first_cluster: acquisition passes true (one beacon in the window, and the
-  // frame anchor depends on getting the right peak); re-sync leaves it false.
+  // `pick` is the crossing-selection rule, and the two callers need DIFFERENT
+  // ones. Acquisition searches a wide window that can hold several beacon copies
+  // 4096 samples apart, so it takes the earliest copy refined to its own peak --
+  // repeatable across restarts, which the once-only pilot anchor depends on.
+  // Re-sync searches a targeted lead+tail slice that cannot hold two copies, so
+  // it takes the strongest crossing: there the earliest one is the beacon's own
+  // lag-128 self-coherent STS preamble, hundreds of samples early, and whether
+  // it wins depends on received level. See houdini::sync::PickRule.
   ssize_t syncSearch(const std::complex<int16_t>* check_data,
                      size_t search_window, float corr_scale,
-                     bool refine_first_cluster = false);
+                     houdini::sync::PickRule pick,
+                     houdini::sync::Detection* detection = nullptr);
 
-  // Two-stage beacon CFO estimate, normalized (cycles/sample); multiply by
-  // the sample rate for Hz. Pointer form so both the vector-backed legacy
-  // path and the targeted-resync path (raw rxbuff) can call it.
-  float estimateCFO(const std::complex<int16_t>* buf, size_t buf_len,
-                    int sync_index) const;
   void initBuffers();
-  void clientTxPilots(size_t user_id, long long base_time);
+  // frame_period: the TRACKED BS frame period in UE samples (AP-31c). The
+  // horizon ladder steps by it, not by samps_per_frame; <= 0 means nominal.
+  void clientTxPilots(size_t user_id, long long base_time,
+                      double frame_period = 0.0);
   int clientTxData(int tid, int frame_id, long long base_time);
   ssize_t clientSyncBeacon(size_t radio_id, size_t sample_window,
                            long long* window_time = nullptr);
+  // period_out, when non-null, receives the BS frame period MEASURED by the
+  // confirm (in UE samples). The confirm already spans k real frames and knows
+  // how far the beacon slipped over them, so the rate costs nothing extra --
+  // see the bootstrap note at the definition.
   bool houdiniAcquireAnchor(int tid, size_t detect_window,
-                            long long& anchor_out);
+                            const houdini::sync::SyncGeometry& geom,
+                            long long& anchor_out,
+                            double* period_out = nullptr);
   void clientAdjustRx(size_t radio_id, size_t discard_samples);
 
  private:
-  // Re-anchor signal into clientTxPilots' scheduling cursor (Opus review
-  // finding 4), one flag per client thread: a single shared flag let one UE
-  // consume another's re-anchor (M5). The unused "shift" half of the old
-  // two-mode contract is removed -- nothing ever wrote it (M1).
-  std::vector<std::unique_ptr<std::atomic<bool>>> houdini_pilot_cursor_reset_;
-  Config* config_;
+  /// The client's synchronisation model (Config::SyncModel): the receiver's
+  /// remaining platform branches are the stamp-anchored model (a tracked
+  /// frame grid on beacon timestamps, bursts composed in process, a timed
+  /// resync cadence) against the trigger-framed one (the Iris/UHD framer
+  /// triggers the client and the beacon and uplink data come from files).
+  bool stampAnchored() const {
+    return config_->sync_model() == Config::SyncModel::kStampAnchored;
+  }
 
-#if defined(USE_UHD)
-  ClientRadioSetUHD* client_radio_set_;
-  BaseRadioSetUHD* base_radio_set_;
-#else
-  ClientRadioSet* client_radio_set_;
-  BaseRadioSet* base_radio_set_;
-#endif
+  Config* config_;
+  // The sync library objects, built once in the constructor from the
+  // configured beacon shape and the sync block. Every beacon search, every
+  // SNR confirm and every beacon carrier read in this class goes through them,
+  // so a run has one detector, one guard and one estimator, all describable.
+  std::unique_ptr<houdini::sync::Detector> sync_detector_;
+  std::unique_ptr<houdini::sync::SnrWindowGuard> sync_guard_;
+  std::unique_ptr<houdini::sync::RepetitionPhaseEstimator> cfo_estimator_;
+
+  // The sets behind their interfaces (RadioSetInterfaces.h): the factory
+  // picks the Soapy or the native-UHD implementation for this build.
+  std::unique_ptr<IClientRadioSet> client_radio_set_;
+  std::unique_ptr<IBaseRadioSet> base_radio_set_;
 
   size_t thread_num_;
   // pointer of message_queue_
