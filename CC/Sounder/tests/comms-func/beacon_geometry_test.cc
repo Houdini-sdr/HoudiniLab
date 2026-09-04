@@ -754,10 +754,14 @@ int main() {
           // index is 0 when the rule is decided, 0.05 for one flip in twenty,
           // and 0.5 for a coin toss, and it says which.
           //
-          // Two passes so 128 draws are affordable: 16 to find the tau values
-          // where anything moves, then 128 on those alone.
+          // Two passes so 128 draws are affordable: a screen to find the tau
+          // values where anything moves, then 128 on those alone. The screen
+          // is 48 draws, not 16: at a minority share of 0.05 a 16-draw screen
+          // misses the tau entirely 44 % of the time and the table then prints
+          // 0.000, the value it prints for a decided rule (review round 4).
+          // At 48 the miss rate is 8 %.
           std::map<long long, int> hist;
-          for (unsigned sd = 1; sd <= 16; ++sd) {
+          for (unsigned sd = 1; sd <= 48; ++sd) {
             const long long r = runAt(b, tau, sd, win, snr, guard);
             if (r == kMiss) continue;
             const double e = static_cast<double>(r) - truth;
@@ -787,16 +791,22 @@ int main() {
         std::printf(" %7.3f", nq[r] ? std::sqrt(sq[r] / nq[r]) : 0.0);
       for (int r = 0; r < 3; ++r) std::printf(" %9.3f", minority[r]);
       std::printf("\n");
-      // The claim under test, asserted rather than left to the eye: the guard
-      // must not make the integer worse than the rule it guards. It is NOT
-      // asserted that guard 1 reaches the argmax exactly -- `nr`, whose lobe
-      // is wider than one sample, does not (0.31 against 0.289), and the row
-      // above says so.
+      // WHAT IS ASSERTED HAS TO BE CAPABLE OF FAILING. "Guard 1 is no worse
+      // than guard 0" is true by construction and was asserted for one round
+      // before that was noticed: guard 1's answer is either guard 0's or the
+      // argmax, and on a single path the argmax is the nearest sample, so the
+      // inequality holds pointwise whatever the code does (review round 4).
+      // The claim with content is that guard 1 lands NEAR THE ARGMAX -- which
+      // guard 0 does not, by 0.083 to 0.169 samples of RMS. A tolerance of
+      // 0.05 passes every shape including `nr` at 0.321 and fails guard 0 on
+      // every shape, so it distinguishes the two.
+      const double r_am = nq[0] ? std::sqrt(sq[0] / nq[0]) : 0.0;
       const double r_g0 = nq[1] ? std::sqrt(sq[1] / nq[1]) : 0.0;
       const double r_g1 = nq[2] ? std::sqrt(sq[2] / nq[2]) : 0.0;
-      check(r_g1 <= r_g0 + 1e-9,
-            std::string("guard 1 is no worse than guard 0 on a single path: ") +
-                b.name + " " + std::to_string(r_g1) + " vs " + std::to_string(r_g0));
+      check(r_g1 <= r_am + 0.05,
+            std::string("guard 1 lands within 0.05 samples of the argmax: ") +
+                b.name + " " + std::to_string(r_g1) + " vs " + std::to_string(r_am) +
+                " (guard 0 reads " + std::to_string(r_g0) + ")");
     }
   }
 
@@ -813,7 +823,8 @@ int main() {
   // All five shapes, including dot11, whose lobe is the widest.
   std::printf("\n=== AP-72: the guard against genuine multipath (worst |residual "
               "- truth| over tau in {0, .25, .5, .75} x 6 draws) ===\n");
-  std::printf("%-32s %-14s %9s %9s\n", "channel", "shape", "guard 0", "guard 1");
+  std::printf("%-32s %-14s %9s %9s %9s\n", "channel", "shape", "guard 0",
+              "guard 1", "differed");
   {
     // The direct path sits at -8.9 dB against the -9.0 dB floor in the "weak
     // direct" case, which is 0.1 dB of margin on a floor whose own comment
@@ -831,39 +842,50 @@ int main() {
       for (const auto& b : ds) {
         std::printf("%-32s %-14s", ch.name, b.name.c_str());
         double worst[2] = {0.0, 0.0};
-        for (int g = 0; g < 2; ++g) {
-          for (int t = 0; t < 4; ++t) {
-            const double tau = 0.25 * t;
-            const double truth = static_cast<double>(kEndConvention) + tau;
-            for (unsigned sd = 1; sd <= 6; ++sd) {
-              const long long v = residualCh(b, 1600.0, kSnrDb, kLead, kTail,
-                                             kResyncCorrScale, Pick::kFirstPath,
-                                             sd, b.replica_reps < 2 ? Thr::kCoherence
-                                                                    : Thr::kNormalizedXCorr,
-                                             ch, g, tau);
-              if (v == kMiss) { worst[g] = 1000.0; continue; }
-              worst[g] = std::max(worst[g], std::fabs(static_cast<double>(v) - truth));
+        int differed = 0, points = 0;
+        for (int t = 0; t < 4; ++t) {
+          const double tau = 0.25 * t;
+          const double truth = static_cast<double>(kEndConvention) + tau;
+          for (unsigned sd = 1; sd <= 6; ++sd) {
+            long long v[2];
+            for (int g = 0; g < 2; ++g) {
+              v[g] = residualCh(b, 1600.0, kSnrDb, kLead, kTail, kResyncCorrScale,
+                                Pick::kFirstPath, sd,
+                                b.replica_reps < 2 ? Thr::kCoherence
+                                                   : Thr::kNormalizedXCorr,
+                                ch, g, tau);
+              worst[g] = v[g] == kMiss
+                             ? 1000.0
+                             : std::max(worst[g], std::fabs(static_cast<double>(v[g]) - truth));
             }
+            ++points;
+            if (v[0] != v[1]) ++differed;
           }
         }
-        std::printf(" %9.2f %9.2f\n", worst[0], worst[1]);
-        // WHAT IS ASSERTED IS THAT THE GUARD DOES NOT CHANGE THE OUTCOME, not
-        // that the outcome is right. Half a sample of slack, because the
-        // integer cannot track tau and even a perfect rule reads up to 0.5 off
-        // at these fractional delays.
+        std::printf(" %9.2f %9.2f %7d/%d\n", worst[0], worst[1], differed, points);
+        // PAIRED, PER (tau, seed), NOT A COMPARISON OF TWO MAXIMA. The maxima
+        // form hid everything: the one channel where the guard is KNOWN to
+        // change the answer by a full sample read 0.50 against 1.00, a
+        // difference of exactly 0.50, and passed the tolerance it was excluded
+        // from anyway (review round 4). What is asserted now is that on a
+        // channel whose direct path is well above the floor the guard changes
+        // NO point at all, which a one-sample regression cannot satisfy.
         //
-        // The "weak direct" row is a floor measurement, not a guard one, and
-        // it fails to find the direct path at BOTH settings on legacy_guard,
-        // dot11 and nr: that path sits 8.9 dB under the echo against a -9.0 dB
-        // floor, so the rule cannot see it and locks on the echo 40 samples
-        // late. comms-lib-portable.cc already records that this floor "clears
-        // it by under 1 dB, which is thin"; this is that thinness, per shape.
-        // Recorded rather than hidden by moving the amplitude.
-        if (std::string(ch.name).find("UNRESOLVABLE") == std::string::npos)
-          check(std::fabs(worst[1] - worst[0]) <= 0.5 + 1e-9,
-                std::string("guard 1 does not change the outcome on ") +
-                    ch.name + ", " + b.name + " (" + std::to_string(worst[1]) +
-                    " vs " + std::to_string(worst[0]) + ")");
+        // Two channels are reported and not asserted, for stated reasons. The
+        // +1 echo is unresolvable: no rule can separate it from a split peak,
+        // and the guard trades a toggling pick for a stable one-sample-late
+        // one. The weak-direct channel puts its direct path 8.9 dB under the
+        // echo against a -9.0 dB floor, so the rule cannot see it at all on
+        // legacy_guard, dot11 or nr and locks on the echo 40 samples late at
+        // BOTH settings; the guard does move a few of those points, which is
+        // motion inside an answer that is already wrong.
+        const std::string nm(ch.name);
+        if (nm.find("UNRESOLVABLE") == std::string::npos &&
+            nm.find("weak direct") == std::string::npos)
+          check(differed == 0,
+                std::string("guard 1 changes no point on ") + ch.name + ", " +
+                    b.name + " (" + std::to_string(differed) + " of " +
+                    std::to_string(points) + " differed)");
       }
     }
   }
@@ -873,7 +895,9 @@ int main() {
   // three-point estimators in a row were defeated by what this table shows.
   // A parabola assumes a smooth lobe and the lobe is nearly a delta; a ratio
   // of the bracketing pair assumes the neighbours are SYMMETRIC at zero delay
-  // and they are not (legacy reads 0.0184 one side and 0.0080 the other), so
+  // and they are not (at the DETECTED index legacy reads 0.0079 one side and
+  // 0.0024 the other, and `nr` 0.0157 and 0.0305; the table below prints
+  // them), so
   // near a whole-sample arrival the fixed asymmetry outweighs the delay's and
   // the estimate takes the wrong sign. Any replacement has to use the
   // replica's own autocorrelation, which is what this table measures.
