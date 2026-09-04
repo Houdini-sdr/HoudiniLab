@@ -286,26 +286,29 @@ class CommsLib {
   // of arrival phases, which a one-sample guard does not cover.
   //
   // WHAT IT COSTS, MEASURED, NOT ASSUMED. On a direct path with a stronger
-  // echo 2, 8 or 24 samples later the guard changes NO detection, at any
-  // arrival phase or noise draw. Two cases do change and neither is a
+  // echo 8 or 24 samples later the guard changes NO detection over a sweep of
+  // arrival phase, noise draw and SNR; at +2 it changes a few and every one of
+  // them is an IMPROVEMENT (never worse, measured per point). Two cases do change and neither is a
   // resolvable earlier arrival being lost:
-  //   - an echo ONE sample later, where guard 0 returns the direct path and
-  //     guard 1 returns the echo, an 8.1 ns shift. No rule can separate a
+  //   - an echo ONE sample later, where on half the arrival phases guard 0
+  //     returns the direct path and guard 1 the echo, an 8.1 ns shift. No rule can separate a
   //     one-sample echo from a split peak in a single window; the guard
   //     trades a pick that toggles with the arrival phase for one that is
   //     stable and one sample late.
-  //   - a direct path already 8.9 dB under its echo, against a -9.0 dB floor:
-  //     legacy_guard, dot11 and `nr` do not find it at EITHER setting and
-  //     lock on the echo 40 samples late, and the guard moves a few of those
-  //     points around inside an answer that is already wrong.
+  //   - a direct path 40 samples ahead of a stronger echo, which legacy_guard,
+  //     dot11 and `nr` do not find at EITHER setting -- for legacy_guard
+  //     because it sits 8.9 dB under a -9.0 dB floor, for the other two
+  //     because their 32-sample back-scan cannot reach 40 at all. The guard
+  //     moves some of those points inside an answer that is already wrong.
   //
   // Only 0 and 1 are meaningful. 2 loses a genuine two-sample-earlier arrival
   // and 3 a three-sample one (measured), so the JSON schema refuses them and
   // the environment reader clamps them to 1 with a warning.
   //
-  // 0 is the behaviour every release so far has shipped and remains the
-  // default until the silicon gate of DEMO_VERIFICATION 8ak says otherwise:
-  // it moves the reported index on 23 % to 36 % of arrival phases by shape.
+  // A guard of 0 is the behaviour every release so far has shipped and remains
+  // the default until the silicon gate of DEMO_VERIFICATION 8ak says
+  // otherwise, because a guard of 1 moves the reported index on 23 % to 36 %
+  // of arrival phases, by shape.
   //   first_path_window  samples of back-search from the peak (0..2*seqLen)
   //   first_path_db      how much weaker an earlier path may be, dB <= 0
   //   first_path_guard   samples immediately before the peak the back-search

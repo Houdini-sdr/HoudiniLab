@@ -55,12 +55,9 @@ Detector::Detector(const BeaconShape& shape, const DetectorConfig& cfg)
       // Clamped to the window here so the accessor reports what the correlator
       // will actually apply: it clamps again, and an accessor that disagrees
       // with the effective value misleads the record it is written into.
-      first_path_guard_(std::max(
-          0, std::min(cfg.first_path_guard,
-                      cfg.first_path_window >= 0
-                          ? std::min<int>(cfg.first_path_window,
-                                          2 * static_cast<int>(shape.replicaLen()))
-                          : shape.defaultFirstPathWindow()))),
+      // first_path_window_ is initialised above and holds the same expression;
+      // recomputing it here left two copies to keep in step (review round 5).
+      first_path_guard_(std::max(0, std::min(cfg.first_path_guard, first_path_window_))),
       pfa_applies_(false),
       pfa_(cfg.pfa_per_window),
 #if defined(USE_CUDA)

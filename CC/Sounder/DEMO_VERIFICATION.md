@@ -748,16 +748,21 @@ not that the backend applied it; the portable correlator does apply it, and a
 backend that does not already triggers the "first-path knobs are NOT applied"
 warning beside the same line, so the two together are the evidence.
 
-**The comparison, with its tolerance stated:** the B legs' adjacent-difference
-jitter must not exceed the A legs' by more than **1.3 samples**, and their
-residual sd by more than **4.2 samples**. Those come from what a FIXED
+**The comparison, with its statistic AND its tolerance stated.** Compare the
+**mean over the two legs of each arm**, not leg maxima against leg minima: with
+two legs an arm, the choice of aggregation can otherwise be made after the data
+and it changes the answer. mean(B) - mean(A) must not exceed **1.3 samples** of
+adjacent-difference jitter or **4.2 samples** of residual sd. Those come from what a FIXED
 configuration did between rounds on this bench in 8.192: legacy's jitter moved
 2.43 to 1.21, a swing of 1.22, and its residual sd 8.15 to 4.06, a swing of
-4.09, with nothing changed but the clock. The tolerances are those swings
-rounded up. **A first draft of this section set 0.5 and 3, TIGHTER than the
-swings it cited, which would have failed the gate on the clock and started a
-bisection for a regression that does not exist; the review caught it before
-the runs.**
+4.09, with nothing changed but the clock; 1.22 and 4.09 rounded up.
+**Two drafts of this paragraph were wrong before the runs and both were caught
+by review:** the first set 0.5 and 3, TIGHTER than the swings it cited, which
+would have failed the gate on the clock; the second named no aggregation rule,
+and 8.193's own four legs on this bench, same evening, one knob changed,
+spanned 4.42 in residual sd, above the 4.2 bound. On leg extremes that gate
+fails; on per-arm means the same data reads 3.28 and passes. The statistic is
+therefore named above, before any leg runs.
 
 **WHY THIS GATE IS WEAK, STATED IN ADVANCE RATHER THAN AFTERWARDS.** The
 guard's principal effect is a CONSTANT one-sample shift of the reported index
@@ -766,10 +771,20 @@ jitter differences a constant away; residual sd is invariant to a constant;
 accepts, escalations, off-grid and low-SNR counts are all invariant to it. So
 every PASS statistic above is blind to the change's main effect by
 construction, and what remains visible is only the part
-that varies phase to phase. The offline gap between the two settings is 0.083
-samples of RMS ACCURACY, which is not a jitter and cannot be set beside one;
-no offline measurement of the jitter difference exists, and the clock moved 18
-samples in a minute on this bench. **This gate can
+that varies phase to phase.
+
+**And that part was measured offline rather than left as an admission.**
+Simulating 40 legs of 23 detections each with a walking clock through the
+library's own channel model: adjacent-difference jitter **0.415 at guard 0
+against 0.414 at guard 1**, residual sd 0.294 against 0.294. The guard does not
+add or remove a toggle; it moves the rounding threshold in arrival phase from
+about 0.52 to about 0.74, so both settings step once per cycle. **So the gate
+is predicted to see nothing, and that prediction is on the record before the
+legs run.** A difference that does appear is therefore the clock or a defect,
+not the guard's intended effect. (The offline RMS accuracy gap, 0.083 samples
+on legacy and 0.169 on dot11, is an accuracy figure and is not comparable to a
+jitter; setting the two side by side was the category error that round 2 was
+written about.) **This gate can
 falsify a large regression and nothing else.** It cannot see the benefit, which
 is offline and reported as such, and it cannot see the one harm the offline
 work identified: a one-sample echo, where guard 1 returns the echo and guard 0
@@ -816,9 +831,11 @@ or an sd on integers distinguishes one flip in twenty from a coin toss):
 of it for four of the five shapes.** `nr` keeps 0.310 to 0.321, and not
 because its lobe is wide -- dot11's is the widest and dot11 is fully
 recovered. `nr` is the one shape whose back-scan reaches TWO samples before
-the peak on a small fraction of arrival phases, which a one-sample guard does
-not cover; the guard is not claimed to fix it and
-the test asserts only that the guard is never worse than the rule it guards. The guard is therefore reinstated, as
+the peak on a small fraction of arrival phases (8 of 800 in the histogram, and
+0 for every other shape), which a one-sample guard does not cover; the guard is not claimed to fix it and
+the test asserts that guard 1 lands within
+0.05 samples of the argmax, which `nr` meets at 0.321 and which guard 0 fails
+on every shape. The guard is therefore reinstated, as
 `sync.detector.first_path_guard`.
 
 **And what it costs on multipath, measured per point rather than per column.**
@@ -833,14 +850,17 @@ guarded tap cannot matter. Compared draw by draw and phase by phase:
   direct path, guard 1 the echo. No rule can separate a one-sample echo from a
   split peak in one window; the guard trades a pick that toggles with the
   arrival phase for one that is stable and one sample late.
-- **A direct path 8.9 dB under its echo, against the -9.0 dB floor:** dot11 and
-  `nr` differ on 6 of 24 points. This is NOT a resolvable arrival being lost by
-  the guard: those two shapes, and legacy_guard, fail to find that direct path
-  at EITHER setting and lock on the echo 40 samples late, so the guard is
-  moving points around inside an answer that is already wrong. A first draft of
-  this section claimed the guard "returns exactly what guard 0 returns, every
-  draw" on all three original channels; that came from a comparison of two
-  maxima which could not see per-point motion, and it was wrong.
+- **A direct path 8.9 dB under its echo, at +40 samples:** legacy_guard, dot11
+  and `nr` never find it, at either setting, and lock on the echo 40 samples
+  late; the guard moves some of those points around inside an answer that is
+  already wrong. **The reason differs by shape and only one of them is the
+  floor.** For legacy_guard, whose back-scan window is 64, the path is within
+  reach and is rejected by the -9.0 dB floor it sits 8.9 dB under. For dot11
+  and `nr` the window is 32, so 40 samples is out of reach whatever the floor
+  does: a control at full strength, only 2.9 dB down, is still not found. A
+  first draft attributed all three to the floor, and a draft before that
+  claimed the guard changed nothing on this channel at all, from a comparison
+  of two maxima that could not see per-point motion.
 
 **Shipped default stays 0**, the behaviour of every release so far, because
 this moves the reported index on about a third of windows. The silicon gate is

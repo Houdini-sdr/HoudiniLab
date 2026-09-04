@@ -730,14 +730,15 @@ int main() {
   // the true arrival beside it.
   std::printf("\n=== AP-72: first-path rule against the argmax, single path, "
               "and what guard 1 recovers ===\n");
-  std::printf("%-14s %5s %7s %7s %7s %9s %9s %9s\n", "shape", "SNR",
+  std::printf("%-14s %5s %7s %7s %7s %14s %14s %14s\n", "shape", "SNR",
               "argmax", "guard0", "guard1", "argmax", "guard0", "guard1");
-  std::printf("%-14s %5s %-23s %-29s\n", "", "", "  RMS vs true arrival",
-              "    worst minority share");
+  std::printf("%-14s %5s %-23s %s\n", "", "", "  RMS vs true arrival",
+              "  worst minority share @ phase (resolution 1/48 = 0.021)");
   for (const double snr : {45.0, 30.0}) {
     for (const auto& b : ds) {
       const int w = shippedWindow(b);
       double sq[3] = {0.0, 0.0, 0.0}, minority[3] = {0.0, 0.0, 0.0};
+      double at[3] = {0.0, 0.0, 0.0};
       int nq[3] = {0, 0, 0};
       for (int t = 0; t < 100; ++t) {
         const double tau = 0.01 * t;
@@ -745,22 +746,19 @@ int main() {
         for (int rule = 0; rule < 3; ++rule) {
           const int win = rule == 0 ? 0 : w;
           const int guard = rule == 2 ? 1 : 0;
-          // THE STATISTIC IS THE MINORITY SHARE, NOT A COUNT OF DISTINCT
-          // VALUES AND NOT AN SD. Round 2 of the review retired the distinct
-          // count because it cannot tell a 95/5 split from a coin toss; round
-          // 3 showed that an sd threshold on integers is bit-for-bit the same
-          // test in a new costume (over 3000 tau points the two never
-          // disagreed). The fraction of draws that do NOT return the modal
-          // index is 0 when the rule is decided, 0.05 for one flip in twenty,
-          // and 0.5 for a coin toss, and it says which.
+          // ONE PASS AT 48 DRAWS, NOT A SCREEN AND A REFINEMENT. The two-pass
+          // version could not be made safe by raising the screen: a real
+          // minority share of 0.008 is missed by a 48-draw screen 68 % of the
+          // time and then prints 0.000, the value a decided rule prints
+          // (review round 5). One pass has a floor instead of a blind spot:
+          // the resolution is 1/48 = 0.021 and anything under that reads as 0,
+          // which the header says.
           //
-          // Two passes so 128 draws are affordable: a screen to find the tau
-          // values where anything moves, then 128 on those alone. The screen
-          // is 48 draws, not 16: at a minority share of 0.05 a 16-draw screen
-          // misses the tau entirely 44 % of the time and the table then prints
-          // 0.000, the value it prints for a decided rule (review round 4).
-          // At 48 the miss rate is 8 %.
+          // The statistic is the fraction of draws NOT returning the modal
+          // index. Unlike a count of distinct values or an sd on integers it
+          // tells one flip in twenty from a coin toss.
           std::map<long long, int> hist;
+          int kept = 0;
           for (unsigned sd = 1; sd <= 48; ++sd) {
             const long long r = runAt(b, tau, sd, win, snr, guard);
             if (r == kMiss) continue;
@@ -768,45 +766,48 @@ int main() {
             sq[rule] += e * e;
             ++nq[rule];
             ++hist[r];
-          }
-          if (hist.size() < 2) continue;  // decided at 16 draws, nothing to refine
-          hist.clear();
-          int kept = 0;
-          for (unsigned sd = 1; sd <= 128; ++sd) {
-            const long long r = runAt(b, tau, sd, win, snr, guard);
-            if (r == kMiss) continue;
-            ++hist[r];
             ++kept;
           }
+          if (kept == 0) continue;
           int mode = 0;
           for (const auto& kv : hist) mode = std::max(mode, kv.second);
-          if (kept > 0)
-            minority[rule] = std::max(
-                minority[rule],
-                1.0 - static_cast<double>(mode) / static_cast<double>(kept));
+          const double m = 1.0 - static_cast<double>(mode) / static_cast<double>(kept);
+          if (m > minority[rule]) { minority[rule] = m; at[rule] = tau; }
         }
       }
       std::printf("%-14s %5.0f", b.name.c_str(), snr);
       for (int r = 0; r < 3; ++r)
-        std::printf(" %7.3f", nq[r] ? std::sqrt(sq[r] / nq[r]) : 0.0);
-      for (int r = 0; r < 3; ++r) std::printf(" %9.3f", minority[r]);
+        std::printf(" %7.3f", nq[r] ? std::sqrt(sq[r] / nq[r]) : 999.0);
+      // THE PHASE IS PRINTED BESIDE THE SHARE, because the share alone repeats
+      // the error 8ah was retracted for. The argmax's and guard 1's worst
+      // share sits at phase 0.50, where the truth is exactly between two
+      // samples and both answers are equally right; guard 0's sits at its own
+      // transition near 0.74, where one answer is three times further from the
+      // truth than the other. Same number, opposite meaning (review round 5).
+      for (int r = 0; r < 3; ++r)
+        std::printf(" %8.3f@%.2f", minority[r], at[r]);
       std::printf("\n");
-      // WHAT IS ASSERTED HAS TO BE CAPABLE OF FAILING. "Guard 1 is no worse
-      // than guard 0" is true by construction and was asserted for one round
-      // before that was noticed: guard 1's answer is either guard 0's or the
-      // argmax, and on a single path the argmax is the nearest sample, so the
-      // inequality holds pointwise whatever the code does (review round 4).
-      // The claim with content is that guard 1 lands NEAR THE ARGMAX -- which
-      // guard 0 does not, by 0.083 to 0.169 samples of RMS. A tolerance of
-      // 0.05 passes every shape including `nr` at 0.321 and fails guard 0 on
-      // every shape, so it distinguishes the two.
-      const double r_am = nq[0] ? std::sqrt(sq[0] / nq[0]) : 0.0;
-      const double r_g0 = nq[1] ? std::sqrt(sq[1] / nq[1]) : 0.0;
-      const double r_g1 = nq[2] ? std::sqrt(sq[2] / nq[2]) : 0.0;
+      // WHAT IS ASSERTED HAS TO BE CAPABLE OF FAILING, and of failing for the
+      // right build. "Guard 1 is no worse than guard 0" was true by
+      // construction. This is not: guard 1 must land NEAR THE ARGMAX, which
+      // guard 0 misses by 0.083 to 0.169 samples of RMS. 0.05 passes every
+      // shape including `nr` at 0.321 and fails guard 0 on every shape.
+      const double r_am = nq[0] ? std::sqrt(sq[0] / nq[0]) : 999.0;
+      const double r_g0 = nq[1] ? std::sqrt(sq[1] / nq[1]) : 999.0;
+      const double r_g1 = nq[2] ? std::sqrt(sq[2] / nq[2]) : 999.0;
+      // A no-detection column reads 999, not 0: every check here would
+      // otherwise pass perfectly on a build that finds nothing.
+      check(nq[0] > 0 && nq[1] > 0 && nq[2] > 0,
+            std::string("all three rules detect on ") + b.name);
       check(r_g1 <= r_am + 0.05,
             std::string("guard 1 lands within 0.05 samples of the argmax: ") +
-                b.name + " " + std::to_string(r_g1) + " vs " + std::to_string(r_am) +
-                " (guard 0 reads " + std::to_string(r_g0) + ")");
+                b.name + " " + std::to_string(r_g1) + " vs " + std::to_string(r_am));
+      // POSITIVE CONTROL: guard 0 must be measurably the UNGUARDED rule. A
+      // build that applies the guard whatever the knob says would otherwise
+      // pass this whole table while silently changing shipped behaviour.
+      check(r_g0 > r_am + 0.05,
+            std::string("guard 0 is the unguarded rule and is measurably worse: ") +
+                b.name + " " + std::to_string(r_g0) + " vs " + std::to_string(r_am));
     }
   }
 
@@ -821,16 +822,15 @@ int main() {
   // the same value and the check compared 0 with 0 (review round 3). With tau
   // swept the guarded tap is live, and the comparison has something to fail.
   // All five shapes, including dot11, whose lobe is the widest.
-  std::printf("\n=== AP-72: the guard against genuine multipath (worst |residual "
-              "- truth| over tau in {0, .25, .5, .75} x 6 draws) ===\n");
-  std::printf("%-32s %-14s %9s %9s %9s\n", "channel", "shape", "guard 0",
-              "guard 1", "differed");
+  std::printf("\n=== AP-72: the guard against genuine multipath (phase grid "
+              "0.05, 4 draws; err = worst |residual - truth|) ===\n");
+  std::printf("%-32s %-14s %8s %8s %9s %9s\n", "channel", "shape", "err g0",
+              "err g1", "differed", "g1 worse");
   {
-    // The direct path sits at -8.9 dB against the -9.0 dB floor in the "weak
-    // direct" case, which is 0.1 dB of margin on a floor whose own comment
-    // records the case flipping between -8.8 and -8.0 dB. It is kept because
-    // it is the hardest gated case, and it is named here so a failure there
-    // reads as the margin it is and not as a guard regression.
+    // The direct path sits 8.9 dB under the echo in the "weak direct" case,
+    // against a -9.0 dB floor whose own comment records the case flipping
+    // between -8.8 and -8.0 dB. It is kept because it is the hardest case, and
+    // named here so a result there reads as the margin it is.
     const Channel mp[] = {
         {{{0, 1.0}, {8, 1.4}}, 0.0, "echo +8 samp, STRONGER"},
         {{{0, 1.0}, {24, 1.4}}, 0.0, "echo +24 samp, STRONGER"},
@@ -838,56 +838,72 @@ int main() {
         {{{0, 1.0}, {2, 1.4}}, 0.0, "echo +2 samp, STRONGER"},
         {{{0, 1.0}, {1, 1.4}}, 0.0, "echo +1 samp (UNRESOLVABLE)"},
     };
+    int control_differed = 0;
     for (const auto& ch : mp) {
       for (const auto& b : ds) {
         std::printf("%-32s %-14s", ch.name, b.name.c_str());
         double worst[2] = {0.0, 0.0};
-        int differed = 0, points = 0;
-        for (int t = 0; t < 4; ++t) {
-          const double tau = 0.25 * t;
+        int differed = 0, g1_worse = 0, points = 0, found = 0;
+        // A GRID OF 0.05, NOT 0.25. At 0.25 the +2 echo read "no point
+        // differs" and the test asserted it; the two settings in fact differ
+        // over a band near phase 0.4 that a quarter-sample grid steps over
+        // (review round 5). The band is where guard 1 is BETTER, so the
+        // coarse grid hid a benefit while asserting a falsehood.
+        for (int t = 0; t < 20; ++t) {
+          const double tau = 0.05 * t;
           const double truth = static_cast<double>(kEndConvention) + tau;
-          for (unsigned sd = 1; sd <= 6; ++sd) {
+          for (unsigned sd = 1; sd <= 4; ++sd) {
             long long v[2];
+            double err[2];
             for (int g = 0; g < 2; ++g) {
               v[g] = residualCh(b, 1600.0, kSnrDb, kLead, kTail, kResyncCorrScale,
                                 Pick::kFirstPath, sd,
                                 b.replica_reps < 2 ? Thr::kCoherence
                                                    : Thr::kNormalizedXCorr,
                                 ch, g, tau);
-              worst[g] = v[g] == kMiss
-                             ? 1000.0
-                             : std::max(worst[g], std::fabs(static_cast<double>(v[g]) - truth));
+              err[g] = v[g] == kMiss ? 1000.0
+                                     : std::fabs(static_cast<double>(v[g]) - truth);
+              worst[g] = std::max(worst[g], err[g]);
             }
             ++points;
+            if (v[0] != kMiss && v[1] != kMiss) ++found;
             if (v[0] != v[1]) ++differed;
+            if (err[1] > err[0] + 1e-9) ++g1_worse;
           }
         }
-        std::printf(" %9.2f %9.2f %7d/%d\n", worst[0], worst[1], differed, points);
-        // PAIRED, PER (tau, seed), NOT A COMPARISON OF TWO MAXIMA. The maxima
-        // form hid everything: the one channel where the guard is KNOWN to
-        // change the answer by a full sample read 0.50 against 1.00, a
-        // difference of exactly 0.50, and passed the tolerance it was excluded
-        // from anyway (review round 4). What is asserted now is that on a
-        // channel whose direct path is well above the floor the guard changes
-        // NO point at all, which a one-sample regression cannot satisfy.
-        //
-        // Two channels are reported and not asserted, for stated reasons. The
-        // +1 echo is unresolvable: no rule can separate it from a split peak,
-        // and the guard trades a toggling pick for a stable one-sample-late
-        // one. The weak-direct channel puts its direct path 8.9 dB under the
-        // echo against a -9.0 dB floor, so the rule cannot see it at all on
-        // legacy_guard, dot11 or nr and locks on the echo 40 samples late at
-        // BOTH settings; the guard does move a few of those points, which is
-        // motion inside an answer that is already wrong.
+        std::printf(" %8.2f %8.2f %9d %9d\n", worst[0], worst[1], differed,
+                    g1_worse);
+        control_differed += differed;
+        // A DETECTION FLOOR FIRST. Every statistic here reads perfectly when
+        // nothing is detected: `differed` counts agreement, so two settings
+        // that both find nothing agree on everything (review round 5).
+        check(found == points,
+              std::string("both settings detect at every point on ") + ch.name +
+                  ", " + b.name + " (" + std::to_string(found) + " of " +
+                  std::to_string(points) + ")");
+        // AND THE CLAIM IS "NEVER WORSE", NOT "NEVER DIFFERENT". On a
+        // resolvable channel the guard may legitimately change the answer, and
+        // where it does on the +2 echo it IMPROVES it. This is not true by
+        // construction the way the single-path version was: guard 1 falls back
+        // to the argmax, which on multipath is the ECHO, so a guard that
+        // reached too far would fail here.
         const std::string nm(ch.name);
         if (nm.find("UNRESOLVABLE") == std::string::npos &&
             nm.find("weak direct") == std::string::npos)
-          check(differed == 0,
-                std::string("guard 1 changes no point on ") + ch.name + ", " +
-                    b.name + " (" + std::to_string(differed) + " of " +
-                    std::to_string(points) + " differed)");
+          check(g1_worse == 0,
+                std::string("guard 1 is never worse than guard 0 on ") +
+                    ch.name + ", " + b.name + " (" + std::to_string(g1_worse) +
+                    " of " + std::to_string(points) + " points worse)");
       }
     }
+    // POSITIVE CONTROL. Without this the whole block passes on a build that
+    // ignores the knob and applies the guard unconditionally -- measured: such
+    // a build scores 0 failures here and its table reads as an improvement
+    // (review round 5). The +1 echo is where the two settings must differ.
+    check(control_differed > 0,
+          "the two guard settings differ somewhere: " +
+              std::to_string(control_differed) +
+              " points (0 would mean the knob is not reaching the correlator)");
   }
 
   // THE SHAPE OF THE CORRELATION LOBE, WHICH IS THE SPECIFICATION FOR AP-75.
