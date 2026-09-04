@@ -649,6 +649,31 @@ whether an NR-shaped beacon is a live option for the OTA target.
 | 8.167 | **THE CONJUGATE-IMAGE INFERENCE IS RETRACTED, AND WHAT SURVIVES IS SMALLER AND BETTER FOUNDED.** [user: "any test should be validated again even if it matches the hypothesis"; "I am skeptical of a conjugate-image"]. The inference rested on a rule of thumb -- a pure beacon gives a wrong-sense/right-sense peak ratio of 1/sqrt(128) = 0.09 -- that this replica violates: the Gold IFFT sequence is structured and its conjugate-free self-product, computed exactly on a pure delayed beacon (`phase_probe_null.py`), is **0.16 to 0.28 depending on the fractional delay**. The identical analysis on the real windows reads **0.18 to 0.24 on the sounder's six golden windows and 0.29 to 0.34 on the probe's raw window**, i.e. at the null; and the estimator barely responds to an injected image below b = 0.3 (0.211 at b = 0, 0.212 at b = 0.2), so it could not have detected a small one anyway. The "100x variation between re-arms" was the probe's lag-product ratio for the wrong sense, a statistic that was never given a null and cannot carry a claim. **Retracted: image, chain-state variation, and the AP-70 handoff as filed.** **What survives, validated the same way:** (1) the correlation lobe's phase step between adjacent samples is **0.06 to 0.30 rad on real data in BOTH capture paths** (sounder windows -0.07 / -0.16 / -0.29 / +0.20 / -0.07 / -0.14; probe -0.06 to -0.30) against **0.01 for a pure delayed beacon**, so the received beacon's spectrum is asymmetric by a modest, benign amount (chain and cable dispersion) and an integer-peak phase readout inherits that step at every argmax hop; (2) one run had two equal-magnitude adjacent samples **2.4 rad apart**, which a single correlation lobe cannot produce and which fits a two-component arrival about one sample apart; its waveform was not captured, so it is **UNEXPLAINED**, and the probe now arms a raw dump so the next one is. (3) Incidental and verified: the probe transmits the dumped core as is while the sounder pre-conjugates its transmit, so the probe's windows correlate with conj(g) and the sounder's with g; both are consistent with the conjugating receive mixer. The AP-67 design rule stands on (1) alone | `tests/demo-verify/phase_probe_null.py` (null, calibration, both real paths) | VERIFIED-TEST; image claim RETRACTED; 2.4 rad run UNEXPLAINED |
 | 8.168 | **AP-67 MEASURED: THE BEACON PHASE IS PREDICTABLE FOUR FRAMES AHEAD TO ABOUT 1.5 DEGREES.** On the clean runs the phase innovation after removing one fitted per-frame advance is **0.021 / 0.026 / 0.024 / 0.025 rad at lags 1 / 2 / 3 / 4 frames** (192 / 180 / 168 / 156 pairs), i.e. flat: neither the linear growth of a frequency error nor the sqrt(lag) growth of a random walk is visible above the lag-1 floor, which is the estimator's own noise. So over 4 ms the transmitter's carrier phase relative to the receiver's is a constant advance to 1.5 degrees, and the 5-degree budget in `docs/UE_TIME_FREQ_SYNC.md` section 11.4 was conservative by 3x. Consequence: a beacon-only phase tracker supports 64-QAM-grade phase (about 2 degrees) across the frame on this bench, and the in-slot pilots the doc recommends are for channel change and for other hardware, not for this oscillator pair. One caveat carried: the runs were 6 to 12 windows of 17 frames on a cable at the calibrated clock state; the innovation over tens of frames and over the air is not measured | `ap67.log`, `evidence/20260903-rig/ap67_*.csv` | VERIFIED-HW |
 
+### 8ag. AP-64, the launcher's automatic release of the boards: criteria written BEFORE the runs
+
+Pre-registration, in the 8v style (2026-09-03 19:40). Root cause (8.127,
+AP-64): a launcher that dies without its cleanup path leaves the sounder
+holding both boards' RX streams, and every later run is refused at
+`setSampleRate(RX)` with an empty log. Three shell-loop supervisors that
+polled the launcher's liveness failed on silicon. The fix under test replaces
+the shell loop with a Python supervisor on the launcher's main thread and
+gives the sounder `PR_SET_PDEATHSIG = SIGTERM`, so the kernel ends the
+sounder when the launcher dies by any signal, cleanup path or not.
+
+**Instrument:** `pgrep -x sounder` on the rig host, and the next bare
+sounder's log (a refused board prints `setSampleRate(RX): an RX stream is
+open`; a free one prints the `Beacon detector` startup line and reaches an
+accept). **Runs, each twice:** (A) launch `csi_server.py --launch` under
+`timeout -s KILL 45` (SIGKILL to the launcher, the case the shell loops
+lost), wait 6 s, count sounders, then run a bare sounder for 30 s; (B) the
+same under `timeout -s TERM 45` (the clean path). **PASS:** in all four,
+zero sounders 6 s after the launcher dies and the bare run that follows
+prints the startup line and at least one accept without the refusal.
+**FAIL:** any leftover sounder or any refusal, reported with the pgrep and
+the log line; the fix is then withdrawn, not adjusted, and AP-64 stays open.
+The bench wiring does not matter to this test (the sounder only has to hold
+and release the streams).
+
 ### 8af. AP-73, the 4.24 differential without TX_CLEAR: criteria written BEFORE the runs
 
 Pre-registration, in the 8v style (2026-09-03 19:05). The software lane's
