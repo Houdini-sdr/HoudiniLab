@@ -777,10 +777,11 @@ nothing to its log, so it looks like nothing happened rather than like an error.
 If you are running several captures in a row, the first one that fails this way
 makes all the rest fail too.
 
-The usual cause is how the previous run ended. The launcher starts the sounder
-underneath a small retry loop, so if you kill the launcher, the retry loop keeps
-going and starts another sounder, and that sounder holds both boards. Killing
-the window you launched from is not enough.
+The usual cause is how the previous run ended. A sounder started by the
+launcher now ends when the launcher ends, however the launcher was killed, and
+a sounder you started yourself releases both boards when you stop it. What can
+still hold a board is a sounder started some other way (another window, another
+user, a test harness) that is still running.
 
 Release it, from the rig, in the sounder directory:
 
