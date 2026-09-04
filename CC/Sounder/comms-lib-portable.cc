@@ -20,7 +20,6 @@
 #include <cstdlib>
 #include <functional>
 #include <iostream>
-#include <limits>
 #include <mutex>
 #include <queue>
 #include <thread>
@@ -314,73 +313,6 @@ static double firstPathFloorFrac(CommsLib::BeaconThresh form, double db) {
 // half the echo's power" and that was wishful. Widen with HOUDINI_FIRST_PATH_DB
 // if a channel needs it, and re-run beacon_geometry_test when you do.
 
-// SUB-SAMPLE POSITION OF THE LOBE AN INDEX SITS ON (BeaconResult::frac_offset).
-//
-// THE ESTIMATOR IS A RATIO OF THE TWO SAMPLES THAT BRACKET THE TOP, NOT A
-// PARABOLA THROUGH THREE OF THEM. For a replica that is a full-rate
-// pseudorandom sequence the autocorrelation is nearly a delta -- measured at
-// zero fractional delay, the peak's neighbours carry 0.008 of it for legacy,
-// 0.014 for nr_pss, 0.030 for nr (beacon_geometry_test prints the table) -- so
-// the three samples around the top trace the FRACTIONAL-DELAY KERNEL and not
-// the beacon. For the two kernels that bracket that case, the ideal
-// bandlimited sinc and the triangle, `side / (mid + side)` is EXACTLY the
-// offset. A parabola through a near-delta instead under-reports by up to 0.234
-// samples with a threefold gain error near half a sample, which is a
-// nonlinear timing discriminator rather than a measurement (8ai).
-//
-// dot11 IS THE EXCEPTION AND IT IS MEASURED, NOT ASSUMED: its replica is a
-// band-limited training field, so its neighbours carry 0.18 and its main lobe
-// is genuinely wider than a delta. Symmetric leakage of that size biases this
-// estimator, and dot11 is duly the worst column in the accuracy table at 0.095
-// samples RMS -- still five times better than the 0.449 of the integer it
-// refines, and well inside the 0.289 bar. A shape with a wider lobe still
-// would want a kernel-matched estimator rather than this one.
-//
-// The returned index is not always the top -- with the first-path guard off,
-// the rule picks the earlier tap of a split peak -- so this climbs one sample
-// to the local maximum and reports the result relative to `i`. The magnitude
-// is therefore at most 1.5 samples.
-//
-// NaN, NOT ZERO, when no refinement is available. Zero is a measurement, a top
-// sitting exactly on the index, and must never double as "no information";
-// `statistic` in this library already carries that convention.
-static double fracOffsetAt(const std::vector<std::complex<float>>& corr, size_t i) {
-  // ONE SAMPLE, AND THE REASON IS PHYSICAL, NOT MEASURED. A split peak's
-  // partner is exactly one tap away, so one step reaches the top of the SAME
-  // path. A longer climb can cross to a DIFFERENT path: on genuine multipath
-  // the first-path rule returns a weak early arrival on purpose, and climbing
-  // to the stronger echo beside it would report that echo's position under the
-  // name of the detected path (review, 8aj). An earlier version used two, on a
-  // reach figure that measured the -9 dB floor rather than any lobe.
-  constexpr int kMaxClimb = 1;
-  const double kNone = std::numeric_limits<double>::quiet_NaN();
-  const size_t n = corr.size();
-  if (n < 3 || i >= n) return kNone;
-  // In double from the parts: |z| taken in float rounds a near-flat top to a
-  // tenth of a sample of offset that is nothing but float spacing.
-  const auto amp = [&corr](size_t k) {
-    return std::hypot(static_cast<double>(corr[k].real()),
-                      static_cast<double>(corr[k].imag()));
-  };
-  size_t c = i;
-  for (int step = 0; step < kMaxClimb; ++step) {
-    if (c + 1 < n && amp(c + 1) > amp(c)) { ++c; continue; }  // strict: a
-    if (c >= 1 && amp(c - 1) > amp(c)) { --c; continue; }     // plateau stops
-    break;
-  }
-  if (c < 1 || c + 1 >= n) return kNone;  // no room to bracket at the edge
-  const double lo = amp(c - 1), mid = amp(c), hi = amp(c + 1);
-  if (!std::isfinite(lo) || !std::isfinite(mid) || !std::isfinite(hi)) return kNone;
-  // The climb is bounded, so `c` need not have reached a local maximum: the
-  // index can sit on a shoulder with no top within reach. Refining there would
-  // report a position no lobe has, so it reports none instead.
-  if (mid <= 0.0 || mid < lo || mid < hi) return kNone;
-  const double side = hi >= lo ? hi : lo;
-  const double frac = side / (mid + side);  // 0 .. 0.5 by construction
-  return static_cast<double>(c) - static_cast<double>(i) +
-         (hi >= lo ? frac : -frac);
-}
-
 int CommsLib::find_beacon_avx(
     const std::vector<std::complex<float>>& raw_samples,
     const std::vector<std::complex<float>>& match_samples, float corr_scale,
@@ -489,7 +421,6 @@ CommsLib::BeaconResult CommsLib::find_beacon_ex(
     if (i >= 0 && static_cast<size_t>(i) < gold_corr.size()) {
       r.statistic = ranking(static_cast<size_t>(i));
       r.peak = gold_corr[static_cast<size_t>(i)];
-      r.frac_offset = fracOffsetAt(gold_corr, static_cast<size_t>(i));
     }
     return r;
   };
@@ -566,7 +497,7 @@ CommsLib::BeaconResult CommsLib::find_beacon_ex(
     // THE GUARD SKIPS THE PEAK'S OWN SPLIT PARTNER. A beacon between samples
     // puts the same path on two adjacent taps; the earlier one is not an
     // earlier arrival and cannot be told from one, so admitting it trades a
-    // sample of accuracy on a clean link for nothing (kDefaultFirstPathGuard).
+    // sample of accuracy on a clean link for nothing (see comms-lib.h).
     // Guard 0 reproduces every release so far.
     const int guard = std::max(0, std::min(first_path_guard, win));
     int first = best;

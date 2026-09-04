@@ -25,7 +25,6 @@
 #include <string.h> /* for memcpy */
 #include <unistd.h>
 
-#include <limits>
 #include <algorithm>
 #include <cstring>
 #include <fstream>  // std::ifstream
@@ -266,20 +265,33 @@ class CommsLib {
   // them here, so a run has ONE source of truth and nothing in the correlator
   // reads the environment.
   static constexpr double kDefaultFirstPathFloorDb = -9.0;
-  /// HOW MANY SAMPLES BEFORE THE PEAK THE FIRST-PATH BACK-SCAN MUST SKIP.
+  /// HOW MANY SAMPLES BEFORE THE PEAK THE FIRST-PATH BACK-SCAN SKIPS
+  /// (`first_path_guard`, `sync.detector.first_path_guard`, default 0).
   ///
   /// A beacon arrives between samples, so the matched-filter peak splits over
-  /// two ADJACENT taps and the earlier one is the same physical path, not an
-  /// earlier one. Admitting it as a "first path" costs accuracy on a link with
-  /// no multipath at all: measured single path, the rule reads 0.365 to 0.449
-  /// samples RMS against the true arrival where the plain argmax reads 0.286,
-  /// the ideal rounder (8aj). A guard of 1 skips exactly that tap, leaving
-  /// every resolvable earlier arrival to the rule.
+  /// two ADJACENT taps and the earlier one is the same physical arrival, not
+  /// an earlier one. Admitting it costs accuracy on a link with no multipath:
+  /// measured single path, the rule reads 0.372 to 0.458 samples RMS against
+  /// the true arrival where the plain argmax reads 0.289, the ideal rounder
+  /// 1/sqrt(12). A guard of 1 skips that tap and returns four of the five
+  /// shapes to 0.289 exactly; `nr`, whose lobe is wider, reaches 0.310 to
+  /// 0.321 (DEMO_VERIFICATION 8aj). Those figures are noiseless-grid RMS; at
+  /// 45 dB the same measurement reads a little higher.
   ///
-  /// 0 is the behaviour every release so far has shipped and stays the default
-  /// until a silicon gate says otherwise, because this moves the reported
-  /// index on about a third of windows.
-  static constexpr int kDefaultFirstPathGuard = 0;
+  /// WHAT IT COSTS, MEASURED, NOT ASSUMED. Every resolvable earlier arrival is
+  /// still found: on a direct path with a stronger echo 8, 24 or 40 samples
+  /// later the guard changes nothing. An echo ONE sample later is a different
+  /// matter -- guard 0 returns the direct path there and guard 1 returns the
+  /// echo, an 8.1 ns anchor shift. No rule can separate a one-sample echo from
+  /// a split peak in a single window; the guard trades a pick that toggles
+  /// with the fractional timing for one that is stable and one sample late.
+  ///
+  /// Only 0 and 1 are accepted. 2 loses a genuine two-sample-earlier arrival
+  /// and 3 a three-sample one, measured, so the schema rejects them.
+  ///
+  /// 0 is the behaviour every release so far has shipped and remains the
+  /// default until the silicon gate of 8ak says otherwise: it moves the
+  /// reported index on a quarter to a third of windows (23 % to 36 % by shape).
   /// Threads for correlate_mt (sync.detector.corr_threads); 0 leaves the
   /// current setting. Read at dispatch, so set it before the first search.
   static void setCorrelatorThreads(unsigned n);
@@ -303,30 +315,6 @@ class CommsLib {
     ssize_t index = -1;
     double statistic = 0.0;
     std::complex<float> peak{0.0f, 0.0f};
-    /// WHERE THE LOBE'S TOP ACTUALLY SITS, RELATIVE TO `index`, IN SAMPLES.
-    /// A beacon that arrives between samples splits the matched-filter peak
-    /// over two adjacent taps, so the integer index carries up to half a
-    /// sample of quantisation and, under the first-path rule, up to one sample
-    /// of bias: measured, DEMO_VERIFICATION 8ah. `index + frac_offset` is the
-    /// sub-sample position of the detected path.
-    ///
-    /// RANGE IS NOT +-0.5. The rule can pick a tap up to two samples before the
-    /// top, so this runs to +-2.5 and real captures reach +0.93 (8ah). A
-    /// consumer that clamps it to half a sample corrupts exactly the split
-    /// peaks it exists for.
-    ///
-    /// NaN MEANS NO REFINEMENT, and zero is a measurement (a top exactly on the
-    /// index), never a stand-in for "unknown". NaN arises at a search-window
-    /// edge, on a shoulder with no lobe top within reach, and from a backend
-    /// that does not report the field at all.
-    ///
-    /// It describes the correlation lobe the index sits on; it does not
-    /// re-judge whether that index is a beacon. Read `statistic` against the
-    /// bar for that, exactly as before: a detection admitted on noise carries a
-    /// sub-sample position for its noise bump.
-    ///
-    /// ADDITIVE: `index`, `statistic` and `peak` are bit-unchanged by it.
-    double frac_offset = std::numeric_limits<double>::quiet_NaN();
   };
   /// The radio's samples as the correlator takes them: full scale to +-1.
   static std::vector<std::complex<float>> toCorrelatorScale(

@@ -676,11 +676,13 @@ across draws, RMS against the true arrival):
 
 | | argmax | first-path, guard 0 | first-path, guard 1 |
 |---|---|---|---|
-| RMS vs the true arrival, samples | **0.289** | 0.372 to 0.458 | **0.289** (nr 0.310) |
+| RMS vs the true arrival, samples | **0.289** | 0.372 to 0.458 | **0.289**, and `nr` 0.310 to 0.321 |
 
 0.289 is 1/sqrt(12), the ideal rounder. **The first-path rule costs 29 % to
 58 % accuracy on a link with no multipath, and a one-sample guard recovers all
-of it for every shipped shape.** The guard is therefore reinstated, as
+of it for four of the five shapes.** `nr`, whose correlation lobe is wider
+than one sample, keeps 0.310 to 0.321; the guard is not claimed to fix it and
+the test asserts only that the guard is never worse than the rule it guards. The guard is therefore reinstated, as
 `sync.detector.first_path_guard`.
 
 **And it does not cost what the rule exists for.** On the three resolvable
@@ -697,17 +699,9 @@ which is the trade this system's timing reference asks for.
 this moves the reported index on about a third of windows. The silicon gate is
 pre-registered as 8ak.
 
-**On the sub-sample estimator, which is a separate claim:** the accuracy
-criterion passes comfortably (0.018 to 0.096 samples RMS against 0.286 to
-0.458 for the integer). **The "decided" criterion FAILS on 4 of 10 rows and is
-reported failed, not moved.** Two reasons, both mine: the statistic 8ah named
-is the sd of the FRACTION alone, which swings by a whole sample wherever the
-integer steps and the fraction compensates, while the physical quantity
-(`index + frac_offset`) stays at 0.000 to 0.002 median and 0.034 to 0.124
-worst; and 0.1 was chosen without a noise model on a grid ten times coarser
-than the one that now finds the transitions. The test prints both statistics,
-marks the 8ah verdict per row, and asserts only a regression guard that is
-labelled as a different claim.
+**On the sub-sample estimator, which was a separate claim: it is WITHDRAWN in
+round 3 and is now AP-75. See 8al.** Its "decided" criterion had already
+failed on 4 of 10 rows and was reported failed rather than moved.
 
 **Also applied from the round:** the reach table that claimed to measure "lobe
 width" measured the -9 dB FLOOR (one more dB of floor, or 20 dB SNR, moves it
@@ -723,33 +717,123 @@ statistic" was false, 18 of 30 carry a statistic and the test now says so; a
 dead constant carrying the instructions for an already-fixed instrument bug
 was removed.
 
+### 8al. AP-72 review round 3: the sub-sample estimator is WITHDRAWN
+
+Two reviewers ran against the round-2 tree, one on the production code and one
+on the measurements. **The estimator fails, and it fails where it would be
+used.**
+
+`side / (mid + side)` is exact for an ideal sinc and for a triangle, which is
+why it was chosen, and both of those kernels are SYMMETRIC. The shipped
+replicas' autocorrelations are not: measured at the index the detector
+actually reports, legacy carries 0.0079 one side and 0.0024 the other, `nr`
+0.0157 and 0.0305. Near a whole-sample arrival that fixed asymmetry is larger
+than the one the fractional delay creates, so the comparison that picks the
+side chooses wrongly and the correction takes the wrong sign. Measured on the
+real shapes: the refined position is WORSE than the raw integer on 12 to 26 %
+of timing points, with the wrong sign on up to 23 %, worst error 0.271 samples
+on `nr`. **The failure is concentrated near integer arrivals, which is exactly
+where a tracking loop sits at lock**, so a loop fed this would be driven the
+wrong way at the one place it matters. Under noise the side becomes a coin
+toss rather than merely biased.
+
+**It is withdrawn from the branch rather than fixed under time pressure.** Two
+three-point estimators in a row have now been defeated by the shape of this
+lobe; a third guess is not what the evidence asks for. What it asks for is the
+replica's own autocorrelation, computed once at Detector construction, and the
+offset estimated by matching the measured triple against the expected one.
+That is **AP-75**, with this measurement as its specification and its gate
+written there: better than the argmax's quantisation AND never worse than the
+raw integer at any timing point. No production code read the field, so nothing
+depends on the withdrawal.
+
+**Two more things the round found, both kept.** The reviewers also caught that
+`kMaxClimb` had been reduced from 2 to 1 in round 2 without re-reporting the
+accuracy it cost (`nr` 0.070 to 0.223), and that the golden-window check
+introduced in round 2 was a second tautology: a build with every offset forced
+to 0 or 1 passed all 30 windows. Both are moot with the field withdrawn and
+both are recorded so AP-75 does not repeat them.
+
+**And a finding that outlives the withdrawal.** Sweeping the multipath
+channels over fractional delay instead of at zero, as an earlier version did,
+showed that **at the shipped -9.0 dB first-path floor a direct path 8.9 dB
+under a stronger echo is NOT found by legacy_guard, dot11 or `nr`**: they lock
+on the echo 40 samples late, at guard 0 and guard 1 alike. `comms-lib-portable.cc`
+already warned this floor "clears it by under 1 dB, which is thin". This is
+that thinness measured per shape. It is pre-existing, unrelated to the guard,
+and the geometry test now records it rather than hiding it by moving the
+amplitude.
+
+**Applied to the guard from the same round:** `first_path_guard` accepts only
+0 and 1 now, because 2 loses a genuine two-sample-earlier arrival and 3 a
+three-sample one (measured); the guard joins the per-detection diagnostic
+record and the startup detector line, so a window captured under one setting
+cannot replay under the other unnoticed; `Detector::firstPathGuard()` reports
+the value the correlator will actually apply rather than the one requested;
+the constant that documented the default without being one was removed; the
+header's accuracy figures were re-measured on the corrected grid; and the
+measurement code lost a dither statistic that was the retracted distinct-value
+count in a new costume, a multipath block that ran only at zero fractional
+delay where the guarded tap cannot matter, and a lobe table whose peak landed
+on a different repetition from seed to seed.
+
 ### 8ak. The first-path guard on silicon: criteria written BEFORE the runs
 
-Pre-registration, in the 8v style. `sync.detector.first_path_guard` = 1 skips
-the tap immediately before the peak, which offline recovers the ideal rounder
-(8aj). It moves the reported index by one sample on the windows where the
-split favours the earlier tap, about a third of them, so the claim under test
-is that the sync loop is at least as good with it as without.
+Pre-registration, in the 8v style, rewritten after review round 3 found the
+first draft's tolerance misquoted and its statistics blind to the change.
 
-**Runs:** legacy at 60 s, four interleaved legs A B B A, A = shipped
-(`guard 0`), B = `SYNC_OVERLAY {"detector":{"first_path_guard":1}}`, through
-`run_shape_campaign.sh`.
+`sync.detector.first_path_guard` = 1 skips the tap immediately before the
+peak. Offline it returns four of five shapes to the ideal rounder (8aj). It
+moves the reported index by one sample on a quarter to a third of windows, so
+the claim under test is that the sync loop is at least as good with it.
+
+**Runs:** legacy AND dot11 at 60 s, four interleaved legs per shape, A B B A,
+A = shipped (`guard 0`), B = `SYNC_OVERLAY
+{"detector":{"first_path_guard":1}}`, through `run_shape_campaign.sh`. dot11
+is included because it has the largest offline benefit (0.458 to 0.289) and
+the widest lobe; `nr` is excluded because the guard is not claimed to fix it.
 
 **PASS, per leg:** 0 escalations, 0 off-grid, at most 1 low-SNR rejection,
-accepts 15-25. **And the comparison that decides it:** the B legs' adjacent-
-difference jitter is no worse than the A legs' on the same evening, and their
-residual sd is no worse by more than the clock's own leg-to-leg spread
-measured in 8.192 (which reached 8.15 against 1.77 across shapes, so the clock
-is the dominant term and this is a weak test by construction: it can only
-falsify a LARGE regression, and that limit is stated here rather than
-discovered afterwards).
+accepts 15-25, and the startup line reads `guard 1` on the B legs and `guard 0`
+on the A legs (the setting is now printed, so a leg that silently ran the wrong
+one is visible rather than assumed).
 
-**FAIL** on the envelope bisects the guard. A jitter improvement is NOT
-expected to be visible: the offline effect is 0.08 samples of RMS on a bench
-whose clock moves 18 samples in a minute, so this gate tests for harm, not for
-benefit. The benefit is the offline measurement and is reported as such.
+**The comparison, with its tolerance stated:** the B legs' adjacent-difference
+jitter must not exceed the A legs' by more than 0.5 samples, and their residual
+sd must not exceed the A legs' by more than 3 samples. Those numbers come from
+what a FIXED configuration did between rounds on this bench in 8.192: legacy's
+jitter moved 2.43 to 1.21 and its residual sd 8.15 to 4.06 with nothing
+changed but the clock. A tolerance tighter than that measures the clock.
 
-### 8ah. AP-72, the split-peak pick: what the measurement said, and the criteria for what follows
+**WHY THIS GATE IS WEAK, STATED IN ADVANCE RATHER THAN AFTERWARDS.** The
+guard's principal effect is a CONSTANT one-sample shift of the reported index
+on the windows where the split favours the earlier tap. Adjacent-difference
+jitter differences a constant away; residual sd is invariant to a constant;
+accepts, escalations, off-grid and low-SNR counts are all invariant to it. So
+every PASS statistic above is blind to the change's main effect by
+construction, and what remains visible is the varying part, 0.08 samples,
+against a clock term that moved 18 samples in a minute. **This gate can
+falsify a large regression and nothing else.** It cannot see the benefit, which
+is offline and reported as such, and it cannot see the one harm the offline
+work identified: a one-sample echo, where guard 1 returns the echo and guard 0
+returns the direct path. This bench is a cable with no such echo, so that harm
+is not testable here at all and stays an open risk for the over-the-air work.
+
+**FAIL** on the envelope bisects the guard. A jitter or sd improvement is NOT
+expected and, if one appears, is to be read as the clock unless it replicates
+across both shapes and both rounds.
+
+### 8ah. AP-72, the split-peak pick: RETRACTED, see 8aj and 8al
+
+**READ 8aj AND 8al FIRST. THE CONCLUSION BELOW IS WITHDRAWN.** This section
+concluded that the first-path rule is a stabiliser and withdrew the guard fix;
+review round 2 showed the measurement behind it could not have found the
+opposite result, and the guard was reinstated. The sub-sample estimator this
+section then pre-registered was itself withdrawn in round 3 and is now AP-75.
+The section is kept unedited below because the pre-registered criteria and the
+reasoning are the record of how the error was made.
+
+### 8ah (as written, and wrong). AP-72, the split-peak pick: what the measurement said, and the criteria for what follows
 
 **The measurement came first and it contradicts the row (2026-09-03, offline,
 `beacon_geometry_test`).** AP-72 and 8.177 called the one-sample-early pick "a

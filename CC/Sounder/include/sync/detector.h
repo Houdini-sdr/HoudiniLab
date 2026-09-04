@@ -19,7 +19,6 @@
 #pragma once
 
 #include <complex>
-#include <limits>
 #include <cstddef>
 #include <cstdint>
 #include <sys/types.h>
@@ -46,16 +45,6 @@ struct Detection {
   /// The correlator output at the index: the matched field's complex peak,
   /// which a phase tracker reads (architecture plan, P5).
   std::complex<float> peak{0.0f, 0.0f};
-  /// The sub-sample position of the detected path relative to `end_index`, in
-  /// samples: `end_index + frac_offset` is where the lobe's top actually sits
-  /// (CommsLib::BeaconResult::frac_offset, measured in 8ah). Runs to +-2.5,
-  /// not +-0.5, because the first-path rule can pick a tap up to two samples
-  /// before the top. NaN means no refinement was available (a window edge, a
-  /// shoulder with no top in reach, or a backend that does not report one);
-  /// zero is a measurement and never a stand-in for unknown. The integer
-  /// `end_index` is unchanged by it, so the index convention is the same with
-  /// and without this field.
-  double frac_offset = std::numeric_limits<double>::quiet_NaN();
   bool found() const { return end_index >= 0; }
 };
 

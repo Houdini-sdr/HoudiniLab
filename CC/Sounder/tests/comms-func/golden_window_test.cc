@@ -246,7 +246,6 @@ int main(int argc, char** argv) {
   const auto cfg = houdini::sync::SyncConfig::loadFromText("{}");
   const float kCorrScale = 10.0f;
   int windows = 0;
-  int frac_none = 0;  // windows where the sub-sample estimator reported none
   int with_stat = 0;  // fixtures too old to carry a statistic are not silently counted
   std::map<std::string, int> per_shape;
   // Windows per shape: legacy and nr_pss 00-05 (morning) + 06-11 (with the
@@ -335,40 +334,11 @@ int main(int argc, char** argv) {
       // statistic (8.176) showed picks as low as 2 dB above the bar on legacy.
       const auto am = det.run(w.data(), w.size(), corr_scale, PickRule::kArgmax);
       {
-        std::printf("INFO  %s window %d: picked %lld stat %.4g | argmax %lld stat %.4g | pick - argmax = %lld samples, %.1f dB below | frac_offset %+.4f (sub-sample end %.4f)\n",
+        std::printf("INFO  %s window %d: picked %lld stat %.4g | argmax %lld stat %.4g | pick - argmax = %lld samples, %.1f dB below \n",
                     shape, i, static_cast<long long>(det_res.end_index), det_res.statistic,
                     static_cast<long long>(am.end_index), am.statistic,
                     static_cast<long long>(det_res.end_index - am.end_index),
-                    am.statistic > 0 ? 10.0 * std::log10(am.statistic / std::max(1e-12, det_res.statistic)) : 0.0,
-                    det_res.frac_offset,
-                    static_cast<double>(det_res.end_index) + det_res.frac_offset);
-      }
-      // THE SUB-SAMPLE OFFSET, CHECKED AGAINST THE PICK RATHER THAN AGAINST
-      // ITS OWN BOUND. An earlier version asserted only "finite and within the
-      // estimator's clamp", which the estimator guarantees by construction and
-      // which would stay green if the fit were replaced by `return 0` (review,
-      // 8aj). What is asserted instead is a relation between two quantities
-      // computed independently: the offset says where the lobe's top is, the
-      // argmax says which sample carries it, and they have to agree. When the
-      // pick IS the argmax the top is within half a sample of it; when the
-      // pick is the tap before the argmax the top lies beyond half a sample,
-      // toward the argmax. NaN is allowed: a backend that does not report the
-      // field (CUDA) returns it, and asserting finiteness would fail a build
-      // whose production contract permits none.
-      if (std::isnan(det_res.frac_offset)) {
-        ++frac_none;
-      } else {
-        const long long gap = static_cast<long long>(am.end_index) -
-                              static_cast<long long>(det_res.end_index);
-        const double f = det_res.frac_offset;
-        const bool consistent =
-            gap == 0 ? std::fabs(f) <= 0.5 + 1e-9
-                     : (gap == 1 ? f > 0.5 - 1e-9 && f <= 1.5 + 1e-9
-                                 : std::fabs(f) <= 1.5 + 1e-9);
-        std::snprintf(what, sizeof what,
-                      "%s window %d: frac_offset %+.4f agrees with the argmax %lld sample(s) away",
-                      shape, i, f, gap);
-        check(consistent, what);
+                    am.statistic > 0 ? 10.0 * std::log10(am.statistic / std::max(1e-12, det_res.statistic)) : 0.0);
       }
       const double snr = guard.snrDb(w.data(), w.size(), det_res.end_index);
       std::snprintf(what, sizeof what, "%s window %d: snr %.2f dB (recorded %.2f)", shape, i,
@@ -395,7 +365,6 @@ int main(int argc, char** argv) {
   // mid-slice detections with room to bracket, so a nonzero count on the
   // portable backend means the estimator stopped refining and is worth reading
   // before it is trusted (8ai).
-  std::printf("INFO  sub-sample offset reported none on %d of %d windows\n", frac_none, windows);
   // Said out loud because "all 30 windows return their recorded index AND
   // statistic" would be false: the morning's fixtures predate the statistic
   // and only the later ones carry it (review, 8aj).

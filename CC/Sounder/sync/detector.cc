@@ -52,7 +52,15 @@ Detector::Detector(const BeaconShape& shape, const DetectorConfig& cfg)
                                              2 * static_cast<int>(shape.replicaLen()))
                              : shape.defaultFirstPathWindow()),
       first_path_floor_db_(cfg.first_path_floor_db),
-      first_path_guard_(std::max(0, cfg.first_path_guard)),
+      // Clamped to the window here so the accessor reports what the correlator
+      // will actually apply: it clamps again, and an accessor that disagrees
+      // with the effective value misleads the record it is written into.
+      first_path_guard_(std::max(
+          0, std::min(cfg.first_path_guard,
+                      cfg.first_path_window >= 0
+                          ? std::min<int>(cfg.first_path_window,
+                                          2 * static_cast<int>(shape.replicaLen()))
+                          : shape.defaultFirstPathWindow()))),
       pfa_applies_(false),
       pfa_(cfg.pfa_per_window),
 #if defined(USE_CUDA)
@@ -108,7 +116,6 @@ Detection Detector::run(const std::complex<int16_t>* samples, size_t n,
     d.form = ThresholdForm::kPowerRatio;
     d.statistic = std::numeric_limits<double>::quiet_NaN();  // not reported by this backend
     d.bar = std::numeric_limits<double>::quiet_NaN();
-    d.frac_offset = std::numeric_limits<double>::quiet_NaN();
     return d;
   }
 #endif
@@ -122,9 +129,6 @@ Detection Detector::run(const std::complex<int16_t>* samples, size_t n,
   if (d.end_index >= 0) {
     d.statistic = r.statistic;
     d.peak = r.peak;
-    // The correlator's index and the beacon end differ by the replica tail, a
-    // constant, so the sub-sample offset of the lobe carries across unchanged.
-    d.frac_offset = r.frac_offset;
   }
   return d;
 }
