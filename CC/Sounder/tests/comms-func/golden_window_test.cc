@@ -16,9 +16,11 @@
  * dumped after 2026-09-03 also carry the detector settings they were taken
  * under (corr_scale, thresh, pick, first_path_window, first_path_floor_db,
  * snr_floor_db, snr_guard, replica_tail, beacon_type), asserted below when
- * present. `cfo_hz` is NOT written by the sounder: it is a baseline added by
- * hand from the library at commit 10d0fe0, so the estimator has an identity
- * check rather than a plausibility band.
+ * present. `first_path_guard` is written by the sounder as of 2026-09-04 but
+ * NO fixture in the tree carries it yet, so that assertion is forward-looking
+ * and currently runs on none of the windows. `cfo_hz` is NOT written by the
+ * sounder: it is a baseline added by hand from the library at commit 10d0fe0,
+ * so the estimator has an identity check rather than a plausibility band.
  */
 #include <cmath>
 #include <cstdio>
@@ -246,6 +248,7 @@ int main(int argc, char** argv) {
   const auto cfg = houdini::sync::SyncConfig::loadFromText("{}");
   const float kCorrScale = 10.0f;
   int windows = 0;
+  int with_stat = 0;  // fixtures too old to carry a statistic are not silently counted
   std::map<std::string, int> per_shape;
   // Windows per shape: legacy and nr_pss 00-05 (morning) + 06-11 (with the
   // statistic); dot11 00-05 recorded after round 4 for the guard rule.
@@ -305,6 +308,13 @@ int main(int argc, char** argv) {
       else check(false, tag + ": fixture records the pick rule by name");
       if (meta.has("first_path_window"))
         check(det.firstPathWindow() == static_cast<int>(meta.at("first_path_window")), tag + ": recorded first-path window matches");
+      // The guard changes sync_index on a quarter to a third of arrival
+      // phases, so a window captured under one setting and replayed under the
+      // other must not pass quietly. Fixtures written before the knob existed
+      // carry no such line and are checked on the other two settings only.
+      if (meta.has("first_path_guard"))
+        check(det.firstPathGuard() == static_cast<int>(meta.at("first_path_guard")),
+              tag + ": recorded first-path guard matches");
       if (meta.has("first_path_floor_db"))
         check(std::fabs(det.firstPathFloorDb() - meta.at("first_path_floor_db")) < 1e-6, tag + ": recorded first-path floor matches");
       if (meta.has("snr_floor_db"))
@@ -323,6 +333,7 @@ int main(int argc, char** argv) {
       // Detection widening of 2026-09-03): a change that leaves the argmax
       // alone but moves the margin is visible here.
       if (meta.has("statistic") && std::isfinite(meta.at("statistic"))) {  // NaN = recorded by a backend without evidence
+        ++with_stat;
         std::snprintf(what, sizeof what, "%s window %d: statistic %.5g (recorded %.5g)", shape, i,
                       det_res.statistic, meta.at("statistic"));
         check(std::fabs(det_res.statistic - meta.at("statistic")) <= 1e-4 * std::max(1.0, std::fabs(meta.at("statistic"))), what);
@@ -330,14 +341,12 @@ int main(int argc, char** argv) {
       // Informational, not a check: where the strongest crossing sits and how
       // much stronger it is than the picked first path. The fixtures' recorded
       // statistic (8.176) showed picks as low as 2 dB above the bar on legacy.
-      {
-        const auto am = det.run(w.data(), w.size(), corr_scale, PickRule::kArgmax);
-        std::printf("INFO  %s window %d: picked %lld stat %.4g | argmax %lld stat %.4g | pick - argmax = %lld samples, %.1f dB below\n",
-                    shape, i, static_cast<long long>(det_res.end_index), det_res.statistic,
-                    static_cast<long long>(am.end_index), am.statistic,
-                    static_cast<long long>(det_res.end_index - am.end_index),
-                    am.statistic > 0 ? 10.0 * std::log10(am.statistic / std::max(1e-12, det_res.statistic)) : 0.0);
-      }
+      const auto am = det.run(w.data(), w.size(), corr_scale, PickRule::kArgmax);
+      std::printf("INFO  %s window %d: picked %lld stat %.4g | argmax %lld stat %.4g | pick - argmax = %lld samples, %.1f dB below\n",
+                  shape, i, static_cast<long long>(det_res.end_index), det_res.statistic,
+                  static_cast<long long>(am.end_index), am.statistic,
+                  static_cast<long long>(det_res.end_index - am.end_index),
+                  am.statistic > 0 ? 10.0 * std::log10(am.statistic / std::max(1e-12, det_res.statistic)) : 0.0);
       const double snr = guard.snrDb(w.data(), w.size(), det_res.end_index);
       std::snprintf(what, sizeof what, "%s window %d: snr %.2f dB (recorded %.2f)", shape, i,
                     snr, meta.at("snr"));
@@ -359,6 +368,11 @@ int main(int argc, char** argv) {
     }
   }
   check(windows == 30, "found " + std::to_string(windows) + " fixture windows (expected 30)");
+  std::printf("INFO  %d of %d windows carry a recorded statistic; the rest check the index only\n",
+              with_stat, windows);
+  // Asserted, not merely printed: a fixture set that lost its statistics would
+  // otherwise report "0 of 30" and pass (review round 7).
+  check(with_stat >= 18, "at least the 18 fixtures that recorded a statistic still carry one");
   for (const auto& kv : kExpected)
     check(per_shape[kv.first] == kv.second, kv.first + ": " + std::to_string(per_shape[kv.first]) + " of " +
                                                 std::to_string(kv.second) + " fixture windows present (a half-populated set fails here, not quietly)");

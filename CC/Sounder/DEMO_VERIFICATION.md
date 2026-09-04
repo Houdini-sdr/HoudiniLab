@@ -649,6 +649,573 @@ whether an NR-shaped beacon is a live option for the OTA target.
 | 8.167 | **THE CONJUGATE-IMAGE INFERENCE IS RETRACTED, AND WHAT SURVIVES IS SMALLER AND BETTER FOUNDED.** [user: "any test should be validated again even if it matches the hypothesis"; "I am skeptical of a conjugate-image"]. The inference rested on a rule of thumb -- a pure beacon gives a wrong-sense/right-sense peak ratio of 1/sqrt(128) = 0.09 -- that this replica violates: the Gold IFFT sequence is structured and its conjugate-free self-product, computed exactly on a pure delayed beacon (`phase_probe_null.py`), is **0.16 to 0.28 depending on the fractional delay**. The identical analysis on the real windows reads **0.18 to 0.24 on the sounder's six golden windows and 0.29 to 0.34 on the probe's raw window**, i.e. at the null; and the estimator barely responds to an injected image below b = 0.3 (0.211 at b = 0, 0.212 at b = 0.2), so it could not have detected a small one anyway. The "100x variation between re-arms" was the probe's lag-product ratio for the wrong sense, a statistic that was never given a null and cannot carry a claim. **Retracted: image, chain-state variation, and the AP-70 handoff as filed.** **What survives, validated the same way:** (1) the correlation lobe's phase step between adjacent samples is **0.06 to 0.30 rad on real data in BOTH capture paths** (sounder windows -0.07 / -0.16 / -0.29 / +0.20 / -0.07 / -0.14; probe -0.06 to -0.30) against **0.01 for a pure delayed beacon**, so the received beacon's spectrum is asymmetric by a modest, benign amount (chain and cable dispersion) and an integer-peak phase readout inherits that step at every argmax hop; (2) one run had two equal-magnitude adjacent samples **2.4 rad apart**, which a single correlation lobe cannot produce and which fits a two-component arrival about one sample apart; its waveform was not captured, so it is **UNEXPLAINED**, and the probe now arms a raw dump so the next one is. (3) Incidental and verified: the probe transmits the dumped core as is while the sounder pre-conjugates its transmit, so the probe's windows correlate with conj(g) and the sounder's with g; both are consistent with the conjugating receive mixer. The AP-67 design rule stands on (1) alone | `tests/demo-verify/phase_probe_null.py` (null, calibration, both real paths) | VERIFIED-TEST; image claim RETRACTED; 2.4 rad run UNEXPLAINED |
 | 8.168 | **AP-67 MEASURED: THE BEACON PHASE IS PREDICTABLE FOUR FRAMES AHEAD TO ABOUT 1.5 DEGREES.** On the clean runs the phase innovation after removing one fitted per-frame advance is **0.021 / 0.026 / 0.024 / 0.025 rad at lags 1 / 2 / 3 / 4 frames** (192 / 180 / 168 / 156 pairs), i.e. flat: neither the linear growth of a frequency error nor the sqrt(lag) growth of a random walk is visible above the lag-1 floor, which is the estimator's own noise. So over 4 ms the transmitter's carrier phase relative to the receiver's is a constant advance to 1.5 degrees, and the 5-degree budget in `docs/UE_TIME_FREQ_SYNC.md` section 11.4 was conservative by 3x. Consequence: a beacon-only phase tracker supports 64-QAM-grade phase (about 2 degrees) across the frame on this bench, and the in-slot pilots the doc recommends are for channel change and for other hardware, not for this oscillator pair. One caveat carried: the runs were 6 to 12 windows of 17 frames on a cable at the calibrated clock state; the innovation over tens of frames and over the air is not measured | `ap67.log`, `evidence/20260903-rig/ap67_*.csv` | VERIFIED-HW |
 
+### 8ap. AP-72 review round 8: the loop stops, and the matrix that stopped it
+
+Round 8 verified round 7's ten fixes: eight genuine, two partial. It found
+five leftovers, applied here, and **none of them was in the production
+change** -- the fifth consecutive reviewer to find it clean. The loop stops at
+this round because the thing that kept it going has been removed rather than
+because the reviewers ran out of findings.
+
+**The one with substance, and it is round 7's own repair failing the same way
+its predecessors did.** The simulated-leg block asserts an EQUALITY -- that a
+60 s leg cannot tell the two guard settings apart by jitter -- and an equality
+passes vacuously when both arms are the same configuration. Measured: that
+block alone passed under ALL SIX guard mutations, including the knob ignored
+entirely, printing the two arms as one number with nothing objecting. It now
+carries the positive control its two sibling blocks already had (211 of 920
+detections differ between the arms), so the equality is asserted on two arms
+that are demonstrably different. The other four were a comment describing a
+criterion removed two rounds earlier together with the three variables computed
+only for it, a reason given backwards, an orphaned antecedent, and the stale
+23 % where the measurement reads 22 %.
+
+**THE MUTATION MATRIX, WHICH IS THE STRONGEST EVIDENCE ON THIS BRANCH.** Round
+7's structural change was that every assertion in the AP-72 blocks names the
+mutation that makes it fail. Round 8 BUILT them: six distinct guard defects --
+the guard off, inverted, forced to 2, applied unconditionally, the knob never
+reaching the correlator -- and a single dropped detection. Every one fails the
+suite, each with the shape its comment predicts. "Capable of failing" is no
+longer something a round rediscovers by hand; it is a property the file states
+and a matrix that has been run.
+
+**What eight rounds cost and what they bought.** Five reviewers found the
+production change clean, and every defect any round found was in the
+measurement code or the prose around it. That asymmetry is the durable finding
+of AP-72, and it is the one promoted out of this branch (AP-77).
+
+### 8ao. AP-72 review round 7: the structural change that ended the loop
+
+Round 7 verified round 6's fixes (three genuinely fixed, three partially, one
+in name only) and found three HIGH and seven MEDIUM, again none in the
+production code -- four consecutive reviewers have now found it clean. The
+three HIGH are the pattern in miniature, and all three were introduced BY
+round 6's repairs: 8.196 still quoted the simulation figure that round 6's own
+rewrite of 8ak had just retracted; the new simulated-leg block was written
+without the detection floor round 6 had added to the two blocks either side of
+it, and a build dropping detections regenerated the headline number as garbage
+and passed; and an assertion round 6 deleted left both its comment and 8aj
+still claiming the suite makes it.
+
+Two integrity items are worth naming separately because neither is a bug.
+**A PASS criterion was proposed for 8ak after the gate of 8.196 had already
+run.** It is now recorded as a candidate for the next gate and explicitly NOT
+part of what 8.196 was judged against, since back-dating a criterion into a
+pre-registration is the one thing a pre-registration exists to prevent. And
+**the fixture assertion on the guard runs on 0 of the 30 windows**, because no
+fixture predates the knob and none has been recaptured; 8al listed it as an
+applied fix, and it is forward-looking only.
+
+**The structural change this round asked for, and it is adopted.** Six rounds
+each broke the previous round's repair, and the recurring species is an
+assertion nobody checked could fail. Every assertion in the AP-72 blocks now
+carries a comment naming the mutation that makes it fail, verified by building
+that mutation: the guard off, inverted, forced to 2, applied unconditionally,
+the knob ignored, detections dropped. "Capable of failing" stops being
+something each round rediscovers by hand.
+
+**Also this round:** the simulated leg's jitter did not match the statistic
+`shape_campaign_summary.py` computes and now does (0.287 and 0.305 rather than
+0.281 and 0.298); its quoted difference is one realisation whose sign changes
+between seeds, and the section says so; the multipath block claimed a sweep
+over signal level that it never ran and now runs one; a comment telling the
+reader that guard 0's worst dither always sits at its own transition was
+contradicted by its own table on one row; the widening argument for one
+tolerance ran backwards; and the shipped client is on channel "B" too, so both
+nodes take the auxiliary-replay path that AP-76 turns on.
+
+### 8an. AP-76 / SH-335, the joint leg: criteria written BEFORE the rig slot
+
+Pre-registration, in the 8v style, written 2026-09-04 while the rig is
+unallocated. Joint with the software lane: our sounder is the instrument, their
+HIL leg and dirty counter run alongside.
+
+**The mechanism under test, as they localized it.** The TX rate is global to
+the DAC group. `setSampleRate(TX)` only records it; it is APPLIED at the first
+TX `setupStream`, which resyncs the group because the vld change moved the DAC
+FIFO latency. The realign runs on every TX setupStream and corrupts only when
+the vld actually moved. Board defaults are restored at every device open, so
+our demo start moves it every run.
+
+**Why our exposure is the untested case.** The shipped config sets `channel`
+to "B" for the base station AND `ue_channel` to "B" for the client, so BOTH
+nodes take this path; the base station's channels are {1}, `has_ch0` is false and `mts` is
+true, and `RadioSoapy` opens an auxiliary channel-0 stream in REPLAY mode
+before the data TX stream. That auxiliary stream's setupStream is therefore the
+first after the move and absorbs the realign, every run. Every dataset either
+lane has is on PACED streams.
+
+**THE READOUT RULE, AND IT IS THE POINT OF WRITING THIS DOWN EARLY.** A replay
+stream plays from RAM rather than a host-fed FIFO, so if it is sensitive to the
+post-realign state it will most likely fail as a SILENT OR WRONG DAC OUTPUT
+rather than as drops or sequence errors. This bench has produced exactly that
+shape before: row 4.24, counters playing and no RF leaving the DAC. **So on the
+replay arm the beacon detection is the load-bearing readout and the software
+lane's dirty counter may read clean while the output is wrong. A clean counter
+with a dead or wrong beacon is a POSITIVE RESULT, not a contradiction, and it
+is recorded here in advance so it cannot be argued away as instrument
+disagreement afterwards.** The converse, a dirty counter with a healthy beacon,
+is also a positive and means the corruption does not reach the replay path.
+
+**Arms, interleaved, one binary, the shipped config, 60 s each, order rotated
+between rounds:**
+1. **As-is.** The shipped ordering: rate move, then the auxiliary replay stream
+   first, then the data stream. Also record whether the FIRST post-move stream
+   being a replay changes anything against a paced first stream, which is the
+   exact variable the software lane's hammer never had.
+2. **No move.** The device left or provisioned at the operational TX rate, so
+   `setSampleRate` records what is already there. If this arm is clean the vld
+   move is confirmed as the whole cause.
+3. **Absorbed.** A throwaway paced TX stream opened and closed at the
+   operational rate before the auxiliary stream, to eat the realign. This tests
+   our preferred interim fix.
+
+**PASS for an arm:** beacon acquired and tracked with accepts inside 15-25, 0
+escalations, 0 off-grid, and the software lane's dirty counter clean.
+**FAIL:** no beacon, a beacon whose detected level or shape is wrong, or a
+dirty counter. **The comparison that decides the row:** arm 1 dirty or
+beaconless while arms 2 and 3 are clean means our shipped ordering is exposed
+through the replay path and the fix is ours. All three arms clean, replicated,
+means replay streams are immune and AP-76 closes as clear by accident. Arm 2
+dirty means the mechanism is not the vld move and both lanes go back to it.
+
+**Stated weakness.** One evening on one cable bench with one board pair. This
+can establish that the exposure is real; it cannot establish that it is absent,
+because a corruption that fires on some fraction of rate moves needs many more
+cycles than a rig slot affords. A clean result is therefore reported as "not
+reproduced in N cycles", with N stated, and never as "does not happen".
+
+### 8am. AP-72 review rounds 5 and 6: what the fixes broke
+
+Round 4's fixes were reviewed, and so were round 5's. Both rounds found the
+production change clean and both found defects in what the previous round had
+just repaired, which is the pattern of this whole piece of work.
+
+**Round 5** verified six of round 4's seven fixes and demolished the seventh:
+the multipath block, rewritten in round 4 to assert that the guard changes no
+point on a resolvable echo, was asserting something FALSE. At an echo two
+samples away the two settings do differ, over a band of arrival phase near 0.4
+that the block's 0.25 grid stepped over, and at every one of those points guard
+1 is BETTER. It also found that a build ignoring the knob and applying the
+guard unconditionally passed the entire block while its table read as an
+improvement, because nothing asserted that the two settings differ at all; that
+every statistic read perfectly when nothing was detected, since two settings
+that both find nothing agree everywhere; and that the minority-share screen
+could not be made safe by raising its draw count, because a real share of 0.008
+is missed two times in three and then prints the value a decided rule prints.
+
+**Round 6** verified round 5's fixes and found three more. The single-path
+check, rewritten to compare guard 1 against the argmax by RMS, was true by
+construction on four of the five shapes: with the split partner excluded
+there is usually no other candidate above the floor, so guard 1 simply IS
+the argmax. It now asserts the guard's contract literally, that guard 1
+never returns the tap immediately before the argmax, with a control that
+guard 0 does return it (22 to 36 of 100 phases by shape, from a second
+statistic in the same instrument rather than an independent one). Round 6
+also found a worked example in 8ak's tolerance paragraph that was a single
+leg-pair difference, the exact after-the-fact aggregation that paragraph
+forbids, and that 8aj still carried the claim round 5 had disproved. Both
+are corrected above.
+
+**And a fourth, found by the test rather than by a reviewer.** The replacement
+single-path check first asserted that guard 1 stays within one sample of the
+argmax. It does not: `nr` has a second tap above the floor on about 1 % of
+phases and legitimately lands two samples early. The bound had been written
+without measuring it first, which is the same error this work has now made
+several times, and the suite caught it immediately.
+
+**Standing count for this piece of work: the production change has been found
+clean by three consecutive reviewers. Every defect of substance since round 3
+has been in the measurement code or the prose describing it.**
+
+### 8al. AP-72 review round 3: the sub-sample estimator is WITHDRAWN
+
+Two reviewers ran against the round-2 tree, one on the production code and one
+on the measurements. **The estimator fails, and it fails where it would be
+used.**
+
+`side / (mid + side)` is exact for an ideal sinc and for a triangle, which is
+why it was chosen, and both of those kernels are SYMMETRIC. The shipped
+replicas' autocorrelations are not: measured at the index the detector
+actually reports, legacy carries 0.0079 one side and 0.0024 the other, `nr`
+0.0157 and 0.0305. Near a whole-sample arrival that fixed asymmetry is larger
+than the one the fractional delay creates, so the comparison that picks the
+side chooses wrongly and the correction takes the wrong sign. Measured on the
+real shapes: the refined position is WORSE than the raw integer on 12 to 26 %
+of timing points, with the wrong sign on up to 23 %, worst error 0.271 samples
+on `nr`. **The failure is concentrated near integer arrivals, which is exactly
+where a tracking loop sits at lock**, so a loop fed this would be driven the
+wrong way at the one place it matters. Under noise the side becomes a coin
+toss rather than merely biased.
+
+**It is withdrawn from the branch rather than fixed under time pressure.** Two
+three-point estimators in a row have now been defeated by the shape of this
+lobe; a third guess is not what the evidence asks for. What it asks for is the
+replica's own autocorrelation, computed once at Detector construction, and the
+offset estimated by matching the measured triple against the expected one.
+That is **AP-75**, with this measurement as its specification and its gate
+written there: better than the argmax's quantisation AND never worse than the
+raw integer at any timing point. No production code read the field, so nothing
+depends on the withdrawal.
+
+**Two more things the round found, both kept.** The reviewers also caught that
+`kMaxClimb` had been reduced from 2 to 1 in round 2 without re-reporting the
+accuracy it cost (`nr` 0.070 to 0.223), and that the golden-window check
+introduced in round 2 was a second tautology: a build with every offset forced
+to 0 or 1 passed all 30 windows. Both are moot with the field withdrawn and
+both are recorded so AP-75 does not repeat them.
+
+**And a finding that outlives the withdrawal.** Sweeping the multipath
+channels over fractional delay instead of at zero, as an earlier version did,
+showed that **at the shipped -9.0 dB first-path floor a direct path 8.9 dB
+under a stronger echo is NOT found by legacy_guard, dot11 or `nr`**: they lock
+on the echo 40 samples late, at guard 0 and guard 1 alike. `comms-lib-portable.cc`
+already warned this floor "clears it by under 1 dB, which is thin". This is
+that thinness measured per shape. It is pre-existing, unrelated to the guard,
+and the geometry test now records it rather than hiding it by moving the
+amplitude.
+
+**Round 4 (the guard alone, after the withdrawal).** The guard itself came
+back clean: bit-identical to the base commit at guard 0 over 86 400 calls
+with matched compiler flags, correct at every boundary tried, and never
+leaking into a pick rule that should ignore it. Everything the round found
+was again in the measurements and the prose, and all of it is applied: the
+silicon gate's tolerances were TIGHTER than the clock swings they were
+derived from and would have failed on the clock; the multipath check
+compared two maxima and would have passed a full-sample regression, so it is
+paired per point now and the per-point differences above come from it; the
+single-path check was true by construction; the dither screen ran at 16
+draws, which misses a one-in-twenty flip 44 % of the time, and now runs at
+48; a lobe figure from the superseded seed-unstable table survived in a
+comment; the fixture replay gained an assertion on the guard, which **runs
+on 0 of the 30 windows**, because EVERY fixture predates the knob and none
+has been recaptured since, which is exactly why none carries the field: it
+is forward-looking only, and the file header claiming the newer fixtures
+carry the field is corrected; and the sections were out of order with two
+references to an 8ai that did not exist as a section, which it now does.
+
+**Applied to the guard from round 3:** `first_path_guard` accepts only
+0 and 1 now, because 2 loses a genuine two-sample-earlier arrival and 3 a
+three-sample one (measured); the guard joins the per-detection diagnostic
+record and the startup detector line, so a window captured under one setting
+cannot replay under the other unnoticed; `Detector::firstPathGuard()` reports
+the value the correlator will actually apply rather than the one requested;
+the constant that documented the default without being one was removed; the
+header's accuracy figures were re-measured on the corrected grid; and the
+measurement code lost a dither statistic that was the retracted distinct-value
+count in a new costume, a multipath block that ran only at zero fractional
+delay where the guarded tap cannot matter, and a lobe table whose peak landed
+on a different repetition from seed to seed.
+
+### 8ak. The first-path guard on silicon: criteria written BEFORE the runs
+
+Pre-registration, in the 8v style, rewritten after review round 3 found the
+first draft's tolerance misquoted and its statistics blind to the change.
+
+`sync.detector.first_path_guard` = 1 skips the tap immediately before the
+peak. Offline it returns four of five shapes to the ideal rounder (8aj). It
+moves the reported index by one sample on a quarter to a third of windows, so
+the claim under test is that the sync loop is at least as good with it.
+
+**Runs:** legacy AND dot11 at 60 s, four interleaved legs per shape, A B B A,
+A = shipped (`guard 0`), B = `SYNC_OVERLAY
+{"detector":{"first_path_guard":1}}`, through `run_shape_campaign.sh`. dot11
+is included because it has the largest offline benefit (0.458 to 0.289) and
+the widest lobe; `nr` is excluded because the guard is not claimed to fix it.
+
+**PASS, per leg:** 0 escalations, 0 off-grid, at most 1 low-SNR rejection,
+accepts 15-25, and the startup line reads `guard 1` on the B legs and `guard 0`
+on the A legs.
+
+**One criterion was proposed for this list AFTER the legs of 8.196 had already
+run, and is therefore NOT part of what that gate was judged against.** The
+suggestion was an acquisition residual within plus or minus 2 samples, on the
+reasoning that it is an absolute index rather than a difference and so would
+survive the constant shift the other statistics remove. It is recorded here as
+a candidate for the NEXT gate and not folded into this one, because
+back-dating a criterion into a pre-registration is precisely what a
+pre-registration exists to prevent. It is also weaker than it looks: a guard
+of 2 would produce a 2-sample-early acquisition, which sits inside the bound.
+For the record the 8.196 legs do meet it (residuals 0, -1, 0, 0, 0, 0, 0, 0).
+
+**Back to the startup line in the PASS list above.** It proves the knob was
+PARSED and reached the detector, not that the backend applied it; the
+portable correlator does apply it, and a backend that does not already
+triggers the "first-path knobs are NOT applied" warning beside the same
+line, so the two together are the evidence.
+
+**The comparison, with its statistic AND its tolerance stated.** Compare the
+**mean over the two legs of each arm**, not leg maxima against leg minima:
+with two legs an arm, the choice of aggregation can otherwise be made after
+the data and it changes the answer. mean(B) - mean(A) must not exceed **1.3
+samples** of adjacent-difference jitter or **4.2 samples** of residual sd.
+Those come from what a FIXED configuration did between rounds on this bench
+in 8.192: legacy's jitter moved 2.43 to 1.21, a swing of 1.22, and its
+residual sd 8.15 to 4.06, a swing of 4.09, with nothing changed but the
+clock; 1.22 and 4.09 rounded up to 1.3 and 4.2. A draft justified the extra
+tenth on the second by saying the swing is a single-leg figure while the
+statistic is a mean of two; that argument runs BACKWARDS, since a mean of
+two legs has LESS spread than one leg, and it would tighten the bound rather
+than loosen it. The tenth is slack, plainly, and is kept only because a
+tolerance that has to be loosened after the runs is worse than one that was
+generous before them. **Two drafts of this paragraph were wrong before the
+runs and both were caught by review:** the first set 0.5 and 3, TIGHTER than
+the swings it cited, which would have failed the gate on the clock; the
+second named no aggregation rule, and 8.193's own four legs on this bench,
+same evening, one knob changed, spanned 4.42 in residual sd, above the 4.2
+bound. On leg extremes that gate fails; **on per-arm means the same four
+legs read 0.57 and pass with a sevenfold margin** (A legs 3.32 and 7.02,
+mean 5.17; B legs 6.60 and 2.60, mean 4.60). A draft of this paragraph
+quoted 3.28 for that comparison, which is `leg2 - leg1`, a single leg-pair
+difference and precisely the after-the-fact aggregation the paragraph exists
+to forbid; the correct figure makes the argument stronger, not weaker. The
+statistic is named above, before any leg runs.
+
+**WHY THIS GATE IS WEAK, STATED IN ADVANCE RATHER THAN AFTERWARDS.** The
+guard's principal effect is a CONSTANT one-sample shift of the reported index
+on the windows where the split favours the earlier tap. Adjacent-difference
+jitter differences a constant away; residual sd is invariant to a constant;
+accepts, escalations, off-grid and low-SNR counts are all invariant to it. So
+every PASS statistic above is blind to the change's main effect by
+construction, and what remains visible is only the part
+that varies phase to phase.
+
+**And that part is measured, in the tree, by `beacon_geometry_test`.** Forty
+simulated legs of 23 detections through the library's own channel model, in
+exactly the statistic `shape_campaign_summary.py` reports, so the number is
+comparable with the rig's: **jitter 0.287 at guard 0 against 0.305 at guard
+1, and residual sd 0.277 against 0.292.** A difference of 0.018 samples
+against a gate tolerance of 1.3. **That 0.018 is one realisation and its
+SIGN is not stable** -- across master seeds the difference reads +0.018,
+-0.007 and +0.003, and under a deterministic phase walk instead of
+independent draws it is 0.000. What is stable, and all the gate needs, is
+that every one of those is far inside the tolerance. The guard does not add
+or remove a toggle; it moves the rounding threshold in arrival phase, so
+both settings step once per cycle. The phase between accepts is INDEPENDENT
+rather than walking, because the shipped 2604 ms cadence advances it by tens
+of samples each time. (Two earlier versions of this paragraph were wrong.
+The first quoted a reviewer's scratch figure of 0.415 against 0.414 which
+nothing in the tree regenerated. The second put the simulation in the tree
+but computed the RMS about zero divided by the sample count, where the rig's
+statistic removes the mean and divides by the count of DIFFERENCES, and read
+2.3 % low as a result.) **So the gate is predicted to see nothing, and that
+prediction is on the record before the legs run.** A difference that does
+appear is therefore the clock or a defect, not the guard's intended effect.
+(The offline RMS accuracy gap, 0.083 samples on legacy and 0.169 on dot11,
+is an accuracy figure and is not comparable to a jitter; setting the two
+side by side was the category error that round 2 was written about.) **This
+gate can falsify a large regression and nothing else.** It cannot see the
+benefit, which is offline and reported as such, and it cannot see the one
+harm the offline work identified: a one-sample echo, where guard 1 returns
+the echo and guard 0 returns the direct path. This bench is a cable with no
+such echo, so that harm is not testable here at all and stays an open risk
+for the over-the-air work.
+
+**FAIL** on the envelope bisects the guard. A jitter or sd improvement is NOT
+expected and, if one appears, is to be read as the clock unless it replicates
+across both shapes and both rounds.
+
+### 8aj. AP-72 review round 2: THE 8ah CONCLUSION WAS WRONG, and the guard is back
+
+**Retraction, stated first.** 8ah concluded "the rule is a stabiliser, not a
+jitter source" and withdrew the guard fix on the strength of it. **That
+conclusion was an artefact of three bad instruments, all mine, and it is
+withdrawn.** A reviewer attacked the measurement code rather than the
+production code and found:
+
+- The dither table swept tau on a grid of 0.1. **That grid lands exactly on
+  the argmax's undecided point (tau = 0.5, where the truth is halfway between
+  two samples and both answers are equally right) and steps straight over the
+  first-path rule's own transition, which for legacy is at tau = 0.74.** The
+  measurement as designed could not have found the opposite result.
+- Its statistic, the count of DISTINCT indices over 32 draws, cannot tell a
+  95/5 split from a coin toss, reads "decided" at 32 draws and "dithering" at
+  256, and scored a case where the rule's spread is three times the argmax's
+  as a tie.
+- The "adjacent-difference jitter along tau" of 0.14 samples was
+  `1/sqrt(N-1)` of my own tau grid, not a jitter magnitude, and was set beside
+  the rig's frame-to-frame 0.7 to 1.7 as though the two were the same
+  statistic.
+
+**What the corrected measurement says** (grid 0.01, RMS against the true
+arrival, and the worst MINORITY SHARE across noise draws: the fraction of
+draws not returning the modal index, which unlike a count of distinct values
+or an sd on integers distinguishes one flip in twenty from a coin toss):
+
+| | argmax | first-path, guard 0 | first-path, guard 1 |
+|---|---|---|---|
+| RMS vs the true arrival, samples | **0.289** | 0.372 to 0.458 | **0.289**, and `nr` 0.310 to 0.321 |
+
+0.289 is 1/sqrt(12), the ideal rounder. **The first-path rule costs 29 % to
+58 % accuracy on a link with no multipath, and a one-sample guard recovers
+all of it for four of the five shapes.** `nr` keeps 0.310 to 0.321, and not
+because its lobe is wide -- dot11's is the widest and dot11 is fully
+recovered. `nr` is the one shape whose back-scan reaches TWO samples before
+the peak on a small fraction of arrival phases (8 of 800 in the histogram,
+and 0 for every other shape), which a one-sample guard does not cover; the
+guard is not claimed to fix it and the test asserts the guard's contract
+literally -- guard 1 never returns the tap immediately before the argmax --
+with a control that guard 0 does return it, on 22 to 36 of 100 arrival
+phases by shape. An RMS form of that claim was asserted for one round and
+deleted: it was true by construction on four of the five shapes. The guard
+is therefore reinstated, as `sync.detector.first_path_guard`.
+
+**And what it costs on multipath, measured per point rather than per column.**
+Two channels were added to the three the geometry test carried, and the whole
+block now sweeps the arrival phase instead of running at zero, where the
+guarded tap cannot matter. Compared draw by draw and phase by phase:
+
+- **Echoes at +8 and +24 samples, stronger than the direct path: not a single
+  point differs**, on any of the five shapes, over a sweep of arrival phase,
+  noise draw and signal level. A resolvable earlier arrival is never lost.
+- **An echo at +2 samples: a few points DO differ, and every one of them is an
+  improvement.** Over a band of arrival phase near 0.4 (measured, roughly 0.34
+  to 0.43) guard 0 returns a tap two samples early and guard 1 one sample
+  early, closer to the truth. An earlier draft of this line said no point
+  differs anywhere; that came from a phase grid of 0.25 which stepped over the
+  band, and the correction is round 5's.
+- **An echo ONE sample later:** half the points differ. Guard 0 finds the
+  direct path, guard 1 the echo. No rule can separate a one-sample echo from a
+  split peak in one window; the guard trades a pick that toggles with the
+  arrival phase for one that is stable and one sample late.
+- **A direct path 8.9 dB under its echo, at +40 samples:** legacy_guard, dot11
+  and `nr` never find it, at either setting, and lock on the echo 40 samples
+  late; the guard moves some of those points around inside an answer that is
+  already wrong. **The reason differs by shape and only one of them is the
+  floor.** For legacy_guard, whose back-scan window is 64, the path is within
+  reach and is rejected by the -9.0 dB floor it sits 8.9 dB under. For dot11
+  and `nr` the window is 32, so 40 samples is out of reach whatever the floor
+  does: a control at full strength, only 2.9 dB down, is still not found. A
+  first draft attributed all three to the floor, and a draft before that
+  claimed the guard changed nothing on this channel at all, from a comparison
+  of two maxima that could not see per-point motion.
+
+**Shipped default stays 0**, the behaviour of every release so far, because
+this moves the reported index on about a third of windows. The silicon gate is
+pre-registered as 8ak.
+
+**On the sub-sample estimator, which was a separate claim: it is WITHDRAWN in
+round 3 and is now AP-75. See 8al.** Its "decided" criterion had already
+failed on 4 of 10 rows and was reported failed rather than moved.
+
+**Also applied from the round:** the reach table that claimed to measure "lobe
+width" measured the -9 dB FLOOR (one more dB of floor, or 20 dB SNR, moves it
+from 1 to 2 on four of five shapes) and is deleted, along with the unsupported
+climb bound it justified; the climb is one sample on a physical argument, and
+a longer one could report a neighbouring echo's position under the name of the
+detected path; the golden-window check asserted a bound the estimator
+guarantees by construction and would have stayed green with the fit replaced
+by `return 0`, and now asserts agreement between the offset and the
+independently computed argmax; the tau sweep counted tau = 0 and tau = 1, the
+same phase, twice; the claim "all 30 windows return their recorded index and
+statistic" was false, 18 of 30 carry a statistic and the test now says so; a
+dead constant carrying the instructions for an already-fixed instrument bug
+was removed.
+
+### 8ai. AP-72 review round 1: the estimator was replaced before the re-runs
+
+**Written after review round 1 and BEFORE the re-runs.** The reviewer
+disproved the estimator's stated rationale, not the criteria. Two HIGH
+findings: the climb bound of two samples was unreachable because the
+magnitude bound discarded every two-step result, so `nr` (the one shape
+needing it) always reported none; and "a parabola through three points of a
+triangle finds its apex" is false, with a measured S-curve bias to 0.234
+samples and a threefold gain error near half a sample, because the
+autocorrelation of a full-rate pseudorandom sequence is a delta (the peak's
+neighbours carry 0.008 and 0.002 of it at zero offset) and three samples of
+a near-delta are the worst case for a parabola. **The estimator is therefore
+replaced before the re-runs by the ratio of the two samples bracketing the
+top, `side / (mid + side)`, which is EXACT for the ideal bandlimited sinc
+and for the triangle, the two kernels that bracket the physical case.**
+**Correction to the reviewer's own premise, found by measuring it in-tree
+instead of quoting it:** "the lobe is essentially a delta" holds for legacy
+(neighbours 0.008 of the peak), nr_pss (0.014) and nr (0.030) and NOT for
+dot11, whose replica is a band-limited training field and whose neighbours
+carry 0.18; the review measured legacy and generalised. The estimator's
+premise is therefore per shape, dot11 is duly the worst accuracy column, and
+`beacon_geometry_test` prints the lobe table so the numbers in the code
+comment are reproducible rather than quoted. The pre-registered bars above
+are unchanged and the same runs judge it; what changed is the arithmetic
+between the samples and the answer. Also applied from the round: no
+refinement now reports NaN rather than zero, so "unknown" cannot read as
+"exactly centred"; the amplitude is taken in double from the parts;
+non-finite samples, window edges and shoulders with no top in reach all
+report none; and the documented range is the true one, plus or minus 2.5
+samples rather than half a sample.
+
+### 8ah. AP-72, the split-peak pick: RETRACTED, see 8aj and 8al
+
+**READ 8aj AND 8al FIRST. THE CONCLUSION BELOW IS WITHDRAWN.** This section
+concluded that the first-path rule is a stabiliser and withdrew the guard fix;
+review round 2 showed the measurement behind it could not have found the
+opposite result, and the guard was reinstated. The sub-sample estimator this
+section pre-registered was replaced in round 1 (8ai) and withdrawn entirely in
+round 3 (8al); it is now AP-75. The section is kept unedited below because the
+pre-registered criteria and the reasoning are the record of how the error was
+made.
+
+### 8ah (as written, and wrong). AP-72, the split-peak pick: what the measurement said, and the criteria for what follows
+
+**The measurement came first and it contradicts the row (2026-09-03, offline,
+`beacon_geometry_test`).** AP-72 and 8.177 called the one-sample-early pick "a
+candidate for the ~1-sample adjacent-difference jitter every campaign
+reports" and proposed two fixes: a floor judged against the two-sample split
+energy (equivalently, a guard that keeps the first-path back-scan out of the
+peak's own lobe), or a sub-sample peak fit. Three sweeps, single path, the
+shipped per-shape back-scan window:
+
+1. **Reach.** Taking the detector at back-scan windows 1, 2, 3, 4 and the
+   shipped width, the returned index reaches at most ONE sample before the
+   argmax for legacy, legacy_guard, dot11 and nr_pss, and two for `nr`. So the
+   lobe is one sample wide for every shipped shape and the rule never walks
+   further into its own skirt.
+2. **Share.** Over tau = 0 to 1 in 0.02 with 8 draws, the pick differs from the
+   argmax at 88 to 144 of 408 points (22 % to 35 %), which matches the golden
+   windows' 7 of 24. **But the adjacent-difference jitter along tau is
+   identical for the two, 0.14 samples, for every shape but `nr` (0.24 against
+   0.14).** The rule does not add steps; it moves where the one correct step
+   happens.
+3. **Dither at fixed tau, which is the silicon condition** (the clock walks tau
+   slowly while a fresh noise draw arrives every frame). Across 32 draws at
+   each tau, **the ARGMAX returns two distinct indices at tau = 0.5 (at 30 dB,
+   for every shape) and the shipped first-path rule returns ONE, at every tau,
+   for every shape except `nr` at 30 dB.** At tau = 0.5 the truth is exactly
+   between two samples; the argmax splits between them with the noise, and the
+   first-path rule lands on the earlier one either way.
+
+**Conclusion: the rule is a stabiliser, not a jitter source, and the guard fix
+is withdrawn before being written.** It would replace a decided pick with a
+dithering one at exactly the timing where dither is worst. AP-72's premise is
+corrected in the row and in 8.177. What survives is a systematic sub-sample
+BIAS (the reported integer sits up to one sample before the true position over
+a band of tau), which a tracking loop absorbs and which the sweeps show does
+not grow the residual.
+
+**What is built instead: AP-72's other named fix, the sub-sample peak fit,
+which is additive.** `BeaconResult` and `Detection` gain a `frac_offset`: the
+sub-sample position of the lobe the returned index sits on, from a three-point
+parabolic fit on the matched-filter AMPLITUDE at index-1, index, index+1
+(amplitude because a pseudorandom sequence's autocorrelation main lobe is
+triangular in amplitude, not in power). The picked integer index does not
+move, so the index convention AP-34 fixed is untouched. AP-67 asks for phase
+at the fractional peak and AP-74's tracker will want the same.
+
+**Criteria, written before the runs.**
+- **Additive:** all 30 golden windows return the recorded index and statistic
+  unchanged (statistic to 5 significant digits), on x86 and on aarch64.
+- **Better than the integer it refines:** on a single path at 45 dB, over
+  tau = 0 to 1, the RMS error of `index + frac_offset` against the true
+  fractional end must be **below 0.289 samples**, the sd of the integer
+  quantisation it replaces (1/sqrt(12)). A fit that does not beat rounding is
+  not worth shipping and is reported as such, not tuned until it passes.
+- **Decided:** at fixed tau across 32 draws the sd of `frac_offset` is below
+  0.1 samples at 45 dB, so the estimate does not dither where the integer does.
+- **No behaviour change:** six suites pass; the build matrix is green for every
+  buildable RADIO_TYPE; the startup record and every shipped default are
+  unchanged.
+- **FAIL** on any of these reports the measurement and withdraws the change
+  rather than adjusting the criterion.
+
 ### 8ag. AP-64, the launcher's automatic release of the boards: criteria written BEFORE the runs
 
 Pre-registration, in the 8v style (2026-09-03 19:40). Root cause (8.127,
@@ -865,7 +1432,7 @@ any code moves, because in this migration a difference is a bug by definition.
 | 8.174 | **REVIEW ROUND 2: TWO MED, ELEVEN LOW, ALL APPLIED, AND THE FIRST MED WAS THE ROUND-1 FIX OVER-CORRECTING.** The reviewer checked all 28 round-1 items against the code and the pre-library tree: 26 correct, two not. (1) At `3ca16fe` the SNR guard was a fixed 64 for every shape (the receiver's own `firstPathBackWindow`), and only the correlator derived half the replica; round 1 had tied the guard to the derived window, which narrowed it to 32 for dot11 and nr. Now `SnrWindowGuard::guardFor` keeps the pre-library rule -- 64 unless configured, never narrower than the resolved window (the 8.151 requirement) -- identical for every shape in the tree. (2) The claim that "the old readers clamped" was true for four integer knobs, false for three that ignored an out-of-range value, and meaningless for the rest, which had no bound at all (AP-56's complaint). Each knob now carries its policy and the header, the plan and the walkthrough say exactly which does what. The eleven LOW items are in commit `10d0fe0`. **Verification:** 49 configuration checks and 132 golden-window checks pass on x86 and on the rig (aarch64), including per-window assertions of the recorded threshold form, pick, window, floor, guard, replica tail and a CFO baseline to 1 Hz; every target in the tree builds against the library (`sounder`, `sounder_module`, `houdini_bs_ue_sync`, `houdini_loopback`); and 45 s runs of legacy, dot11 and nr each lock at residual -1 to +1 with 17 accepts, 0 escalations, 0 off-grid, their logs reading `first-path back window 64 / 32 / 32 samples ... SNR guard 64 samples`, the pre-library values. Round 3 running | commits `66a1825`, `10d0fe0`; `logs/gate_p1c` on the rig | VERIFIED-HW |
 | 8.175 | **THE REVIEW-FIX ROUND: ALL 24 ARCHITECTURE ITEMS AND THE BASELINE ASSESSMENT'S FIXES APPLIED IN FIVE COMMITS (`680cb3a`..`729e726`), FIVE OF WHICH CHANGE BEHAVIOUR AND ARE LISTED HERE SO THE GATE KNOWS WHAT TO LOOK FOR.** (1) The Iris/UHD acquisition pick is first-crossing again (master's rule; the library had silently made it cluster-refined, baseline D1) and the power-ratio form its default, both derived by `SyncConfig::resolve()` with provenance `derived` and overridable from the JSON on any platform; Houdini's defaults are unchanged. (2) The SNR guard has one rule, the detector's resolved first-path window (`max(8, window)`): 64 for legacy and nr_pss as before, **32 for dot11 and nr where it was 64**, so those two shapes' in-window SNR readings move by a fraction of a dB (unfixtured; a dot11 run is in the gate). [SUPERSEDED by round 4 (8.178): the rule now names the trailing-echo allowance too, so every shape is back at 64.] (3) A cell configured with no radios proceeds as master did; only a cell that lists radios and opens none aborts (D5). (4) `float_to_cint16` and `loadData` saturate instead of wrapping past full scale (D4); pilots that never exceeded full scale are byte-identical. (5) The correlator no longer reads `HOUDINI_FIRST_PATH_WIN/DB` itself and its thread count is `sync.detector.corr_threads` (`SOUNDER_CORR_THREADS` stays as the logged alias). Everything else is structural: schema/values split with typed provenance and a `resolve()` pass, `BeaconShape` as the one home of the index convention, `Detection` with statistic/bar/peak, library-only enums, `SliceGeometry` sized from the replica, `TrackerConfig` built from the JSON block (its second copy of the defaults had disagreed on the innovation gate), `ResyncPolicy` extracted from the loop with every transition unit-tested, `sim::Channel` and `Numerology`, the pure-UHD build stubs (B1, inspection-only: no UHD here), one dump directory, cached debug reads, `SOUNDER_BUILD_TESTS`. Offline: sounder and every tool build on x86 with SoapySDR present; **6 of 6 suites pass; the 12 golden windows return identical index and SNR**; the walkthrough's knob table is diffed against the schema by the test. Opus review round 4 launched on the diff | `git log 42ab161..729e726` | VERIFIED-TEST; silicon gate 8ab pending |
 | 8.176 | **GATE 8ab PASSED ON EVERY PRE-REGISTERED CRITERION: THE REVIEW-FIX ROUND IS INDISTINGUISHABLE AT RUN LEVEL, AND THE STARTUP RECORD NOW SAYS WHAT RAN.** Binary built on the rig 12:27 from `729e726`; before any run, 6 of 6 suites and the 12 golden windows passed on aarch64 (identical index and SNR). Latin square, 60 s, shipped `files/houdini-ul.json`: **legacy 23 / 23 accepts (resid sd 1.99 / 4.71, jitter 0.67 / 0.99, low-SNR 0 / 0), nr_pss 23 / 23 (sd 4.68 / 2.94, jitter 1.10 / 1.71, low-SNR 1 / 1, the one rejected noise-window crossing per hunt of 8.162), dot11 23 (sd 3.91, jitter 1.28, low-SNR 1: an impossible span at -99 dB, rejected); 0 escalations and 0 off-grid detections in all five.** Against the envelope (accepts 15-25, sd at most 5, jitter at most 2, at most 1 low-SNR): every run inside. dot11 ran with the 32-sample guard the one-rule change gives it (its log: "first-path back window 32 samples ... SNR guard 32") and its 23 accepts sit above 8.149's 19. The startup block prints once with the derived values (`first_path_window = 64 [derived]`, 32 for dot11; `sync_tol_samples = 32 [derived]` = a quarter of this config's 128-sample prefix; `corr_scale = 100 [json]` read from the legacy array) and the detector line names the backend (`Beacon detector [portable]`). The `ResyncPolicy`-driven loop, the `BeaconShape`-owned end convention and the `SliceGeometry` sized from the replica produced the same accept counts, residuals and jitter as 8.170 / 8.174. The campaign script had to be invoked through `bash`: the bundle shipped it without its executable bit (now `100755` in git, `a833ed1`), which cost no radio time | `logs/gate8ab`, `logs/gate8ab_dot11` on .64; `evidence/20260903-rig/gate8ab/` | VERIFIED-HW |
-| 8.177 | **TWELVE NEW GOLDEN WINDOWS WITH THE STATISTIC, REPLAYED ACROSS ARCHITECTURES, AND THE FIRST THING THE STATISTIC SHOWED: A SPLIT-PEAK ONE-SAMPLE TOGGLE THE INDEX ALONE COULD NOT.** Two 40 s runs (legacy, nr_pss) on the gated binary with `HOUDINI_DUMP_RESYNC_WIN` recorded six windows each with the new `statistic` and `bar` fields (`resyncwin_06..11`, alongside the morning's 00-05). **Correction to 8ab's fixture criterion as written:** "index and SNR equal to the old fixtures' to the digit" is unmeetable for NEW captures (different windows), so what was checked instead is the cross-architecture replay the widened `Detection` exists for: the x86 library reproduces the aarch64 sounder's recorded index, SNR (0.01 dB) and statistic (5 significant digits) on all 12, and the 24-window set passes on both machines. **The finding:** the golden test now prints, for each window, the picked index against the argmax. On 7 of 24 windows (legacy 0, 4, 6, 8, 10; nr_pss 1, 5) the pick is exactly ONE sample before the argmax, with its statistic 3.6 to 14.9 dB below the peak's (legacy window 8: 0.019 picked against 0.604 at the next sample, on a bar of 0.01). On the other 17 the two coincide. Mechanism: the beacon sits between samples (8.164), so the matched-filter peak splits over two neighbours; the first-path rule's -9 dB floor (a power fraction that becomes 0.016 of the 4th-order xcorr statistic and 0.126 of the 2nd-order coherence) admits the earlier neighbour whenever the fractional timing puts enough energy there, and the fraction drifts with the clock offset, so the pick toggles by one sample as it crosses the floor. That is a candidate for the ~1-sample adjacent-difference jitter every campaign has reported (0.7-1.7 here) and it is systematic, not noise: a sub-sample peak fit, or a floor judged against the two-sample split energy, would remove it. Measured here, not fixed: AP-72 | `tests/comms-func/fixtures/golden/*/resyncwin_06..11.*`; `golden_window_test` INFO lines | VERIFIED-HW (the windows); the mechanism VERIFIED-TEST offline (8.164's sweep), its share of the jitter NOT yet measured |
+| 8.177 | **TWELVE NEW GOLDEN WINDOWS WITH THE STATISTIC, REPLAYED ACROSS ARCHITECTURES, AND THE FIRST THING THE STATISTIC SHOWED: A SPLIT-PEAK ONE-SAMPLE TOGGLE THE INDEX ALONE COULD NOT.** Two 40 s runs (legacy, nr_pss) on the gated binary with `HOUDINI_DUMP_RESYNC_WIN` recorded six windows each with the new `statistic` and `bar` fields (`resyncwin_06..11`, alongside the morning's 00-05). **Correction to 8ab's fixture criterion as written:** "index and SNR equal to the old fixtures' to the digit" is unmeetable for NEW captures (different windows), so what was checked instead is the cross-architecture replay the widened `Detection` exists for: the x86 library reproduces the aarch64 sounder's recorded index, SNR (0.01 dB) and statistic (5 significant digits) on all 12, and the 24-window set passes on both machines. **The finding:** the golden test now prints, for each window, the picked index against the argmax. On 7 of 24 windows (legacy 0, 4, 6, 8, 10; nr_pss 1, 5) the pick is exactly ONE sample before the argmax, with its statistic 3.6 to 14.9 dB below the peak's (legacy window 8: 0.019 picked against 0.604 at the next sample, on a bar of 0.01). On the other 17 the two coincide. Mechanism: the beacon sits between samples (8.164), so the matched-filter peak splits over two neighbours; the first-path rule's -9 dB floor (a power fraction that becomes 0.016 of the 4th-order xcorr statistic and 0.126 of the 2nd-order coherence) admits the earlier neighbour whenever the fractional timing puts enough energy there, and the fraction drifts with the clock offset, so the pick toggles by one sample as it crosses the floor. That is a candidate for the ~1-sample adjacent-difference jitter every campaign has reported (0.7-1.7 here) and it is systematic, not noise: a sub-sample peak fit, or a floor judged against the two-sample split energy, would remove it. Measured here, not fixed: AP-72. **Followed up 2026-09-03: the second of those two is what worked (`first_path_guard`, 8aj); the sub-sample fit was built twice and withdrawn twice and is now AP-75 (8al). This row's "candidate for the jitter" reading was NOT borne out -- the effect is a bias, not a jitter source, and the guard's value is accuracy on a clean link** | `tests/comms-func/fixtures/golden/*/resyncwin_06..11.*`; `golden_window_test` INFO lines | VERIFIED-HW (the windows); the mechanism VERIFIED-TEST offline (8.164's sweep), its share of the jitter NOT yet measured |
 | 8.178 | **REVIEW ROUND 4 RAN ON OPUS AND FOUND FOUR HIGH DEFECTS THE FIRST THREE ROUNDS AND THE GATE COULD NOT SEE; ALL APPLIED, AND THE 8ac CHECK PASSED.** The reviewer rebuilt the base commit and diffed old against new numerically rather than reading: `ResyncPolicy`, `sim::Channel`, the geometry, the tracker and all five shapes are identical to the base at the shipped numerology (0 diffs over 7 rates x 8 tolerances x 13 fields; 384 channel cases bit-identical; 20 million saturation samples identical). What it found: **(H1)** the NR shapes refused every rate but 122.88 MSPS, and `Config` defaults to 5 MSPS, so any config naming `nr`/`nr_pss` off the shipped rate aborted at startup -- now the shapes build the shipped 128-point symbols, record that the numerology was not held, and `Config` warns; **(H2)** the IFFT guard was off by one (DC is nulled, 127 tones need 128 points) and admitted a non-power-of-two size that segfaults the FFT plan at 121.92 MSPS; **(H3)** `-DHOUDINI_USE_CUDA` no longer linked because the kernel moved out of the library that calls it (the Spark workstream's path); **(H4)** a single-client config WITHOUT a `corr_scale` key got the library's 10 instead of the sounder's 1, a bar ten times looser on four of the legacy configs in `files/` (the shipped Houdini configs carry the key). Eleven MEDIUM: `resolve()` did not validate what it derived, could misreport `nr_pss` on Iris, left `corr_scale_init` unmarked and ignored a multi-client config; the slice lead ignored the replica tail (nr_pss 15 samples short on 3 % of phases); the CUDA detection posed as measured with a zero statistic; the guard change halved dot11/nr without the trailing-echo reason; two bench instruments broke silently (the summary's `nolag` regex; the tools' thread count); unchecked pointer arithmetic in the provenance helpers. All fixed in `4221a29` (the LOWs too: dump-open failures logged, NaN saturates to 0, the beacon RAM clamps, the underflow guard, stale prose). **Behaviour on the Houdini run path at shipped defaults:** the nr_pss lead is 646 (was 502) and dot11/nr are back at the 64-sample guard under a rule that names both reasons. **8ac check (13:05 binary, one round each, 60 s):** legacy 23 accepts (sd 4.79, jitter 1.48, low-SNR 0), nr_pss 23 (sd 4.35, jitter 1.21, low-SNR 1), dot11 23 (sd 1.65, jitter 0.75, low-SNR 0), 0 escalations, 0 off-grid; dot11's log reads "first-path back window 32 samples ... SNR guard 64 samples". Every criterion met. Stated for the record: rounds 1-3 ran on the default model because Opus was unavailable, and round 4 on Opus found what they had not | `evidence/20260903-rig/check8ac/`; `logs/check8ac` on .64 | VERIFIED-HW |
 | 8.179 | **REVIEW ROUND 5 (OPUS, ON THE ROUND-4 COMMIT ALONE): ONE HIGH THAT WAS MINE, ONE MEDIUM, SIX LOW; ALL APPLIED, AND dot11 IS NOW FIXTURED.** The reviewer built with `-Wall -Wextra -Wshadow` (zero warnings), ran the suites, and reproduced at runtime. **HIGH:** the round-4 threshold adoption read `corr_scale_.at(0)`, which throws for a config with no clients (BS-only, calibration, beam-sweep configs that omit `corr_scale`; `num_cl_sdrs_` is legitimately 0) -- every such config aborted at startup since `4221a29`; reproduced with the shipped BS-only topology, fixed by adopting the sounder's fallback of 1 when the arrays are empty. **MEDIUM:** under a CUDA build the golden replay now links (round 4 fixed the link) and would compare the config-ignoring GPU backend against fixtures recorded by the config-applying one; the loop skips a backend that does not apply the configuration and says so. **LOW, all applied:** adoption re-validates; the two raw `spec()` dereferences use the checked index; the multi-client note keys off the sync block, not the always-set provenance; the pick/threshold notes key off the platform, not provenance (an explicit `first_crossing` on Iris no longer reads "diagnostic only on Houdini"); the dead throwing `ifftSize()` is gone; the third ci16-to-float copy (`CommsLib::find_beacon`) uses the one public `toCorrelatorScale`; the beacon RAM clamp's negative rail matches the utility's; a tautological test line and two stale comments removed. Verified correct by the reviewer at runtime: H1 (nr_pss at 5 MSPS starts, warns, builds 128-point symbols), H2, all four corr_scale interleavings (the block's value wins and init follows it), M5 idempotency (no duplicate notes), M6 (nr_pss on Iris records coherence), M9 (only nr_pss's lead moves, by exactly 144). **The guard change (round 4, M11) had no fixture:** six dot11 windows recorded (40 s, `HOUDINI_DUMP_RESYNC_WIN`), replaying index, SNR and statistic identically on x86; the set is 30 windows over three shapes (legacy 12, nr_pss 12, dot11 6). The rig rebuilt `87ed3c2`: 6 of 6 suites and all 30 windows pass on aarch64 too. dot11 windows 3 and 5 show the split-peak pick (statistic 0.15 and 0.028 against neighbours near 1): AP-72's mechanism on a third shape | `tests/comms-func/fixtures/golden/dot11/`; the reviewer's build `/tmp/r5build` | VERIFIED-TEST (the fixes); VERIFIED-HW (the windows) |
 | 8.180 | **REVIEW ROUND 6 (OPUS, ON THE ROUND-5 COMMIT): NOTHING OF SUBSTANCE; ONE ORDER-DEPENDENCE AND SIX CLEANUPS, ALL APPLIED.** Verified by the reviewer with a `-Wall -Wextra -Wshadow` build (zero warnings), the suites (6 of 6) and the 30-window replay, plus probes linked against the built library: the note lifecycle across load, adoption and resolve leaves no duplicates and loses no environment warnings; the platform wording is right in all four cases; the CUDA skip keeps the counts; `toCorrelatorScale` is the one conversion; the fixture map fails loudly on a missing shape. The one finding worth acting on: the "the block set a bar" fact was computed inside the adoption, so a `load()` followed by `resolve()` with no adoption lost the multi-client note and a repeated adoption could fake one; it is now recorded by `load()` once, and both cases are tested. Cleanups: the dead `kShortMaxFloat` and its include in `comms-lib.cc`; the client-less fallback is per array, so an explicit `corr_scale_init` in a BS-only file is still recorded; the CUDA skip in the golden test is per shape and says plainly that a CUDA build has no golden coverage (round 7 found this version kept the counts only by asserting them, corrected in 8.181); the beacon RAM clamp maps NaN to 0 like the utility; the blank lines a removed helper left. Pre-existing, noted and left: `CMAKE_ARCHIVE_OUTPUT_DIRECTORY` points every build tree's archive at `build/` in the source tree, so two build trees race on one `libhoudini_sync.a` (verify with `nm` after an out-of-tree build). The rig rebuilt `77fe420`: 6 of 6 suites and all 30 windows pass on aarch64. The review loop the user asked for ("until no new minor issues are found") has converged: round 4 found four HIGH, round 5 one HIGH that round 4's fix introduced, round 6 none | `git show 87ed3c2..` | VERIFIED-TEST |
@@ -877,6 +1444,7 @@ any code moves, because in this migration a difference is a bug by definition.
 | 8.193 | **GATE 8ae (P3 ON SILICON): THE ONE REJECTED NOISE-WINDOW CROSSING PER ACQUISITION HUNT WENT TO ZERO UNDER THE PFA BAR, IN BOTH PFA LEGS; THE SHIPPED BAR PAID IT IN BOTH OF ITS LEGS.** nr_pss, four 60 s legs interleaved A B B A (A = shipped `files/houdini-ul.json`, coherence bar 1/corr_scale = 0.01; B = `SYNC_OVERLAY` `{"detector":{"pfa_per_window":1e-3}}`, the startup line reading "threshold coherence (bar from pfa 0.001 per window)" and the knob `[json]`). **Low-SNR rejections (the rejected crossings): A 1, B 0, B 0, A 1.** Accepts 23 / 23 / 22 / 22, escalations 0, off-grid 0, jitter 1.06 / 1.64 / 0.92 / 1.74, acquisition residual 0 / 0 / +1 / 0. Residual sd 3.32 / 6.60 / 2.60 / 7.02: legs 2 and 4, one under each bar, carried the evening's clock wander (8.192), so the envelope's sd 5 was exceeded once per arm and not by the bar. **Verdict: the pre-registered claim held (2 of 2 against 0 of 2); everything else inside the 8.176 envelope except the clock-borne sd, equal across arms.** Two legs per arm is the smallest interleaved design; the count is a difference of ones, so this is the predicted direction confirmed, not a rate. The nr_pss detector's coherence at the shipped bar still crosses on noise about once per hunt (8.162); under the pfa bar it did not, at the same accepts | `tests/demo-verify/evidence/20260903-rig/gate8ae/leg{1_A,2_B,3_B,4_A}/` | VERIFIED-HW |
 | 8.194 | **AP-73 MEASURED: THE REPLAY-RAM RELOAD LANDS WITHOUT TX_CLEAR ON THE CURRENT STACK; EVERY LEG PLAYED ITS OWN LEVEL, NO REFUSAL, NO THROW. 4.24 DID NOT REPRODUCE (THE SOFTWARE LANE'S PREDICTION).** Per 8af, legacy shape, TX ch1, 40 s legs, the level through `SYNC_OVERLAY`. Instrument validation (shipped ladder): strong 0.6 read a median tracked SNR of **48.6 dB** (53 accept lines, 48.2-48.7), weak 0.15 read **36.1 dB** (35.7-36.3): 12.5 dB apart against the 12.5 dB the levels predict, inside the registered 12 +/- 3. Diagnostic (`houdini_diag_skip_tx_clear`, the ladder's warning present once per leg): strong **48.5**, weak **36.3**, strong **48.5**, weak **36.5** dB, each leg's spread under 0.8 dB, 15 accepts in every leg, no "refused" and no "replay RAM load" line anywhere. Stack: fpga `c88e0b5f`, device `3a0aa361`, host `93b9c354`; binary from `23bfb24`, 6 of 6 suites on aarch64 first; build matrix on `23bfb24`: SOAPY_IRIS PASS, SOAPY_UHD PASS (0 warnings), PURE_UHD SKIPPED. **What this did and did not test:** the sounder's own pre-arm ladder without its TX_CLEAR pulse, with gate_release and the strobe-off kept, after the campaign script's teardown between legs (which pulses TX_CLEAR from the tool). 4.24's abort-only pre-arm (no gate_release, no strobe-off) was not run: 3.2 established that a re-arm without gate_release throws on this stack, so that variant cannot arm at all today. Within what was tested, a dropped or stale reload would have shown as a leg reading its neighbour's level, and none did. AP-73 closes as measured; the mechanism of 4.24 on `c20d7975` stays a candidate on SH-348, the driver lane's | `tests/demo-verify/evidence/20260903-rig/ap73/`; `matrix11` logs | VERIFIED-HW (no reproduction) |
 | 8.195 | **AP-64 FIXED AND VERIFIED: THE LAUNCHER'S SOUNDER DIES WITH THE LAUNCHER, BY THE KERNEL, AND THE BOARDS ARE FREE FOR THE NEXT RUN; 4 OF 4 PER 8ag.** The shell retry loop that polled the launcher's liveness is gone; `csi_server.py --launch` supervises the sounder from Python on its main thread (teardown, 8 s settle, start, up to 4 attempts, output prefixed as before) and starts the sounder with `PR_SET_PDEATHSIG = SIGTERM` in its own session, so the kernel ends it when the launcher dies by any signal. Offline first: a stub sounder under a SIGKILLed launcher, 0 left. On the rig (`1923e43`, stack as 8.192): launcher under `timeout -s KILL 45` twice and `timeout -s TERM 45` twice, each launcher run reaching 14 accepts before the kill; **sounders 6 s after the launcher died: 0, 0, 0, 0; the bare sounder that followed each printed the startup line and reached 11 accepts in 30 s with no `setSampleRate(RX)` refusal: 4 of 4.** Teardown after: both radios clear. What is unchanged: `tools/rig_release_holders.py` and walkthrough 8.0 stay as the recovery for anything outside the launcher (a bare sounder killed by the operator releases on its own, 8.127; a foreign holder still needs the tool). Why the three earlier attempts failed and this one does not: each earlier one asked the child to notice the parent's death; this one asks the kernel, which cannot miss a SIGKILL. The walkthrough's "the retry loop keeps going" paragraph is rewritten | `tests/demo-verify/evidence/20260903-rig/ap64/` | VERIFIED-HW (4/4) |
+| 8.196 | **GATE 8ak PASSED: THE FIRST-PATH GUARD IS INVISIBLE AT RUN LEVEL ON SILICON, WHICH IS WHAT 8ak PREDICTED IN WRITING BEFORE THE LEGS RAN.** Rig binary from `0d795ba` (6 of 6 suites and 30 of 30 golden windows on aarch64 first); stack fpga `c88e0b5f`, device `3a0aa361`, host `504d7f5`. Eight 60 s legs, two shapes, interleaved A B B A per shape, `SYNC_OVERLAY {"detector":{"first_path_guard":1}}` on the B legs, **and each leg's own startup line read back to confirm the setting it ran: guard 0, 1, 1, 0 on both shapes.** Per leg: accepts 21 to 23 against a 15-25 envelope, **0 escalations and 0 off-grid detections in all eight**, low-SNR rejections 0 except one dot11 A leg with 1. The pre-registered comparison, per-arm means as 8ak names them: legacy jitter **+0.29** and residual sd **+1.57** for guard 1, dot11 jitter **-0.13** and sd **+0.65**, against bounds of 1.3 and 4.2 derived from what a FIXED configuration did between rounds on this bench. **Every criterion met.** The two shapes disagree in the SIGN of the jitter difference, which is the signature of the clock; the residual sd moved the same way on both, by +1.57 and +0.65, so that half of the comparison does not discriminate and is reported rather than read as evidence. That is the outcome 8ak predicted from an offline simulation of 40 legs, which now lives in `beacon_geometry_test` and reads jitter 0.287 against 0.305 in the same statistic this row quotes: the guard moves the rounding threshold in arrival phase rather than adding a toggle, so every statistic in the envelope differences it away. **What this gate did NOT test, stated in 8ak before the runs and restated here: the benefit, which is offline (0.083 samples of RMS accuracy on legacy, 0.169 on dot11); and the one harm the offline work found, a one-sample echo, which a cable bench does not have.** The shipped default stays 0. **Instrument note: the driver's own read-back of the guard was wrong for dot11 on the first pass** -- it matched a single digit of `cyclic guard 32` on the beacon-shape line, which precedes the detector line and which legacy does not print at all (legacy reads "no guard"), so the bug was dot11-only. A first write-up of this row blamed the SNR guard, which is 64 on both shapes and was not the field involved -- and the settings were confirmed from the detector line itself instead. The legs were correct; the check of the legs was not, which is the fifth measurement defect of this piece of work and the first found by me rather than by a reviewer. One dot11 B leg was launched twice: the first attempt died in radio setup with an RPC timeout and no lock, and the campaign harness relaunched it automatically; the discarded log is kept beside the leg it belongs to | `tests/demo-verify/evidence/20260903-rig/gate8ak/` | VERIFIED-HW (8 of 8 legs) |
 
 ### 8x. The gate, and the proof the crossing-rule fix was needed
 

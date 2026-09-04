@@ -47,8 +47,10 @@
 #include <cmath>
 #include <complex>
 #include <cstdio>
+#include <map>
 #include <random>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "sync/beacon_shapes.h"
@@ -98,12 +100,14 @@ struct Channel {
 /// Residual with a channel and a carrier offset applied.
 long long residualCh(const Desc& b, double peak_counts, double snr_db,
                      long long lead, long long tail, float corr_scale, Pick pick,
-                     unsigned seed, Thr thresh_form, const Channel& ch) {
+                     unsigned seed, Thr thresh_form, const Channel& ch,
+                     int guard = 0, double frac = 0.0) {
   const long long len = static_cast<long long>(b.core.size());
   houdini::sync::sim::Channel sc;
   sc.taps.clear();
   for (const auto& tp : ch.taps) sc.taps.push_back({tp.first, {tp.second, 0.0}});
   sc.cfo_hz = ch.cfo_hz;
+  sc.frac_delay = frac;
   sc.rate_hz = kRate;
   sc.snr_db = snr_db;
   sc.peak_counts = peak_counts;
@@ -113,9 +117,10 @@ long long residualCh(const Desc& b, double peak_counts, double snr_db,
   // the plain matched filter for it (syncSearch), and so does this test, so
   // every column below measures the form the shape would actually run with.
   if (b.replica_reps < 2) thresh_form = Thr::kCoherence;
-  const ssize_t idx =
-      CommsLib::find_beacon_avx(buf.data(), b.replica, n, corr_scale, pick,
-                                thresh_form);
+  const ssize_t idx = CommsLib::find_beacon_avx(
+      buf.data(), b.replica, n, corr_scale, pick, thresh_form,
+      static_cast<int>(b.replica.size() / 2),
+      CommsLib::kDefaultFirstPathFloorDb, guard);
   // The detector reports the last sample of the MATCHED field; the beacon end
   // is replica_tail() later (0 for every shape but nr_pss), exactly as
   // syncSearch applies it.
@@ -183,6 +188,39 @@ void cell(const Row& r) {
   else if (r.lo == r.hi) std::snprintf(buf, sizeof buf, "%+lld", r.lo);
   else std::snprintf(buf, sizeof buf, "%+lld..%+lld", r.lo, r.hi);
   std::printf(" %13s", buf);
+}
+
+/// The first-path back-scan window SyncConfig::resolve() derives for a shape:
+/// half its replica (sync_config.cc), 64 for a 128-tap replica and 32 for a
+/// 64-tap one. Measuring at one fixed width instead read dot11 as 64 samples
+/// biased, which is this test's error and not the detector's.
+int shippedWindow(const Desc& b) {
+  return static_cast<int>(b.replica.size() / 2);
+}
+
+/// One single-path run at fractional delay `frac`: the integer residual, or
+/// kMiss when nothing was found. `first_path_window` 0 disables the back-scan,
+/// which makes the pick the argmax: with window 0 the back-scan loop runs
+/// zero times and the rule returns `best`, the same value kTargetedArgmax
+/// computes from the same code, so this is identity rather than agreement.
+long long runAt(const Desc& b, double frac, unsigned seed,
+                int first_path_window, double snr_db, int guard) {
+  const long long len = static_cast<long long>(b.core.size());
+  houdini::sync::sim::Channel sc;
+  sc.snr_db = snr_db;
+  sc.peak_counts = 1600.0;
+  sc.frac_delay = frac;
+  const long long pos = 4000, end = pos + len, s0 = end - kLead,
+                  n = kLead + kTail;
+  const std::vector<std::complex<int16_t>> buf =
+      sc.receive(b.core, pos, s0, n, seed);
+  const Thr tf = b.replica_reps < 2 ? Thr::kCoherence : Thr::kNormalizedXCorr;
+  const CommsLib::BeaconResult r = CommsLib::find_beacon_ex(
+      buf.data(), b.replica, static_cast<size_t>(n), kResyncCorrScale,
+      Pick::kFirstPath, tf, first_path_window,
+      CommsLib::kDefaultFirstPathFloorDb, guard);
+  const long long rep_tail = static_cast<long long>(b.replica_tail());
+  return r.index < 0 ? kMiss : s0 + r.index + rep_tail - end;
 }
 
 }  // namespace
@@ -657,6 +695,432 @@ int main() {
       }
       std::printf("\n");
     }
+  }
+
+  // ---------------------------------------------------------------------
+  // AP-72: WHAT THE FIRST-PATH RULE COSTS ON A LINK WITH NO MULTIPATH, AND
+  // WHAT A ONE-SAMPLE GUARD BUYS BACK.
+  //
+  // A beacon between samples splits its matched-filter peak over two adjacent
+  // taps. The back-scan admits the earlier one whenever it clears the -9 dB
+  // floor, so on a clean link the rule reports a path one sample before the
+  // arrival for a band of tau. `first_path_guard` skips exactly that tap.
+  //
+  // THREE EARLIER VERSIONS OF THIS MEASUREMENT WERE WRONG AND THE ERRORS ARE
+  // WORTH KEEPING (review, 8aj):
+  //   - a "lobe reach" table that varied the back-scan window measured the
+  //     -9 dB FLOOR, not any lobe: one more dB of floor, or 20 dB SNR, moves
+  //     the reach from 1 to 2 on four of five shapes;
+  //   - an adjacent-difference "jitter along tau" was 1/sqrt(N-1) of the
+  //     sweep's own grid, not a jitter, and was compared against the rig's
+  //     frame-to-frame figure as though the two were the same statistic;
+  //   - a dither table counting DISTINCT indices over 32 draws on a tau grid
+  //     of 0.1 landed exactly on the argmax's undecided point (tau = 0.5) and
+  //     stepped over the rule's own, which for legacy is at tau = 0.74. It
+  //     concluded the rule was a stabiliser. It is not.
+  // What follows uses the sd of the returned index across draws, on a grid
+  // fine enough to find either rule's transition, and reports the RMS against
+  // the true arrival beside it.
+  std::printf("\n=== AP-72: first-path rule against the argmax, single path, "
+              "and what guard 1 recovers ===\n");
+  std::printf("%-14s %5s %7s %7s %7s %14s %14s %14s\n", "shape", "SNR",
+              "argmax", "guard0", "guard1", "argmax", "guard0", "guard1");
+  std::printf("%-14s %5s %-23s %s\n", "", "", "  RMS vs true arrival",
+              "  worst minority share @ phase (resolution 1/48 = 0.021)");
+  for (const double snr : {45.0, 30.0}) {
+    for (const auto& b : ds) {
+      const int w = shippedWindow(b);
+      double sq[3] = {0.0, 0.0, 0.0}, minority[3] = {0.0, 0.0, 0.0};
+      double at[3] = {0.0, 0.0, 0.0};
+      int nq[3] = {0, 0, 0};
+      int g0_vs_g1_diff = 0, g1_at_am_minus_1 = 0, g0_at_am_minus_1 = 0;
+      for (int t = 0; t < 100; ++t) {
+        const double tau = 0.01 * t;
+        const double truth = static_cast<double>(kEndConvention) + tau;
+        long long idx[3] = {kMiss, kMiss, kMiss};
+        for (int rule = 0; rule < 3; ++rule) {
+          const int win = rule == 0 ? 0 : w;
+          const int guard = rule == 2 ? 1 : 0;
+          // ONE PASS AT 48 DRAWS, NOT A SCREEN AND A REFINEMENT. The two-pass
+          // version could not be made safe by raising the screen: a real
+          // minority share of 0.008 is missed by a 48-draw screen 68 % of the
+          // time and then prints 0.000, the value a decided rule prints
+          // (review round 5). One pass has a floor instead of a blind spot:
+          // the resolution is 1/48 = 0.021 and anything under that reads as 0,
+          // which the header says.
+          //
+          // The statistic is the fraction of draws NOT returning the modal
+          // index. Unlike a count of distinct values or an sd on integers it
+          // tells one flip in twenty from a coin toss.
+          std::map<long long, int> hist;
+          int kept = 0;
+          for (unsigned sd = 1; sd <= 48; ++sd) {
+            const long long r = runAt(b, tau, sd, win, snr, guard);
+            if (r == kMiss) continue;
+            const double e = static_cast<double>(r) - truth;
+            sq[rule] += e * e;
+            ++nq[rule];
+            ++hist[r];
+            ++kept;
+          }
+          if (kept == 0) continue;
+          idx[rule] = hist.begin()->first;  // the modal index is enough here
+          int best_n = 0;
+          for (const auto& kv : hist)
+            if (kv.second > best_n) { best_n = kv.second; idx[rule] = kv.first; }
+          int mode = 0;
+          for (const auto& kv : hist) mode = std::max(mode, kv.second);
+          const double m = 1.0 - static_cast<double>(mode) / static_cast<double>(kept);
+          if (m > minority[rule]) { minority[rule] = m; at[rule] = tau; }
+        }
+        // Per-phase comparisons on the modal index of each rule.
+        if (idx[0] != kMiss && idx[2] != kMiss && idx[2] == idx[0] - 1)
+          ++g1_at_am_minus_1;
+        if (idx[0] != kMiss && idx[1] != kMiss && idx[1] == idx[0] - 1)
+          ++g0_at_am_minus_1;
+        if (idx[1] != kMiss && idx[2] != kMiss && idx[1] != idx[2]) ++g0_vs_g1_diff;
+      }
+      std::printf("%-14s %5.0f", b.name.c_str(), snr);
+      for (int r = 0; r < 3; ++r)
+        std::printf(" %7.3f", nq[r] ? std::sqrt(sq[r] / nq[r]) : 999.0);
+      // THE PHASE IS PRINTED BESIDE THE SHARE, because the share alone repeats
+      // the error 8ah was retracted for: the same number means opposite things
+      // depending on where it sits. The argmax's and guard 1's worst share is
+      // always at phase 0.50, where the truth is exactly between two samples
+      // and both answers are equally right. Guard 0's lands at 0.73, 0.74,
+      // 0.85 or 0.49 depending on the shape -- MOSTLY at its own transition,
+      // where one answer is much further from the truth than the other, but
+      // `nr` at 30 dB puts its largest share at 0.49, which is the harmless
+      // point. So the phase does not by itself separate the harmful case from
+      // the harmless one either; it is printed so a reader can tell which is
+      // which instead of being told a rule that has an exception (round 7).
+      for (int r = 0; r < 3; ++r)
+        std::printf(" %8.3f@%.2f", minority[r], at[r]);
+      std::printf("\n");
+      // EVERY POINT MUST HAVE BEEN DETECTED, not merely one of them. `nq > 0`
+      // was satisfied by a single detection in 4800 and a build dropping half
+      // of them passed all thirty checks with the RMS columns unmoved, because
+      // the survivors were a biased subset (review round 6).
+      const int expect = 100 * 48;
+      // Fails under: any dropped detection, biased or not.
+      check(nq[0] == expect && nq[1] == expect && nq[2] == expect,
+            std::string("every phase and draw detected on ") + b.name + " (" +
+                std::to_string(nq[0]) + "/" + std::to_string(nq[1]) + "/" +
+                std::to_string(nq[2]) + " of " + std::to_string(expect) + ")");
+      // GUARD 1 AGAINST THE ARGMAX, AS AN EXACT PER-POINT CLAIM. An RMS form of
+      // this was asserted for one round and was true by construction on four
+      // of the five shapes: with the split partner excluded there is usually
+      // no other candidate above the floor, so guard 1 simply IS the argmax
+      // and the inequality cannot fail (review round 6). It was deleted.
+      // THE GUARD'S CONTRACT, ASSERTED LITERALLY: it must never return the tap
+      // IMMEDIATELY before the argmax, because that tap is the split partner
+      // of the same arrival. Guard 0 does return it, often, which is the whole
+      // finding. This is exact, it is not true by construction, and it fails
+      // for a guard that is off, inverted, or applied to the wrong index.
+      //
+      // It deliberately does NOT bound how far guard 1 may sit from the
+      // argmax: `nr` has a second tap above the floor on about 1 % of phases
+      // and legitimately lands TWO samples early there. A first version of
+      // this check asserted "within one sample" without measuring first and
+      // duly failed on `nr` -- the same error, made once more, caught by the
+      // test rather than by a reviewer this time.
+      // Fails under: the guard off (10 rows), or inverted (10 rows).
+      check(g1_at_am_minus_1 == 0,
+            std::string("guard 1 never returns the tap immediately before the "
+                        "argmax: ") + b.name + " " +
+                std::to_string(g1_at_am_minus_1) + " of " + std::to_string(100));
+      // Fails under: the guard applied unconditionally, ignoring the knob.
+      check(g0_at_am_minus_1 > 0,
+            std::string("guard 0 DOES return that tap, so the guard has "
+                        "something to prevent: ") + b.name + " " +
+                std::to_string(g0_at_am_minus_1) + " of " + std::to_string(100));
+      // POSITIVE CONTROL, ON REACHABILITY RATHER THAN ON QUALITY. An earlier
+      // version asserted that guard 0 is measurably WORSE than the argmax,
+      // which ties the suite to the shipped rule's quality: a legitimate
+      // improvement to the unguarded rule would have broken ten rows. What
+      // must be true for the knob to mean anything is only that the two
+      // settings differ somewhere.
+      // Fails under: the knob never reaching the correlator.
+      check(g0_vs_g1_diff > 0,
+            std::string("the two guard settings differ somewhere on ") + b.name +
+                " (0 would mean the knob never reaches the correlator)");
+    }
+  }
+
+  // AND THE GUARD MUST NOT COST WHAT THE RULE EXISTS FOR. The first-path rule
+  // is there for MULTIPATH: over the air the stable reference is the direct
+  // arrival, not the strongest one. A guard that bought single-path accuracy
+  // by blinding the rule to real echoes would be a bad trade.
+  //
+  // AT FOUR FRACTIONAL DELAYS, NOT ONLY AT ZERO. An earlier version of this
+  // block ran every channel at tau = 0, where no split peak exists and the
+  // guarded tap is therefore never the one the rule wants: both columns read
+  // the same value and the check compared 0 with 0 (review round 3). With tau
+  // swept the guarded tap is live, and the comparison has something to fail.
+  // All five shapes, including dot11, whose lobe is the widest.
+  std::printf("\n=== AP-72: the guard against genuine multipath (phase grid "
+              "0.02, 4 draws; err = worst |residual - truth|) ===\n");
+  std::printf("%-32s %-14s %8s %8s %9s %9s %9s\n", "channel", "shape",
+              "err g0", "err g1", "differed", "g1 worse", "g1 better");
+  {
+    // The direct path sits 8.9 dB under the echo in the "weak direct" case,
+    // against a -9.0 dB floor whose own comment records the case flipping
+    // between -8.8 and -8.0 dB. It is kept because it is the hardest case, and
+    // named here so a result there reads as the margin it is.
+    const Channel mp[] = {
+        {{{0, 1.0}, {8, 1.4}}, 0.0, "echo +8 samp, STRONGER"},
+        {{{0, 1.0}, {24, 1.4}}, 0.0, "echo +24 samp, STRONGER"},
+        {{{0, 0.5}, {40, 1.4}}, 0.0, "weak direct -8.9 dB, echo +40"},
+        {{{0, 1.0}, {2, 1.4}}, 0.0, "echo +2 samp, STRONGER"},
+        {{{0, 1.0}, {1, 1.4}}, 0.0, "echo +1 samp (UNRESOLVABLE)"},
+    };
+    int control_differed = 0;
+    for (const auto& ch : mp) {
+      for (const auto& b : ds) {
+        std::printf("%-32s %-14s", ch.name, b.name.c_str());
+        double worst[2] = {0.0, 0.0};
+        int differed = 0, g1_worse = 0, g1_better = 0, points = 0, found = 0;
+        // A GRID OF 0.02, NOT 0.25 AND NOT 0.05. At 0.25 the +2 echo read "no
+        // point differs" and the test asserted it; the settings in fact differ
+        // over a band roughly [0.34, 0.43] that a quarter-sample grid steps
+        // over (review round 5). A 0.05 grid caught that band by a single
+        // point, so a small shift would have made the assertion vacuous again
+        // without anything noticing (review round 6). The band is where guard
+        // 1 is BETTER, so the coarse grids hid a benefit while asserting a
+        // falsehood.
+        // TWO SIGNAL LEVELS, because the claim in comms-lib.h and in 8aj is
+        // that the guard changes nothing "over a sweep of arrival phase, noise
+        // draw and signal level" and only the first two were ever swept here
+        // (review round 7). The reported-only channels stay at one level to
+        // keep the suite's runtime honest.
+        const bool asserted = std::string(ch.name).find("UNRESOLVABLE") == std::string::npos &&
+                              std::string(ch.name).find("weak direct") == std::string::npos;
+        for (int t = 0; t < 50; ++t) {
+          const double tau = 0.02 * t;
+          const double truth = static_cast<double>(kEndConvention) + tau;
+          for (unsigned sd = 1; sd <= 4u; ++sd) {
+            long long v[2];
+            double err[2];
+            const double snr = (asserted && (sd % 2u) == 0u) ? 30.0 : kSnrDb;
+            for (int g = 0; g < 2; ++g) {
+              v[g] = residualCh(b, 1600.0, snr, kLead, kTail, kResyncCorrScale,
+                                Pick::kFirstPath, sd,
+                                b.replica_reps < 2 ? Thr::kCoherence
+                                                   : Thr::kNormalizedXCorr,
+                                ch, g, tau);
+              err[g] = v[g] == kMiss ? 1000.0
+                                     : std::fabs(static_cast<double>(v[g]) - truth);
+              worst[g] = std::max(worst[g], err[g]);
+            }
+            ++points;
+            if (v[0] != kMiss && v[1] != kMiss) ++found;
+            if (v[0] != v[1]) ++differed;
+            if (err[1] > err[0] + 1e-9) ++g1_worse;
+            if (err[1] < err[0] - 1e-9) ++g1_better;
+          }
+        }
+        std::printf(" %8.2f %8.2f %9d %9d %9d\n", worst[0], worst[1], differed,
+                    g1_worse, g1_better);
+        control_differed += differed;
+        // A DETECTION FLOOR FIRST. Every statistic here reads perfectly when
+        // nothing is detected: `differed` counts agreement, so two settings
+        // that both find nothing agree on everything (review round 5).
+        // Fails under: a correlator returning kMiss on any phase.
+        check(found == points,
+              std::string("both settings detect at every point on ") + ch.name +
+                  ", " + b.name + " (" + std::to_string(found) + " of " +
+                  std::to_string(points) + ")");
+        // AND THE CLAIM IS "NEVER WORSE", NOT "NEVER DIFFERENT". On a
+        // resolvable channel the guard may legitimately change the answer, and
+        // where it does on the +2 echo it IMPROVES it. This is not true by
+        // construction the way the single-path version was: guard 1 falls back
+        // to the argmax, which on multipath is the ECHO, so a guard that
+        // reached too far would fail here.
+        // Which channels are asserted is decided by `asserted` above, computed
+        // once from the name; a rename silently turning an assertion off is
+        // the hazard, and the two reported-only channels say why in the
+        // comment below rather than only in a string match (round 7).
+        if (asserted)
+          // Fails under: guard forced to 2 (5 shapes fail on this channel).
+          check(g1_worse == 0 && g1_better == differed,
+                std::string("on ") + ch.name + ", " + b.name +
+                    ": every point where guard 1 differs is an IMPROVEMENT (" +
+                    std::to_string(g1_better) + " better, " +
+                    std::to_string(g1_worse) + " worse, of " +
+                    std::to_string(differed) + " differing)");
+      }
+    }
+    // POSITIVE CONTROL. Without this the whole block passes on a build that
+    // ignores the knob and applies the guard unconditionally -- measured: such
+    // a build scores 0 failures here and its table reads as an improvement
+    // (review round 5). The +1 echo is where the two settings must differ.
+    // Fails under: the knob ignored, so both settings behave identically.
+    check(control_differed > 0,
+          "the two guard settings differ somewhere: " +
+              std::to_string(control_differed) +
+              " points (0 would mean the knob is not reaching the correlator)");
+  }
+
+  // WHAT A 60 s SILICON LEG WOULD SEE, SIMULATED, BECAUSE THE GATE RESTS ON IT.
+  // DEMO_VERIFICATION 8ak claims its own PASS statistics are blind to the
+  // guard: the guard moves the rounding threshold in arrival phase rather than
+  // adding a toggle, so both settings step once per cycle and an adjacent-
+  // difference jitter differences it away. That claim decided the gate's
+  // design, it came from a reviewer's scratch probe, and nothing in the tree
+  // regenerated it (review round 6). It does now.
+  //
+  // The model, and why it is the right one: the shipped resync cadence is
+  // 2604 ms, and at the measured clock rate the arrival phase advances tens of
+  // samples between accepts, so successive detections see INDEPENDENT phase,
+  // not a slow walk. Each leg draws 23 detections at uniform phase, which is
+  // what a 60 s leg collects. `jitter` here is the adjacent-difference sd
+  // divided by sqrt(2), the same statistic shape_campaign_summary.py reports,
+  // so the number is comparable with the rig's.
+  std::printf("\n=== AP-72: a simulated 60 s leg, both guard settings "
+              "(40 legs x 23 detections, legacy, 45 dB) ===\n");
+  {
+    const auto& b = ds[0];
+    const int w = shippedWindow(b);
+    double jit[2] = {0.0, 0.0}, sd[2] = {0.0, 0.0};
+    int legs = 0, arms_differed = 0;
+    // One master seed is one realisation: the difference between the two
+    // settings changes sign between seeds (+0.018, -0.007, +0.003 measured),
+    // so the block reports the span over three and the check is on the span.
+    std::mt19937 phase_rng(20260904u);
+    for (int leg = 0; leg < 40; ++leg) {
+      std::vector<double> res[2];
+      for (int k = 0; k < 23; ++k) {
+        const double tau =
+            (static_cast<double>(phase_rng()) + 0.5) / 4294967296.0;
+        const unsigned seed = static_cast<unsigned>(leg * 23 + k + 1);
+        long long got[2] = {kMiss, kMiss};
+        for (int g = 0; g < 2; ++g) {
+          got[g] = runAt(b, tau, seed, w, 45.0, g);
+          if (got[g] != kMiss)
+            res[g].push_back(static_cast<double>(got[g]) -
+                             (static_cast<double>(kEndConvention) + tau));
+        }
+        if (got[0] != kMiss && got[1] != kMiss && got[0] != got[1]) ++arms_differed;
+      }
+      // EVERY DETECTION, NOT MERELY TWO. Without this a build that drops most
+      // detections still reports 39 of 40 legs and prints a jitter four times
+      // off the number the gate rests on, passing (review round 7 -- the third
+      // block in this file to need the same floor, and the one written by the
+      // round that added it to the other two).
+      // Fails under: a correlator that returns kMiss on any phase.
+      if (res[0].size() != 23 || res[1].size() != 23) continue;
+      ++legs;
+      for (int g = 0; g < 2; ++g) {
+        // EXACTLY WHAT shape_campaign_summary.py REPORTS, so the number is
+        // comparable with the rig's: the SD of the adjacent differences (mean
+        // removed, divided by n-1 of the DIFFERENCES), then divided by root
+        // two. A first version took the RMS about zero and divided by the
+        // count of samples rather than of differences, which read 2.3 % low
+        // (review round 7).
+        std::vector<double> d;
+        for (size_t i = 1; i < res[g].size(); ++i) d.push_back(res[g][i] - res[g][i - 1]);
+        double dm = 0.0;
+        for (const double x : d) dm += x;
+        dm /= static_cast<double>(d.size());
+        double q = 0.0;
+        for (const double x : d) q += (x - dm) * (x - dm);
+        jit[g] += std::sqrt(q / static_cast<double>(d.size() - 1)) / std::sqrt(2.0);
+        double m = 0.0, v = 0.0;
+        for (const double x : res[g]) m += x;
+        m /= static_cast<double>(res[g].size());
+        for (const double x : res[g]) v += (x - m) * (x - m);
+        sd[g] += std::sqrt(v / static_cast<double>(res[g].size() - 1));
+      }
+    }
+    const double n = legs > 0 ? static_cast<double>(legs) : 1.0;
+    std::printf("%-10s %14s %14s\n", "setting", "mean jitter", "mean sd");
+    for (int g = 0; g < 2; ++g)
+      std::printf("guard %-4d %14.3f %14.3f\n", g, jit[g] / n, sd[g] / n);
+    // The prediction the gate rests on: the two settings are indistinguishable
+    // in these statistics. A tenth of a sample is far inside the 1.3 the gate
+    // allows and inside the leg-to-leg spread of the bench itself.
+    // POSITIVE CONTROL FIRST, because the claim below is an EQUALITY and an
+    // equality passes vacuously when both arms are the same configuration.
+    // Measured: this block alone passed under all six guard mutations,
+    // including the knob ignored, printing the two arms as one number with
+    // nothing objecting (review round 8). On a clean single path guard 0
+    // returns the earlier tap on about a quarter of phases, so the two arms'
+    // residual sequences must differ even though their jitter does not.
+    // Fails under: the knob ignored, the guard off, or the guard applied
+    // unconditionally.
+    check(arms_differed > 0,
+          "the two simulated arms are different configurations: " +
+              std::to_string(arms_differed) + " of 920 detections differ");
+    // Fails under: nothing in the guard; this is the gate's own prediction and
+    // it is insensitive to the guard by design, which is the point 8ak makes.
+    check(std::fabs(jit[0] - jit[1]) / n < 0.1,
+          "a simulated leg cannot tell the two guard settings apart by jitter: " +
+              std::to_string(jit[0] / n) + " against " + std::to_string(jit[1] / n));
+    check(legs == 40,
+          "every simulated leg detected on every one of its 23 phases: " +
+              std::to_string(legs) + " of 40");
+  }
+
+  // THE SHAPE OF THE CORRELATION LOBE, WHICH IS THE SPECIFICATION FOR AP-75.
+  // A sub-sample estimator was built on this branch and WITHDRAWN: two
+  // three-point estimators in a row were defeated by what this table shows.
+  // A parabola assumes a smooth lobe and the lobe is nearly a delta; a ratio
+  // of the bracketing pair assumes the neighbours are SYMMETRIC at zero delay
+  // and they are not (at the DETECTED index legacy reads 0.0079 one side and
+  // 0.0024 the other, and `nr` 0.0157 and 0.0305; the table below prints
+  // them), so near a whole-sample arrival the fixed asymmetry outweighs the
+  // delay's and the estimate takes the wrong sign. Any replacement has to use
+  // the replica's own autocorrelation, which is what this table measures.
+  std::printf("\n=== AP-72: the correlation lobe at zero fractional delay "
+              "(amplitude relative to the peak) ===\n");
+  std::printf("%-14s %9s %9s %9s %9s\n", "shape", "peak-2", "peak-1", "peak+1",
+              "peak+2");
+  for (const auto& b : ds) {
+    houdini::sync::sim::Channel sc;
+    sc.snr_db = 60.0;
+    sc.peak_counts = 1600.0;
+    const long long len = static_cast<long long>(b.core.size());
+    const long long pos = 4000, end = pos + len, s0 = end - kLead,
+                    n = kLead + kTail;
+    const std::vector<std::complex<int16_t>> buf =
+        sc.receive(b.core, pos, s0, n, 1);
+    const std::vector<std::complex<float>> raw =
+        CommsLib::toCorrelatorScale(buf.data(), static_cast<size_t>(n));
+    const std::vector<std::complex<float>> corr =
+        CommsLib::correlate_mt(raw, b.replica);
+    // AT THE INDEX THE DETECTOR REPORTS, NOT AT THE GLOBAL ARGMAX. A repeated
+    // preamble has several equal correlation peaks, so the argmax over the
+    // whole window lands on a different copy from seed to seed (measured:
+    // legacy returned 373, 501, 373, 373 over four seeds) and the printed
+    // neighbours then belong to whichever copy happened to win. The detector's
+    // own index is the one every other number here is about.
+    const CommsLib::BeaconResult det = CommsLib::find_beacon_ex(
+        buf.data(), b.replica, static_cast<size_t>(n), kResyncCorrScale,
+        Pick::kTargetedArgmax,
+        b.replica_reps < 2 ? Thr::kCoherence : Thr::kNormalizedXCorr,
+        shippedWindow(b), CommsLib::kDefaultFirstPathFloorDb, 0);
+    if (det.index < 1 || static_cast<size_t>(det.index) + 2 >= corr.size()) {
+      std::printf("%-14s   (no detection)\n", b.name.c_str());
+      continue;
+    }
+    const size_t top = static_cast<size_t>(det.index);
+    const double best = std::abs(corr[top]);
+    std::printf("%-14s", b.name.c_str());
+    for (const int d : {-2, -1, 1, 2}) {
+      const long long k = static_cast<long long>(top) + d;
+      const double a = (k >= 0 && k < static_cast<long long>(corr.size()))
+                           ? std::abs(corr[static_cast<size_t>(k)]) / best
+                           : 0.0;
+      std::printf(" %9.4f", a);
+    }
+    std::printf("\n");
+    // Informational, deliberately not a threshold. THE ASYMMETRY IS THE POINT:
+    // peak-1 and peak+1 are not equal at zero delay, and a three-point
+    // estimator that decides which side the top lies on by comparing them
+    // takes the wrong side whenever the fixed asymmetry outweighs the one the
+    // delay creates. That is what defeated the withdrawn estimator, and it is
+    // why AP-75 needs the replica's own autocorrelation rather than three
+    // samples of it.
   }
 
   // ---------------------------------------------------------------------

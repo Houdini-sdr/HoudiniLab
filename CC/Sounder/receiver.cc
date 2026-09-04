@@ -1694,13 +1694,14 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
       MLPD_INFO(
           "Beacon detector [%s]: threshold %s (bar %s), targeted resync pick %s, "
           "acquisition pick %s, untargeted resync pick first_crossing (first-path "
-          "back window %d samples, floor %.1f dB); SNR floor %.1f dB, SNR guard "
-          "%zu samples; CFO guard %d margin %d\n",
+          "back window %d samples, floor %.1f dB, guard %d); SNR floor %.1f dB, "
+          "SNR guard %zu samples; CFO guard %d margin %d\n",
           sync_detector_->backendName(), houdini::sync::name(sync_detector_->form()),
           bar_text, houdini::sync::name(sync_detector_->pick()),
           houdini::sync::name(sync_detector_->pick()),
           sync_detector_->firstPathWindow(), sync_detector_->firstPathFloorDb(),
-          sync_guard_->floorDb(), sync_guard_->guard(),
+          sync_detector_->firstPathGuard(), sync_guard_->floorDb(),
+          sync_guard_->guard(),
           config_->sync().cfo.index_guard, cfo_estimator_->margin());
     }
     if (!sync_detector_->backendAppliesConfig()) {
@@ -1992,7 +1993,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
                       "n %d\nsync_index %zd\nsnr %.2f\nframe %zu\n"
                       "rx_beacon_time %lld\npilot_ref %lld\nbeacon_end %lld\n"
                       "corr_scale %.6g\nthresh %s\npick %s\nfirst_path_window %d\n"
-                      "first_path_floor_db %.3f\nsnr_floor_db %.3f\n"
+                      "first_path_floor_db %.3f\nfirst_path_guard %d\nsnr_floor_db %.3f\n"
                       "snr_guard %zu\nreplica_tail %zu\nbeacon_type %s\n"
                       "statistic %.6g\nbar %.6g\nbar_from_pfa %d\n",
                       request_samples, sync_index, snr, frame_id,
@@ -2002,7 +2003,8 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
                       houdini::sync::name(sync_detector_->form()),
                       houdini::sync::name(sync_detector_->pick()),
                       sync_detector_->firstPathWindow(),
-                      sync_detector_->firstPathFloorDb(), sync_guard_->floorDb(),
+                      sync_detector_->firstPathFloorDb(),
+                      sync_detector_->firstPathGuard(), sync_guard_->floorDb(),
                       sync_guard_->guard(), sync_detector_->replicaTail(),
                       config_->beacon_type().c_str(), resync_det.statistic,
                       resync_det.bar, sync_detector_->barFromPfa() ? 1 : 0);

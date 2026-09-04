@@ -265,21 +265,65 @@ class CommsLib {
   // them here, so a run has ONE source of truth and nothing in the correlator
   // reads the environment.
   static constexpr double kDefaultFirstPathFloorDb = -9.0;
+
   /// Threads for correlate_mt (sync.detector.corr_threads); 0 leaves the
   /// current setting. Read at dispatch, so set it before the first search.
   static void setCorrelatorThreads(unsigned n);
+  // HOW MANY SAMPLES BEFORE THE PEAK THE FIRST-PATH BACK-SCAN SKIPS
+  // (the `first_path_guard` argument below; `sync.detector.first_path_guard`).
+  //
+  // A beacon arrives between samples, so the matched-filter peak splits over
+  // two ADJACENT taps and the earlier one is the same physical arrival, not
+  // an earlier one. Admitting it costs accuracy on a link with no multipath:
+  // measured single path over a fractional-delay sweep at 45 and 30 dB, the
+  // rule reads 0.372 to 0.458 samples RMS against the true arrival where the
+  // plain argmax reads 0.289, the ideal rounder 1/sqrt(12). A guard of 1
+  // skips that tap and returns four of the five shapes to 0.289 exactly.
+  //
+  // `nr` reaches only 0.310 to 0.321, and NOT because its lobe is wide --
+  // dot11's is the widest and dot11 is fully recovered. `nr` is the one shape
+  // whose back-scan reaches TWO samples before the peak on a small fraction
+  // of arrival phases, which a one-sample guard does not cover.
+  //
+  // WHAT IT COSTS, MEASURED, NOT ASSUMED. On a direct path with a stronger
+  // echo 8 or 24 samples later the guard changes NO detection over a sweep of
+  // arrival phase, noise draw and SNR; at +2 it changes a few and every one of
+  // them is an IMPROVEMENT (never worse, measured per point). Two cases do change and neither is a
+  // resolvable earlier arrival being lost:
+  //   - an echo ONE sample later, where on half the arrival phases guard 0
+  //     returns the direct path and guard 1 the echo, an 8.1 ns shift. No rule can separate a
+  //     one-sample echo from a split peak in a single window; the guard
+  //     trades a pick that toggles with the arrival phase for one that is
+  //     stable and one sample late.
+  //   - a direct path 40 samples ahead of a stronger echo, which legacy_guard,
+  //     dot11 and `nr` do not find at EITHER setting -- for legacy_guard
+  //     because it sits 8.9 dB under a -9.0 dB floor, for the other two
+  //     because their 32-sample back-scan cannot reach 40 at all. The guard
+  //     moves some of those points inside an answer that is already wrong.
+  //
+  // Only 0 and 1 are meaningful. 2 loses a genuine two-sample-earlier arrival
+  // and 3 a three-sample one (measured), so the JSON schema refuses them and
+  // the environment reader clamps them to 1 with a warning.
+  //
+  // A guard of 0 is the behaviour every release so far has shipped and remains
+  // the default until the silicon gate of DEMO_VERIFICATION 8ak says
+  // otherwise, because a guard of 1 moves the reported index on 22 % to 36 %
+  // of arrival phases, by shape.
   //   first_path_window  samples of back-search from the peak (0..2*seqLen)
   //   first_path_db      how much weaker an earlier path may be, dB <= 0
+  //   first_path_guard   samples immediately before the peak the back-search
+  //                      skips (0 or 1; see the note above)
   static int find_beacon_avx(
       const std::vector<std::complex<float>>& raw_samples,
       const std::vector<std::complex<float>>& match_samples, float corr_scale,
       BeaconPick pick, BeaconThresh thresh_form, int first_path_window,
-      double first_path_db);
+      double first_path_db, int first_path_guard = 0);
   static ssize_t find_beacon_avx(
       const std::complex<int16_t>* raw_samples,
       const std::vector<std::complex<float>>& match_samples,
       size_t check_window, float corr_scale, BeaconPick pick,
-      BeaconThresh thresh_form, int first_path_window, double first_path_db);
+      BeaconThresh thresh_form, int first_path_window, double first_path_db,
+      int first_path_guard = 0);
   // The detection with its evidence: the index, the decision statistic at it
   // (in the form's units) and the correlator output there (the matched
   // field's complex peak). The find_beacon_avx overloads return .index.
@@ -295,12 +339,13 @@ class CommsLib {
       const std::vector<std::complex<float>>& raw_samples,
       const std::vector<std::complex<float>>& match_samples, float corr_scale,
       BeaconPick pick, BeaconThresh thresh_form, int first_path_window,
-      double first_path_db);
+      double first_path_db, int first_path_guard = 0);
   static BeaconResult find_beacon_ex(
       const std::complex<int16_t>* raw_samples,
       const std::vector<std::complex<float>>& match_samples,
       size_t check_window, float corr_scale, BeaconPick pick,
-      BeaconThresh thresh_form, int first_path_window, double first_path_db);
+      BeaconThresh thresh_form, int first_path_window, double first_path_db,
+      int first_path_guard = 0);
   // GPU beacon detector (find_beacon_cuda.cu), defined only when built with
   // -DUSE_CUDA (CMake HOUDINI_USE_CUDA), which is OFF by default and OFF on the
   // rig. NOTE it still returns the FIRST crossing (atomicMin over the index), so

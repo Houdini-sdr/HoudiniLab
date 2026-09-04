@@ -52,6 +52,12 @@ Detector::Detector(const BeaconShape& shape, const DetectorConfig& cfg)
                                              2 * static_cast<int>(shape.replicaLen()))
                              : shape.defaultFirstPathWindow()),
       first_path_floor_db_(cfg.first_path_floor_db),
+      // Clamped to the window here so the accessor reports what the correlator
+      // will actually apply: it clamps again, and an accessor that disagrees
+      // with the effective value misleads the record it is written into.
+      // first_path_window_ is initialised above and holds the same expression;
+      // recomputing it here left two copies to keep in step (review round 5).
+      first_path_guard_(std::max(0, std::min(cfg.first_path_guard, first_path_window_))),
       pfa_applies_(false),
       pfa_(cfg.pfa_per_window),
 #if defined(USE_CUDA)
@@ -112,7 +118,7 @@ Detection Detector::run(const std::complex<int16_t>* samples, size_t n,
 #endif
   const CommsLib::BeaconResult r = CommsLib::find_beacon_ex(
       samples, shape_.replica(), n, scale, toCorrelator(pick), toCorrelator(form_),
-      first_path_window_, first_path_floor_db_);
+      first_path_window_, first_path_floor_db_, first_path_guard_);
   d.end_index = shape_.endFromCorrelatorIndex(r.index, n);
   d.form = form_;
   // Evidence travels with a detection that IS one: an index whose implied
