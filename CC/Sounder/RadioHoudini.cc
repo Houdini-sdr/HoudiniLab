@@ -152,10 +152,17 @@ int RadioHoudini::recv(void* const* buffs, int samples, long long& frameTime) {
                         ? std::chrono::steady_clock::now()
                         : std::chrono::steady_clock::time_point{};
   int drained_chunks = 0, drained_samps = 0;
-  int dr = 0;
-  while ((dr = dev_->readStream(rxs_, jb.data(), drain_samps, jf, jt, 0)) > 0) {
-    ++drained_chunks;
-    drained_samps += dr;
+  // Drain each per-channel RX stream to empty (single-channel Houdini streams,
+  // SH-142b). Each stream reads into its own junk region so the discards don't
+  // clobber one another; draining both here means the accumulate below starts
+  // the two channels time-aligned.
+  for (size_t c = 0; c < rx_streams_.size(); ++c) {
+    int dr = 0;
+    while ((dr = dev_->readStream(rx_streams_[c], &jb[c], drain_samps, jf, jt,
+                                  0)) > 0) {
+      ++drained_chunks;
+      drained_samps += dr;
+    }
   }
   const auto p_t1 = rx_profile_every > 0
                         ? std::chrono::steady_clock::now()
@@ -185,8 +192,11 @@ int RadioHoudini::recv(void* const* buffs, int samples, long long& frameTime) {
                static_cast<size_t>(got) * kBytesPerSamp;
     int flags = 0;
     long long t = 0;
-    int r =
-        dev_->readStream(rxs_, cur.data(), samples - got, flags, t, 1000000);
+    // Channel 0 anchors the window: its return count r and timestamp t drive
+    // the grid/gap check and every sibling read, so the channels stay sample-
+    // aligned even though each has its own single-channel stream (SH-142b).
+    int r = dev_->readStream(rx_streams_[0], &cur[0], samples - got, flags, t,
+                             1000000);
     if (r <= 0) {
       if (got == 0) {
       // Account the call before leaving, or the drain cost already added above
@@ -199,6 +209,36 @@ int RadioHoudini::recv(void* const* buffs, int samples, long long& frameTime) {
       break;
     }
     if (got == 0) frameTime = t;  // first (grid-anchoring) read stamps the window
+    // Siblings: read exactly r samples from each other channel's stream into its
+    // own buffer at the same offset. They share the board clock and gate, so on
+    // a healthy link this returns r straight away; a short read is looped, and a
+    // stall zero-fills the remainder (kept aligned to ch0) with a throttled warn
+    // rather than silently sliding the second channel's window.
+    for (size_t c = 1; c < rx_streams_.size(); ++c) {
+      int off = 0;
+      while (off < r) {
+        uint8_t* d = static_cast<uint8_t*>(cur[c]) +
+                     static_cast<size_t>(off) * kBytesPerSamp;
+        void* one[1] = {d};
+        int fc = 0;
+        long long tc = 0;
+        int rc = dev_->readStream(rx_streams_[c], one, r - off, fc, tc, 1000000);
+        if (rc <= 0) {
+          std::memset(d, 0, static_cast<size_t>(r - off) * kBytesPerSamp);
+          static std::atomic<int> shortc{0};
+          const int n = shortc.fetch_add(1);
+          if ((n % 200) == 0) {  // braces load-bearing: MLPD_WARN is multi-stmt
+            MLPD_WARN(
+                "RX ch %zu under-filled by %d/%d samples (rc=%d); zero-filled to "
+                "stay aligned to ch0. The second channel is losing packets its "
+                "sibling is not.\n",
+                c, r - off, r, rc);
+          }
+          break;
+        }
+        off += rc;
+      }
+    }
     size_t pad = 0;
     if (rx_rate_ > 0.0 && (flags & SOAPY_SDR_HAS_TIME) != 0) {
       const Sounder::GridCheck gc = grid.onStamp(t, got);
