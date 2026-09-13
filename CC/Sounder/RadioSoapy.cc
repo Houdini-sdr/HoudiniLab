@@ -486,6 +486,11 @@ int RadioSoapy::xmit(const void* const* buffs, int samples, int flags,
   // check still fires.
   int ret = samples;
   for (size_t i = 0; i < tx_streams_.size(); ++i) {
+    // A null channel buffer means "nothing on this channel this write" -- the BS
+    // beacon is single-antenna, so it passes its samples only on the beacon
+    // channel and nullptr on the others; fanning it to every channel would fill
+    // (and, if armed, be refused on) a channel that is not the beacon's.
+    if (buffs[i] == nullptr) continue;
     long long ft = frameTime;  // writeStream may advance its copy; keep ours
     const void* one[1] = {buffs[i]};
     int r = dev_->writeStream(tx_streams_[i], one, samples, flag_args, ft,

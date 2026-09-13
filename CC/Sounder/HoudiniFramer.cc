@@ -116,7 +116,16 @@ void HoudiniFramer::armReplayBeacon(void) {
   // stream is bound to the BS channel (the wired DAC), so xmit targets it. RX
   // is NOT activated here: it would sit unread (overflowing) until the caller is
   // ready to receive -- activateHoudiniRx() starts it on demand.
-  const void* buffs[1] = {iq.data()};
+  // Beacon is single-antenna: with per-channel TX streams (SH-235) pass it only
+  // on the beacon channel's index in the opened channel list, nullptr elsewhere.
+  const auto bs_chans = Utils::strToChannels(cfg_->bs_channel());
+  const size_t beacon_idx =
+      bs_chans.empty() ? 0
+                       : std::min(static_cast<size_t>(cfg_->beacon_channel()),
+                                  bs_chans.size() - 1);
+  std::vector<const void*> buffs(bs_chans.empty() ? 1 : bs_chans.size(),
+                                 nullptr);
+  buffs[beacon_idx] = iq.data();
   long long t0 = 0;
   for (size_t c = 0; c < radios_.size(); ++c) {
     for (size_t i = 0; i < radios_.at(c).size(); ++i) {
@@ -126,7 +135,7 @@ void HoudiniFramer::armReplayBeacon(void) {
       // error while the replay bank's level arm is still set) must stop the
       // bring-up here, not arm the loop over stale RAM and play a beacon that
       // is not the one built above (DEMO_VERIFICATION 4.24, SH-348).
-      const int loaded = r->xmit(buffs, static_cast<int>(n_load), 0, t0);
+      const int loaded = r->xmit(buffs.data(), static_cast<int>(n_load), 0, t0);
       if (loaded != static_cast<int>(n_load)) {
         throw std::runtime_error(
             "Houdini beacon replay RAM load refused: " +
@@ -258,7 +267,6 @@ void HoudiniFramer::armTdd(void) {
   std::vector<int16_t> iq;
   buildBeacon(iq);
   const size_t n_load = iq.size() / 2;
-  const void* buffs[1] = {iq.data()};
 
   for (size_t c = 0; c < radios_.size(); ++c) {
     for (size_t i = 0; i < radios_.at(c).size(); ++i) {
@@ -311,11 +319,20 @@ void HoudiniFramer::armTdd(void) {
       // fired the strobe on ch0 (DAC_B, not cabled) so the beacon never reached
       // the UE.
       const auto bs_chans = Utils::strToChannels(cfg_->bs_channel());
-      const size_t tx_ch =
+      const size_t beacon_idx =
           bs_chans.empty()
               ? 0
-              : bs_chans.at(std::min(static_cast<size_t>(cfg_->beacon_channel()),
-                                     bs_chans.size() - 1));
+              : std::min(static_cast<size_t>(cfg_->beacon_channel()),
+                         bs_chans.size() - 1);
+      const size_t tx_ch = bs_chans.empty() ? 0 : bs_chans.at(beacon_idx);
+      // Beacon is single-antenna: with per-channel TX streams (SH-235) the load
+      // must land only on the beacon channel's stream. Pass its samples at the
+      // beacon channel's index in the opened channel list and nullptr elsewhere;
+      // xmit skips the null channels, so a non-beacon TX stream is never filled
+      // or (via the strobe below, which also targets tx_ch only) armed.
+      std::vector<const void*> buffs(bs_chans.empty() ? 1 : bs_chans.size(),
+                                     nullptr);
+      buffs[beacon_idx] = iq.data();
       // The load/schedule/strobe sequence, re-runnable: the arm retry loop
       // re-invokes it after every teardown ladder (Opus review H1 -- a
       // ladder invalidates this state, so a bare arm retry could arm a
@@ -346,7 +363,7 @@ void HoudiniFramer::armTdd(void) {
         // retry loop runs the ladder, which clears that arm, and re-invokes
         // this setup. Arming over stale RAM would play a beacon that is not
         // the one built above (DEMO_VERIFICATION 4.24, SH-348).
-        const int loaded = r->xmit(buffs, static_cast<int>(n_load), 0, t0);
+        const int loaded = r->xmit(buffs.data(), static_cast<int>(n_load), 0, t0);
         if (loaded != static_cast<int>(n_load)) {
           throw std::runtime_error(
               "Houdini beacon replay RAM load refused: " +
