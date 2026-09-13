@@ -227,17 +227,28 @@ RadioSoapy::RadioSoapy(const RadioParams& params, Type type, const SoapySDR::Kwa
         aux["mts"] = "true";
         aux_mts_txs_ = dev_->setupStream(SOAPY_SDR_TX, soapyFmt, {0}, aux);
       }
-      txs_ = dev_->setupStream(SOAPY_SDR_TX, soapyFmt, channels, txStreamArgs);
+      // SH-235: the Houdini driver rejects a multi-channel TX stream on both
+      // modes (replay beacon and live pilot). Open one single-channel TX stream
+      // per channel; xmit routes each channel's buffer to its own stream.
+      for (auto ch : channels) {
+        tx_streams_.push_back(
+            dev_->setupStream(SOAPY_SDR_TX, soapyFmt, {ch}, txStreamArgs));
+      }
       rxs_ = dev_->setupStream(SOAPY_SDR_RX, soapyFmt, channels, rxStreamArgs);
     } catch (...) {
-      if (txs_ != nullptr) dev_->closeStream(txs_);
+      for (auto* s : tx_streams_)
+        if (s != nullptr) dev_->closeStream(s);
+      tx_streams_.clear();
       if (aux_mts_txs_ != nullptr) dev_->closeStream(aux_mts_txs_);
       SoapySDR::Device::unmake(dev_);
       throw;
     }
   } else {
+    // Iris/UHD accept a single multi-channel TX stream (vector size 1); xmit
+    // writes the whole per-channel buffer array to it in one call.
     rxs_ = dev_->setupStream(SOAPY_SDR_RX, soapyFmt, channels, rxStreamArgs);
-    txs_ = dev_->setupStream(SOAPY_SDR_TX, soapyFmt, channels, txStreamArgs);
+    tx_streams_.push_back(
+        dev_->setupStream(SOAPY_SDR_TX, soapyFmt, channels, txStreamArgs));
   }
 
   const std::string driver =
@@ -331,40 +342,47 @@ RadioSoapy::~RadioSoapy() {
   }
   dev_->closeStream(rxs_);
   rxs_ = nullptr;
-  dev_->closeStream(txs_);
-  txs_ = nullptr;
+  for (auto* s : tx_streams_)
+    if (s != nullptr) dev_->closeStream(s);
+  tx_streams_.clear();
   SoapySDR::Device::unmake(dev_);
   dev_ = nullptr;
 }
 
 
 int RadioSoapy::drainTxStatus() {
-  if (tx_status_unsupported_ || txs_ == nullptr) return 0;
+  if (tx_status_unsupported_ || tx_streams_.empty()) return 0;
   int problems = 0;
-  for (int i = 0; i < 32; ++i) {  // bounded so a hot queue cannot stall the caller
-    size_t chan_mask = 0;
-    int flags = 0;
-    long long t = 0;
-    const int st = dev_->readStreamStatus(txs_, chan_mask, flags, t, 0);
-    if (st == SOAPY_SDR_TIMEOUT) break;  // nothing queued: the normal case
-    if (st == SOAPY_SDR_NOT_SUPPORTED) {
-      tx_status_unsupported_ = true;
-      break;
-    }
-    if (st == 0) continue;  // a benign event (e.g. an end-of-burst ack)
-    ++problems;
-    ++tx_status_events_;
-    const long long now =
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now().time_since_epoch())
-            .count();
-    if (now - tx_status_log_ns_ > 5000000000LL) {  // at most one line per 5 s
-      tx_status_log_ns_ = now;
-      MLPD_WARN(
-          "TX status: %zu problem event(s), latest %s at %lld ns. A burst the "
-          "driver accepted was sent late or dropped; on the TDD grid that shows "
-          "up as a phase jump, not as a write error.\n",
-          tx_status_events_, SoapySDR::errToStr(st), t);
+  // Poll every TX stream: per-channel Houdini streams each carry their own
+  // status queue, so draining only one would miss a late/dropped burst on the
+  // others. Each stream keeps the original 32-read bound.
+  for (auto* txs : tx_streams_) {
+    if (txs == nullptr) continue;
+    for (int i = 0; i < 32; ++i) {  // bounded so a hot queue cannot stall the caller
+      size_t chan_mask = 0;
+      int flags = 0;
+      long long t = 0;
+      const int st = dev_->readStreamStatus(txs, chan_mask, flags, t, 0);
+      if (st == SOAPY_SDR_TIMEOUT) break;  // nothing queued: the normal case
+      if (st == SOAPY_SDR_NOT_SUPPORTED) {
+        tx_status_unsupported_ = true;
+        return problems;  // the surface is absent device-wide, stop asking
+      }
+      if (st == 0) continue;  // a benign event (e.g. an end-of-burst ack)
+      ++problems;
+      ++tx_status_events_;
+      const long long now =
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now().time_since_epoch())
+              .count();
+      if (now - tx_status_log_ns_ > 5000000000LL) {  // at most one line per 5 s
+        tx_status_log_ns_ = now;
+        MLPD_WARN(
+            "TX status: %zu problem event(s), latest %s at %lld ns. A burst the "
+            "driver accepted was sent late or dropped; on the TDD grid that shows "
+            "up as a phase jump, not as a write error.\n",
+            tx_status_events_, SoapySDR::errToStr(st), t);
+      }
     }
   }
   return problems;
@@ -411,25 +429,52 @@ int RadioSoapy::xmit(const void* const* buffs, int samples, int flags,
                       SOAPY_SDR_HAS_TIME | SOAPY_SDR_END_BURST,
                       SOAPY_SDR_WAIT_TRIGGER | SOAPY_SDR_END_BURST};
   int flag_args = soapyFlags[flags];
-  int r =
-      dev_->writeStream(txs_, buffs, samples, flag_args, frameTime, 1000000);
-  if (r != samples) {
-    std::cerr << "unexpected writeStream error " << SoapySDR::errToStr(r)
-              << std::endl;
+  if (tx_streams_.empty()) return 0;
+  // One multi-channel stream (Iris/UHD, or a single channel): write the whole
+  // per-channel buffer array in one call, exactly as before.
+  if (tx_streams_.size() == 1) {
+    int r = dev_->writeStream(tx_streams_.front(), buffs, samples, flag_args,
+                              frameTime, 1000000);
+    if (r != samples) {
+      std::cerr << "unexpected writeStream error " << SoapySDR::errToStr(r)
+                << std::endl;
+    }
+    return r;
   }
-  return (r);
+  // Houdini per-channel streams (SH-235): buffs[i] belongs to channel i, so
+  // write each to its own single-channel stream at the SAME timed start. Both
+  // channels share the board's clock, so one frameTime seats them on the same
+  // TDD grid. Return the first short/failed write so the caller's BAD-Write
+  // check still fires.
+  int ret = samples;
+  for (size_t i = 0; i < tx_streams_.size(); ++i) {
+    long long ft = frameTime;  // writeStream may advance its copy; keep ours
+    const void* one[1] = {buffs[i]};
+    int r = dev_->writeStream(tx_streams_[i], one, samples, flag_args, ft,
+                              1000000);
+    if (r != samples) {
+      std::cerr << "unexpected writeStream error (ch " << i << ") "
+                << SoapySDR::errToStr(r) << std::endl;
+      if (ret == samples) ret = r;
+    }
+  }
+  return ret;
 }
 
 void RadioSoapy::activateXmit(void) {
   // for USRP device start tx stream UHD_INIT_TIME_SEC sec in the future
-  if (!isUhd()) {
-    dev_->activateStream(txs_);
-  } else {
-    dev_->activateStream(txs_, SOAPY_SDR_HAS_TIME, UHD_INIT_TIME_SEC * 1e9, 0);
+  for (auto* txs : tx_streams_) {
+    if (!isUhd()) {
+      dev_->activateStream(txs);
+    } else {
+      dev_->activateStream(txs, SOAPY_SDR_HAS_TIME, UHD_INIT_TIME_SEC * 1e9, 0);
+    }
   }
 }
 
-void RadioSoapy::deactivateXmit(void) { dev_->deactivateStream(txs_); }
+void RadioSoapy::deactivateXmit(void) {
+  for (auto* txs : tx_streams_) dev_->deactivateStream(txs);
+}
 
 int RadioSoapy::getTriggers(void) const {
   return std::stoi(dev_->readSetting("TRIGGER_COUNT"));
