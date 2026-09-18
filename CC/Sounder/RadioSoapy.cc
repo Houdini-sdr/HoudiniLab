@@ -242,9 +242,23 @@ RadioSoapy::RadioSoapy(const RadioParams& params, Type type, const SoapySDR::Kwa
       }
       // SH-142b/SH-159: likewise a combined (>1) RX data stream cannot be
       // activated. One single-channel RX stream per channel; recv reads each.
+      // INTERIM (HOUDINI_RX_ONLY_CH=<n>): the driver's multi-channel RX DATA path
+      // is WIP -- two active single-channel RX streams still do not coherently
+      // egress (a second channel's read times out), so for bring-up open ONLY
+      // the RX stream for physical channel <n> (the cabled one; recv puts its
+      // samples in buffs[0], which is where the sync path reads). TX stays
+      // per-channel, matching what the driver supports today (1 RX, N TX).
+      // Remove once SH-142/SH-159 land; unset = per-channel RX (the real path).
+      const char* rx_only = std::getenv("HOUDINI_RX_ONLY_CH");
+      const long rx_only_ch = rx_only != nullptr ? std::atol(rx_only) : -1;
       for (auto ch : channels) {
+        if (rx_only_ch >= 0 && static_cast<long>(ch) != rx_only_ch) continue;
         rx_streams_.push_back(
             dev_->setupStream(SOAPY_SDR_RX, soapyFmt, {ch}, rxStreamArgs));
+      }
+      if (rx_streams_.empty()) {  // requested channel not in the set: use front
+        rx_streams_.push_back(dev_->setupStream(SOAPY_SDR_RX, soapyFmt,
+                                                {channels.front()}, rxStreamArgs));
       }
     } catch (...) {
       for (auto* s : tx_streams_)
@@ -268,7 +282,12 @@ RadioSoapy::RadioSoapy(const RadioParams& params, Type type, const SoapySDR::Kwa
 
   const std::string driver =
       (args.count("driver") != 0u) ? args.at("driver") : std::string();
-  num_rx_ch_ = channels.empty() ? 1 : channels.size();
+  // The number of RX channels recv fills. For the Houdini per-channel path this
+  // is the RX stream count (== channels, or 1 under HOUDINI_RX_FRONT_ONLY);
+  // RadioHoudini::recv keys its per-channel loops off it. Iris opens one
+  // multi-channel stream and does not use this in its recv.
+  num_rx_ch_ = isUhd() ? (channels.empty() ? 1 : channels.size())
+                       : (rx_streams_.empty() ? 1 : rx_streams_.size());
 
   // RESET_DATA_LOGIC is an Iris-only setting; Houdini/UHD don't implement it.
   if (!isUhd() && driver == "iris") {
