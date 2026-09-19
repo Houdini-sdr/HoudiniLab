@@ -114,17 +114,11 @@ void RadioSoapy::drain_buffers(std::vector<void*> buffs, int symSamp) {
      *      None
      */
   long long frameTime = 0;
-  int flags = 0;
+  int flags = 0, r = 0;
   [[maybe_unused]] int i = 0;
-  // Drain every RX stream (one per channel on Houdini; a single multi-channel
-  // stream on Iris). buffs is a scratch sink here, so aliasing across streams
-  // is harmless -- the samples are discarded.
-  for (auto* rxs : rx_streams_) {
-    int r = 0;
-    while (r != -1) {
-      r = dev_->readStream(rxs, buffs.data(), symSamp, flags, frameTime, 0);
-      i++;
-    }
+  while (r != -1) {
+    r = dev_->readStream(rxs_, buffs.data(), symSamp, flags, frameTime, 0);
+    i++;
   }
   MLPD_TRACE("Number of reads needed to drain: %d\n", i);
 }
@@ -240,54 +234,30 @@ RadioSoapy::RadioSoapy(const RadioParams& params, Type type, const SoapySDR::Kwa
         tx_streams_.push_back(
             dev_->setupStream(SOAPY_SDR_TX, soapyFmt, {ch}, txStreamArgs));
       }
-      // SH-142b/SH-159: likewise a combined (>1) RX data stream cannot be
-      // activated. One single-channel RX stream per channel; recv reads each.
-      // INTERIM (HOUDINI_RX_ONLY_CH=<n>): the driver's multi-channel RX DATA path
-      // is WIP -- two active single-channel RX streams still do not coherently
-      // egress (a second channel's read times out), so for bring-up open ONLY
-      // the RX stream for physical channel <n> (the cabled one; recv puts its
-      // samples in buffs[0], which is where the sync path reads). TX stays
-      // per-channel, matching what the driver supports today (1 RX, N TX).
-      // Remove once SH-142/SH-159 land; unset = per-channel RX (the real path).
-      const char* rx_only = std::getenv("HOUDINI_RX_ONLY_CH");
-      const long rx_only_ch = rx_only != nullptr ? std::atol(rx_only) : -1;
-      for (auto ch : channels) {
-        if (rx_only_ch >= 0 && static_cast<long>(ch) != rx_only_ch) continue;
-        rx_streams_.push_back(
-            dev_->setupStream(SOAPY_SDR_RX, soapyFmt, {ch}, rxStreamArgs));
-      }
-      if (rx_streams_.empty()) {  // requested channel not in the set: use front
-        rx_streams_.push_back(dev_->setupStream(SOAPY_SDR_RX, soapyFmt,
-                                                {channels.front()}, rxStreamArgs));
-      }
+      // One combined RX stream over all channels. Since SH-142/SH-159 landed the
+      // driver activates a >1-channel RX stream and readStream fills buffs[i] per
+      // channel, sample-aligned with one timestamp -- the same shape Iris uses.
+      rxs_ = dev_->setupStream(SOAPY_SDR_RX, soapyFmt, channels, rxStreamArgs);
     } catch (...) {
       for (auto* s : tx_streams_)
         if (s != nullptr) dev_->closeStream(s);
       tx_streams_.clear();
-      for (auto* s : rx_streams_)
-        if (s != nullptr) dev_->closeStream(s);
-      rx_streams_.clear();
+      if (rxs_ != nullptr) dev_->closeStream(rxs_);
+      rxs_ = nullptr;
       if (aux_mts_txs_ != nullptr) dev_->closeStream(aux_mts_txs_);
       SoapySDR::Device::unmake(dev_);
       throw;
     }
   } else {
-    // Iris/UHD accept a single multi-channel stream (vector size 1); recv/xmit
-    // pass the whole per-channel buffer array to it in one call.
-    rx_streams_.push_back(
-        dev_->setupStream(SOAPY_SDR_RX, soapyFmt, channels, rxStreamArgs));
+    // Iris/UHD: one multi-channel RX stream; TX one multi-channel stream too.
+    rxs_ = dev_->setupStream(SOAPY_SDR_RX, soapyFmt, channels, rxStreamArgs);
     tx_streams_.push_back(
         dev_->setupStream(SOAPY_SDR_TX, soapyFmt, channels, txStreamArgs));
   }
 
   const std::string driver =
       (args.count("driver") != 0u) ? args.at("driver") : std::string();
-  // The number of RX channels recv fills. For the Houdini per-channel path this
-  // is the RX stream count (== channels, or 1 under HOUDINI_RX_FRONT_ONLY);
-  // RadioHoudini::recv keys its per-channel loops off it. Iris opens one
-  // multi-channel stream and does not use this in its recv.
-  num_rx_ch_ = isUhd() ? (channels.empty() ? 1 : channels.size())
-                       : (rx_streams_.empty() ? 1 : rx_streams_.size());
+  num_rx_ch_ = channels.empty() ? 1 : channels.size();
 
   // RESET_DATA_LOGIC is an Iris-only setting; Houdini/UHD don't implement it.
   if (!isUhd() && driver == "iris") {
@@ -374,9 +344,8 @@ RadioSoapy::~RadioSoapy() {
     dev_->closeStream(aux_mts_txs_);
     aux_mts_txs_ = nullptr;
   }
-  for (auto* s : rx_streams_)
-    if (s != nullptr) dev_->closeStream(s);
-  rx_streams_.clear();
+  dev_->closeStream(rxs_);
+  rxs_ = nullptr;
   for (auto* s : tx_streams_)
     if (s != nullptr) dev_->closeStream(s);
   tx_streams_.clear();
@@ -426,25 +395,7 @@ int RadioSoapy::drainTxStatus() {
 
 int RadioSoapy::recv(void* const* buffs, int samples, long long& frameTime) {
   int flags(0);
-  if (rx_streams_.empty()) return 0;
-  int r;
-  if (rx_streams_.size() == 1) {
-    // One multi-channel stream (Iris/UHD, or a single channel): read the whole
-    // per-channel buffer array in one call, exactly as before.
-    r = dev_->readStream(rx_streams_.front(), buffs, samples, flags, frameTime,
-                         1000000);
-  } else {
-    // Houdini per-channel streams: read each into its own buffer. Channel 0
-    // anchors the window time; the others read the same count.
-    r = dev_->readStream(rx_streams_[0], &buffs[0], samples, flags, frameTime,
-                         1000000);
-    for (size_t c = 1; c < rx_streams_.size() && r > 0; ++c) {
-      int fc = 0;
-      long long tc = 0;
-      int rc = dev_->readStream(rx_streams_[c], &buffs[c], r, fc, tc, 1000000);
-      if (rc < r) r = rc;  // surface a short/failed sibling read to the caller
-    }
-  }
+  int r = dev_->readStream(rxs_, buffs, samples, flags, frameTime, 1000000);
   if (r < 0) {
     MLPD_ERROR("Time: %lld, readStream error: %d - %s, flags: %d\n", frameTime,
                r, SoapySDR::errToStr(r), flags);
@@ -465,20 +416,16 @@ int RadioSoapy::activateRecv(long long rxTime, size_t numSamps, int flags) {
                       SOAPY_SDR_HAS_TIME | SOAPY_SDR_END_BURST,
                       SOAPY_SDR_WAIT_TRIGGER | SOAPY_SDR_END_BURST};
   int flag_args = soapyFlags[flags];
-  int ret = 0;
   // for USRP device start rx stream UHD_INIT_TIME_SEC sec in the future
-  for (auto* rxs : rx_streams_) {
-    int r = isUhd() ? dev_->activateStream(rxs, SOAPY_SDR_HAS_TIME,
-                                           UHD_INIT_TIME_SEC * 1e9, 0)
-                    : dev_->activateStream(rxs, flag_args, rxTime, numSamps);
-    if (r != 0 && ret == 0) ret = r;  // report the first failure
+  if (!isUhd()) {
+    return dev_->activateStream(rxs_, flag_args, rxTime, numSamps);
+  } else {
+    return dev_->activateStream(rxs_, SOAPY_SDR_HAS_TIME,
+                                UHD_INIT_TIME_SEC * 1e9, 0);
   }
-  return ret;
 }
 
-void RadioSoapy::deactivateRecv(void) {
-  for (auto* rxs : rx_streams_) dev_->deactivateStream(rxs);
-}
+void RadioSoapy::deactivateRecv(void) { dev_->deactivateStream(rxs_); }
 
 int RadioSoapy::xmit(const void* const* buffs, int samples, int flags,
                 long long& frameTime) {

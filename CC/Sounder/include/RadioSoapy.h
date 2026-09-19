@@ -63,13 +63,10 @@ class RadioSoapy : public Radio {
   // these before every setupStream has assigned them (second review 2.1 --
   // an indeterminate txs_ meant closeStream on a wild pointer on the
   // transient-board-wedge retry path).
-  // RX streams. Same split as TX below: Iris/UHD open ONE multi-channel stream
-  // (vector size 1) and recv reads the whole buffer array from it; the Houdini
-  // driver forbids activating a combined (>1) RX stream (SH-142b/SH-159: "the
-  // combined readStream merge is WIP; activate one RX channel at a time"), so
-  // the Houdini path opens one single-channel RX stream per channel and reads
-  // each into its own buffer. Empty until setupStream succeeds.
-  std::vector<SoapySDR::Stream*> rx_streams_;
+  // One combined RX stream over all channels (Iris/UHD and, since SH-142/SH-159
+  // landed, Houdini): readStream fills buffs[i] per channel with one common
+  // timestamp, sample-aligned across channels.
+  SoapySDR::Stream* rxs_ = nullptr;
   // TX streams. Iris/UHD open ONE multi-channel stream (vector size 1) and every
   // write goes to it. The Houdini driver forbids a multi-channel TX stream
   // (SH-235: "one channel per live-TX stream; open one stream per channel"), so
