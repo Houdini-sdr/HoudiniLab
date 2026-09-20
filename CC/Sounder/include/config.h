@@ -132,8 +132,20 @@ class Config {
   inline float corr_scale_init(size_t id) const {
     return this->corr_scale_init_.at(id);
   }
+  // *_sdr_ch() is the RECEIVE (recorded-antenna) channel count -- the meaning
+  // every existing caller relies on. The direction-split counts below let a node
+  // transmit and receive on different channel sets; for a config that sets only
+  // `channel`, tx == rx == sdr_ch, so nothing changes.
   inline size_t cl_sdr_ch(void) const { return this->cl_sdr_ch_; }
   inline size_t bs_sdr_ch(void) const { return this->bs_sdr_ch_; }
+  inline size_t bs_tx_ch(void) const { return this->bs_tx_ch_; }
+  inline size_t bs_rx_ch(void) const { return this->bs_rx_ch_; }
+  inline size_t cl_tx_ch(void) const { return this->cl_tx_ch_; }
+  inline size_t cl_rx_ch(void) const { return this->cl_rx_ch_; }
+  inline const std::string& bs_tx_channel(void) const { return this->bs_tx_channel_; }
+  inline const std::string& bs_rx_channel(void) const { return this->bs_rx_channel_; }
+  inline const std::string& cl_tx_channel(void) const { return this->cl_tx_channel_; }
+  inline const std::string& cl_rx_channel(void) const { return this->cl_rx_channel_; }
 
   inline bool running(void) const { return this->running_.load(); }
   inline void running(bool value) { this->running_ = value; }
@@ -409,6 +421,8 @@ class Config {
   std::vector<std::string> bs_sdr_file_;  // No accessor
   std::string hub_file_;                  // No accessor
   size_t bs_sdr_ch_;
+  size_t bs_tx_ch_;
+  size_t bs_rx_ch_;
   std::vector<std::vector<std::string>> bs_sdr_ids_;
   std::vector<std::string> hub_ids_;
   std::vector<std::string> calib_ids_;
@@ -427,6 +441,8 @@ class Config {
   size_t num_bs_sdrs_all_;
   size_t num_bs_antennas_all_;
   std::string bs_channel_;
+  std::string bs_tx_channel_;
+  std::string bs_rx_channel_;
   std::string frame_mode_;
   bool bs_hw_framer_;
   bool hw_framer_;
@@ -463,8 +479,12 @@ class Config {
   size_t max_tx_gain_ue_;
   size_t num_cl_sdrs_;
   size_t cl_sdr_ch_;
+  size_t cl_tx_ch_;
+  size_t cl_rx_ch_;
   size_t num_cl_antennas_;
   std::string cl_channel_;
+  std::string cl_tx_channel_;
+  std::string cl_rx_channel_;
   bool cl_agc_en_;
   int cl_agc_gain_init_;
   bool cl_power_ramp_;

@@ -96,16 +96,40 @@ Config::Config(const std::string& jsonfile, const std::string& directory,
   num_bs_antennas_all_ = 0;
   num_cl_sdrs_ = 0;
 
+  // `channel` is the legacy single knob that sets BOTH directions. TX and RX may
+  // now be given independently via `tx_channel` / `rx_channel` (and the UE's
+  // `ue_tx_channel` / `ue_rx_channel`), each defaulting to `channel`, so every
+  // existing config is unchanged. This lets a node transmit on one channel set
+  // and receive on another -- required where a converter is RX-only (the
+  // RFSoC4x2 has 2 DACs but 4 ADCs) or the TX and RX antenna counts differ.
+  // Each spec is letters A-D (any subset, in order); the count feeds the
+  // recorder/antenna accounting (RX) and the stream setup (per direction).
+  const auto valid_ch = [](const std::string& s) {
+    return !s.empty() && !Utils::strToChannels(s).empty();
+  };
   bs_channel_ = tddConf.value("channel", "A");
-  if ((bs_channel_ != "A") && (bs_channel_ != "B") && (bs_channel_ != "AB")) {
-    throw std::invalid_argument("error channel config: not any of A/B/AB!\n");
+  bs_tx_channel_ = tddConf.value("tx_channel", bs_channel_);
+  bs_rx_channel_ = tddConf.value("rx_channel", bs_channel_);
+  if (!valid_ch(bs_tx_channel_) || !valid_ch(bs_rx_channel_)) {
+    throw std::invalid_argument(
+        "error channel config: tx_channel/rx_channel (or channel) must be "
+        "letters A-D\n");
   }
-  bs_sdr_ch_ = (bs_channel_ == "AB") ? 2 : 1;
+  bs_tx_ch_ = Utils::strToChannels(bs_tx_channel_).size();
+  bs_rx_ch_ = Utils::strToChannels(bs_rx_channel_).size();
+  bs_sdr_ch_ = bs_rx_ch_;  // legacy: the recorded-antenna (RX) count per BS SDR
 
   cl_channel_ = tddConf.value("ue_channel", "A");
-  if (cl_channel_ != "A" && cl_channel_ != "B" && cl_channel_ != "AB")
-    throw std::invalid_argument("error channel config: not any of A/B/AB!\n");
-  cl_sdr_ch_ = (cl_channel_ == "AB") ? 2 : 1;
+  cl_tx_channel_ = tddConf.value("ue_tx_channel", cl_channel_);
+  cl_rx_channel_ = tddConf.value("ue_rx_channel", cl_channel_);
+  if (!valid_ch(cl_tx_channel_) || !valid_ch(cl_rx_channel_)) {
+    throw std::invalid_argument(
+        "error channel config: ue_tx_channel/ue_rx_channel (or ue_channel) "
+        "must be letters A-D\n");
+  }
+  cl_tx_ch_ = Utils::strToChannels(cl_tx_channel_).size();
+  cl_rx_ch_ = Utils::strToChannels(cl_rx_channel_).size();
+  cl_sdr_ch_ = cl_rx_ch_;  // legacy: the recorded-antenna (RX) count per UE SDR
 
   auto serials_file = tddConf.value("serial_file", "./files/topology.json");
   loadTopology(serials_file, bs_only, client_only, calibrate);

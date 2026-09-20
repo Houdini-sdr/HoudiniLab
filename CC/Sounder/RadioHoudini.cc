@@ -46,7 +46,7 @@ SoapySDR::Kwargs RadioHoudini::rxStreamArgs(const RadioParams& p) {
   // channel) stream the driver rejects local_port: the wire fixes each channel's
   // port at 10001 + channel (SH-142/SH-159), so leave it unset and let the
   // driver assign per channel.
-  if (p.channels.size() <= 1) {
+  if (p.rx_channels.size() <= 1) {
     rx["local_port"] = std::to_string(p.rx_local_port);
   }
   // Break-at-gap (SH-253). The driver defaults this ON, but the whole gap
@@ -92,10 +92,11 @@ void RadioHoudini::setup(int ch, double rxgain, double txgain) {
 
 void RadioHoudini::printSettings() const {
   // No CBRS/UHF front end and no LNA/PGA/TIA gain stages to report.
-  const size_t ch0 = params_.channels.empty() ? 0 : params_.channels.front();
+  const size_t rx0 = params_.rx_channels.empty() ? 0 : params_.rx_channels.front();
+  const size_t tx0 = params_.tx_channels.empty() ? 0 : params_.tx_channels.front();
   std::cout << params_.label << ": Houdini RFSoC, RX "
-            << (dev_->getSampleRate(SOAPY_SDR_RX, ch0) / 1e6) << " MSPS, TX "
-            << (dev_->getSampleRate(SOAPY_SDR_TX, ch0) / 1e6) << " MSPS" << std::endl;
+            << (dev_->getSampleRate(SOAPY_SDR_RX, rx0) / 1e6) << " MSPS, TX "
+            << (dev_->getSampleRate(SOAPY_SDR_TX, tx0) / 1e6) << " MSPS" << std::endl;
   // Register this node's gateware/firmware/host stack for the cross-node
   // skew check the Receiver runs once every radio set is up.
   Sounder::NodeVersions::instance().add(params_.label, dev_->getHardwareInfo());

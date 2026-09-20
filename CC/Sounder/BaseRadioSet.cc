@@ -258,7 +258,8 @@ void BaseRadioSet::init(BaseRadioContext* context) {
   p.id = _cfg->bs_sdr_ids().at(c).at(i);
   p.label = "BS " + p.id;
   p.remote_port = _cfg->remote_port();
-  p.channels = Utils::strToChannels(_cfg->bs_channel());
+  p.tx_channels = Utils::strToChannels(_cfg->bs_tx_channel());
+  p.rx_channels = Utils::strToChannels(_cfg->bs_rx_channel());
   p.rate_hz = _cfg->rate();
   p.nco_hz = _cfg->nco();
   p.rf_freq_hz = _cfg->radio_rf_freq();
@@ -301,8 +302,9 @@ void BaseRadioSet::configure(BaseRadioContext* context) {
   std::atomic_ulong* thread_count = context->thread_count;
   delete context;
 
-  //load channels
-  auto channels = Utils::strToChannels(_cfg->bs_channel());
+  //load channels (Iris per-channel analog gain; a no-op on Houdini). The RX
+  // channel set drives it -- symmetric on Iris, and the recorded set otherwise.
+  auto channels = Utils::strToChannels(_cfg->bs_rx_channel());
   for (auto ch : channels) {
     double rxgain = _cfg->rx_gain().at(ch);
     double txgain = _cfg->tx_gain().at(ch);

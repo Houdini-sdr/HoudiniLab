@@ -131,7 +131,10 @@ RadioSoapy::RadioSoapy(const RadioParams& params, Type type, const SoapySDR::Kwa
                        bool houdini_streams)
     : Radio(params), type_(type) {
   const char* soapyFmt = SOAPY_SDR_CS16;
-  const std::vector<size_t>& channels = params.channels;
+  // TX and RX may use different channel sets (see RadioParams). Rate/NCO are set
+  // per direction on that direction's channels; streams open per direction too.
+  const std::vector<size_t>& tx_channels = params.tx_channels;
+  const std::vector<size_t>& rx_channels = params.rx_channels;
   const double rxFreqOffset = params.rx_freq_offset_hz;
   const double txFreqOffset = params.tx_freq_offset_hz;
   dev_ = SoapySDR::Device::make(args);
@@ -151,7 +154,7 @@ RadioSoapy::RadioSoapy(const RadioParams& params, Type type, const SoapySDR::Kwa
   // (the replay RAM plays at that rate and the RFDC interpolates to the DAC) --
   // but the BS beacon now passes the app rate, so no host upsampling is needed.
   if (preStreamRxRate > 0.0) {
-    for (auto ch : channels) {
+    for (auto ch : rx_channels) {
       dev_->setSampleRate(SOAPY_SDR_RX, ch, preStreamRxRate);
     }
   }
@@ -159,11 +162,11 @@ RadioSoapy::RadioSoapy(const RadioParams& params, Type type, const SoapySDR::Kwa
     double tx_rate = preStreamTxRate;
     if (tx_rate < 0.0) {  // sentinel: use the device max TX rate (replay)
       const auto tr = dev_->listSampleRates(
-          SOAPY_SDR_TX, channels.empty() ? 0 : channels.front());
+          SOAPY_SDR_TX, tx_channels.empty() ? 0 : tx_channels.front());
       tx_rate = tr.empty() ? 0.0 : *std::max_element(tr.begin(), tr.end());
     }
     if (tx_rate > 0.0) {
-      for (auto ch : channels) {
+      for (auto ch : tx_channels) {
         dev_->setSampleRate(SOAPY_SDR_TX, ch, tx_rate);
       }
     }
@@ -185,8 +188,10 @@ RadioSoapy::RadioSoapy(const RadioParams& params, Type type, const SoapySDR::Kwa
           "are NOT nominal.\n",
           rxFreqOffset, txFreqOffset, preStreamFreq / 1e6);
     }
-    for (auto ch : channels) {
+    for (auto ch : rx_channels) {
       dev_->setFrequency(SOAPY_SDR_RX, ch, rx_f);
+    }
+    for (auto ch : tx_channels) {
       dev_->setFrequency(SOAPY_SDR_TX, ch, tx_f);
     }
     // Read the NCO BACK. setFrequency returning is not evidence the hardware
@@ -194,12 +199,13 @@ RadioSoapy::RadioSoapy(const RadioParams& params, Type type, const SoapySDR::Kwa
     // which would make an injection experiment silently measure nothing and
     // publish the null as a result (the SH-338 class).
     if (rxFreqOffset != 0.0 || txFreqOffset != 0.0) {
-      for (auto ch : channels) {
-        MLPD_WARN(
-            "Radio: NCO readback ch%zu -- RX %.3f Hz, TX %.3f Hz (wanted "
-            "%.3f / %.3f)\n",
-            ch, dev_->getFrequency(SOAPY_SDR_RX, ch),
-            dev_->getFrequency(SOAPY_SDR_TX, ch), rx_f, tx_f);
+      for (auto ch : rx_channels) {
+        MLPD_WARN("Radio: NCO readback RX ch%zu -- %.3f Hz (wanted %.3f)\n", ch,
+                  dev_->getFrequency(SOAPY_SDR_RX, ch), rx_f);
+      }
+      for (auto ch : tx_channels) {
+        MLPD_WARN("Radio: NCO readback TX ch%zu -- %.3f Hz (wanted %.3f)\n", ch,
+                  dev_->getFrequency(SOAPY_SDR_TX, ch), tx_f);
       }
     }
 
@@ -215,7 +221,7 @@ RadioSoapy::RadioSoapy(const RadioParams& params, Type type, const SoapySDR::Kwa
     const bool want_mts = txStreamArgs.count("mts") != 0u &&
                           txStreamArgs.at("mts") == "true";
     const bool has_ch0 =
-        std::find(channels.begin(), channels.end(), 0u) != channels.end();
+        std::find(tx_channels.begin(), tx_channels.end(), 0u) != tx_channels.end();
     // A throw from any setup below escapes the constructor, so ~Radio never
     // runs: release what this ctor already owns (the aux stream, then the
     // device) before rethrowing, or the in-process radio-open retry finds
@@ -230,14 +236,15 @@ RadioSoapy::RadioSoapy(const RadioParams& params, Type type, const SoapySDR::Kwa
       // SH-235: the Houdini driver rejects a multi-channel TX stream on both
       // modes (replay beacon and live pilot). Open one single-channel TX stream
       // per channel; xmit routes each channel's buffer to its own stream.
-      for (auto ch : channels) {
+      for (auto ch : tx_channels) {
         tx_streams_.push_back(
             dev_->setupStream(SOAPY_SDR_TX, soapyFmt, {ch}, txStreamArgs));
       }
-      // One combined RX stream over all channels. Since SH-142/SH-159 landed the
-      // driver activates a >1-channel RX stream and readStream fills buffs[i] per
-      // channel, sample-aligned with one timestamp -- the same shape Iris uses.
-      rxs_ = dev_->setupStream(SOAPY_SDR_RX, soapyFmt, channels, rxStreamArgs);
+      // One combined RX stream over the RX channels. Since SH-142/SH-159 landed
+      // the driver activates a >1-channel RX stream and readStream fills buffs[i]
+      // per channel, sample-aligned with one timestamp -- the same shape Iris
+      // uses. RX channels may differ from TX (e.g. an RX-only converter).
+      rxs_ = dev_->setupStream(SOAPY_SDR_RX, soapyFmt, rx_channels, rxStreamArgs);
     } catch (...) {
       for (auto* s : tx_streams_)
         if (s != nullptr) dev_->closeStream(s);
@@ -249,15 +256,15 @@ RadioSoapy::RadioSoapy(const RadioParams& params, Type type, const SoapySDR::Kwa
       throw;
     }
   } else {
-    // Iris/UHD: one multi-channel RX stream; TX one multi-channel stream too.
-    rxs_ = dev_->setupStream(SOAPY_SDR_RX, soapyFmt, channels, rxStreamArgs);
+    // Iris/UHD: one multi-channel RX stream; one multi-channel TX stream.
+    rxs_ = dev_->setupStream(SOAPY_SDR_RX, soapyFmt, rx_channels, rxStreamArgs);
     tx_streams_.push_back(
-        dev_->setupStream(SOAPY_SDR_TX, soapyFmt, channels, txStreamArgs));
+        dev_->setupStream(SOAPY_SDR_TX, soapyFmt, tx_channels, txStreamArgs));
   }
 
   const std::string driver =
       (args.count("driver") != 0u) ? args.at("driver") : std::string();
-  num_rx_ch_ = channels.empty() ? 1 : channels.size();
+  num_rx_ch_ = rx_channels.empty() ? 1 : rx_channels.size();
 
   // RESET_DATA_LOGIC is an Iris-only setting; Houdini/UHD don't implement it.
   if (!isUhd() && driver == "iris") {
@@ -291,7 +298,9 @@ long long RadioSoapy::txTimeNs(long long frame_ticks, double rate_hz, bool /*tdd
 }
 
 void RadioSoapy::printSettings() const {
-  const auto& channels = params_.channels;
+  // Iris/UHD diagnostics (Houdini overrides this); TX and RX use the same set
+  // there, so the RX channel list covers both directions' reports.
+  const auto& channels = params_.rx_channels;
   std::cout << params_.label << ": Front end " << dev_->getHardwareInfo()["frontend"]
             << std::endl;
   for (auto ch : channels) {
