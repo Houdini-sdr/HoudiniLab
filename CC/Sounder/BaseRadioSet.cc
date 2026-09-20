@@ -304,10 +304,13 @@ void BaseRadioSet::configure(BaseRadioContext* context) {
 
   //load channels (Iris per-channel analog gain; a no-op on Houdini). The RX
   // channel set drives it -- symmetric on Iris, and the recorded set otherwise.
+  // The gain vectors carry only the configured (A/B) channels, so a higher RX
+  // channel (C/D on an RX-only converter) has no gain entry; default it to 0 --
+  // Houdini has no analog gain stage and ignores it anyway.
   auto channels = Utils::strToChannels(_cfg->bs_rx_channel());
   for (auto ch : channels) {
-    double rxgain = _cfg->rx_gain().at(ch);
-    double txgain = _cfg->tx_gain().at(ch);
+    double rxgain = ch < _cfg->rx_gain().size() ? _cfg->rx_gain().at(ch) : 0.0;
+    double txgain = ch < _cfg->tx_gain().size() ? _cfg->tx_gain().at(ch) : 0.0;
     bsRadios.at(c).at(i)->setup(ch, rxgain, txgain);
   }
 
