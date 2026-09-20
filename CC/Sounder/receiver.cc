@@ -240,7 +240,7 @@ void Receiver::initBuffers() {
     }
   }
   pilotbuffA_.at(0) = config_->pilot_ci16().data();
-  if (config_->cl_sdr_ch() == 2) {
+  if (config_->cl_tx_ch() == 2) {  // UE transmits a pilot on each TX channel
     pilotbuffA_.at(1) = zeros_.at(0);
     pilotbuffB_.at(1) = config_->pilot_ci16().data();
     pilotbuffB_.at(0) = zeros_.at(1);
@@ -332,9 +332,9 @@ void Receiver::baseTxBeacon(int radio_id, int cell, int frame_id,
   std::vector<void*> beaconbuff(2);
   if (config_->beam_sweep() == true) {
     size_t beacon_frame_slot = frame_id % config_->num_bs_antennas_all();
-    for (size_t ch = 0; ch < config_->bs_sdr_ch(); ++ch) {
+    for (size_t ch = 0; ch < config_->bs_tx_ch(); ++ch) {
       size_t cell_radio_id = radio_id + config_->n_bs_sdrs_agg().at(cell);
-      size_t cell_ant_id = cell_radio_id * config_->bs_sdr_ch();
+      size_t cell_ant_id = cell_radio_id * config_->bs_tx_ch();
       int hdmd = CommsLib::hadamard2(beacon_frame_slot, cell_ant_id);
       beaconbuff.at(ch) = hdmd == -1 ? config_->neg_beacon_ci16().data()
                                      : config_->beacon_ci16().data();
@@ -343,9 +343,9 @@ void Receiver::baseTxBeacon(int radio_id, int cell, int frame_id,
     if (config_->beacon_radio() == (size_t)radio_id) {
       size_t bcn_ch = config_->beacon_channel();
       beaconbuff.at(bcn_ch) = config_->beacon_ci16().data();
-      if (config_->bs_sdr_ch() > 1) beaconbuff.at(1 - bcn_ch) = zeros_.at(0);
+      if (config_->bs_tx_ch() > 1) beaconbuff.at(1 - bcn_ch) = zeros_.at(0);
     } else {  // set both channels to zeros
-      for (size_t ch = 0; ch < config_->bs_sdr_ch(); ++ch)
+      for (size_t ch = 0; ch < config_->bs_tx_ch(); ++ch)
         beaconbuff.at(ch) = zeros_.at(ch);
     }
   }
@@ -378,11 +378,11 @@ int Receiver::baseTxData(int radio_id, int cell, int frame_id,
     if (config_->bs_hw_framer() == false)
       this->baseTxBeacon(radio_id, cell, event.frame_id, txFrameTime);
     for (size_t s = 0; s < config_->dl_slot_per_frame(); s++) {
-      for (size_t ch = 0; ch < config_->bs_sdr_ch(); ++ch) {
+      for (size_t ch = 0; ch < config_->bs_tx_ch(); ++ch) {
         char* cur_ptr_buffer =
             bs_tx_buffer_[radio_id].buffer.data() + (cur_offset * packetLength);
         Packet* pkt = reinterpret_cast<Packet*>(cur_ptr_buffer);
-        assert(pkt->ant_id == config_->bs_sdr_ch() * radio_id + ch);
+        assert(pkt->ant_id == config_->bs_tx_ch() * radio_id + ch);
         dl_txbuff.at(ch) = pkt->data;
         cur_offset = (cur_offset + 1) % tx_buffer_size;
       }
@@ -465,7 +465,7 @@ void Receiver::loopRecv(int tid, int core_id, SampleBuffer* rx_buffer) {
   // use token to speed up
   moodycamel::ProducerToken local_ptok(*message_queue_);
 
-  const size_t num_channels = config_->bs_channel().length();
+  const size_t num_channels = config_->bs_rx_ch();  // BS receives on rx_channels
   size_t packetLength = sizeof(Packet) + config_->getPacketDataLength();
   int buffer_chunk_size = rx_buffer[0].buffer.size() / packetLength;
   int bs_tx_buff_size = kSampleBufferFrameNum * config_->slot_per_frame();
@@ -816,7 +816,7 @@ void Receiver::clientTxRx(int tid) {
   rxbuff[1] = buffs.data();
 
   std::vector<void*> ul_txbuff(2);
-  for (size_t ch = 0; ch < config_->cl_sdr_ch(); ch++) {
+  for (size_t ch = 0; ch < config_->cl_tx_ch(); ch++) {
     ul_txbuff.at(ch) =
         std::calloc(config_->samps_per_slot(), sizeof(int16_t) * 2);
   }
@@ -882,7 +882,7 @@ void Receiver::clientTxRx(int tid) {
       }
     }  // end receiveErrors == false)
   }    // end while config_->running() == true)
-  for (size_t ch = 0; ch < config_->cl_sdr_ch(); ch++) {
+  for (size_t ch = 0; ch < config_->cl_tx_ch(); ch++) {
     std::free(ul_txbuff.at(ch));
   }
 }
@@ -891,7 +891,7 @@ void Receiver::clientTxPilots(size_t user_id, long long base_time,
                               double frame_period) {
   // for UHD device, the first pilot should not have an END_BURST flag
   int flags = (((kUsePureUHD == true || kUseSoapyUHD == true) &&
-                (config_->cl_sdr_ch() == 2)))
+                (config_->cl_tx_ch() == 2)))
                   ? kStreamContinuous
                   : kStreamEndBurst;
   int num_samps = config_->samps_per_slot();
@@ -921,7 +921,7 @@ void Receiver::clientTxPilots(size_t user_id, long long base_time,
   }();
   const int horizon =
       horizon_env >= 0 ? horizon_env : config_->ue_pilot_horizon();
-  if (horizon > 0 && stampAnchored() && config_->cl_sdr_ch() == 1) {
+  if (horizon > 0 && stampAnchored()) {  // Houdini seated-burst path (any TX ch)
     // AP-31(c). This ladder used to step by samps_per_frame, on the assumption
     // stated in the comment above -- "with the boards frequency-locked (CFO ~0,
     // no drift) the pilot offset is stable". On free-running clocks it is not,
@@ -956,7 +956,16 @@ void Receiver::clientTxPilots(size_t user_id, long long base_time,
     // worth caching by pad (AP-54); do not re-assert the old property.
     constexpr long long kTddGridTicks = houdini::sync::kHoudiniStrobeOffsetTicks;
     thread_local long long pilot_cursor = 0;  // last-scheduled txTime (samples)
-    thread_local std::vector<std::complex<int16_t>> burst;
+    // One burst PER TX channel: each carries the SAME pilot sequence but seated
+    // in that channel's own pilot slot (cl_pilot_slots[c]), so the channels are
+    // time-orthogonal and the BS estimates each path from its slot. Single-
+    // channel is one burst -- identical to before.
+    const auto& pslots = config_->cl_pilot_slots().at(user_id);
+    const size_t num_tx = std::min(config_->cl_tx_ch(),
+                                   pslots.empty() ? 1 : pslots.size());
+    const long long base_slot =
+        pslots.empty() ? 0 : static_cast<long long>(pslots.at(0));
+    thread_local std::vector<std::vector<std::complex<int16_t>>> bursts;
     thread_local long long burst_pad = -1;
     // An anchor change must reach the WIRE: the cursor otherwise keeps
     // winning the max() below for ~horizon frames and the pilots stay on the
@@ -989,25 +998,43 @@ void Receiver::clientTxPilots(size_t user_id, long long base_time,
       const long long anchor = (cur / kTddGridTicks) * kTddGridTicks;
       const long long pad = cur - anchor;
       if (pad != burst_pad) {
-        const size_t total = static_cast<size_t>(pad) + num_samps +
-                             (ul_fits ? static_cast<size_t>(ul_off) : 0);
+        // The burst spans from the pad to the last content: the furthest pilot
+        // slot (channels are time-orthogonal) or the uplink slot, whichever is
+        // later. Each channel gets its pilot at its own slot offset; the uplink
+        // data (ch A's) rides on every channel at the same U-slot offset.
+        long long span = num_samps;
+        for (size_t c = 0; c < num_tx; ++c) {
+          const long long off =
+              (static_cast<long long>(pslots.at(c)) - base_slot) * num_samps;
+          span = std::max(span, off + num_samps);
+        }
+        if (ul_fits) span = std::max(span, ul_off + num_samps);
+        const size_t total = static_cast<size_t>(pad) + static_cast<size_t>(span);
         // total kept even so the burst ends on a whole 2-sample TX unit; the
         // trailing zero does not move any signal.
-        burst.assign(total + (total & 1), std::complex<int16_t>(0, 0));
-        std::memcpy(burst.data() + pad, pilotbuffA_.at(0),
-                    static_cast<size_t>(num_samps) * 4);
-        if (ul_fits) {
-          std::memcpy(burst.data() + pad + ul_off, ue_databuffA_.at(0),
+        bursts.assign(num_tx, {});
+        for (size_t c = 0; c < num_tx; ++c) {
+          bursts[c].assign(total + (total & 1), std::complex<int16_t>(0, 0));
+          const long long poff =
+              pad + (static_cast<long long>(pslots.at(c)) - base_slot) * num_samps;
+          std::memcpy(bursts[c].data() + poff, config_->pilot_ci16().data(),
                       static_cast<size_t>(num_samps) * 4);
+          if (ul_fits) {
+            std::memcpy(bursts[c].data() + pad + ul_off,
+                        ue_databuffA_.at(0),
+                        static_cast<size_t>(num_samps) * 4);
+          }
         }
         burst_pad = pad;
       }
       long long tt = anchor;  // grid-exact, so radioTx's snap is a no-op
-      const void* bufs[1] = {burst.data()};
-      const int rr = client_radio_set_->radioTx(
-          user_id, bufs, static_cast<int>(burst.size()), flags, tt);
-      if (rr < static_cast<int>(burst.size())) {
-        MLPD_WARN("BAD Write (burst @%lld): %d/%zu\n", cur, rr, burst.size());
+      std::vector<const void*> bufs(num_tx);
+      for (size_t c = 0; c < num_tx; ++c) bufs[c] = bursts[c].data();
+      const int burst_len = static_cast<int>(bursts[0].size());
+      const int rr = client_radio_set_->radioTx(user_id, bufs.data(), burst_len,
+                                                 flags, tt);
+      if (rr < burst_len) {
+        MLPD_WARN("BAD Write (burst @%lld): %d/%d\n", cur, rr, burst_len);
         break;
       }
       pilot_cursor = cur;
@@ -1032,7 +1059,7 @@ void Receiver::clientTxPilots(size_t user_id, long long base_time,
   if (r < num_samps) {
     MLPD_WARN("BAD Write: %d/%d\n", r, num_samps);
   }
-  if (config_->cl_sdr_ch() == 2) {
+  if (config_->cl_tx_ch() == 2) {
     txTime = base_time +
              config_->cl_pilot_slots().at(user_id).at(1) * num_samps -
              config_->tx_advance(user_id);
@@ -1064,12 +1091,12 @@ int Receiver::clientTxData(int tid, int frame_id, long long base_time) {
                    txFrameTime);  // assuming pilot is always sent before data
 
     for (size_t s = 0; s < tx_slots; s++) {
-      for (size_t ch = 0; ch < config_->cl_sdr_ch(); ++ch) {
+      for (size_t ch = 0; ch < config_->cl_tx_ch(); ++ch) {
         char* cur_ptr_buffer =
             cl_tx_buffer_[tid].buffer.data() + (cur_offset * packetLength);
         Packet* pkt = reinterpret_cast<Packet*>(cur_ptr_buffer);
         assert(pkt->slot_id == config_->cl_ul_slots().at(tid).at(s));
-        assert(pkt->ant_id == config_->cl_sdr_ch() * tid + ch);
+        assert(pkt->ant_id == config_->cl_tx_ch() * tid + ch);
         ul_txbuff.at(ch) = pkt->data;
         cur_offset = (cur_offset + 1) % tx_buffer_size;
       }

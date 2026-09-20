@@ -191,7 +191,7 @@ void RecorderWorker::streamCsi(Packet* pkt, NodeType node_type) {
     }
     return;
   }
-  const size_t num_channels = cfg_->bs_channel().size();
+  const size_t num_channels = cfg_->bs_rx_ch();
   const size_t radio_id = pkt->ant_id / num_channels;
   const bool is_pilot =
       cfg_->internal_measurement()
@@ -958,7 +958,7 @@ void RecorderWorker::init(void) {
 
   // How many RF channels per Iris board are enabled ("single" or "dual")
   this->hdf5_->write_attribute("BS_CH_PER_RADIO",
-                               this->cfg_->bs_channel().length());
+                               this->cfg_->bs_rx_ch());
 
   // Frame schedule (string vector)
   // TODO: This should change to matrix when we go to multi-cell
@@ -989,7 +989,7 @@ void RecorderWorker::init(void) {
   for (size_t i = 0; i < bs_ant_num_per_cell.size(); ++i) {
     bs_ant_num_per_cell[i] =
         std::to_string(this->cfg_->bs_sdr_ids().at(i).size() *
-                       this->cfg_->bs_channel().length());
+                       this->cfg_->bs_rx_ch());
   }
   this->hdf5_->write_attribute("BS_ANT_NUM_PER_CELL", bs_ant_num_per_cell);
 
@@ -1198,7 +1198,7 @@ void RecorderWorker::record(int tid, Packet* pkt, NodeType node_type) {
   }
   /* TODO: remove TEMP check */
   size_t end_antenna = (this->antenna_offset_ + this->num_antennas_) - 1;
-  size_t num_channels = this->cfg_->bs_channel().size();
+  size_t num_channels = this->cfg_->bs_rx_ch();
 
   if ((pkt->ant_id < this->antenna_offset_) || (pkt->ant_id > end_antenna)) {
     MLPD_ERROR("Antenna id is not within range of this recorder %d, %zu:%zu",
