@@ -118,7 +118,7 @@ void HoudiniFramer::armReplayBeacon(void) {
   // ready to receive -- activateHoudiniRx() starts it on demand.
   // Beacon is single-antenna: with per-channel TX streams (SH-235) pass it only
   // on the beacon channel's index in the opened channel list, nullptr elsewhere.
-  const auto bs_chans = Utils::strToChannels(cfg_->bs_channel());
+  const auto bs_chans = Utils::strToChannels(cfg_->bs_tx_channel());  // beacon is TX
   const size_t beacon_idx =
       bs_chans.empty() ? 0
                        : std::min(static_cast<size_t>(cfg_->beacon_channel()),
@@ -318,7 +318,7 @@ void HoudiniFramer::armTdd(void) {
       // DAC, e.g. bs_channel "B" -> ch1 = the cabled DAC_A). Using the logical 0
       // fired the strobe on ch0 (DAC_B, not cabled) so the beacon never reached
       // the UE.
-      const auto bs_chans = Utils::strToChannels(cfg_->bs_channel());
+      const auto bs_chans = Utils::strToChannels(cfg_->bs_tx_channel());  // beacon is TX
       const size_t beacon_idx =
           bs_chans.empty()
               ? 0
