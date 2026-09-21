@@ -44,7 +44,8 @@ struct RadioParams {
   std::string id;             ///< Iris serial, UHD address, or the Houdini board IP
   std::string label;          ///< how logs name it ("BS <id>", "UE <id>")
   std::string remote_port;    ///< Houdini: the SoapyRemote port on the board
-  std::vector<size_t> channels;
+  std::vector<size_t> tx_channels;  ///< converter channels to open for transmit
+  std::vector<size_t> rx_channels;  ///< converter channels to open for receive
   double rate_hz = 0.0;
   double nco_hz = 0.0;        ///< Houdini: the mixer NCO; Iris: the BB frequency
   double rf_freq_hz = 0.0;    ///< Iris/UHD: the RF tune

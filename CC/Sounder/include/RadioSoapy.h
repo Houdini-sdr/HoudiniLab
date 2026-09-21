@@ -59,12 +59,21 @@ class RadioSoapy : public Radio {
   Type type_;
 
   SoapySDR::Device* dev_ = nullptr;
-  // nullptr NSDMI is load-bearing: the ctor's cleanup-and-rethrow reads
+  // nullptr / empty NSDMI is load-bearing: the ctor's cleanup-and-rethrow reads
   // these before every setupStream has assigned them (second review 2.1 --
   // an indeterminate txs_ meant closeStream on a wild pointer on the
   // transient-board-wedge retry path).
+  // One combined RX stream over all channels (Iris/UHD and, since SH-142/SH-159
+  // landed, Houdini): readStream fills buffs[i] per channel with one common
+  // timestamp, sample-aligned across channels.
   SoapySDR::Stream* rxs_ = nullptr;
-  SoapySDR::Stream* txs_ = nullptr;
+  // TX streams. Iris/UHD open ONE multi-channel stream (vector size 1) and every
+  // write goes to it. The Houdini driver forbids a multi-channel TX stream
+  // (SH-235: "one channel per live-TX stream; open one stream per channel"), so
+  // the Houdini path opens one SINGLE-channel stream per channel and xmit fans
+  // the per-channel buffers across them. A single-channel config is size 1 in
+  // both worlds, so nothing changes for it. Empty until setupStream succeeds.
+  std::vector<SoapySDR::Stream*> tx_streams_;
   // MTS membership helper: DAC tile 0 must be a GROUP MEMBER (not merely
   // powered), so a single-channel ch1 stream needs this never-activated
   // ch0 replay stream opened first (the canonical mts_check group shape).

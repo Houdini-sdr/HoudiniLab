@@ -116,7 +116,16 @@ void HoudiniFramer::armReplayBeacon(void) {
   // stream is bound to the BS channel (the wired DAC), so xmit targets it. RX
   // is NOT activated here: it would sit unread (overflowing) until the caller is
   // ready to receive -- activateHoudiniRx() starts it on demand.
-  const void* buffs[1] = {iq.data()};
+  // Beacon is single-antenna: with per-channel TX streams (SH-235) pass it only
+  // on the beacon channel's index in the opened channel list, nullptr elsewhere.
+  const auto bs_chans = Utils::strToChannels(cfg_->bs_tx_channel());  // beacon is TX
+  const size_t beacon_idx =
+      bs_chans.empty() ? 0
+                       : std::min(static_cast<size_t>(cfg_->beacon_channel()),
+                                  bs_chans.size() - 1);
+  std::vector<const void*> buffs(bs_chans.empty() ? 1 : bs_chans.size(),
+                                 nullptr);
+  buffs[beacon_idx] = iq.data();
   long long t0 = 0;
   for (size_t c = 0; c < radios_.size(); ++c) {
     for (size_t i = 0; i < radios_.at(c).size(); ++i) {
@@ -126,7 +135,7 @@ void HoudiniFramer::armReplayBeacon(void) {
       // error while the replay bank's level arm is still set) must stop the
       // bring-up here, not arm the loop over stale RAM and play a beacon that
       // is not the one built above (DEMO_VERIFICATION 4.24, SH-348).
-      const int loaded = r->xmit(buffs, static_cast<int>(n_load), 0, t0);
+      const int loaded = r->xmit(buffs.data(), static_cast<int>(n_load), 0, t0);
       if (loaded != static_cast<int>(n_load)) {
         throw std::runtime_error(
             "Houdini beacon replay RAM load refused: " +
@@ -258,7 +267,6 @@ void HoudiniFramer::armTdd(void) {
   std::vector<int16_t> iq;
   buildBeacon(iq);
   const size_t n_load = iq.size() / 2;
-  const void* buffs[1] = {iq.data()};
 
   for (size_t c = 0; c < radios_.size(); ++c) {
     for (size_t i = 0; i < radios_.at(c).size(); ++i) {
@@ -310,12 +318,21 @@ void HoudiniFramer::armTdd(void) {
       // DAC, e.g. bs_channel "B" -> ch1 = the cabled DAC_A). Using the logical 0
       // fired the strobe on ch0 (DAC_B, not cabled) so the beacon never reached
       // the UE.
-      const auto bs_chans = Utils::strToChannels(cfg_->bs_channel());
-      const size_t tx_ch =
+      const auto bs_chans = Utils::strToChannels(cfg_->bs_tx_channel());  // beacon is TX
+      const size_t beacon_idx =
           bs_chans.empty()
               ? 0
-              : bs_chans.at(std::min(static_cast<size_t>(cfg_->beacon_channel()),
-                                     bs_chans.size() - 1));
+              : std::min(static_cast<size_t>(cfg_->beacon_channel()),
+                         bs_chans.size() - 1);
+      const size_t tx_ch = bs_chans.empty() ? 0 : bs_chans.at(beacon_idx);
+      // Beacon is single-antenna: with per-channel TX streams (SH-235) the load
+      // must land only on the beacon channel's stream. Pass its samples at the
+      // beacon channel's index in the opened channel list and nullptr elsewhere;
+      // xmit skips the null channels, so a non-beacon TX stream is never filled
+      // or (via the strobe below, which also targets tx_ch only) armed.
+      std::vector<const void*> buffs(bs_chans.empty() ? 1 : bs_chans.size(),
+                                     nullptr);
+      buffs[beacon_idx] = iq.data();
       // The load/schedule/strobe sequence, re-runnable: the arm retry loop
       // re-invokes it after every teardown ladder (Opus review H1 -- a
       // ladder invalidates this state, so a bare arm retry could arm a
@@ -346,7 +363,7 @@ void HoudiniFramer::armTdd(void) {
         // retry loop runs the ladder, which clears that arm, and re-invokes
         // this setup. Arming over stale RAM would play a beacon that is not
         // the one built above (DEMO_VERIFICATION 4.24, SH-348).
-        const int loaded = r->xmit(buffs, static_cast<int>(n_load), 0, t0);
+        const int loaded = r->xmit(buffs.data(), static_cast<int>(n_load), 0, t0);
         if (loaded != static_cast<int>(n_load)) {
           throw std::runtime_error(
               "Houdini beacon replay RAM load refused: " +
@@ -403,13 +420,24 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
   const int n = static_cast<int>(cfg_->samps_per_slot());
   const size_t K = htdd_rx_slots_.size();  // rx slots/frame (pilot P + uplink U...)
   const size_t cur = htdd_rx_cursor_;
+  // Combined RX delivers C sample-aligned lanes; the caller (loopRecv) provides C
+  // buffers and RadioHoudini::recv reads C lanes, so every read/cache/deliver here
+  // must span all C -- a single-lane read hands the driver a null buffs[1] and its
+  // null-lane guard rejects the whole read (-2 STREAM_ERROR). The pilot/timing is
+  // located on lane 0 and applied to all lanes (they are sample-aligned by the
+  // combined stream). C==1 reduces to the original single-channel path. The cache
+  // is laid out slot-major, lanes contiguous within a slot: [slot k][lane c].
+  const size_t C = std::max<size_t>(1, cfg_->bs_rx_ch());
 
   // Non-first rx slot: serve it from the per-frame cache filled on cursor 0 (one
   // continuous read yields every rx slot of the frame). Shares the frame_id so the
   // recorder places P and U in the same frame.
   if (cur != 0) {
-    std::memcpy(buffs[0], htdd_slot_cache_.data() + cur * static_cast<size_t>(n) * 2,
-                static_cast<size_t>(n) * 4);
+    for (size_t c = 0; c < C; ++c)
+      std::memcpy(
+          buffs[c],
+          htdd_slot_cache_.data() + (cur * C + c) * static_cast<size_t>(n) * 2,
+          static_cast<size_t>(n) * 4);
     const size_t slot = htdd_rx_slots_.at(cur);
     htdd_rx_cursor_ = (cur + 1) % K;
     frameTime = (htdd_cache_frame_ << 32) | (static_cast<long long>(slot) << 16);
@@ -425,10 +453,12 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
                                           htdd_rx_slots_.front())
                        : 0;
   const int fn = static_cast<int>(htdd_frame_ticks_) + (span + 3) * n;
-  htdd_cap_buf_.resize(static_cast<size_t>(fn) * 2);
-  void* cb[1] = {htdd_cap_buf_.data()};
+  htdd_cap_buf_.resize(C * static_cast<size_t>(fn) * 2);
+  std::vector<void*> cb(C);
+  for (size_t c = 0; c < C; ++c)
+    cb[c] = htdd_cap_buf_.data() + c * static_cast<size_t>(fn) * 2;
   long long ft = 0;
-  const int cg = r->recv(cb, fn, ft);
+  const int cg = r->recv(cb.data(), fn, ft);
   // This one read backs every rx slot of the frame, so its padding applies to all of
   // them; latch it before any later recv on this radio overwrites the radio's copy.
   htdd_frame_pad_ = r->lastPadSamples();
@@ -602,7 +632,7 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
   // integer number of slots; extracting the data at pilot+gap would leave it
   // ~260 samples off. Aligning each slot lands every slot at [prefix..] so the
   // recorded data lines up with the pilot for offline equalization.
-  htdd_slot_cache_.resize(K * static_cast<size_t>(n) * 2);
+  htdd_slot_cache_.resize(K * C * static_cast<size_t>(n) * 2);
   long long u_start = -1;  // aligned start of the uplink-data slot, if present
   for (size_t k = 0; k < K; ++k) {
     const long long guess = p_start +
@@ -610,8 +640,15 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
          static_cast<long long>(htdd_pilot_slot_)) * n;
     const long long st = align_slot(guess);
     if (htdd_rx_slots_.at(k) != htdd_pilot_slot_) u_start = st;
-    std::memcpy(htdd_slot_cache_.data() + k * static_cast<size_t>(n) * 2,
-                s + st * 2, static_cast<size_t>(n) * 4);
+    // The centroid start is derived from lane 0 but applies to every lane (the
+    // combined stream is sample-aligned), so extract slot k from each lane's own
+    // capture block at the same offset.
+    for (size_t c = 0; c < C; ++c) {
+      const int16_t* sc = htdd_cap_buf_.data() + c * static_cast<size_t>(fn) * 2;
+      std::memcpy(
+          htdd_slot_cache_.data() + (k * C + c) * static_cast<size_t>(n) * 2,
+          sc + st * 2, static_cast<size_t>(n) * 4);
+    }
   }
   if (getenv("HOUDINI_BS_RX_DEBUG") != nullptr) {
     // Throttle is its OWN knob. HOUDINI_BS_RX_DEBUG=1 has meant "on" in the
@@ -701,7 +738,11 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
       }
     }
   }
-  std::memcpy(buffs[0], htdd_slot_cache_.data(), static_cast<size_t>(n) * 4);
+  // Deliver rx slot 0 (cache index 0), all lanes; cursors 1..K-1 serve the rest.
+  for (size_t c = 0; c < C; ++c)
+    std::memcpy(buffs[c],
+                htdd_slot_cache_.data() + c * static_cast<size_t>(n) * 2,
+                static_cast<size_t>(n) * 4);
   htdd_cache_frame_ = htdd_frame_counter_;
   ++htdd_frame_counter_;
   htdd_rx_cursor_ = (K > 1) ? 1 : 0;

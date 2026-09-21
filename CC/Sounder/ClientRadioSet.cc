@@ -234,7 +234,8 @@ void ClientRadioSet::init(ClientRadioContext* context) {
   p.id = _cfg->cl_sdr_ids().at(i);
   p.label = "UE " + p.id;
   p.remote_port = _cfg->remote_port();
-  p.channels = channels;
+  p.tx_channels = Utils::strToChannels(_cfg->cl_tx_channel());
+  p.rx_channels = Utils::strToChannels(_cfg->cl_rx_channel());
   p.rate_hz = _cfg->rate();
   p.nco_hz = _cfg->nco();
   p.rf_freq_hz = _cfg->radio_rf_freq();

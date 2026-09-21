@@ -296,6 +296,12 @@ void Scheduler::do_it() {
       }
     }
   }
+  MLPD_WARN(
+      "Scheduler do_it loop EXITED: running()=%d gotExitSignal()=%d "
+      "frames_seen=%zu -- stopping all threads\n",
+      static_cast<int>(this->cfg_->running()),
+      static_cast<int>(SignalHandler::gotExitSignal()),
+      this->max_frame_number_);
   this->cfg_->running(false);
   this->receiver_->completeRecvThreads(recv_threads);
   this->receiver_.reset();

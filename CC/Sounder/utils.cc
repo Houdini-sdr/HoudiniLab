@@ -28,22 +28,19 @@ int pin_thread_to_core(int core_id, pthread_t& thread_to_pin) {
 }
 
 std::vector<size_t> Utils::strToChannels(const std::string& channel) {
+  // Each letter A-D maps to converter channel 0-3, in the order written, so any
+  // subset works (e.g. "BC" -> {1,2}, "AC" -> {0,2}). This generalises the old
+  // fixed set (A/B/AB/C/D/CD/ABCD) so TX and RX channel sets can differ; an
+  // unrecognised character yields an empty vector, which the caller rejects.
   std::vector<size_t> channels;
-  if (channel == "A")
-    channels = {0};
-  else if (channel == "B")
-    channels = {1};
-  else if (channel == "AB")
-    channels = {0, 1};
-  else if (channel == "C")
-    channels = {2};
-  else if (channel == "D")
-    channels = {3};
-  else if (channel == "CD")
-    channels = {2, 3};
-  else if (channel == "ABCD")
-    channels = {0, 1, 2, 3};
-  return (channels);
+  for (char c : channel) {
+    if (c >= 'A' && c <= 'D') {
+      channels.push_back(static_cast<size_t>(c - 'A'));
+    } else {
+      return {};  // any junk char invalidates the whole spec
+    }
+  }
+  return channels;
 }
 
 std::vector<std::complex<int16_t>> Utils::cfloat_to_cint16(

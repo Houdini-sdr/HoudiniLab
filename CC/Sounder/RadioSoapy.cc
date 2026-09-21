@@ -131,7 +131,10 @@ RadioSoapy::RadioSoapy(const RadioParams& params, Type type, const SoapySDR::Kwa
                        bool houdini_streams)
     : Radio(params), type_(type) {
   const char* soapyFmt = SOAPY_SDR_CS16;
-  const std::vector<size_t>& channels = params.channels;
+  // TX and RX may use different channel sets (see RadioParams). Rate/NCO are set
+  // per direction on that direction's channels; streams open per direction too.
+  const std::vector<size_t>& tx_channels = params.tx_channels;
+  const std::vector<size_t>& rx_channels = params.rx_channels;
   const double rxFreqOffset = params.rx_freq_offset_hz;
   const double txFreqOffset = params.tx_freq_offset_hz;
   dev_ = SoapySDR::Device::make(args);
@@ -151,7 +154,7 @@ RadioSoapy::RadioSoapy(const RadioParams& params, Type type, const SoapySDR::Kwa
   // (the replay RAM plays at that rate and the RFDC interpolates to the DAC) --
   // but the BS beacon now passes the app rate, so no host upsampling is needed.
   if (preStreamRxRate > 0.0) {
-    for (auto ch : channels) {
+    for (auto ch : rx_channels) {
       dev_->setSampleRate(SOAPY_SDR_RX, ch, preStreamRxRate);
     }
   }
@@ -159,11 +162,11 @@ RadioSoapy::RadioSoapy(const RadioParams& params, Type type, const SoapySDR::Kwa
     double tx_rate = preStreamTxRate;
     if (tx_rate < 0.0) {  // sentinel: use the device max TX rate (replay)
       const auto tr = dev_->listSampleRates(
-          SOAPY_SDR_TX, channels.empty() ? 0 : channels.front());
+          SOAPY_SDR_TX, tx_channels.empty() ? 0 : tx_channels.front());
       tx_rate = tr.empty() ? 0.0 : *std::max_element(tr.begin(), tr.end());
     }
     if (tx_rate > 0.0) {
-      for (auto ch : channels) {
+      for (auto ch : tx_channels) {
         dev_->setSampleRate(SOAPY_SDR_TX, ch, tx_rate);
       }
     }
@@ -185,8 +188,10 @@ RadioSoapy::RadioSoapy(const RadioParams& params, Type type, const SoapySDR::Kwa
           "are NOT nominal.\n",
           rxFreqOffset, txFreqOffset, preStreamFreq / 1e6);
     }
-    for (auto ch : channels) {
+    for (auto ch : rx_channels) {
       dev_->setFrequency(SOAPY_SDR_RX, ch, rx_f);
+    }
+    for (auto ch : tx_channels) {
       dev_->setFrequency(SOAPY_SDR_TX, ch, tx_f);
     }
     // Read the NCO BACK. setFrequency returning is not evidence the hardware
@@ -194,12 +199,13 @@ RadioSoapy::RadioSoapy(const RadioParams& params, Type type, const SoapySDR::Kwa
     // which would make an injection experiment silently measure nothing and
     // publish the null as a result (the SH-338 class).
     if (rxFreqOffset != 0.0 || txFreqOffset != 0.0) {
-      for (auto ch : channels) {
-        MLPD_WARN(
-            "Radio: NCO readback ch%zu -- RX %.3f Hz, TX %.3f Hz (wanted "
-            "%.3f / %.3f)\n",
-            ch, dev_->getFrequency(SOAPY_SDR_RX, ch),
-            dev_->getFrequency(SOAPY_SDR_TX, ch), rx_f, tx_f);
+      for (auto ch : rx_channels) {
+        MLPD_WARN("Radio: NCO readback RX ch%zu -- %.3f Hz (wanted %.3f)\n", ch,
+                  dev_->getFrequency(SOAPY_SDR_RX, ch), rx_f);
+      }
+      for (auto ch : tx_channels) {
+        MLPD_WARN("Radio: NCO readback TX ch%zu -- %.3f Hz (wanted %.3f)\n", ch,
+                  dev_->getFrequency(SOAPY_SDR_TX, ch), tx_f);
       }
     }
 
@@ -215,7 +221,7 @@ RadioSoapy::RadioSoapy(const RadioParams& params, Type type, const SoapySDR::Kwa
     const bool want_mts = txStreamArgs.count("mts") != 0u &&
                           txStreamArgs.at("mts") == "true";
     const bool has_ch0 =
-        std::find(channels.begin(), channels.end(), 0u) != channels.end();
+        std::find(tx_channels.begin(), tx_channels.end(), 0u) != tx_channels.end();
     // A throw from any setup below escapes the constructor, so ~Radio never
     // runs: release what this ctor already owns (the aux stream, then the
     // device) before rethrowing, or the in-process radio-open retry finds
@@ -227,22 +233,38 @@ RadioSoapy::RadioSoapy(const RadioParams& params, Type type, const SoapySDR::Kwa
         aux["mts"] = "true";
         aux_mts_txs_ = dev_->setupStream(SOAPY_SDR_TX, soapyFmt, {0}, aux);
       }
-      txs_ = dev_->setupStream(SOAPY_SDR_TX, soapyFmt, channels, txStreamArgs);
-      rxs_ = dev_->setupStream(SOAPY_SDR_RX, soapyFmt, channels, rxStreamArgs);
+      // SH-235: the Houdini driver rejects a multi-channel TX stream on both
+      // modes (replay beacon and live pilot). Open one single-channel TX stream
+      // per channel; xmit routes each channel's buffer to its own stream.
+      for (auto ch : tx_channels) {
+        tx_streams_.push_back(
+            dev_->setupStream(SOAPY_SDR_TX, soapyFmt, {ch}, txStreamArgs));
+      }
+      // One combined RX stream over the RX channels. Since SH-142/SH-159 landed
+      // the driver activates a >1-channel RX stream and readStream fills buffs[i]
+      // per channel, sample-aligned with one timestamp -- the same shape Iris
+      // uses. RX channels may differ from TX (e.g. an RX-only converter).
+      rxs_ = dev_->setupStream(SOAPY_SDR_RX, soapyFmt, rx_channels, rxStreamArgs);
     } catch (...) {
-      if (txs_ != nullptr) dev_->closeStream(txs_);
+      for (auto* s : tx_streams_)
+        if (s != nullptr) dev_->closeStream(s);
+      tx_streams_.clear();
+      if (rxs_ != nullptr) dev_->closeStream(rxs_);
+      rxs_ = nullptr;
       if (aux_mts_txs_ != nullptr) dev_->closeStream(aux_mts_txs_);
       SoapySDR::Device::unmake(dev_);
       throw;
     }
   } else {
-    rxs_ = dev_->setupStream(SOAPY_SDR_RX, soapyFmt, channels, rxStreamArgs);
-    txs_ = dev_->setupStream(SOAPY_SDR_TX, soapyFmt, channels, txStreamArgs);
+    // Iris/UHD: one multi-channel RX stream; one multi-channel TX stream.
+    rxs_ = dev_->setupStream(SOAPY_SDR_RX, soapyFmt, rx_channels, rxStreamArgs);
+    tx_streams_.push_back(
+        dev_->setupStream(SOAPY_SDR_TX, soapyFmt, tx_channels, txStreamArgs));
   }
 
   const std::string driver =
       (args.count("driver") != 0u) ? args.at("driver") : std::string();
-  num_rx_ch_ = channels.empty() ? 1 : channels.size();
+  num_rx_ch_ = rx_channels.empty() ? 1 : rx_channels.size();
 
   // RESET_DATA_LOGIC is an Iris-only setting; Houdini/UHD don't implement it.
   if (!isUhd() && driver == "iris") {
@@ -276,7 +298,9 @@ long long RadioSoapy::txTimeNs(long long frame_ticks, double rate_hz, bool /*tdd
 }
 
 void RadioSoapy::printSettings() const {
-  const auto& channels = params_.channels;
+  // Iris/UHD diagnostics (Houdini overrides this); TX and RX use the same set
+  // there, so the RX channel list covers both directions' reports.
+  const auto& channels = params_.rx_channels;
   std::cout << params_.label << ": Front end " << dev_->getHardwareInfo()["frontend"]
             << std::endl;
   for (auto ch : channels) {
@@ -331,40 +355,58 @@ RadioSoapy::~RadioSoapy() {
   }
   dev_->closeStream(rxs_);
   rxs_ = nullptr;
-  dev_->closeStream(txs_);
-  txs_ = nullptr;
+  for (auto* s : tx_streams_)
+    if (s != nullptr) dev_->closeStream(s);
+  tx_streams_.clear();
   SoapySDR::Device::unmake(dev_);
   dev_ = nullptr;
 }
 
 
 int RadioSoapy::drainTxStatus() {
-  if (tx_status_unsupported_ || txs_ == nullptr) return 0;
+  if (tx_status_unsupported_ || tx_streams_.empty()) return 0;
   int problems = 0;
-  for (int i = 0; i < 32; ++i) {  // bounded so a hot queue cannot stall the caller
-    size_t chan_mask = 0;
-    int flags = 0;
-    long long t = 0;
-    const int st = dev_->readStreamStatus(txs_, chan_mask, flags, t, 0);
-    if (st == SOAPY_SDR_TIMEOUT) break;  // nothing queued: the normal case
-    if (st == SOAPY_SDR_NOT_SUPPORTED) {
-      tx_status_unsupported_ = true;
-      break;
-    }
-    if (st == 0) continue;  // a benign event (e.g. an end-of-burst ack)
-    ++problems;
-    ++tx_status_events_;
-    const long long now =
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now().time_since_epoch())
-            .count();
-    if (now - tx_status_log_ns_ > 5000000000LL) {  // at most one line per 5 s
-      tx_status_log_ns_ = now;
-      MLPD_WARN(
-          "TX status: %zu problem event(s), latest %s at %lld ns. A burst the "
-          "driver accepted was sent late or dropped; on the TDD grid that shows "
-          "up as a phase jump, not as a write error.\n",
-          tx_status_events_, SoapySDR::errToStr(st), t);
+  // Poll every TX stream: per-channel Houdini streams each carry their own
+  // status queue, so draining only one would miss a late/dropped burst on the
+  // others. Each stream keeps the original 32-read bound.
+  for (size_t si = 0; si < tx_streams_.size(); ++si) {
+    auto* txs = tx_streams_[si];
+    if (txs == nullptr) continue;
+    for (int i = 0; i < 32; ++i) {  // bounded so a hot queue cannot stall the caller
+      size_t chan_mask = 0;
+      int flags = 0;
+      long long t = 0;
+      const int st = dev_->readStreamStatus(txs, chan_mask, flags, t, 0);
+      if (st == SOAPY_SDR_TIMEOUT) break;  // nothing queued: the normal case
+      if (st == SOAPY_SDR_NOT_SUPPORTED) {
+        tx_status_unsupported_ = true;
+        return problems;  // the surface is absent device-wide, stop asking
+      }
+      if (st == 0) continue;  // a benign event (e.g. an end-of-burst ack)
+      ++problems;
+      ++tx_status_events_;
+      const long long now =
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now().time_since_epoch())
+              .count();
+      if (now - tx_status_log_ns_ > 5000000000LL) {  // at most one line per 5 s
+        tx_status_log_ns_ = now;
+        // AP-78 forensics: attribute the event to its per-channel stream and
+        // dump the driver's per-bank counters (late/under/drops/played), which
+        // discriminate pacing (late) from starvation (under) from overfeeding
+        // (drops) -- the aggregate text alone cannot. TX_BANK_STATUS carries the
+        // real totals even when a readStreamStatus counter saturates at 0xFFFF.
+        std::string bank;
+        try {
+          bank = dev_->readSetting("TX_BANK_STATUS");
+        } catch (...) {
+          bank = "<readSetting failed>";
+        }
+        MLPD_WARN(
+            "TX status: %zu problem event(s), latest %s (code %d) on "
+            "tx_stream[%zu] at %lld ns. TX_BANK_STATUS=%s\n",
+            tx_status_events_, SoapySDR::errToStr(st), st, si, t, bank.c_str());
+      }
     }
   }
   return problems;
@@ -411,25 +453,97 @@ int RadioSoapy::xmit(const void* const* buffs, int samples, int flags,
                       SOAPY_SDR_HAS_TIME | SOAPY_SDR_END_BURST,
                       SOAPY_SDR_WAIT_TRIGGER | SOAPY_SDR_END_BURST};
   int flag_args = soapyFlags[flags];
-  int r =
-      dev_->writeStream(txs_, buffs, samples, flag_args, frameTime, 1000000);
-  if (r != samples) {
-    std::cerr << "unexpected writeStream error " << SoapySDR::errToStr(r)
-              << std::endl;
+  if (tx_streams_.empty()) return 0;
+  // One multi-channel stream (Iris/UHD, or a single channel): write the whole
+  // per-channel buffer array in one call, exactly as before.
+  if (tx_streams_.size() == 1) {
+    int r = dev_->writeStream(tx_streams_.front(), buffs, samples, flag_args,
+                              frameTime, 1000000);
+    if (r != samples) {
+      std::cerr << "unexpected writeStream error " << SoapySDR::errToStr(r)
+                << std::endl;
+    }
+    return r;
   }
-  return (r);
+  // Houdini per-channel streams (SH-235): buffs[i] belongs to channel i, so
+  // write each to its own single-channel stream at the SAME timed start. Both
+  // channels share the board's clock, so one frameTime seats them on the same
+  // TDD grid. Return the first short/failed write so the caller's BAD-Write
+  // check still fires.
+  int ret = samples;
+  // AP-78 diag: the second-written per-channel stream's burst can miss its tick
+  // (arrives late -> the bank never starts -> zero-fill), while the first-written
+  // one makes the deadline. HOUDINI_TX_REVERSE flips the write order so we can
+  // tell an order-dependent margin (the dead lane follows the order) from a
+  // stream-specific fault (the dead lane stays put).
+  static const bool tx_reverse = getenv("HOUDINI_TX_REVERSE") != nullptr;
+  const size_t nstreams = tx_streams_.size();
+  // AP-78 step-2 diag: the real per-burst host lead is frameTime - device clock
+  // at the moment of the write. One getHardwareTime RPC per xmit (env-gated,
+  // throttled) -- both streams write within ~us of this, so it is the base lead
+  // they share; if it is under the driver's ~500 us threshold the second write
+  // misses. Not in the shipped loop (the RPC is ~0.1-1.5 ms).
+  static const bool margin_log = getenv("HOUDINI_TX_MARGIN") != nullptr;
+  if (margin_log) {
+    static long long last_margin_ns = 0;
+    const long long nowns =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count();
+    if (nowns - last_margin_ns > 2000000000LL) {
+      last_margin_ns = nowns;
+      long long hw = -1;
+      try {
+        hw = dev_->getHardwareTime();
+      } catch (...) {
+      }
+      MLPD_WARN(
+          "TX margin: frameTime=%lld ns hw_time=%lld ns lead=%.1f us "
+          "(nstreams=%zu)\n",
+          frameTime, hw, (hw >= 0 ? (frameTime - hw) / 1000.0 : 0.0), nstreams);
+    }
+  }
+  for (size_t k = 0; k < nstreams; ++k) {
+    const size_t i = tx_reverse ? (nstreams - 1 - k) : k;
+    // A null channel buffer means "nothing on this channel this write" -- the BS
+    // beacon is single-antenna, so it passes its samples only on the beacon
+    // channel and nullptr on the others; fanning it to every channel would fill
+    // (and, if armed, be refused on) a channel that is not the beacon's.
+    if (buffs[i] == nullptr) continue;
+    long long ft = frameTime;  // writeStream may advance its copy; keep ours
+    // writeStream takes flags by REFERENCE and CLEARS the consumed bits
+    // (HAS_TIME/END_BURST) in place. flag_args must therefore be copied PER
+    // STREAM, exactly like ft above -- otherwise the first stream's write zeroes
+    // the flags and every later stream is written with 0x0 (no HAS_TIME), so its
+    // burst is never anchored to its tick, the bank never activates, and it
+    // zero-fills. That was the whole dead-second-antenna bug (AP-78): the driver
+    // DIAG showed ch0 flags=0x6 but ch1 flags=0x0 for the same pilot.
+    int fl = flag_args;
+    const void* one[1] = {buffs[i]};
+    int r = dev_->writeStream(tx_streams_[i], one, samples, fl, ft, 1000000);
+    if (r != samples) {
+      std::cerr << "unexpected writeStream error (ch " << i << ") "
+                << SoapySDR::errToStr(r) << std::endl;
+      if (ret == samples) ret = r;
+    }
+  }
+  return ret;
 }
 
 void RadioSoapy::activateXmit(void) {
   // for USRP device start tx stream UHD_INIT_TIME_SEC sec in the future
-  if (!isUhd()) {
-    dev_->activateStream(txs_);
-  } else {
-    dev_->activateStream(txs_, SOAPY_SDR_HAS_TIME, UHD_INIT_TIME_SEC * 1e9, 0);
+  for (auto* txs : tx_streams_) {
+    if (!isUhd()) {
+      dev_->activateStream(txs);
+    } else {
+      dev_->activateStream(txs, SOAPY_SDR_HAS_TIME, UHD_INIT_TIME_SEC * 1e9, 0);
+    }
   }
 }
 
-void RadioSoapy::deactivateXmit(void) { dev_->deactivateStream(txs_); }
+void RadioSoapy::deactivateXmit(void) {
+  for (auto* txs : tx_streams_) dev_->deactivateStream(txs);
+}
 
 int RadioSoapy::getTriggers(void) const {
   return std::stoi(dev_->readSetting("TRIGGER_COUNT"));
