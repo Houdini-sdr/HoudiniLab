@@ -511,9 +511,16 @@ int RadioSoapy::xmit(const void* const* buffs, int samples, int flags,
     // (and, if armed, be refused on) a channel that is not the beacon's.
     if (buffs[i] == nullptr) continue;
     long long ft = frameTime;  // writeStream may advance its copy; keep ours
+    // writeStream takes flags by REFERENCE and CLEARS the consumed bits
+    // (HAS_TIME/END_BURST) in place. flag_args must therefore be copied PER
+    // STREAM, exactly like ft above -- otherwise the first stream's write zeroes
+    // the flags and every later stream is written with 0x0 (no HAS_TIME), so its
+    // burst is never anchored to its tick, the bank never activates, and it
+    // zero-fills. That was the whole dead-second-antenna bug (AP-78): the driver
+    // DIAG showed ch0 flags=0x6 but ch1 flags=0x0 for the same pilot.
+    int fl = flag_args;
     const void* one[1] = {buffs[i]};
-    int r = dev_->writeStream(tx_streams_[i], one, samples, flag_args, ft,
-                              1000000);
+    int r = dev_->writeStream(tx_streams_[i], one, samples, fl, ft, 1000000);
     if (r != samples) {
       std::cerr << "unexpected writeStream error (ch " << i << ") "
                 << SoapySDR::errToStr(r) << std::endl;
