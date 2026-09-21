@@ -918,6 +918,19 @@ void Receiver::clientTxPilots(size_t user_id, long long base_time,
   long long txTime = base_time +
                      config_->cl_pilot_slots().at(user_id).at(0) * num_samps -
                      config_->tx_advance(user_id);
+  // AP-78: give every pilot burst extra HOST LEAD so both per-channel writes
+  // clear their tick. xmit writes the streams back-to-back at the same tick, and
+  // the SECOND write was missing the deadline by a razor-thin margin -> its bank
+  // never started and zero-filled (confirmed: reversing the write order moved the
+  // dead lane). The lead is added in WHOLE FRAMES so the pilot's seating (its
+  // position modulo the BS frame, and thus which rx_gate slot it lands in) is
+  // unchanged. Tunable while calibrating the threshold; default 0 = old behavior.
+  static const long long lead_frames = [] {
+    const char* e = std::getenv("HOUDINI_PILOT_LEAD_FRAMES");
+    return e != nullptr ? std::atoll(e) : 0;
+  }();
+  if (lead_frames > 0)
+    txTime += lead_frames * static_cast<long long>(config_->samps_per_frame());
   // Houdini pilot-only closed loop: the BS and UE loops are async and slower than
   // real-time (recvHoudini drains before it reads), so a single once-per-loop timed
   // pilot rarely lands in the frame the BS happens to arm its rx_gate on. With the

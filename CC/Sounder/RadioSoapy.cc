@@ -471,7 +471,40 @@ int RadioSoapy::xmit(const void* const* buffs, int samples, int flags,
   // TDD grid. Return the first short/failed write so the caller's BAD-Write
   // check still fires.
   int ret = samples;
-  for (size_t i = 0; i < tx_streams_.size(); ++i) {
+  // AP-78 diag: the second-written per-channel stream's burst can miss its tick
+  // (arrives late -> the bank never starts -> zero-fill), while the first-written
+  // one makes the deadline. HOUDINI_TX_REVERSE flips the write order so we can
+  // tell an order-dependent margin (the dead lane follows the order) from a
+  // stream-specific fault (the dead lane stays put).
+  static const bool tx_reverse = getenv("HOUDINI_TX_REVERSE") != nullptr;
+  const size_t nstreams = tx_streams_.size();
+  // AP-78 step-2 diag: the real per-burst host lead is frameTime - device clock
+  // at the moment of the write. One getHardwareTime RPC per xmit (env-gated,
+  // throttled) -- both streams write within ~us of this, so it is the base lead
+  // they share; if it is under the driver's ~500 us threshold the second write
+  // misses. Not in the shipped loop (the RPC is ~0.1-1.5 ms).
+  static const bool margin_log = getenv("HOUDINI_TX_MARGIN") != nullptr;
+  if (margin_log) {
+    static long long last_margin_ns = 0;
+    const long long nowns =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count();
+    if (nowns - last_margin_ns > 2000000000LL) {
+      last_margin_ns = nowns;
+      long long hw = -1;
+      try {
+        hw = dev_->getHardwareTime();
+      } catch (...) {
+      }
+      MLPD_WARN(
+          "TX margin: frameTime=%lld ns hw_time=%lld ns lead=%.1f us "
+          "(nstreams=%zu)\n",
+          frameTime, hw, (hw >= 0 ? (frameTime - hw) / 1000.0 : 0.0), nstreams);
+    }
+  }
+  for (size_t k = 0; k < nstreams; ++k) {
+    const size_t i = tx_reverse ? (nstreams - 1 - k) : k;
     // A null channel buffer means "nothing on this channel this write" -- the BS
     // beacon is single-antenna, so it passes its samples only on the beacon
     // channel and nullptr on the others; fanning it to every channel would fill
