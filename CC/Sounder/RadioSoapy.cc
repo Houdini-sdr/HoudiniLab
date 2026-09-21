@@ -369,7 +369,8 @@ int RadioSoapy::drainTxStatus() {
   // Poll every TX stream: per-channel Houdini streams each carry their own
   // status queue, so draining only one would miss a late/dropped burst on the
   // others. Each stream keeps the original 32-read bound.
-  for (auto* txs : tx_streams_) {
+  for (size_t si = 0; si < tx_streams_.size(); ++si) {
+    auto* txs = tx_streams_[si];
     if (txs == nullptr) continue;
     for (int i = 0; i < 32; ++i) {  // bounded so a hot queue cannot stall the caller
       size_t chan_mask = 0;
@@ -390,11 +391,21 @@ int RadioSoapy::drainTxStatus() {
               .count();
       if (now - tx_status_log_ns_ > 5000000000LL) {  // at most one line per 5 s
         tx_status_log_ns_ = now;
+        // AP-78 forensics: attribute the event to its per-channel stream and
+        // dump the driver's per-bank counters (late/under/drops/played), which
+        // discriminate pacing (late) from starvation (under) from overfeeding
+        // (drops) -- the aggregate text alone cannot. TX_BANK_STATUS carries the
+        // real totals even when a readStreamStatus counter saturates at 0xFFFF.
+        std::string bank;
+        try {
+          bank = dev_->readSetting("TX_BANK_STATUS");
+        } catch (...) {
+          bank = "<readSetting failed>";
+        }
         MLPD_WARN(
-            "TX status: %zu problem event(s), latest %s at %lld ns. A burst the "
-            "driver accepted was sent late or dropped; on the TDD grid that shows "
-            "up as a phase jump, not as a write error.\n",
-            tx_status_events_, SoapySDR::errToStr(st), t);
+            "TX status: %zu problem event(s), latest %s (code %d) on "
+            "tx_stream[%zu] at %lld ns. TX_BANK_STATUS=%s\n",
+            tx_status_events_, SoapySDR::errToStr(st), st, si, t, bank.c_str());
       }
     }
   }
