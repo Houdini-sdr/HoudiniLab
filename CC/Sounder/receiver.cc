@@ -981,10 +981,23 @@ void Receiver::clientTxPilots(size_t user_id, long long base_time,
     // time-orthogonal and the BS estimates each path from its slot. Single-
     // channel is one burst -- identical to before.
     const auto& pslots = config_->cl_pilot_slots().at(user_id);
-    const size_t num_tx = std::min(config_->cl_tx_ch(),
-                                   pslots.empty() ? 1 : pslots.size());
+    // Transmit on EVERY TX channel. When there are fewer pilot slots than TX
+    // channels (one shared pilot slot for a spatially-separated 2-channel link:
+    // each BS antenna hears only its own cabled UE antenna, so the two pilots
+    // need not be time-orthogonal -- firing both in the SAME slot lets the BS
+    // separate them in space, and the per-antenna view then has one clean pilot
+    // per antenna instead of one valid + one noise slot), channels past the last
+    // slot reuse it. With one slot per channel this is the original
+    // time-orthogonal path unchanged.
+    const size_t num_tx = std::max<size_t>(1, config_->cl_tx_ch());
     const long long base_slot =
         pslots.empty() ? 0 : static_cast<long long>(pslots.at(0));
+    // Pilot slot for TX channel c: its own slot if it has one, else the last
+    // (shared) slot. Guards pslots.at(c) against num_tx > pslots.size().
+    auto pslot_of = [&](size_t c) -> long long {
+      if (pslots.empty()) return base_slot;
+      return static_cast<long long>(pslots.at(std::min(c, pslots.size() - 1)));
+    };
     thread_local std::vector<std::vector<std::complex<int16_t>>> bursts;
     thread_local long long burst_pad = -1;
     // An anchor change must reach the WIRE: the cursor otherwise keeps
@@ -1024,8 +1037,7 @@ void Receiver::clientTxPilots(size_t user_id, long long base_time,
         // data (ch A's) rides on every channel at the same U-slot offset.
         long long span = num_samps;
         for (size_t c = 0; c < num_tx; ++c) {
-          const long long off =
-              (static_cast<long long>(pslots.at(c)) - base_slot) * num_samps;
+          const long long off = (pslot_of(c) - base_slot) * num_samps;
           span = std::max(span, off + num_samps);
         }
         if (ul_fits) span = std::max(span, ul_off + num_samps);
@@ -1035,8 +1047,7 @@ void Receiver::clientTxPilots(size_t user_id, long long base_time,
         bursts.assign(num_tx, {});
         for (size_t c = 0; c < num_tx; ++c) {
           bursts[c].assign(total + (total & 1), std::complex<int16_t>(0, 0));
-          const long long poff =
-              pad + (static_cast<long long>(pslots.at(c)) - base_slot) * num_samps;
+          const long long poff = pad + (pslot_of(c) - base_slot) * num_samps;
           std::memcpy(bursts[c].data() + poff, config_->pilot_ci16().data(),
                       static_cast<size_t>(num_samps) * 4);
           if (ul_fits) {
