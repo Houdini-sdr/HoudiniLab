@@ -24,6 +24,7 @@
 #include <cstdlib>
 #include <random>
 
+#include "SoapySDR/Errors.hpp"
 #include "SoapySDR/Time.hpp"
 #include "include/comms-lib.h"
 #include "include/logger.h"
@@ -631,6 +632,10 @@ void Receiver::loopRecv(int tid, int core_id, SampleBuffer* rx_buffer) {
                                              rxTimeBs);
 
         if (r < 0) {
+          MLPD_WARN(
+              "BS recv (non-hw-framer path): radioRx returned %d at frame %zu "
+              "slot %zu -- STOPPING sounder (running(false))\n",
+              r, frame_id, slot_id);
           config_->running(false);
           break;
         }
@@ -673,13 +678,28 @@ void Receiver::loopRecv(int tid, int core_id, SampleBuffer* rx_buffer) {
         long long frameTime = 0;
         const int rx_ret =
             this->base_radio_set_->radioRx(radio_id, cell, samp, frameTime);
+        // A negative return is RECOVERABLE, not fatal. The combined multi-channel
+        // RX stream realigns the channels after a packet loss on one of them and
+        // reports it (OVERFLOW / a realign code, Tier-1 SH-160); a read that
+        // finds nothing reports TIMEOUT. A single one used to stop the whole
+        // sounder (running(false)), which is why a 2-channel run died ~1 s after
+        // sync. Drop the round and keep running -- the receive loop must not kill
+        // the sounder on a transient RX hiccup. Log the code, throttled, so a
+        // persistent error is still visible.
         if (rx_ret < 0) {
-          config_->running(false);
-          break;
+          static std::atomic<long long> negc{0};
+          const long long n = negc.fetch_add(1);
+          if ((n % 200) == 0) {  // braces load-bearing: MLPD_WARN is multi-stmt
+            MLPD_WARN(
+                "BS recv: radioRx returned %d (%s), occurrence %lld -- dropping "
+                "the round (recoverable; combined-RX realign or empty read)\n",
+                rx_ret, SoapySDR::errToStr(rx_ret), n + 1);
+          }
         }
-        if (rx_ret == 0) {
-          // No slot this round: the framer has no rx slots yet, or the read came
-          // back too short to yield one. Either way buffs and frameTime were left
+        if (rx_ret <= 0) {
+          // No slot this round: the framer has no rx slots yet, the read came
+          // back too short to yield one, or a recoverable negative above.
+          // Either way buffs and frameTime were left
           // untouched, so publishing here would build a packet on an unset
           // frameTime (garbage frame/slot ids) over stale samples. Release the
           // reserved buffers and move on (AP-10).
@@ -1873,6 +1893,10 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
 
   while (config_->running() == true) {
     if (config_->max_frame() > 0 && frame_id >= config_->max_frame()) {
+      MLPD_WARN(
+          "Client sync loop: frame_id (%zu) >= max_frame (%zu), tid %d -- "
+          "STOPPING sounder (running(false))\n",
+          frame_id, config_->max_frame(), tid);
       config_->running(false);
       break;
     }
