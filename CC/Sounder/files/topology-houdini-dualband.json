@@ -1,0 +1,15 @@
+{
+    "_comment": "HS-202 mode-V roles (plan section 6 wiring): .22 = BS, .21 = UE. The XUD1A sits on .21. The pre-mode-V topology-houdini.json has them the other way round.",
+    "BaseStations": {
+        "BS0": {
+            "sdr": [
+                "168.6.244.22"
+            ]
+        }
+    },
+    "Clients": {
+        "sdr": [
+            "168.6.244.21"
+        ]
+    }
+}
