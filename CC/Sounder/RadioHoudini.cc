@@ -70,14 +70,49 @@ SoapySDR::Kwargs RadioHoudini::txStreamArgs(const RadioParams& p) {
   return tx;
 }
 
+houdini::modev::Plan RadioHoudini::modeVPlan(const RadioParams& p) {
+  houdini::modev::Plan m;
+  m.tx_channels = p.tx_channels;
+  m.rx_channels = p.rx_channels;
+  m.tx_rate_hz = p.tx_rate_hz > 0.0 ? p.tx_rate_hz : p.rate_hz;
+  m.rx_rate_hz = p.rate_hz;
+  m.adc_fs_hz = p.adc_fs_hz;
+  m.dac_fs_hz = p.dac_fs_hz;
+  m.default_nco_hz = p.nco_hz;
+  m.nco_by_channel = p.nco_by_channel;
+  m.half_bw_hz = p.half_bw_hz;
+  m.tx_gain_db = p.tx_gain_db;
+  m.rx_gain_db = p.rx_gain_db;
+  m.rx_freq_offset_hz = p.rx_freq_offset_hz;
+  m.tx_freq_offset_hz = p.tx_freq_offset_hz;
+  return m;
+}
+
 RadioHoudini::RadioHoudini(const RadioParams& params)
-    // RX and TX both at the app rate, tuned to the NCO -- all before
-    // setupStream (Houdini forbids a live rate change). The beacon replay RAM
-    // plays out at THIS rate and the RFDC interpolates to the DAC, so no host
-    // upsampling is needed (the old DAC-max sentinel made the beacon recur
-    // every 512 samples and buried the correlator's 2-rep peak).
+    : RadioHoudini(params, params.adc_fs_hz > 0.0
+                               ? std::make_shared<houdini::modev::Result>()
+                               : nullptr) {}
+
+RadioHoudini::RadioHoudini(const RadioParams& params,
+                           std::shared_ptr<houdini::modev::Result> mv)
+    // One-rate path: RX and TX both at the app rate, tuned to the NCO, all
+    // before setupStream (Houdini forbids a live rate change); the beacon
+    // replay RAM plays at THIS rate and the RFDC interpolates to the DAC.
+    // Mode V (AP-79, converter Fs configured): the whole converter bring-up
+    // runs instead, in the device's order, with the per-channel NCO and the
+    // derived zones, calibration modes and inverse sinc; the result is kept
+    // so each RX lane knows whether it needs the channel filter.
     : RadioSoapy(params, Type::kSoapyHoudini, deviceArgs(params), rxStreamArgs(params),
-                 txStreamArgs(params), params.rate_hz, params.rate_hz, params.nco_hz, true) {}
+                 txStreamArgs(params), params.rate_hz, params.rate_hz, params.nco_hz, true,
+                 mv == nullptr
+                     ? std::function<void(SoapySDR::Device&)>()
+                     : [mv, plan = modeVPlan(params), label = params.label](SoapySDR::Device& dev) {
+                         *mv = houdini::modev::bringUp(dev, plan);
+                         for (const auto& entry : mv->log) {
+                           MLPD_INFO("%s mode V: %s\n", label.c_str(), entry.c_str());
+                         }
+                       }),
+      mode_v_(std::move(mv)) {}
 
 void RadioHoudini::setup(int ch, double rxgain, double txgain) {
   // The mixer NCO is the only tuning knob and there is no antenna, analog

@@ -27,9 +27,9 @@
 using json = nlohmann::json;
 
 static size_t kFpgaTxRamSize = 4096;
-static size_t kMaxSupportedFFTSize = 2048;
+static size_t kMaxSupportedFFTSize = 4096;  // AP-79: the 5G-like fft 4096
 static size_t kMinSupportedFFTSize = 64;
-static size_t kMaxSupportedCPSize = 128;
+static size_t kMaxSupportedCPSize = 512;  // AP-79: CP 288 at fft 4096
 
 Config::Config(const std::string& jsonfile, const std::string& directory,
                const bool bs_only, const bool client_only, const bool calibrate)
@@ -144,6 +144,67 @@ Config::Config(const std::string& jsonfile, const std::string& directory,
   freq_ = tddConf.value("frequency", 2.5e9);
   rate_ = tddConf.value("sample_rate", 5e6);
   nco_ = tddConf.value("nco_frequency", 0.75 * rate_);
+  // AP-79 mode V, all optional (absent = one rate, one NCO, as before). The TX
+  // stream may run at twice the RX/tick rate: every TX waveform is still built
+  // at sample_rate and doubled by the x2 interpolator at the radio boundary
+  // (dsp/band_filters.h), so no other ratio is accepted.
+  tx_rate_ = tddConf.value("tx_sample_rate", rate_);
+  if (tx_rate_ != rate_ && tx_rate_ != 2.0 * rate_) {
+    throw std::invalid_argument(
+        "tx_sample_rate must equal sample_rate or twice it (the x2 TX "
+        "interpolator is the only one built)");
+  }
+  if (tx_rate_ != rate_) {
+    // Guard until the x2 interpolator is wired into the TX path (AP-79, the
+    // next step removes this): without it the waveforms built at sample_rate
+    // would play at twice the speed and twice the bandwidth.
+    throw std::invalid_argument(
+        "tx_sample_rate != sample_rate is not wired yet: the x2 TX interpolator "
+        "is built and tested but not yet in the TX path (AP-79)");
+  }
+  adc_fs_hz_ = tddConf.value("rfdc_adc_fs_mhz", 0.0) * 1e6;
+  dac_fs_hz_ = tddConf.value("rfdc_dac_fs_mhz", 0.0) * 1e6;
+  if ((adc_fs_hz_ > 0.0) != (dac_fs_hz_ > 0.0)) {
+    throw std::invalid_argument(
+        "rfdc_adc_fs_mhz and rfdc_dac_fs_mhz are set together or not at all");
+  }
+  // Only the NCO is per channel [user: keep the config common, split only
+  // what must differ]; zone, calibration mode, inverse sinc and the RX filter
+  // are derived from it (houdini/rf_plan.h).
+  if (tddConf.contains("channel_nco_frequency")) {
+    const auto& m = tddConf["channel_nco_frequency"];
+    if (!m.is_object()) {
+      throw std::invalid_argument(
+          "channel_nco_frequency must be an object of channel letter -> Hz");
+    }
+    for (auto it = m.begin(); it != m.end(); ++it) {
+      const auto chs = Utils::strToChannels(it.key());
+      if (chs.size() != 1 || !it.value().is_number()) {
+        throw std::invalid_argument("channel_nco_frequency: key \"" + it.key() +
+                                    "\" must be ONE letter A-D with a value in Hz");
+      }
+      channel_nco_[chs.front()] = it.value().get<double>();
+    }
+  }
+  houdini_tx_gain_db_ = tddConf.value("houdini_tx_gain_db",
+                                      std::numeric_limits<double>::quiet_NaN());
+  houdini_rx_gain_db_ = tddConf.value("houdini_rx_gain_db",
+                                      std::numeric_limits<double>::quiet_NaN());
+  if (adc_fs_hz_ > 0.0 && tddConf.value("radio_type", "iris") != std::string("houdini")) {
+    throw std::invalid_argument("rfdc_*_fs_mhz (mode V) is Houdini-only");
+  }
+  if (adc_fs_hz_ > 0.0 && (tddConf.value("fft_size", 0) <= 0 ||
+                           tddConf.value("ofdm_data_num", 0) <= 0)) {
+    // The per-channel plan is checked against the waveform's occupied band.
+    throw std::invalid_argument(
+        "mode V (rfdc_*_fs_mhz) needs fft_size and ofdm_data_num: the channel "
+        "plan is checked against the band the waveform occupies");
+  }
+  if (tx_rate_ != rate_ && !(adc_fs_hz_ > 0.0)) {
+    throw std::invalid_argument(
+        "tx_sample_rate != sample_rate needs the mode-V converter plan "
+        "(rfdc_adc_fs_mhz / rfdc_dac_fs_mhz); without it the TX rate is not applied");
+  }
   symbol_per_slot_ = tddConf.value("ofdm_symbol_per_slot", 1);
   fft_size_ = tddConf.value("fft_size", 0);
   cp_size_ = tddConf.value("cp_size", 0);
@@ -987,23 +1048,24 @@ void Config::genPilots() {
   }
 
   // compose pilot slot
+  // Refuse rather than clamp: a silent clamp left ofdm_data_num, the slot
+  // length and every derived bandwidth describing a waveform that was not the
+  // one generated (AP-79 review: fft 4096 clamped to 2048 doubled the
+  // computed occupancy and failed the mode-V channel plan).
   if (fft_size_ > kMaxSupportedFFTSize) {
-    fft_size_ = kMaxSupportedFFTSize;
-    std::cout << "Unsupported fft size! Setting fft size to "
-              << kMaxSupportedFFTSize << "..." << std::endl;
+    throw std::invalid_argument("fft_size " + std::to_string(fft_size_) + " above " +
+                                std::to_string(kMaxSupportedFFTSize));
   }
-
-  if (fft_size_ < kMinSupportedFFTSize) {
+  if (fft_size_ < kMinSupportedFFTSize) {  // unset in the Iris configs: keep the old floor
     fft_size_ = kMinSupportedFFTSize;
     std::cout << "Unsupported fft size! Setting fft size to "
               << kMinSupportedFFTSize << "..." << std::endl;
   }
-
   if (cp_size_ > kMaxSupportedCPSize) {
-    cp_size_ = 0;
-    std::cout << "Invalid cp size! Setting cp size to " << cp_size_ << "..."
-              << std::endl;
+    throw std::invalid_argument("cp_size " + std::to_string(cp_size_) + " above " +
+                                std::to_string(kMaxSupportedCPSize));
   }
+
 
   if (fft_size_ == 64) {
     pilot_sym_f_ = CommsLib::getSequence(CommsLib::LTS_SEQ_F);

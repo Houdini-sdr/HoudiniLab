@@ -128,7 +128,8 @@ RadioSoapy::RadioSoapy(const RadioParams& params, Type type, const SoapySDR::Kwa
                        const SoapySDR::Kwargs& rxStreamArgs,
                        const SoapySDR::Kwargs& txStreamArgs, double preStreamRxRate,
                        double preStreamTxRate, double preStreamFreq,
-                       bool houdini_streams)
+                       bool houdini_streams,
+                       const std::function<void(SoapySDR::Device&)>& preStream)
     : Radio(params), type_(type) {
   const char* soapyFmt = SOAPY_SDR_CS16;
   // TX and RX may use different channel sets (see RadioParams). Rate/NCO are set
@@ -153,12 +154,25 @@ RadioSoapy::RadioSoapy(const RadioParams& params, Type type, const SoapySDR::Kwa
   // a negative preStreamTxRate is a sentinel for "use the device max TX rate"
   // (the replay RAM plays at that rate and the RFDC interpolates to the DAC) --
   // but the BS beacon now passes the app rate, so no host upsampling is needed.
-  if (preStreamRxRate > 0.0) {
+  // A backend that owns its whole pre-stream configuration (Houdini mode V,
+  // AP-79) runs it here, between make() and the first setupStream, in place
+  // of the one-rate, one-NCO block below. A throw releases the device first,
+  // for the same reason the stream setup below does (Opus review M12).
+  if (preStream) {
+    try {
+      preStream(*dev_);
+    } catch (...) {
+      SoapySDR::Device::unmake(dev_);
+      dev_ = nullptr;
+      throw;
+    }
+  }
+  if (!preStream && preStreamRxRate > 0.0) {
     for (auto ch : rx_channels) {
       dev_->setSampleRate(SOAPY_SDR_RX, ch, preStreamRxRate);
     }
   }
-  if (preStreamTxRate != 0.0) {
+  if (!preStream && preStreamTxRate != 0.0) {
     double tx_rate = preStreamTxRate;
     if (tx_rate < 0.0) {  // sentinel: use the device max TX rate (replay)
       const auto tr = dev_->listSampleRates(
@@ -171,7 +185,7 @@ RadioSoapy::RadioSoapy(const RadioParams& params, Type type, const SoapySDR::Kwa
       }
     }
   }
-  if (preStreamFreq > 0.0) {
+  if (!preStream && preStreamFreq > 0.0) {
     // rx/txFreqOffset DELIBERATELY detune this radio to inject a known carrier
     // offset (AP-33/AP-34 validation): with both boards on the shared 10 MHz
     // reference there is no natural CFO, so the only way to confirm the beacon
@@ -227,6 +241,26 @@ RadioSoapy::RadioSoapy(const RadioParams& params, Type type, const SoapySDR::Kwa
     // device) before rethrowing, or the in-process radio-open retry finds
     // the device still held by a half-built attempt (Opus review M12).
     try {
+      // The ADC half of the MTS rule (software lane, M2): the group needs an
+      // RX member on ADC tile 0. The planned nodes have one (RX ch0); a node
+      // that omits it is refused here, naming the fix, rather than left to a
+      // sync that fails or lands unsynced. Skipped when the driver does not
+      // report tiles.
+      if (want_mts && !rx_channels.empty()) {
+        bool tile0 = false, reported = false;
+        for (auto ch : rx_channels) {
+          const auto info = dev_->getChannelInfo(SOAPY_SDR_RX, ch);
+          const auto it = info.find("rfdc_tile_index");
+          if (it == info.end()) continue;
+          reported = true;
+          tile0 = tile0 || it->second == "0";
+        }
+        if (reported && !tile0) {
+          throw std::invalid_argument(
+              "MTS needs an RX channel on ADC tile 0 (channel A or B); add one "
+              "to rx_channel / ue_rx_channel");
+        }
+      }
       if (want_mts && !has_ch0) {
         SoapySDR::Kwargs aux;
         aux["tx_mode"] = "replay";

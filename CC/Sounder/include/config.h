@@ -17,6 +17,8 @@
 #include <algorithm>
 #include <atomic>
 #include <vector>
+#include <limits>
+#include <map>
 
 #include "sync/beacon_shape.h"
 #include "sync/rx_path_fixes.h"
@@ -83,6 +85,20 @@ class Config {
   inline double bw_filter(void) const { return this->bw_filter_; }
   inline double freq(void) const { return this->freq_; }
   inline double nco(void) const { return this->nco_; }
+  // AP-79 mode V (see config.cc for the rules).
+  inline double tx_rate(void) const { return this->tx_rate_; }
+  inline double adc_fs_hz(void) const { return this->adc_fs_hz_; }
+  inline double dac_fs_hz(void) const { return this->dac_fs_hz_; }
+  inline bool mode_v(void) const { return this->adc_fs_hz_ > 0.0; }
+  inline const std::map<size_t, double>& channel_nco(void) const { return this->channel_nco_; }
+  inline double houdini_tx_gain_db(void) const { return this->houdini_tx_gain_db_; }
+  inline double houdini_rx_gain_db(void) const { return this->houdini_rx_gain_db_; }
+  /// Half the bandwidth the OFDM waveform occupies (data subcarriers), Hz.
+  inline double occupied_half_bw_hz(void) const {
+    return fft_size_ == 0 ? 0.0
+                          : static_cast<double>(symbol_data_subcarrier_num_) * rate_ /
+                                static_cast<double>(fft_size_) / 2.0;
+  }
   inline double radio_rf_freq(void) const { return this->radio_rf_freq_; }
   inline bool single_gain(void) const { return this->single_gain_; }
   inline bool cl_agc_en(void) const { return this->cl_agc_en_; }
@@ -384,6 +400,12 @@ class Config {
   // common features
   double freq_;
   double nco_;  // baseband frequency controlled by NCO
+  double tx_rate_ = 0.0;     // AP-79: TX stream rate (sample_rate or twice it)
+  double adc_fs_hz_ = 0.0;   // AP-79: RF-ADC / RF-DAC Fs; 0 = leave the device's
+  double dac_fs_hz_ = 0.0;
+  std::map<size_t, double> channel_nco_;  // AP-79: per-channel NCO overrides
+  double houdini_tx_gain_db_ = 0.0;       // AP-79: NaN = not written
+  double houdini_rx_gain_db_ = 0.0;
   double rate_;
   double
       radio_rf_freq_;  // RF frequency set frame_modeon the radio after NCO adjustments

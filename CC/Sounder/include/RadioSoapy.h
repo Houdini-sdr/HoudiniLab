@@ -9,6 +9,7 @@
 #ifndef RADIO_SOAPY_H_
 #define RADIO_SOAPY_H_
 
+#include <functional>
 #include <cstdint>
 #include <vector>
 
@@ -54,7 +55,8 @@ class RadioSoapy : public Radio {
   RadioSoapy(const RadioParams& params, Type type, const SoapySDR::Kwargs& args,
              const SoapySDR::Kwargs& rxStreamArgs, const SoapySDR::Kwargs& txStreamArgs,
              double preStreamRxRate, double preStreamTxRate, double preStreamFreq,
-             bool houdini_streams);
+             bool houdini_streams,
+             const std::function<void(SoapySDR::Device&)>& preStream = nullptr);
   bool isUhd() const { return type_ == Type::kSoapyUhd; }
   Type type_;
 

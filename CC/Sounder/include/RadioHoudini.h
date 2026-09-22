@@ -9,13 +9,21 @@
 #define RADIO_HOUDINI_H_
 
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 #include "RadioSoapy.h"
+#include "houdini/mode_v_bringup.h"
 
 class RadioHoudini : public RadioSoapy {
  public:
   explicit RadioHoudini(const RadioParams& params);
+
+  /// AP-79 mode V: the per-channel plan the bring-up derived and applied,
+  /// null on the one-rate path. rxChannelFilter(ch) says whether RX `ch`
+  /// needs the +-25 MHz channel filter (its mirror lands in the output).
+  const houdini::modev::Result* modeV() const { return mode_v_.get(); }
+  bool rxChannelFilter(size_t ch) const { return mode_v_ != nullptr && mode_v_->rxFilter(ch); }
 
   Type type() const override { return Type::kSoapyHoudini; }
   houdini::sync::Platform platform() const override { return houdini::sync::Platform::kHoudini; }
@@ -46,6 +54,11 @@ class RadioHoudini : public RadioSoapy {
   static SoapySDR::Kwargs txStreamArgs(const RadioParams& p);
 
  private:
+  RadioHoudini(const RadioParams& params, std::shared_ptr<houdini::modev::Result> mv);
+  /// The mode-V plan for this node, from its params.
+  static houdini::modev::Plan modeVPlan(const RadioParams& p);
+
+  std::shared_ptr<houdini::modev::Result> mode_v_;  // null unless mode V
   double rx_rate_ = 0.0;         // cached RX sample rate for the grid tracker
   int64_t rx_sample_pos_ = 0;    // absolute samples emitted across recv calls
   size_t last_pad_samples_ = 0;  // zeros inserted into the last window

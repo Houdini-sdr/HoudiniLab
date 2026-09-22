@@ -29,6 +29,8 @@
 #include <cstdint>
 #include <cstdlib>
 #include <memory>
+#include <limits>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -59,6 +61,15 @@ struct RadioParams {
   bool tdd = false;           ///< the driver's TDD tick anchor for the UE pilot
   bool mts = true;            ///< multi-tile sync on every stream (AP-23)
   std::string timeout = "1000000";
+  // AP-79 mode V (Houdini). adc_fs_hz > 0 selects the mode-V converter
+  // bring-up (houdini/mode_v_bringup.h) in place of the one-rate, one-NCO path.
+  double tx_rate_hz = 0.0;  ///< TX stream rate; 0 = rate_hz
+  double adc_fs_hz = 0.0;
+  double dac_fs_hz = 0.0;
+  std::map<size_t, double> nco_by_channel;  ///< per-channel overrides of nco_hz
+  double half_bw_hz = 0.0;  ///< occupied half bandwidth of the waveform
+  double tx_gain_db = std::numeric_limits<double>::quiet_NaN();  ///< NaN: not written
+  double rx_gain_db = std::numeric_limits<double>::quiet_NaN();
 };
 
 class Radio {

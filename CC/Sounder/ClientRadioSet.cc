@@ -241,6 +241,14 @@ void ClientRadioSet::init(ClientRadioContext* context) {
   p.rf_freq_hz = _cfg->radio_rf_freq();
   p.bw_filter_hz = _cfg->bw_filter();
   p.single_gain = _cfg->single_gain();
+  // AP-79 mode V: the converter plan, the per-channel NCOs, the Houdini gains.
+  p.tx_rate_hz = _cfg->tx_rate();
+  p.adc_fs_hz = _cfg->adc_fs_hz();
+  p.dac_fs_hz = _cfg->dac_fs_hz();
+  p.nco_by_channel = _cfg->channel_nco();
+  p.half_bw_hz = _cfg->occupied_half_bw_hz();
+  p.tx_gain_db = _cfg->houdini_tx_gain_db();
+  p.rx_gain_db = _cfg->houdini_rx_gain_db();
   p.rx_freq_offset_hz = ueRxFreqOffsetHz();
   p.tx_freq_offset_hz = ueTxFreqOffsetHz();
   // Houdini UE: one RX host port per radio; the UE feeds pilots live, so

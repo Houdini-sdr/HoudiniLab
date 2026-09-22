@@ -308,6 +308,12 @@ add_executable(rf_plan_test tests/comms-func/rf_plan_test.cc)
 target_include_directories(rf_plan_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 add_test(NAME rf_plan COMMAND rf_plan_test)
 
+# AP-79: the mode-V bring-up order and values against a recording fake device.
+add_executable(mode_v_bringup_test tests/comms-func/mode_v_bringup_test.cc)
+target_include_directories(mode_v_bringup_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(mode_v_bringup_test ${SoapySDR_LIBRARIES})
+add_test(NAME mode_v_bringup COMMAND mode_v_bringup_test)
+
 # The index-convention check AP-34(a) did not have. Links the real CommsLib so
 # it exercises the REAL detector; a replica would agree with itself.
 add_executable(beacon_geometry_test
