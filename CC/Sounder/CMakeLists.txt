@@ -296,6 +296,12 @@ add_executable(grid_tracker_test tests/comms-func/grid_tracker_test.cc)
 target_include_directories(grid_tracker_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 add_test(NAME grid_tracker COMMAND grid_tracker_test)
 
+# AP-79: the x2 TX interpolator and the sub-6 RX channel filter, measured on
+# the implementation, with the mutation matrix. Header-only; no radio.
+add_executable(band_filters_test tests/comms-func/band_filters_test.cc)
+target_include_directories(band_filters_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_test(NAME band_filters COMMAND band_filters_test)
+
 # The index-convention check AP-34(a) did not have. Links the real CommsLib so
 # it exercises the REAL detector; a replica would agree with itself.
 add_executable(beacon_geometry_test
