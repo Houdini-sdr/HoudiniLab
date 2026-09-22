@@ -302,6 +302,12 @@ add_executable(band_filters_test tests/comms-func/band_filters_test.cc)
 target_include_directories(band_filters_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 add_test(NAME band_filters COMMAND band_filters_test)
 
+# AP-79: the per-channel RF-DC plan (zone, calibration mode, RX filter)
+# derived from the NCO, checked against the HS-202 plan's table.
+add_executable(rf_plan_test tests/comms-func/rf_plan_test.cc)
+target_include_directories(rf_plan_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_test(NAME rf_plan COMMAND rf_plan_test)
+
 # The index-convention check AP-34(a) did not have. Links the real CommsLib so
 # it exercises the REAL detector; a replica would agree with itself.
 add_executable(beacon_geometry_test
