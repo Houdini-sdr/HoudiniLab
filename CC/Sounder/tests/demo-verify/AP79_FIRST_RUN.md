@@ -109,12 +109,12 @@ The ladder, one change per rung; run each only after the one before passes:
 
 Every rung has run (DEMO_VERIFICATION section 9). R1 and R2 run on the
 calibrated hold (0.3 to 0.5 ppm), where the carrier offset is harmless at fft
-256. At R3's 30 kHz spacing it costs about 2.5 dB of EVM (ICI); the rest of
-R3's floor is oscillator phase noise, a property of the clocking. R3 decodes
-without steering. The in-sounder clock steering (branch `park/clock-steer`)
-rolls in only after the validation runs, against their regression data; the
-per-symbol CSI de-rotation is in but OFF by default (`HOUDINI_CSI_DEROTATE=1`)
-until an R3 A/B measures it.
+256. At R3's 30 kHz spacing it DOMINATES the EVM: its leakage sits on the
+pilot as well as the data and costs about 9 dB (DEMO_VERIFICATION 9.13), so a
+run's R3 EVM tracks that run's offset. R3 decodes without correction. The
+in-sounder clock steering (branch `park/clock-steer`) rolls in only after the
+validation runs, against their regression data. (A per-symbol CSI de-rotation
+was tried and removed: it changes EVM by 0.00 dB.)
 
 ## 3. What the sounder logs
 

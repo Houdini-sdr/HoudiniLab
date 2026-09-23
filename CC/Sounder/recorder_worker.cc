@@ -27,7 +27,6 @@
 #include "include/macros.h"
 #include "include/rx_gap_sink.h"  // RxGapSink -> /Data/Gaps at finalize
 #include "include/utils.h"
-#include "include/houdini/csi_average.h"
 
 namespace Sounder {
 
@@ -312,11 +311,6 @@ void RecorderWorker::sendCsi(Packet* pkt) {
   const int es = symStart(d, slot);  // symbol-0 start (fixed prefix by default; sym_start knob)
   int s0 = nsym / 8, s1 = nsym - nsym / 8;
   if (s1 <= s0) { s0 = 0; s1 = nsym; }
-  // Per-symbol estimates, averaged. HOUDINI_CSI_DEROTATE=1 removes each
-  // symbol's common rotation first (AP-79 #5, houdini/csi_average.h): OFF by
-  // default until R3 measures it, since at fft 64/256 the rotation is
-  // negligible and the chained estimate only adds noise.
-  static const bool derotate = std::getenv("HOUDINI_CSI_DEROTATE") != nullptr;
   std::vector<std::vector<std::complex<float>>> gs;
   for (int sym = s0; sym < s1; ++sym) {
     const int base = es + sym * (cp + N) + cp;
@@ -327,7 +321,10 @@ void RecorderWorker::sendCsi(Packet* pkt) {
     gs.push_back(std::move(F));
   }
   const int used = static_cast<int>(gs.size());
-  const std::vector<std::complex<float>> hacc_avg = houdini::csi::derotatedAverage(gs, derotate);
+  std::vector<std::complex<float>> hacc_avg(N, {0.0f, 0.0f});
+  for (const auto& g : gs)
+    for (int k = 0; k < N; ++k) hacc_avg[k] += g[k];
+  for (auto& v : hacc_avg) v /= static_cast<float>(std::max(1, used));
   // Cache H per antenna (always -- keeps it fresh for equalizing this ant's data).
   auto& H = csi_h_[pkt->ant_id];
   csi_h_frame_[pkt->ant_id] = pkt->frame_id;
