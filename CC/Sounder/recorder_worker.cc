@@ -27,6 +27,7 @@
 #include "include/macros.h"
 #include "include/rx_gap_sink.h"  // RxGapSink -> /Data/Gaps at finalize
 #include "include/utils.h"
+#include "include/houdini/pilot_slope_fit.h"
 
 namespace Sounder {
 
@@ -571,8 +572,8 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
     const auto& psc = cfg_->pilot_sc();
     const auto& pind = cfg_->pilot_sc_ind();
     if (pind.size() >= 2 && !Ys.empty()) {
-      double sk = 0, sp = 0, skk = 0, skp = 0;
-      int npts = 0;
+      std::vector<double> kks;
+      std::vector<std::complex<double>> accs;
       for (size_t c = 0; c < pind.size(); ++c) {
         const size_t k = pind[c];
         if (k >= static_cast<size_t>(N)) continue;
@@ -591,15 +592,16 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
                  std::conj(std::complex<double>(psc[c]));
         }
         if (std::abs(acc) < 1e-12) continue;
-        const double kk = static_cast<double>(k) - N / 2.0;
-        const double ph = std::arg(acc);
-        sk += kk; sp += ph; skk += kk * kk; skp += kk * ph;
-        ++npts;
+        kks.push_back(static_cast<double>(k) - N / 2.0);
+        accs.push_back(acc);
       }
-      if (npts >= 2) {
-        const double denom = npts * skk - sk * sk;
-        if (std::abs(denom) > 1e-9) {
-          const double slope = (npts * skp - sk * sp) / denom;  // rad per bin
+      // The line through the tones' phases, taken relative to their common
+      // phase so a pilot-to-data rotation near +-180 degrees cannot wrap it
+      // (houdini/pilot_slope_fit.h).
+      const houdini::csi::SlopeFit fit = houdini::csi::pilotSlopeFit(kks, accs);
+      {
+        if (fit.ok) {
+          const double slope = fit.slope;  // rad per bin
           const double frac = slope * N / (2.0 * M_PI);         // samples
           if (std::abs(frac) < 1.0) best_r += frac;
           // AP-37: the INTERCEPT this fit discards is the U slot's common phase
@@ -609,7 +611,7 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
           // from the constellation metric downstream.
           static std::atomic<unsigned> icn{0};
           if ((icn.fetch_add(1) % 512) == 0) {
-            const double icept = (sp - slope * sk) / npts;
+            const double icept = fit.intercept;
             MLPD_INFO(
                 "U-slot pilot common phase %+.2f deg (slope %+.4f samp), "
                 "frame %u\n",
