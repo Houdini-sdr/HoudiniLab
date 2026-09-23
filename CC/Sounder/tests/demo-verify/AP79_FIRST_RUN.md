@@ -15,8 +15,17 @@ until the software lane hands over the rig.
    `VERSION SKEW:` if the nodes differ.
 2. Confirm the rig is quiet:
    `ps aux | grep -iE "soapy|pytest|sounder|dualband" | grep -v grep`.
-3. Confirm the cabling is the plan's: `.22` DAC_B to `.21` ADC_D (downlink),
-   `.21` DAC_B to `.22` ADC_D (uplink), `.21` DAC_A to `.22` ADC_B (X-IF).
+3. Confirm the cabling is the plan's (the fpga lane's tone walk, unchanged
+   since W2/W3). Every link is a ONE-WAY cable:
+   - `.22` TX ch0 (DAC_B) to `.21` RX ch0 (ADC_D): sub-6 downlink.
+   - `.21` TX ch0 (DAC_B) to `.22` RX ch0 (ADC_D): sub-6 uplink.
+   - `.21` TX ch1 (DAC_A) to `.22` RX ch2 (ADC_B): X-IF, UE to BS ONLY. There
+     is no X-IF downlink cable.
+   - `.22` TX ch1 (DAC_A) loops into `.22`'s own RX ch1 (ADC_C), the HIL
+     self-loop; the demo neither transmits on it nor streams it. `.21` has no
+     self-loop.
+   Every other combination read under 12 dB in the tone walk: treat crosstalk
+   as absent, not zero.
 
 ## 1. Ship and build on the rig host
 
@@ -115,8 +124,10 @@ anomaly is explained before it is called a pass.
 
 1. **Bring-up**: both nodes complete the mode-V bring-up with every readback
    equal to what was written, and the streams open with no SH-422 refusal.
-2. **Preflight baseline**: the standing FAILs are only SH-421's idle-sibling
-   items (none once its fix is deployed) and the named HS-207 known item.
+2. **Preflight baseline**: with SH-421's fix deployed the standing FAIL list
+   is EMPTY on both nodes, apart from the HS-207 item in the "known" part. An
+   ADC0.1 or ADC2.1 FAIL means SH-421's fix did not take: report it to the
+   software lane.
 3. **Acquisition**: the UE acquires the beacon within 10 s of start.
 4. **Tracking**: for 5 minutes, `beacon alive` on every re-sync, `resid`
    within +-2 samples, beacon SNR above 20 dB on the bare cables, and no
@@ -124,19 +135,31 @@ anomaly is explained before it is called a pass.
 5. **Clock**: the tracked offset reads a steady value near the calibrated
    hold (0.3 to 0.5 ppm was the 2026-09-01 reading). Recorded, not gated.
 6. **CSI (sub-6 uplink, BS ch0)**: the `[csi]` counter climbs steadily for
-   antenna 0; |H| is flat within 3 dB across the 96 data subcarriers with no
-   mirror-image structure; CSI SNR above 25 dB.
+   antenna 0; CSI SNR above 25 dB; |H| across the 96 data subcarriers is
+   RECORDED as its spread, expected well under 1 dB (the decimator and the
+   interpolator are flat to 0.19 dB over +-24 MHz, W2), and more than 3 dB
+   fails; no mirror-image structure (single-tone mirror rejection measured
+   -87 to -96 dBc).
 7. **Uplink data**: the QPSK constellation shows four clean clusters; EVM
    recorded (first number, not gated).
 8. **Health**: 5 minutes with no link-health alarm beyond the baseline, and
    app counters `rx_err`, `rx_pad`, `tx_short`, `tx_sat` all zero. The
-   interrupt rate is about 46.6k/s on the TX-at-245.76 node (HS-207, known;
-   one core in the device server).
+   interrupt rate is about 46.6k/s on BOTH nodes: HS-207 keys on any open TX
+   stream at TX 245.76, the BS beacon's replay as much as the UE's live TX
+   (known; one core in each device server).
 
 R2 adds: the X-IF CSI on BS antenna ch2 meets 6 on its own, and the two
 antennas carry distinct channels (sub-6 and X-IF, no crosstalk structure).
 
-## 5. Calibrations to take at the first run
+## 5. Levels to expect
+
+Bare cables, no pads. The software lane's -12 dBFS test tone arrived at about
+-27 dBm on sub-6 and -33 dBm on the X-IF, 99 and about 90 dB above the capture
+floor. The OFDM at 0.3 to 0.4 peak (about -18 to -20 dBFS RMS) arrives about 6
+to 8 dB lower, still far above every SNR bar here. A BS ADC reading near full
+scale means something is wrong, not the level plan.
+
+## 6. Calibrations to take at the first run
 
 Carried from the pre-mode-V demo and not yet valid here:
 
