@@ -39,6 +39,12 @@ check(cs.SounderSupervisor(types.SimpleNamespace(**dict(vars(args), conf="files/
 sup = cs.SounderSupervisor(args, "127.0.0.1:1")
 sup.SETTLE_AFTER_TEARDOWN_S = 0.2; sup.RETRY_DELAY_S = 0.2; sup.STOP_GRACE_S = 2.0
 
+# The gap before the main thread picks a Start up (a supervisor not yet serving):
+# a Check or a second Start then is refused, not queued behind it and dropped.
+idle = cs.SounderSupervisor(args, "127.0.0.1:1")
+check(idle.request("start") is None and idle.snapshot()["state"] == "queued"
+      and idle.request("check") and idle.request("start") and idle.cmds.qsize() == 1,
+      "a queued Start makes Check and Start busy until it is picked up")
 srv = cs.ThreadingHTTPServer(("127.0.0.1", 0), cs.Handler); srv.daemon_threads = True
 srv.control = sup
 threading.Thread(target=srv.serve_forever, daemon=True).start()

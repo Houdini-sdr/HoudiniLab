@@ -86,6 +86,16 @@ def check_config(rep, sd, conf):
         rep.add("FAIL", "topology", "%s: %s" % (topo, e),
                 "Create %s with your radios' addresses (walkthrough section 3)." % topo)
         return cfg, [], []
+    # The sounder reads the cells as BS0, BS1, ... in order and the clients as
+    # {"sdr": [...]} (config.cc), stricter than the teardown's tolerant reader:
+    # another key is silently never opened, and a bare client list throws.
+    cells = t.get("BaseStations")
+    if not isinstance(cells, dict) or set(cells) != {"BS%d" % i for i in range(len(cells))} \
+            or not isinstance(t.get("Clients"), dict):
+        rep.add("FAIL", "topology", "%s is not in the sounder's shape" % topo,
+                "Use {\"BaseStations\": {\"BS0\": {\"sdr\": [\"<bs-ip>\"]}}, "
+                "\"Clients\": {\"sdr\": [\"<ue-ip>\"]}} (walkthrough section 2.6).")
+        return cfg, [], []
     if not bs or not ue:
         rep.add("FAIL", "topology", "%s lists base station %s, client %s" % (topo, bs or "none", ue or "none"),
                 "The demo needs one base station and one client address in %s." % topo)

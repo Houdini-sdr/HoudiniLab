@@ -744,12 +744,16 @@ class SounderSupervisor:
             return "config not allowed: %s" % conf
         # "exited" is the retry wait inside a session: a Start or Check queued then
         # would be dropped by _pending, so refuse it here instead.
-        live = self.snapshot()["state"] in ("checking", "tearing down", "starting", "running", "exited")
+        # "queued": a Start or Restart the main thread has not picked up yet.
+        state = self.snapshot()["state"]
+        live = state in ("queued", "stopping", "checking", "tearing down", "starting", "running", "exited")
         if cmd == "start" and live:
-            return "already running (use Restart)"
+            return "busy (%s): use Restart or Stop" % state
         if cmd == "check" and live:
             return "stop the sounder first: the full check opens the radios"
         self.cmds.put((cmd, conf))
+        if cmd in ("start", "restart"):
+            self._set(state="queued")
         return None
 
     def _kill(self):
@@ -889,7 +893,9 @@ class SounderSupervisor:
             c = None
             self._set(state="stopping")
             self._kill()
-            self._set(state="stopped", pid=None)
+            self._set(pid=None)
+            if cmd == "stop":
+                self._set(state="stopped")
             if conf:
                 self.set_conf(conf)
             if cmd == "check":

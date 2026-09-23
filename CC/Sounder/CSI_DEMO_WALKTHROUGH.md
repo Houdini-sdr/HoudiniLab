@@ -145,16 +145,15 @@ fails.
 
 ### 2.2 Shortcut if your host is already provisioned
 
-Verify with the four checks below and, if they all pass, jump straight to
-section 3:
+Run the setup check. If it prints `Ready.`, jump straight to section 3:
 
 ```sh
-ls <path-to-HoudiniLab>/CC/Sounder/build/sounder      # binary exists
-SoapySDRUtil --info                                   # plugin path is set
-python3 -c "import http.server, socket, struct"       # dashboard needs only stdlib
-ls <path-to-HoudiniLab>/CC/Sounder/csi_gui/vendor/tabler.min.css  # page stylesheet
-cat <path-to-HoudiniLab>/CC/Sounder/files/topology-houdini.json   # your two IPs
+source <your-houdini-venv>/bin/activate
+cd <path-to-HoudiniLab>/CC/Sounder
+python3 csi_gui/check_setup.py --conf files/<config>.json
 ```
+
+Each FAIL line names what is missing and the section below that installs it.
 
 ### 2.3 System packages
 
@@ -368,14 +367,14 @@ output prefixed `[teardown]`, and the sounder's prefixed `[sounder]`.
 
 Two defaults assume one particular layout. If yours differs, override them:
 
-- `--sounder-dir <path-to-HoudiniLab>/CC/Sounder` if the repository is not at
-  `~/repos/HoudiniLab`. Check this one carefully on a host with more than one
-  checkout: the launcher runs whatever `build/sounder` it finds under this
-  directory, and a stale binary from another checkout looks exactly like the
-  current demo until a log line you expect is missing. When in doubt, verify
-  with `strings <dir>/build/sounder | grep <a-string-only-the-new-code-logs>`.
-- `--venv <your-houdini-venv>` if the SoapySDR virtual environment is not at
-  `~/houdini_test`.
+- `--sounder-dir <path-to-HoudiniLab>/CC/Sounder` only to run a different
+  checkout from the one `csi_server.py` lives in, which is the default. The
+  launcher runs whatever `build/sounder` it finds under this directory, and a
+  stale binary looks exactly like the current demo until a log line you expect
+  is missing. When in doubt, verify with
+  `strings <dir>/build/sounder | grep <a-string-only-the-new-code-logs>`.
+- `--venv <your-houdini-venv>` if no environment is activated and the SoapySDR
+  virtual environment is not at `~/houdini_test`.
 
 That command on its own is deliberately quiet. It prints the teardown, the
 sounder's startup and a `[csi]` datagram counter roughly once a second, and

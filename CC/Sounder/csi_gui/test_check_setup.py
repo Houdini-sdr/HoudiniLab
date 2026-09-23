@@ -95,6 +95,12 @@ open(os.path.join(sd, "files", "topo-list.json"), "w").write('["127.0.0.1"]')
 json.dump(dict(cfg, serial_file="files/topo-list.json"), open(os.path.join(sd, "files", "houdini-tl.json"), "w"))
 rc, rep, lv = run("--quick", conf="files/houdini-tl.json")
 check(rc == 1 and lv.get("topology") == "FAIL", "a topology of the wrong shape is a FAIL, not a traceback")
+for bad, what in (({"BaseStations": {"cell0": {"sdr": ["127.0.0.1"]}}, "Clients": {"sdr": ["127.0.0.2"]}}, "a cell not named BS0"),
+                  ({"BaseStations": {"BS0": {"sdr": ["127.0.0.1"]}}, "Clients": ["127.0.0.2"]}, "a bare client list")):
+    json.dump(bad, open(os.path.join(sd, "files", "topo-bad.json"), "w"))
+    json.dump(dict(cfg, serial_file="files/topo-bad.json"), open(os.path.join(sd, "files", "houdini-tb.json"), "w"))
+    rc, rep, lv = run("--quick", conf="files/houdini-tb.json")
+    check(rc == 1 and lv.get("topology") == "FAIL", "%s (the sounder would not open it) fails 'topology'" % what)
 os.rename(exe, exe + ".x"); rc, rep, lv = run("--quick"); check(rc == 1 and lv["build"] == "FAIL", "no binary fails 'build'"); os.rename(exe + ".x", exe)
 open(util, "w").write("#!/bin/sh\necho 'Available factories... remote'\n")
 rc, rep, lv = run("--quick"); check(rc == 1 and lv["plugin"] == "FAIL", "SoapySDR not loading the Houdini module fails 'plugin'")
