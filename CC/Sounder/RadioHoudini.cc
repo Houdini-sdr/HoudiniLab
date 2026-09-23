@@ -16,6 +16,7 @@
 #include <cstdlib>
 #include <ctime>
 #include <cstring>
+#include <functional>
 #include <iostream>
 #include <set>
 #include <vector>
@@ -129,6 +130,61 @@ void RadioHoudini::writeModeVRecord(const std::string& label, SoapySDR::Device& 
  }
 }
 
+void RadioHoudini::writeStateRecord(const std::string& label, SoapySDR::Device& dev, const std::string& stage,
+                                    const std::vector<size_t>& rx_channels,
+                                    const std::vector<size_t>& tx_channels) {
+  try {
+    std::string tag = label;
+    for (auto& ch : tag)
+      if (ch == ' ' || ch == '.' || ch == '/') ch = '_';
+    const std::time_t now = std::time(nullptr);
+    char stamp[32];
+    std::strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", std::localtime(&now));
+    const std::string name = "rfdc_" + tag + "_" + stage + "_" + stamp + ".txt";
+    const std::string path = Utils::dumpPath(name.c_str());
+    FILE* f = std::fopen(path.c_str(), "w");
+    if (f == nullptr) {
+      MLPD_WARN("%s: cannot write the RFDC state record %s (%s)\n", label.c_str(), path.c_str(),
+                std::strerror(errno));
+      return;
+    }
+    std::fprintf(f, "# %s RFDC state, %s, %s\n", label.c_str(), stage.c_str(), stamp);
+    // Each read on its own: one that fails is noted and the rest still land.
+    auto section = [&](const char* title, const std::function<std::string()>& read) {
+      std::fprintf(f, "## %s\n", title);
+      try {
+        std::fprintf(f, "%s\n", read().c_str());
+      } catch (const std::exception& e) {
+        std::fprintf(f, "(read failed: %s)\n", e.what());
+      }
+    };
+    section("hardware", [&] {
+      std::string s;
+      for (const auto& kv : dev.getHardwareInfo()) s += kv.first + "=" + kv.second + "\n";
+      return s;
+    });
+    section("RFDC_PREFLIGHT", [&] { return dev.readSetting("RFDC_PREFLIGHT"); });
+    auto info = [&](int dir, const char* name, const std::vector<size_t>& chans) {
+      for (auto ch : chans) {
+        const std::string title = std::string("getChannelInfo ") + name + " ch" + std::to_string(ch);
+        section(title.c_str(), [&] {
+          std::string s;
+          for (const auto& kv : dev.getChannelInfo(dir, ch)) s += kv.first + "=" + kv.second + "\n";
+          return s;
+        });
+      }
+    };
+    info(SOAPY_SDR_RX, "RX", rx_channels);
+    info(SOAPY_SDR_TX, "TX", tx_channels);
+    section("RFDC_SNAPSHOT", [&] { return dev.readSetting("RFDC_SNAPSHOT"); });
+    std::fclose(f);
+    MLPD_INFO("%s: RFDC state record (%s) %s\n", label.c_str(), stage.c_str(), path.c_str());
+  } catch (const std::exception& e) {
+    MLPD_WARN("%s: the RFDC state record (%s) could not be written: %s\n", label.c_str(), stage.c_str(),
+              e.what());
+  }
+}
+
 houdini::modev::Plan RadioHoudini::modeVPlan(const RadioParams& p) {
   houdini::modev::Plan m;
   m.tx_channels = p.tx_channels;
@@ -176,9 +232,16 @@ RadioHoudini::RadioHoudini(const RadioParams& params,
                          }
                          logModeV(label, mv->log);
                        },
+                 // After the last setup, before any activate: every Houdini run
+                 // records its converter state here; mode V checks it first.
                  mv == nullptr
-                     ? std::function<void(SoapySDR::Device&)>()
-                     : [mv, plan = modeVPlan(params), label = params.label](SoapySDR::Device& dev) {
+                     ? std::function<void(SoapySDR::Device&)>(
+                           [label = params.label, rx = params.rx_channels,
+                            tx = params.tx_channels](SoapySDR::Device& dev) {
+                             writeStateRecord(label, dev, "pre-activate", rx, tx);
+                           })
+                     : [mv, plan = modeVPlan(params), label = params.label, rx = params.rx_channels,
+                        tx = params.tx_channels](SoapySDR::Device& dev) {
                          houdini::modev::PostSetup ps;
                          try {
                            ps = houdini::modev::postSetupCheck(dev, plan, *mv);
@@ -188,6 +251,7 @@ RadioHoudini::RadioHoudini(const RadioParams& params,
                          }
                          logModeV(label, ps.log);
                          writeModeVRecord(label, dev, *mv, ps, "");
+                         writeStateRecord(label, dev, "pre-activate", rx, tx);
                        }),
       mode_v_(std::move(mv)) {
   if (params.tx_rate_hz > 0.0 && params.tx_rate_hz != params.rate_hz) {
@@ -239,6 +303,9 @@ RadioHoudini::~RadioHoudini() {
   }
   health_cv_.notify_all();
   if (health_thread_.joinable()) health_thread_.join();
+  // The end-of-run state, while the streams are still open (the base class
+  // closes them after this), so drift across the run is visible.
+  if (dev_ != nullptr) writeStateRecord(params_.label, *dev_, "end", params_.rx_channels, params_.tx_channels);
 }
 
 void RadioHoudini::maybeStartHealth() {
@@ -280,6 +347,9 @@ void RadioHoudini::healthLoop(double period_s) {
         MLPD_WARN("%s link health: the preflight clear was refused (a bit still set after it): %s\n",
                   label.c_str(), e.what());
       }
+      const std::string after = dev_->readSetting("RFDC_PREFLIGHT");
+      MLPD_INFO("%s link health: preflight after the post-activate clear: %s\n", label.c_str(),
+                after.substr(0, after.find('\n')).c_str());
     }
     houdini::health::LinkHealth h([this](const std::string& k) { return dev_->readSetting(k); }, label);
     std::string at_start;

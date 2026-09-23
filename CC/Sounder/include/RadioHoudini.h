@@ -77,6 +77,14 @@ class RadioHoudini : public RadioSoapy {
   /// The mode-V plan for this node, from its params.
   static houdini::modev::Plan modeVPlan(const RadioParams& p);
   static void logModeV(const std::string& label, const std::vector<std::string>& lines);
+  /// The converter state as the device reports it (RFDC_SNAPSHOT, the full
+  /// RFDC_PREFLIGHT, getChannelInfo per channel in use), written to
+  /// rfdc_<label>_<stage>_<time>.txt under HOUDINI_DUMP_DIR. Every Houdini
+  /// run writes one before activate and one at the end, so a run's settings
+  /// can be checked against its plan and drift across it is visible. Best
+  /// effort: never throws.
+  static void writeStateRecord(const std::string& label, SoapySDR::Device& dev, const std::string& stage,
+                               const std::vector<size_t>& rx_channels, const std::vector<size_t>& tx_channels);
   static void writeModeVRecord(const std::string& label, SoapySDR::Device& dev,
                                const houdini::modev::Result& r, const houdini::modev::PostSetup& ps,
                                const std::string& failure);
