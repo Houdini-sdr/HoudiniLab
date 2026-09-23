@@ -11,7 +11,7 @@ until the software lane hands over the rig.
 
 1. Confirm the stack on both nodes, and write it down: `fpga_commit` (the
    identity; `fpga_version` is cosmetic), `device_build` (the SH-421/SH-422
-   build, `a1c8ecb7` when this was written), `host_build`. The sounder prints
+   build, `e002dead` (md5 `2695631c`) when this was written), `host_build`. The sounder prints
    them at bring-up and warns `VERSION SKEW:` if the nodes differ; each
    node's mode-V session record (section 3) keeps them.
 2. Confirm the rig is quiet:
@@ -131,9 +131,11 @@ At bring-up, per node:
   latches benign ADC flags, SH-372 class), the IRQ count, and
   `session record <path>`: one file per node with the stack, every bring-up
   and post-setup line and the `RFDC_SNAPSHOT`.
-- Per ADC block at each RX setup: `IntrStatus=0xF after rate apply; WATCH`
-  from the driver. Known setup noise (the reconcile's transient FIFO bounce,
-  cleared straight after), under the software lane's review; not a fault.
+- Per ADC block at an RX setup that restarts a tile (R0's first setup
+  does): possibly one WARN per block, `IntrStatus latched 0x... [OVR_VOLTAGE
+  CMODE_OVR CMODE_UNDR] at the setup (cleared here, before any preflight
+  read)`, or with `SUBADC_DCDR`. That is the first-StartUp set (SH-372) or
+  SH-227, now reported instead of silenced: log it, not a fault. See section 4.
 - `syncSearch: detection #k statistic S vs bar B (coherence)`: the first five
   detections, then one in 100. A beacon reads about 0.97; the bar is 0.2.
 
@@ -213,12 +215,14 @@ checked the sense with tones, not through this path).
   real time at R1, so short runs only).
 - **A deliberate detune** (AP-33) puts `mts_phase_stale(RFDC_NCO_REARM)` in
   the preflight's FAIL list, which the monitor reports as new: expected then.
-- **Driver messages that are expected** (device `a1c8ecb7`, the SH-422 fold):
-  each zone write WARNs that the NCO "reads back as 0.000 MHz against the new
-  zone ... re-issue setFrequency" (the bring-up's next step does exactly that);
-  an RX setup's per-block `IntrStatus ... WATCH` now names only a bit that
-  survives the post-bounce clear (on `.22`: `ADC 0.1 [SUBADC_DCDR]`, the known
-  SH-227 class): log it, and treat it as a fault only if the preflight also
+- **Driver messages that are expected** (device `e002dead`, the final
+  SH-421/422 fold): each zone write WARNs that the NCO "reads back as 0.000
+  MHz against the new zone ... re-issue setFrequency" (the bring-up's next
+  step does exactly that); an RX setup that restarts an ADC tile may WARN once
+  per block `IntrStatus latched 0x... [...] at the setup (cleared here, before
+  any preflight read)` (OVR_VOLTAGE, CMODE_OVR, CMODE_UNDR, or SUBADC_DCDR):
+  log it. It is a FAULT only if a bit survives the clear (`after the clear
+  0x... [X]` non-zero, outside FIFOMRGNIND) or the post-activate preflight
   FAILs. A new preflight item `<blk>:rate_unbalanced(...)` FAILs a block whose
   rate differs from its tile's; the sounder writes one rate on every channel
   of each direction, so it should never appear.
