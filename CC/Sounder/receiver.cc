@@ -1198,6 +1198,18 @@ ssize_t Receiver::syncSearch(const std::complex<int16_t>* check_data,
       sync_detector_->run(check_data, search_window, corr_scale, pick);
   const ssize_t sync_index = det.end_index;
   if (detection != nullptr) *detection = det;
+  if (det.found()) {
+    // AP-79: the raw decision statistic against its bar, so the band-limited
+    // beacon's thresholds (derived in simulation, detection_calibration_test)
+    // can be checked on the rig at acquisition. The first five, then 1 in 100.
+    static std::atomic<unsigned> n_found{0};
+    const unsigned k = n_found.fetch_add(1);
+    if (k < 5 || k % 100 == 0) {
+      MLPD_INFO("syncSearch: detection #%u statistic %.4f vs bar %.4f (%s), idx %ld in %zu\n", k + 1,
+                det.statistic, det.bar, houdini::sync::name(sync_detector_->form()),
+                static_cast<long>(sync_index), search_window);
+    }
+  }
   static const bool kSyncDebug = std::getenv("HOUDINI_SYNC_DEBUG") != nullptr;  // read once
   if (kSyncDebug) {
     static std::atomic<int> c{0};

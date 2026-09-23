@@ -90,6 +90,8 @@ class BeaconShape {
   bool singleCopy() const { return replica_reps_ < 2; }
   size_t guardLen() const { return guard_len_; }
   double paprDb() const { return papr_db_; }
+  /// Half the band the core occupies, Hz; 0 = the whole output (AP-79).
+  double occupiedHalfBwHz() const { return occupied_half_bw_hz_; }
 
   /// Samples from the correlator's index to the beacon end: zero for every
   /// shape whose replica is its trailing field and on Iris/UHD; 144 for
@@ -116,6 +118,7 @@ class BeaconShape {
   std::vector<std::complex<float>> core_, replica_;
   size_t replica_off_ = 0, replica_reps_ = 0, guard_len_ = 0, tail_ = 0;
   double papr_db_ = 0.0;
+  double occupied_half_bw_hz_ = 0.0;
   FieldGeometry geometry_;
 };
 

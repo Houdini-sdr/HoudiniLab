@@ -229,13 +229,60 @@ class ChannelFilter {
   const std::vector<float>& taps() const { return taps_; }
 
   void run(const std::complex<float>* in, size_t n, std::complex<float>* out) const {
+    runRange(in, n, 0, n, out);
+  }
+
+  /// Filter only outputs [start, start + count) of a signal `in` of `n`
+  /// samples (zero outside it), written to out[0 .. count). The samples of
+  /// `in` around the range are used as real context, so a slice cut from a
+  /// longer capture is filtered exactly as the whole capture would be.
+  ///
+  /// SPEED (AP-79: the scalar form measured 94 to 138 ms per 10 ms of one
+  /// lane). The taps are symmetric, so out[k] = h_c x[k] + sum_j h_{c-j}
+  /// (x[k-j] + x[k+j]): half the multiplies. The taps are real, so the I and
+  /// Q of the interleaved float array filter identically with a stride of 2,
+  /// and the interior runs as `half` passes of a branch-free, contiguous loop
+  /// the compiler vectorizes, in blocks that stay in cache. Only the few
+  /// outputs within `half` of the signal's ends take the bounds-checked path.
+  void runRange(const std::complex<float>* in, size_t n, size_t start, size_t count,
+                std::complex<float>* out) const {
     if (static_cast<const void*>(in) == static_cast<const void*>(out)) throw std::invalid_argument("ChannelFilter: in-place is not supported");
-    const long ln = static_cast<long>(n), h = static_cast<long>(half_);
-    for (long k = 0; k < ln; ++k) {
+    if (start > n || count > n - start) throw std::invalid_argument("ChannelFilter: range outside the signal");
+    const long h = static_cast<long>(half_);
+    const long ln = static_cast<long>(n);
+    const long k0 = static_cast<long>(start), k1 = k0 + static_cast<long>(count);
+    // Interior: outputs whose whole support lies inside the signal.
+    const long i0 = std::max(k0, h), i1 = std::min(k1, ln - h);
+    const float* x = reinterpret_cast<const float*>(in);
+    float* y = reinterpret_cast<float*>(out);
+    const float hc = taps_[static_cast<size_t>(h)];
+    constexpr long kBlock = 2048;  // complex samples per block
+    for (long b0 = i0; b0 < i1; b0 += kBlock) {
+      const long b1 = std::min(i1, b0 + kBlock);
+      float* yb = y + 2 * (b0 - k0);
+      const float* xb = x + 2 * b0;
+      const long m = 2 * (b1 - b0);
+      for (long i = 0; i < m; ++i) yb[i] = hc * xb[i];
+      for (long j = 1; j <= h; ++j) {
+        const float hj = taps_[static_cast<size_t>(h - j)];
+        const float* xl = xb - 2 * j;
+        const float* xr = xb + 2 * j;
+        for (long i = 0; i < m; ++i) yb[i] += hj * (xl[i] + xr[i]);
+      }
+    }
+    // Edges: the bounds-checked form, for outputs whose support leaves the signal.
+    auto edge = [&](long k) {
       std::complex<float> acc(0.0f, 0.0f);
       const long lo = std::max(0L, k - h), hi = std::min(ln - 1, k + h);
       for (long i = lo; i <= hi; ++i) acc += taps_[static_cast<size_t>(i - k + h)] * in[i];
-      out[k] = acc;
+      out[k - k0] = acc;
+    };
+    for (long k = k0; k < std::min(k1, i0); ++k) edge(k);
+    for (long k = std::max(k0, i1); k < k1; ++k) edge(k);
+    // (when the range is shorter than the support, i0 >= i1 and every output
+    // is an edge; the two loops then cover [k0, k1) without overlap)
+    if (i0 >= i1) {
+      for (long k = std::max(k0, std::min(k1, i0)); k < std::min(k1, std::max(k0, i1)); ++k) edge(k);
     }
   }
 

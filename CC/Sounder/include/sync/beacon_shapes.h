@@ -96,6 +96,10 @@ struct Desc {
   /// spacing is then rate / 128, not scs_hz); the caller should say so.
   Numerology numerology;
   bool numerology_held = true;
+  /// Half the band the core occupies, Hz; 0 means the whole output (every
+  /// shape but nr_pss_bl). Mode V refuses a beacon wider than its RX channel
+  /// filter's passband (AP-79).
+  double occupied_half_bw_hz = 0.0;
 
   /// Peak-to-average power ratio in dB. Not cosmetic: the transmit path scales
   /// the core to a fixed fraction of full scale by PEAK, so a higher PAPR
@@ -400,6 +404,11 @@ inline Desc make(Shape s, const Numerology& num) {
                        d.core.begin() + static_cast<long>(cp + nfft));
       d.replica_off = cp;
       d.replica_reps = 1;
+      // The outermost occupied bin of either field: the PSS's 127 tones sit
+      // on bins -64..63 skipping DC, the TRS's n_trs on -(n_trs/2)..n_trs/2.
+      d.occupied_half_bw_hz =
+          std::max(64.0 * num.rate_hz / static_cast<double>(nfft),
+                   static_cast<double>((n_trs + 1) / 2) * spacing);
       break;
     }
     case Shape::kNrPss: {

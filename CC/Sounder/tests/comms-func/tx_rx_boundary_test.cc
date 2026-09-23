@@ -94,11 +94,11 @@ int main() {
     check(o.buffs.size() == 2 && equal(o.buffs[0], direct(a)) && equal(o.buffs[1], direct(b)),
           "two channels are interpolated independently, each from its own buffer");
   }
-  {  // TX spectral shaping: energy 40.2 to 61.44 MHz from the NCO folds back
+  {  // TX spectral shaping: energy 40.2 to 90.2 MHz from the NCO folds back
      // onto the sub-6 channel at the far ADC, so the prefiltered output must
      // hold it >= 60 dB down, and the unshaped output (the mutant) must not
     auto splatter = [](const TxBurstInterpolator::Out& o, size_t nch0) {
-      // energy of channel 0's TX output in |f| 40.2..61.44 MHz vs total, 245.76 MSPS
+      // energy of channel 0's TX output in |f| 40.2..90.2 MHz vs total, 245.76 MSPS
       const auto* p = static_cast<const cs16*>(o.buffs[nch0]);
       const size_t n = o.samples;
       double in = 0.0, out = 0.0;
@@ -109,7 +109,10 @@ int main() {
           acc += std::complex<double>(p[t].real(), p[t].imag()) * std::complex<double>(std::cos(ph), std::sin(ph));
         }
         const double f = std::fabs((k < n / 2 ? static_cast<double>(k) : static_cast<double>(k) - n) * 245.76e6 / n);
-        (f >= 40.2e6 && f <= 61.44e6 ? out : in) += std::norm(acc);
+        // The whole folding band: TX energy +40.2 to +90.2 MHz from the NCO
+        // lands on the channel at the far ADC (65.2 - f); checked on both
+        // sides. Above 61.44 it sits in the halfband's transition band.
+        (f >= 40.2e6 && f <= 90.2e6 ? out : in) += std::norm(acc);
       }
       return 10.0 * std::log10(out / in);
     };
@@ -124,8 +127,8 @@ int main() {
     TxBurstInterpolator shaped(true), raw(false);
     const double s_shaped = splatter(shaped.run(p, 1, b.size()), 0);
     const double s_raw = splatter(raw.run(p, 1, b.size()), 0);
-    std::printf("TX splatter 40.2-61.44 MHz: shaped %.1f dB, unshaped %.1f dB\n", s_shaped, s_raw);
-    check(s_shaped <= -60.0, "prefiltered TX holds 40.2 to 61.44 MHz >= 60 dB down [mutation: no prefilter]");
+    std::printf("TX splatter 40.2-90.2 MHz: shaped %.1f dB, unshaped %.1f dB\n", s_shaped, s_raw);
+    check(s_shaped <= -60.0, "prefiltered TX holds the folding band 40.2 to 90.2 MHz >= 60 dB down [mutation: no prefilter]");
     check(s_raw > -60.0, "mutant without the prefilter leaves the folding band above -60 dB");
     // margins: content prefilterLead() zeros in reproduces the long-padded
     // result; one zero fewer must not
@@ -228,6 +231,36 @@ int main() {
     std::printf("RX lane 0: alias at +45 MHz leaves at %.1f dBc\n", rel);
     check(rel <= -40.0, "the filtered lane removes a 0 dBc alias by >= 40 dB");
     check(l1 == orig, "the unfiltered lane (X-IF) is left bit-exact");
+  }
+
+  {  // the BS slice path: a slot filtered with the capture as context is
+     // bit-identical to filtering the whole capture and cutting the slot out
+    const size_t cap = 20000, n = 4096;
+    std::vector<cs16> capture(cap);
+    for (size_t k = 0; k < cap; ++k)
+      capture[k] = cs16(static_cast<int16_t>((k * 7919) % 20001 - 10000), static_cast<int16_t>((k * 104729) % 16001 - 8000));
+    std::vector<cs16> whole(capture);
+    void* wb[1] = {whole.data()};
+    RxLaneFilters all({true});
+    all.apply(wb, 1, cap);
+    RxLaneFilters sl({true});
+    bool exact = true;
+    for (size_t st : {size_t{0}, size_t{5}, size_t{17}, size_t{3000}, cap / 2, cap - n - 17, cap - n}) {
+      std::vector<cs16> out(n);
+      sl.filterSlice(capture.data(), cap, st, n, out.data());
+      for (size_t k = 0; k < n; ++k) exact = exact && out[k] == whole[st + k];
+    }
+    check(exact, "a slot filtered from the capture (starts 0, 5, 17, 3000, mid, end-17, end) equals the whole-capture filter, bit for bit "
+                 "[mutation: slice without context below]");
+    // The mutant: filter the slot on its own, zeros outside it (the old
+    // per-window behaviour); it differs within 17 samples of each edge.
+    std::vector<cs16> iso(capture.begin() + 3000, capture.begin() + 3000 + n);
+    void* ib[1] = {iso.data()};
+    RxLaneFilters one({true});
+    one.apply(ib, 1, n);
+    bool differs = false;
+    for (size_t k = 0; k < n; ++k) differs = differs || iso[k] != whole[3000 + k];
+    check(differs, "mutant: the slot filtered without its context differs at its edges");
   }
 
   std::printf("-- mutation matrix (each line must read PASS: the mutant was caught) --\n");

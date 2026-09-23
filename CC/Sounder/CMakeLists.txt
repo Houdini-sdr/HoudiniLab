@@ -344,6 +344,16 @@ target_include_directories(link_health_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/
 add_test(NAME link_health COMMAND link_health_test
          ${CMAKE_CURRENT_SOURCE_DIR}/tests/comms-func/fixtures/link_health/mode_v_streaming_21.txt)
 
+# AP-79: the replay strobe offs/len in the driver's units.
+add_executable(replay_strobe_test tests/comms-func/replay_strobe_test.cc)
+target_include_directories(replay_strobe_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_test(NAME replay_strobe COMMAND replay_strobe_test)
+
+# AP-79: nr_pss_bl's acquisition thresholds derived on a simulated link.
+add_executable(detection_calibration_test tests/comms-func/detection_calibration_test.cc)
+target_link_libraries(detection_calibration_test houdini_sync -lpthread ${MUFFT_LIBRARIES})
+add_test(NAME detection_calibration COMMAND detection_calibration_test)
+
 # The index-convention check AP-34(a) did not have. Links the real CommsLib so
 # it exercises the REAL detector; a replica would agree with itself.
 add_executable(beacon_geometry_test

@@ -23,10 +23,12 @@
 
 #include <SoapySDR/Errors.hpp>
 
+#include "include/RadioHoudini.h"
 #include "include/logger.h"
 #include "include/macros.h"
 #include "include/rx_gap_sink.h"
 #include "include/utils.h"
+#include "houdini/replay_strobe.h"
 #include "houdini/tx_rx_boundary.h"
 #include "sync/beacon_shape.h"
 
@@ -415,36 +417,20 @@ void HoudiniFramer::armTdd(void) {
       // acquisition just needs more detect windows to first see it
       // (~1 in 12.9 windows carries the beacon now). Samples == ticks at the
       // one supported rate (122.88 MSPS; the whole layer assumes it).
-      // AP-79: in TX samples when the TX stream runs at 2 x the tick rate
-      // (len counts 2-TX-sample units, offs ticks); n_load is in ticks (the
-      // image before xmit's x2), and the strobe starts `lead` ticks early so
-      // the core still plays at +384.
-      const long long k_tx = txPerTick(cfg_);
-      const long long offs = kTddGridTicks - beaconLeadTicks(cfg_);
-      const size_t span_units =
-          static_cast<size_t>((htdd_symbol_ticks_ - offs) * k_tx / 2);
-      size_t len_units = std::max<size_t>(
-          (static_cast<size_t>(k_tx) *
-               static_cast<size_t>(beaconLeadTicks(cfg_) + cfg_->beacon_size()) + 1) / 2,
-          std::min(static_cast<size_t>(k_tx) * n_load / 2, span_units));
-      // The PL plays whole 8-unit beats (16 TX samples); the driver warns and
-      // the RTL drops the tail of a non-multiple (software lane, 2026-09-22).
-      // Round up, but never past the loaded image nor past the window: a burst
-      // that overlaps the gate close is a GATED_DROPS case (fpga lane). The
-      // cap is whole beats, so rounding can only ever shorten into zeros.
-      const size_t cap = std::min(static_cast<size_t>(k_tx) * n_load / 2, span_units) / 8 * 8;
-      // The lead, the core AND the prefiltered interpolator's tail must play
-      // inside the window: a cut tail brings back the splatter the prefilter
-      // removes (review).
-      const size_t need = (static_cast<size_t>(k_tx) *
-                               static_cast<size_t>(beaconLeadTicks(cfg_) + cfg_->beacon_size() +
-                                                   beaconTailTicks(cfg_)) + 1) / 2;
-      if (need > cap) {
-        throw std::invalid_argument("Houdini beacon: " + std::to_string(need) +
-                                    " replay units do not fit the window (" + std::to_string(cap) +
-                                    " whole-beat units between the strobe offset and the slot end)");
-      }
-      len_units = std::min(((len_units + 7) / 8) * 8, cap);
+      // AP-79: offs and len in the driver's units at this TX rate, the core
+      // at +384, whole beats, inside the window (houdini/replay_strobe.h,
+      // tested in replay_strobe_test).
+      houdini::ReplayStrobeInputs si;
+      si.k_tx = txPerTick(cfg_);
+      si.symbol_ticks = htdd_symbol_ticks_;
+      si.n_load_ticks = n_load;
+      si.beacon_ticks = cfg_->beacon_size();
+      si.lead_ticks = beaconLeadTicks(cfg_);
+      si.tail_ticks = beaconTailTicks(cfg_);
+      si.grid_offs = kTddGridTicks;
+      const auto strobe = houdini::replayStrobe(si);
+      const long long offs = strobe.offs;
+      const size_t len_units = strobe.len_units;
         dev->writeSetting("TDD_REPLAY_STROBE",
                           "ch" + std::to_string(tx_ch) +
                               ":len=" + std::to_string(len_units) +
@@ -515,6 +501,10 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
   for (size_t c = 0; c < C; ++c)
     cb[c] = htdd_cap_buf_.data() + c * static_cast<size_t>(fn) * 2;
   long long ft = 0;
+  // AP-79: this capture is continuous and only its P/U slots are used, so the
+  // channel filter runs on the extracted slots below, not on the whole read.
+  auto* hr = dynamic_cast<RadioHoudini*>(r);
+  if (hr != nullptr) hr->setRecvFilter(false);
   const int cg = r->recv(cb.data(), fn, ft);
   // This one read backs every rx slot of the frame, so its padding applies to all of
   // them; latch it before any later recv on this radio overwrites the radio's copy.
@@ -702,9 +692,14 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
     // capture block at the same offset.
     for (size_t c = 0; c < C; ++c) {
       const int16_t* sc = htdd_cap_buf_.data() + c * static_cast<size_t>(fn) * 2;
-      std::memcpy(
-          htdd_slot_cache_.data() + (k * C + c) * static_cast<size_t>(n) * 2,
-          sc + st * 2, static_cast<size_t>(n) * 4);
+      int16_t* dst = htdd_slot_cache_.data() + (k * C + c) * static_cast<size_t>(n) * 2;
+      if (hr != nullptr && hr->rxLaneFiltered(c)) {
+        // The slot through the channel filter, with the capture around it as
+        // context: exactly what filtering the whole capture would give here.
+        hr->filterRxSlice(sc, static_cast<size_t>(cg), static_cast<size_t>(st), static_cast<size_t>(n), dst);
+      } else {
+        std::memcpy(dst, sc + st * 2, static_cast<size_t>(n) * 4);
+      }
     }
   }
   if (getenv("HOUDINI_BS_RX_DEBUG") != nullptr) {

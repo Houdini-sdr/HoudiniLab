@@ -110,7 +110,11 @@ RadioHoudini::RadioHoudini(const RadioParams& params,
                      : [mv, plan = modeVPlan(params), label = params.label](SoapySDR::Device& dev) {
                          *mv = houdini::modev::bringUp(dev, plan);
                          for (const auto& entry : mv->log) {
-                           MLPD_INFO("%s mode V: %s\n", label.c_str(), entry.c_str());
+                           if (entry.rfind("WARNING", 0) == 0) {
+                             MLPD_WARN("%s mode V: %s\n", label.c_str(), entry.c_str());
+                           } else {
+                             MLPD_INFO("%s mode V: %s\n", label.c_str(), entry.c_str());
+                           }
                          }
                        }),
       mode_v_(std::move(mv)) {
@@ -168,9 +172,11 @@ RadioHoudini::~RadioHoudini() {
 void RadioHoudini::maybeStartHealth() {
   // AP-79: the software lane's link-health checks (houdini/link_health.h) on
   // THIS session's handle, once streaming. HOUDINI_LINK_HEALTH_S sets the
-  // period (default 5 s; 0 turns it off).
+  // period (default 5 s in mode V, off otherwise; 0 turns it off).
   if (health_started_.exchange(true)) return;
-  double period = 5.0;
+  // On by default in mode V only; the one-rate path keeps its control plane
+  // as it was unless asked.
+  double period = mode_v_ != nullptr ? 5.0 : 0.0;
   if (const char* e = std::getenv("HOUDINI_LINK_HEALTH_S")) period = std::atof(e);
   if (!(period > 0.0)) return;
   health_thread_ = std::thread([this, period] { healthLoop(period); });
@@ -185,10 +191,10 @@ void RadioHoudini::healthLoop(double period_s) {
   const std::string label = params_.label;
   try {
     houdini::health::LinkHealth h([this](const std::string& k) { return dev_->readSetting(k); }, label);
-    std::string standing;
-    for (const auto& f : h.baselineFailures()) standing += (standing.empty() ? "" : "; ") + f;
+    std::string at_start;
+    for (const auto& f : h.baselineFailures()) at_start += (at_start.empty() ? "" : "; ") + f;
     MLPD_INFO("%s link health: baseline taken; preflight FAILs standing at start: %s\n", label.c_str(),
-              standing.empty() ? "none" : standing.c_str());
+              at_start.empty() ? "none" : at_start.c_str());
     std::set<std::string> reported;  // blind/drift alarms already warned about
     unsigned long long p_err = app_rx_err_, p_short = app_rx_short_, p_pad = app_rx_pad_,
                        p_txs = app_tx_short_, p_sat = app_tx_sat_;
@@ -240,8 +246,8 @@ int RadioHoudini::xmit(const void* const* buffs, int samples, int flags,
   const auto o = tx_interp_->run(buffs, params_.tx_channels.size(), static_cast<size_t>(samples));
   if (o.saturated > 0) {
     app_tx_sat_.fetch_add(1, std::memory_order_relaxed);
-    static size_t warned = 0;
-    if (warned++ < 5) {
+    static std::atomic<unsigned> warned{0};
+    if (warned.fetch_add(1) < 5) {
       MLPD_WARN("%s: %zu I/Q components saturated in the x2 TX interpolation; "
                 "lower the TX level (the halfband overshoots near edges)\n",
                 params_.label.c_str(), o.saturated);
@@ -400,6 +406,14 @@ int RadioHoudini::recv(void* const* buffs, int samples, long long& frameTime) {
       got += r;
     }
   }
+  // AP-79: the lanes whose channel's mirror lands in the output get the
+  // +-25 MHz channel filter before any consumer (detector, CFO, framer, CSI)
+  // sees them. Every Houdini read comes through here, and the window dump
+  // below shows the filtered samples, the ones the detector sees. NB the RX
+  // PROFILE's "read" time now includes this filter (review).
+  if (rx_filters_ != nullptr && recv_filter_ && got > 0) {
+    rx_filters_->apply(buffs, num_rx_ch_, static_cast<size_t>(got));
+  }
   rx_sample_pos_ += got;
   last_pad_samples_ = padded;
   if (padded > 0) app_rx_pad_.fetch_add(1, std::memory_order_relaxed);
@@ -454,12 +468,6 @@ int RadioHoudini::recv(void* const* buffs, int samples, long long& frameTime) {
       p_drain = p_read = 0;
       p_calls = p_chunks = p_drained = 0;
     }
-  }
-  // AP-79: the lanes whose channel's mirror lands in the output get the
-  // +-25 MHz channel filter before any consumer (detector, CFO, framer, CSI)
-  // sees them. Every Houdini read comes through here.
-  if (rx_filters_ != nullptr && got > 0) {
-    rx_filters_->apply(buffs, num_rx_ch_, static_cast<size_t>(got));
   }
   return got;
 }

@@ -31,6 +31,15 @@ class RadioHoudini : public RadioSoapy {
   /// needs the +-25 MHz channel filter (its mirror lands in the output).
   const houdini::modev::Result* modeV() const { return mode_v_.get(); }
   bool rxChannelFilter(size_t ch) const { return mode_v_ != nullptr && mode_v_->rxFilter(ch); }
+  /// The BS framer captures CONTINUOUSLY and uses only its P/U slots, so it
+  /// turns the whole-read filter off and filters the slices it extracts
+  /// (filterRxSlice). Default on (the UE's windows are used whole).
+  void setRecvFilter(bool on) { recv_filter_ = on; }
+  bool rxLaneFiltered(size_t lane) const { return rx_filters_ != nullptr && rx_filters_->laneOn(lane); }
+  void filterRxSlice(const void* capture, size_t cap_len, size_t start, size_t n, void* dst) {
+    rx_filters_->filterSlice(static_cast<const houdini::boundary::cs16*>(capture), cap_len, start, n,
+                             static_cast<houdini::boundary::cs16*>(dst));
+  }
 
   Type type() const override { return Type::kSoapyHoudini; }
   houdini::sync::Platform platform() const override { return houdini::sync::Platform::kHoudini; }
@@ -55,8 +64,6 @@ class RadioHoudini : public RadioSoapy {
   /// AP-79: at TX = 2 x sample_rate the burst (built in ticks) is x2
   /// interpolated and beat-padded here; otherwise RadioSoapy::xmit unchanged.
   int xmit(const void* const* buffs, int samples, int flags, long long& frameTime) override;
-  /// TX samples per tick: 2 when the TX stream runs at twice sample_rate.
-  int txSamplesPerTick() const { return tx_interp_ != nullptr ? 2 : 1; }
   size_t lastPadSamples() const override { return last_pad_samples_; }
   int64_t rxSamplePos() const override { return rx_sample_pos_; }
 
@@ -73,6 +80,7 @@ class RadioHoudini : public RadioSoapy {
   std::shared_ptr<houdini::modev::Result> mode_v_;  // null unless mode V
   std::unique_ptr<houdini::boundary::TxBurstInterpolator> tx_interp_;  // TX = 2 x rate
   std::unique_ptr<houdini::boundary::RxLaneFilters> rx_filters_;       // any lane filtered
+  bool recv_filter_ = true;  // off when the BS framer filters its slices itself
 
   // AP-79 link health: the software lane's checks on this handle, on a thread
   // started at the first successful read; plus what only the app can count.

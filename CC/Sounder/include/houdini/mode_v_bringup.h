@@ -134,6 +134,13 @@ inline Result bringUp(SoapySDR::Device& dev, const Plan& p) {
     res.rx.push_back({ch, p.ncoFor(ch), r.zone, r.cal_mode, r.channel_filter});
   }
   auto logLine = [&res](const std::string& s) { res.log.push_back(s); };
+  if (p.rx_freq_offset_hz != 0.0 || p.tx_freq_offset_hz != 0.0) {
+    // The one-rate path warns about a deliberate detune; mode V must too, or a
+    // test injection reads as a nominal run (AP-33).
+    logLine("WARNING: DELIBERATE frequency offset in effect: RX " + fmt("%+.1f", p.rx_freq_offset_hz) +
+            " Hz, TX " + fmt("%+.1f", p.tx_freq_offset_hz) +
+            " Hz off the NCOs. A test injection; results are NOT nominal.");
+  }
 
   // 1
   dev.writeSetting("FORCE_IDLE", "");

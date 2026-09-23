@@ -16,6 +16,7 @@
 #include <optional>
 #include <random>
 
+#include "houdini/rf_plan.h"
 #include "houdini/tx_rx_boundary.h"
 #include "sync/beacon_shapes.h"
 #include "sync/detector.h"
@@ -192,6 +193,15 @@ Config::Config(const std::string& jsonfile, const std::string& directory,
     throw std::invalid_argument(
         "mode V (rfdc_*_fs_mhz) needs fft_size and ofdm_data_num: the channel "
         "plan is checked against the band the waveform occupies");
+  }
+  if (!(adc_fs_hz_ > 0.0) &&
+      (tddConf.contains("channel_nco_frequency") || tddConf.contains("houdini_tx_gain_db") ||
+       tddConf.contains("houdini_rx_gain_db"))) {
+    // These are applied only by the mode-V bring-up; without it they would
+    // silently do nothing (every channel on nco_frequency, make()'s gains).
+    throw std::invalid_argument(
+        "channel_nco_frequency and houdini_tx/rx_gain_db need the mode-V converter "
+        "plan (rfdc_adc_fs_mhz / rfdc_dac_fs_mhz); without it they are not applied");
   }
   if (tx_rate_ != rate_ && !(adc_fs_hz_ > 0.0)) {
     throw std::invalid_argument(
@@ -939,6 +949,19 @@ void Config::genPilots() {
   shape_ = std::make_unique<houdini::sync::BeaconShape>(
       houdini::sync::BeaconShape::make(beacon_type_, platform(), num));
   const houdini::sync::BeaconShape& shape = *shape_;
+  if (mode_v()) {
+    // AP-79: in mode V the sub-6 RX lanes are filtered to +-24 MHz and the TX
+    // is prefiltered to it, so a beacon wider than that is cut on both ends
+    // while the detector still correlates against its full-band replica.
+    const double half = shape.occupiedHalfBwHz();
+    const double pass = houdini::rfplan::Rules{}.filter_pass_hz;
+    if (!(half > 0.0) || half > pass) {
+      throw std::invalid_argument(
+          "mode V needs a band-limited beacon inside +-" + std::to_string(pass / 1e6) +
+          " MHz (sync.beacon.type nr_pss_bl); " + beacon_type_ + " occupies " +
+          (half > 0.0 ? "+-" + std::to_string(half / 1e6) + " MHz" : std::string("the whole output")));
+    }
+  }
 
   // NOTE THE REPLICA'S SCALE IS LOAD-BEARING, and do not "tidy" it to unit
   // power. find_beacon's test is `corr_scale * |gc|^2|gc_lag|^2 > sum|gc|^2`,

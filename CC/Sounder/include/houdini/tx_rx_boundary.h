@@ -39,9 +39,11 @@
  */
 #pragma once
 
+#include <algorithm>
 #include <complex>
 #include <cstdint>
 #include <cstring>
+#include <stdexcept>
 #include <vector>
 
 #include "dsp/band_filters.h"
@@ -154,10 +156,33 @@ class RxLaneFilters {
     for (bool b : on_) if (b) return true;
     return false;
   }
+  bool laneOn(size_t lane) const { return lane < on_.size() && on_[lane]; }
+
+  /// Filter `n` samples starting at `start` of one lane's `capture` (cap_len
+  /// samples, zero beyond it) into `dst`, using the capture around the slice
+  /// as real context: bit-identical to filtering the whole capture and
+  /// cutting the slice out, at the cost of the slice alone. The BS uses this
+  /// on the slots it extracts from a continuous capture, which it could not
+  /// afford to filter whole (AP-79).
+  void filterSlice(const cs16* capture, size_t cap_len, size_t start, size_t n, cs16* dst) {
+    if (start > cap_len || n > cap_len - start) throw std::invalid_argument("RxLaneFilters: slice outside the capture");
+    const size_t h = f_.halfLength();
+    const size_t lo = start > h ? start - h : 0;
+    const size_t hi = std::min(cap_len, start + n + h);
+    in_.resize(hi - lo);
+    out_.resize(n);
+    for (size_t k = lo; k < hi; ++k)
+      in_[k - lo] = {static_cast<float>(capture[k].real()), static_cast<float>(capture[k].imag())};
+    // The context buffer starts at `lo`, but zero lies at the CAPTURE's edges,
+    // not the buffer's: the buffer is the capture itself wherever the filter
+    // reaches (lo = max(0, start - h), hi = min(cap_len, start + n + h)).
+    f_.runRange(in_.data(), hi - lo, start - lo, n, out_.data());
+    dsp::HalfbandInterp2::quantize(out_.data(), n, dst);
+  }
   /// Filter the flagged lanes of `buffs` (CS16, n samples each) in place.
   void apply(void* const* buffs, size_t nlanes, size_t n) {
-    in_.resize(n);
-    out_.resize(n);
+    if (in_.size() < n) in_.resize(n);
+    if (out_.size() < n) out_.resize(n);
     for (size_t l = 0; l < nlanes && l < on_.size(); ++l) {
       if (!on_[l]) continue;
       auto* p = static_cast<cs16*>(buffs[l]);
