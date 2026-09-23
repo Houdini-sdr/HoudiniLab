@@ -185,6 +185,11 @@ void RadioHoudini::writeStateRecord(const std::string& label, SoapySDR::Device& 
     };
     info(SOAPY_SDR_RX, "RX", rx_channels);
     info(SOAPY_SDR_TX, "TX", tx_channels);
+    // The calibration state per ADC block: the SH-377 oracle for a degraded
+    // bring-up (a uniform coefficient set), and the modes it ran with. AP-79
+    // pairs these with the beacon SNR, which spread +-5 dB across bring-ups.
+    section("RFDC_ADC_CAL", [&] { return dev.readSetting("RFDC_ADC_CAL"); });
+    section("RFDC_CAL_COEFFS", [&] { return dev.readSetting("RFDC_CAL_COEFFS"); });
     section("RFDC_SNAPSHOT", [&] { return dev.readSetting("RFDC_SNAPSHOT"); });
     std::fclose(f);
     MLPD_INFO("%s: RFDC state record (%s) %s\n", label.c_str(), stage.c_str(), path.c_str());
