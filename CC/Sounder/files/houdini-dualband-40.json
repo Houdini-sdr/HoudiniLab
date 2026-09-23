@@ -1,6 +1,7 @@
 {
+ "_description": "Demo fallback at 40 MHz: sub-6 2420 MHz + X-band IF 4380 MHz, 4096 FFT, 30 kHz, 106 RB",
  "_comment": "AP-79 40 MHz rollback of the target (houdini-dualband.json) [user: 50 MHz target, 40 MHz rollback if the link at 50 disappoints on the bench]: sub-6 2400 to 2440 MHz at NCO 2420, 106 RB = 1272 subcarriers = 38.16 MHz. Everything else as the target.",
- "_status": "RUNNABLE in software, NOT YET RUN on the rig (AP-79): every key is consumed, the TX interpolator, TX prefilter, RX channel filter and band-limited beacon are in, and the replay strobe contract at vld 2 is confirmed by the software and fpga lanes. Carried calibrations (tx_advance, corr_scale) are re-measured at the first run.",
+ "_status": "RAN on the rig 2026-09-23 (AP-79) and decodes, one run so far; the three-run set follows the SH-427 fix. Results: DEMO_VERIFICATION.md section 9. The replay strobe contract at vld 2 is confirmed by the software and fpga lanes.",
  "serial_file": "files/topology-houdini-dualband.json",
  "radio_type": "houdini",
  "remote_port": "55132",

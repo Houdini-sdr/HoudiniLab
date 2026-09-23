@@ -26,6 +26,71 @@ Additional reference material lives in `../../docs/UE_TX_FINE_GRID_TIMING.md`
 `../../docs/TWO_BOARD_CLOCK_LOCK.md` (why both boards must share one reference
 clock).
 
+## 0. Quick start
+
+If `<host>` already has the sounder built and the SoapyHoudiniSDR host plugin
+installed (section 2 if not), these steps take you from a shell to a live
+display. Every command runs on `<host>` unless it says otherwise.
+
+1. Activate the plugin's environment and go to the sounder:
+
+   ```sh
+   source <your-houdini-venv>/bin/activate
+   cd <path-to-HoudiniLab>/CC/Sounder
+   ```
+
+2. Pick a config from section 3, then put your two radios' addresses in the
+   topology file it names. This prints the file name:
+
+   ```sh
+   grep serial_file files/<config>.json
+   ```
+
+   Put the base station's address under `BaseStations` and the client's under
+   `Clients` (section 2.6 shows the layout).
+
+3. Check the setup. Every FAIL line says how to fix it; fix them and run it
+   again until it prints `Ready.`:
+
+   ```sh
+   python3 csi_gui/check_setup.py --conf files/<config>.json
+   ```
+
+4. Start the dashboard with its controls:
+
+   ```sh
+   python3 csi_gui/csi_server.py --control --conf files/<config>.json
+   ```
+
+5. On your workstation, forward the port and open the page:
+
+   ```sh
+   ssh -L 8080:localhost:8080 <host>
+   ```
+
+   Then browse to `http://localhost:8080/`.
+
+6. In the page header, choose the config in the list and press **Start**. The
+   dashboard checks the setup again, clears the radios, and starts the
+   sounder. If the check finds a problem it shows the list with the fix instead
+   of starting.
+
+7. What good looks like, usually within a minute:
+   - the beacon sync card reads `LOCKED` (section 5.2);
+   - one card per receive antenna appears, and its channel estimate updates;
+   - with an uplink config, the constellation shows tight clusters and the
+     quality line shows the MER.
+
+   If the sync card stays at `NOT SYNCED`, go to section 8.6. Section 6 lists
+   the log lines of a healthy run.
+
+8. Press **Stop** when you are done, or **Restart** to run again, with the same
+   config or another one from the list. Ctrl+C on the dashboard stops
+   everything.
+
+The rest of this document explains each step in detail and what to do when one
+fails.
+
 ## 1. What the demo does
 
 - The sounder normally records to HDF5. In **viewing mode** it does not write a
@@ -181,8 +246,11 @@ sounder can configure with `-DSOUNDER_BUILD_TESTS=OFF`.
 
 ### 2.6 Point the demo at your bench
 
-Edit `files/topology-houdini.json` and replace the two addresses with your own.
-The base station goes under `BaseStations`, the client under `Clients`:
+Each config names its topology file in `serial_file` (the legacy configs use
+`files/topology-houdini.json`, the dual-band ones
+`files/topology-houdini-dualband.json`). Edit that file and replace the two
+addresses with your own. The base station goes under `BaseStations`, the client
+under `Clients`:
 
 ```json
 {
@@ -239,17 +307,29 @@ at or below 4096 to fit the FPGA transmit RAM.
 
 ## 3. Choose a config
 
-Two configs ship with the demo. Both run one client at 122.88 MSPS.
+Each config carries a one-line `_description`, which the dashboard's config
+list shows. All of them run one client. Each names its own topology file in
+`serial_file` and describes the cabling it expects in `_comment`.
 
-| Config | Frame schedule | What you get |
-|---|---|---|
-| `files/houdini-1u.json` | `BGP` then guard | Channel estimate panels only |
-| `files/houdini-ul.json` | Beacon at slot 0, pilot at slot 16, uplink data at slot 18 | Channel estimate **plus** the equalized constellation |
+| Config | What it runs |
+|---|---|
+| `files/houdini-dualband.json` | The dual-band demo: sub-6 2425 MHz plus the X-band IF at 4380 MHz, 5G-like numerology (4096 FFT, 30 kHz spacing, 133 RB) |
+| `files/houdini-dualband-40.json` | The same at 40 MHz (106 RB), the fallback if the 50 MHz link disappoints |
+| `files/houdini-dualband-r3a.json` | The demo numerology on sub-6 only |
+| `files/houdini-dualband-r2.json` | Both bands at 256 FFT, 480 kHz spacing |
+| `files/houdini-dualband-r1.json` | Sub-6 only at 256 FFT, 480 kHz spacing |
+| `files/houdini-r0.json` | The legacy 500 MHz, 64 FFT link on the dual-band roles: the control |
+| `files/houdini-1u.json` | Legacy 500 MHz, 64 FFT: channel estimate panels only |
+| `files/houdini-ul.json` | Legacy 500 MHz, 64 FFT with an uplink slot: channel estimate **plus** the equalized constellation |
+| `files/houdini-2ch-decouple.json` | Legacy 500 MHz, two links on two channels |
 
-Start with `houdini-1u.json` to confirm the link is alive. Move to
-`houdini-ul.json` once you see a clean channel estimate, because the
-constellation panel only has something to draw when the frame carries an
-uplink data slot.
+On a new bench, go up the dual-band ladder one rung at a time: `r0` proves the
+link and the stack, `r1` the converter clocks and the sub-6 band, `r2` adds the
+X-band IF, `r3a` the demo numerology, and `houdini-dualband.json` is the demo.
+When a rung fails, the one below it passing tells you what changed. On the
+legacy bench roles, start with `houdini-1u.json` and move to `houdini-ul.json`
+once the channel estimate is clean: the constellation only has something to
+draw when the frame carries an uplink data slot.
 
 In the schedule strings, `B` is the beacon, `P` is the pilot, `U` is uplink
 data, and `G` is a guard slot. The uplink config places the pilot and data at

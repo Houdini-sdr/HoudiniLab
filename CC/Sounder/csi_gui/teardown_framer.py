@@ -76,38 +76,34 @@ def _import_deps():
     return hs, _teardown
 
 
-def nodes_from_topology(path):
-    """Collect every radio address in a topology file, base stations first.
+def roles_from_topology(topo):
+    """(base station addresses, client addresses) from a parsed topology.
 
     Tolerant of both shapes seen in the shipped files: a "Clients" block that is
     a dict with an "sdr" list, or a bare list.
     """
-    with open(path, encoding="utf-8") as f:
-        topo = json.load(f)
-    found = []
-
-    def _add(v):
+    def _addrs(v):
         if isinstance(v, str):
-            found.append(v)
-        elif isinstance(v, list):
-            found.extend(x for x in v if isinstance(x, str))
+            return [v]
+        if isinstance(v, list):
+            return [x for x in v if isinstance(x, str)]
+        return []
 
-    for bs in (topo.get("BaseStations") or {}).values():
-        if isinstance(bs, dict):
-            _add(bs.get("sdr"))
+    bs = []
+    for cell in (topo.get("BaseStations") or {}).values():
+        if isinstance(cell, dict):
+            bs += _addrs(cell.get("sdr"))
     clients = topo.get("Clients")
-    if isinstance(clients, dict):
-        _add(clients.get("sdr"))
-    else:
-        _add(clients)
+    ue = _addrs(clients.get("sdr") if isinstance(clients, dict) else clients)
+    return bs, ue
 
+
+def nodes_from_topology(path):
+    """Every radio address in a topology file, base stations first."""
+    with open(path, encoding="utf-8") as f:
+        bs, ue = roles_from_topology(json.load(f))
     # Preserve order, drop duplicates (a single-board bench lists one address twice).
-    seen, ordered = set(), []
-    for ip in found:
-        if ip not in seen:
-            seen.add(ip)
-            ordered.append(ip)
-    return ordered
+    return list(dict.fromkeys(bs + ue))
 
 
 def teardown_node(hs, teardown, ip, ch, passes):

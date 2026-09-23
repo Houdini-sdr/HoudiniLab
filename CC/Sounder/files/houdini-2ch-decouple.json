@@ -1,4 +1,5 @@
 {
+ "_description": "Legacy: 500 MHz, 64 FFT, two links on two channels (original bench roles)",
  "_comment": "Two-channel decoupled, SHARED pilot slot: BS(.21) rx=AB (ch0=ADC_D, ch1=ADC_C); UE(.22) tx=AB fires BOTH pilots in slot 2. Cables are spatially orthogonal (.22 DAC_B->.21 ADC_D=ch0, .22 DAC_A->.21 ADC_C=ch1) so the BS separates the two links in space -- no time-orthogonal slots needed; each RX antenna gets one clean pilot.",
  "serial_file": "files/topology-houdini.json",
  "radio_type": "houdini",

@@ -1,7 +1,8 @@
 {
+ "_description": "R3a: the demo numerology (4096 FFT, 30 kHz, 133 RB) on sub-6 2425 MHz only",
  "_comment": "AP-79 ladder rung R3a: the 5G-like numerology of houdini-dualband.json (R3: fft 4096, SCS 30 kHz, CP 288, 14 symbols, 0.5 ms slots, 10 ms frame) on the SUB-6 lane only, so R3's numerology is proven before the X-IF lane is added back (R3 = R3a + UE TX B at 4380 -> BS RX C). Generated from houdini-dualband.json by removing the X-IF channels; every other key is identical.",
  "_r3_comment": "AP-79 dual-band demo, HS-202 mode V: sub-6 ISM 2.4 (2400 to 2450 MHz, NCO 2425) both ways plus the X-band IF (NCO 4380) UE to BS, one numerology on both bands. Derived from houdini-2ch-decouple.json (the AP-78 two-channel demo) with the P + U schedule of houdini-ul.json. BS .22: TX ch0 (A, sub-6 beacon), RX ch0 (A, sub-6 uplink) + ch2 (C, X-IF uplink). UE .21: RX ch0 (A, sub-6 beacon), TX ch0 (A, sub-6) + ch1 (B, X-IF). Wiring per plan section 6: .22 DAC_B -> .21 ADC_D, .21 DAC_B -> .22 ADC_D, .21 DAC_A -> .22 ADC_B.",
- "_status": "RUNNABLE in software, NOT YET RUN on the rig (AP-79): every key is consumed, the TX interpolator, TX prefilter, RX channel filter and band-limited beacon are in, and the replay strobe contract at vld 2 is confirmed by the software and fpga lanes. Carried calibrations (tx_advance, corr_scale) are re-measured at the first run.",
+ "_status": "RAN on the rig 2026-09-23 (AP-79) and decodes, one run so far; the three-run set follows the SH-427 fix. Results: DEMO_VERIFICATION.md section 9. The replay strobe contract at vld 2 is confirmed by the software and fpga lanes.",
  "serial_file": "files/topology-houdini-dualband.json",
  "radio_type": "houdini",
  "remote_port": "55132",

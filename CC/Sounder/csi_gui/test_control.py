@@ -19,8 +19,16 @@ with open(os.path.join(sd, "build", "sounder"), "w") as f:  # records its config
 os.chmod(os.path.join(sd, "build", "sounder"), 0o755)
 with open(os.path.join(sd, "csi_gui", "teardown_framer.py"), "w") as f:
     f.write("open(%r, 'a').write('teardown\\n')\n" % log)
+# Stand-in setup check: logs its form, and FAILs while the flag file exists.
+flag = os.path.join(sd, "fail_check")
+with open(os.path.join(sd, "csi_gui", "check_setup.py"), "w") as f:
+    f.write("import json, os, sys\nq = '--quick' in sys.argv\n"
+            "open(%r, 'a').write('check %%s\\n' %% ('quick' if q else 'full'))\n"
+            "bad = os.path.exists(%r)\n"
+            "print(json.dumps({'ok': not bad, 'quick': q, 'conf': sys.argv[2], 'results': "
+            "[{'level': 'FAIL' if bad else 'PASS', 'what': 'stand-in', 'detail': '', 'fix': ''}]}))\n" % (log, flag))
 for n in ("houdini-a.json", "houdini-b.json", "other.json"):
-    open(os.path.join(sd, "files", n), "w").write("{}")
+    open(os.path.join(sd, "files", n), "w").write('{"_description": "desc of %s"}' % n)
 args = types.SimpleNamespace(sounder_dir=sd, max_frame=1, csi_fps=0, venv=sd,
                              conf="files/houdini-a.json", storepath=sd)
 # The operator's own --conf is offered even when it is not files/houdini*.json.
@@ -50,6 +58,7 @@ def wait_for(pred, t=5.0):
         if pred(): return True
         time.sleep(0.05)
     return False
+def events(): return [l for l in open(log).read().splitlines() if not l.startswith("start")] if os.path.exists(log) else []
 def starts(): return [l.split()[1] for l in open(log).read().splitlines() if l.startswith("start")] if os.path.exists(log) else []
 def alive(pid):
     try: os.kill(pid, 0); return True
@@ -61,6 +70,19 @@ def driver():
         st = get()
         check(st["enabled"] and st["state"] == "stopped", "not autostarted: stopped until asked")
         check(st["configs"] == ["files/houdini-a.json", "files/houdini-b.json"], "only files/houdini*.json are offered")
+        check(st["desc"]["files/houdini-b.json"] == "desc of houdini-b.json", "each config's _description is served")
+        # A failing quick check blocks Start and is shown; nothing launches.
+        open(flag, "w").close()
+        post({"cmd": "start"})
+        check(wait_for(lambda: get()["state"] == "check failed"), "a failing quick check blocks Start")
+        ck = get()["check"]
+        check(ck and ck["quick"] and not ck["ok"] and starts() == [] and "teardown" not in events(),
+              "the failed check is reported and neither teardown nor sounder ran")
+        post({"cmd": "check"})
+        check(wait_for(lambda: get()["state"] == "stopped" and not get()["check"]["quick"]),
+              "Check runs the full form")
+        os.remove(flag)
+        open(log, "w").close()
         check(post({"cmd": "start", "conf": "files/other.json"})[0] == 400, "a config outside the list is refused")
         check(post({"cmd": "start", "conf": "../../etc/passwd"})[0] == 400, "a path outside the sounder is refused")
         check(post({"cmd": "reboot"})[0] == 400, "an unknown command is refused")
@@ -77,7 +99,13 @@ def driver():
         check(post({"cmd": "start"})[0] == 400, "Start while running is refused")
         sup.cmds.put(("start", None)); time.sleep(0.6)  # one queued before the state showed running
         check(get()["pid"] == pid1 and alive(pid1), "a queued Start does not restart a live session")
-        check(starts() == ["files/houdini-a.json"], "start ran the current config after a teardown")
+        check(starts() == ["files/houdini-a.json"] and events()[:2] == ["check quick", "teardown"],
+              "start ran a quick check, a teardown, then the current config")
+        check(post({"cmd": "check"})[0] == 400, "Check while running is refused")
+        n_checks = events().count("check full")
+        sup.cmds.put(("check", None)); time.sleep(0.6)
+        check(get()["pid"] == pid1 and events().count("check full") == n_checks,
+              "a queued Check neither runs nor disturbs a live session")
         post({"cmd": "restart", "conf": "files/houdini-b.json"})
         check(wait_for(lambda: get()["state"] == "running" and get()["pid"] != pid1), "restart: a new sounder is running")
         check(not alive(pid1), "restart killed the old sounder")

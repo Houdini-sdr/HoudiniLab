@@ -1,4 +1,5 @@
 {
+ "_description": "R1: sub-6 2425 MHz only, 256 FFT, 480 kHz",
  "serial_file": "files/topology-houdini-dualband.json",
  "radio_type": "houdini",
  "remote_port": "55132",

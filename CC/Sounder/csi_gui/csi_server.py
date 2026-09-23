@@ -483,7 +483,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, {"enabled": False})
             return
         st = sup.snapshot()
-        st.update({"enabled": True, "configs": sup.configs()})
+        st.update({"enabled": True, "configs": sup.configs(), "desc": sup.descriptions()})
         self._json(200, st)
 
     def do_POST(self):
@@ -692,7 +692,8 @@ class SounderSupervisor:
         # the forking thread), executes them. `state` is what the page shows.
         self.cmds = queue.Queue()
         self.state_lock = threading.Lock()
-        self.state = {"state": "stopped", "pid": None, "rc": None, "attempt": 0, "conf": None}
+        self.state = {"state": "stopped", "pid": None, "rc": None, "attempt": 0, "conf": None,
+                      "check": None}
         self.set_conf(args.conf)
         self.launch_conf = args.conf  # the operator's --conf is always a valid choice
 
@@ -724,14 +725,28 @@ class SounderSupervisor:
                        for p in glob.glob(os.path.join(self.sd, "files", "houdini*.json"))}
                       | {self.launch_conf})
 
+    def descriptions(self):
+        """Each offered config's one-line `_description`, for the page's list."""
+        out = {}
+        for c in self.configs():
+            try:
+                with open(os.path.join(self.sd, c), encoding="utf-8") as f:
+                    out[c] = str(json.load(f).get("_description", ""))
+            except (OSError, ValueError):
+                out[c] = ""
+        return out
+
     def request(self, cmd, conf=None):
-        """From any thread: queue start / stop / restart. Returns an error or None."""
-        if cmd not in ("start", "stop", "restart"):
+        """From any thread: queue start / stop / restart / check. Returns an error or None."""
+        if cmd not in ("start", "stop", "restart", "check"):
             return "unknown command"
         if conf is not None and conf not in self.configs():
             return "config not allowed: %s" % conf
-        if cmd == "start" and self.snapshot()["state"] in ("tearing down", "starting", "running"):
+        live = self.snapshot()["state"] in ("tearing down", "starting", "running")
+        if cmd == "start" and live:
             return "already running (use Restart)"
+        if cmd == "check" and live:
+            return "stop the sounder first: the full check opens the radios"
         self.cmds.put((cmd, conf))
         return None
 
@@ -760,15 +775,39 @@ class SounderSupervisor:
             print("[csi] sounder pid %d did not exit after SIGKILL" % proc.pid, flush=True)
 
     def _pending(self):
-        """The next command for a live session. A Start is dropped: one queued
-        before the state showed the session (a double click) must not restart it."""
+        """The next command for a live session. A Start or Check is dropped: one
+        queued before the state showed the session (a double click) must not
+        restart it, and the full check must not open radios a sounder holds."""
         while True:
             try:
                 c = self.cmds.get_nowait()
             except queue.Empty:
                 return None
-            if c[0] != "start":
+            if c[0] not in ("start", "check"):
                 return c
+
+    def _check(self, quick):
+        """Run csi_gui/check_setup.py for the current config; keep its report for
+        the page. Returns False when it found a FAIL (or could not run)."""
+        self._set(state="checking")
+        cmd = ["python3", "csi_gui/check_setup.py", "--conf", self.conf, "--json"]
+        if quick:
+            cmd.append("--quick")
+        try:
+            out = subprocess.run(cmd, cwd=self.sd, env=self.env, timeout=180,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            rep = json.loads(out.stdout)
+        except (OSError, subprocess.TimeoutExpired, ValueError) as e:
+            rep = {"ok": False, "quick": quick, "conf": self.conf, "results": [
+                {"level": "FAIL", "what": "check", "detail": "check_setup.py did not run (%s)" % e,
+                 "fix": "Run it by hand: python3 csi_gui/check_setup.py --conf %s" % self.conf}]}
+        rep["when"] = time.strftime("%H:%M:%S")
+        rep["id"] = time.time()  # identity for the page; `when` can repeat within a second
+        self._set(check=rep)
+        for r in rep["results"]:
+            if r["level"] in ("FAIL", "WARN"):
+                print("[check] %s %s: %s" % (r["level"], r["what"], r["detail"]), flush=True)
+        return rep["ok"]
 
     def _wait(self, seconds):
         """Sleep, but return a queued command as soon as one arrives."""
@@ -837,7 +876,7 @@ class SounderSupervisor:
         """Main thread: optionally run a session now, then act on dashboard
         commands for the life of the process. A command that arrives during a
         session interrupts it (stop, or a restart with its config)."""
-        c = self.run() if autostart else None
+        c = ("start", None) if autostart else None
         while not self.stopping:
             if c is None:
                 try:
@@ -849,9 +888,17 @@ class SounderSupervisor:
             self._set(state="stopping")
             self._kill()
             self._set(state="stopped", pid=None)
-            if cmd in ("start", "restart"):
-                if conf:
-                    self.set_conf(conf)
+            if conf:
+                self.set_conf(conf)
+            if cmd == "check":
+                self._check(quick=False)
+                self._set(state="stopped")
+            elif cmd in ("start", "restart"):
+                # The quick check first (no radio opened): a missing build, plugin
+                # or server is named on the page instead of as a sounder exit code.
+                if not self._check(quick=True):
+                    self._set(state="check failed")
+                    continue
                 print("[csi] dashboard %s: %s" % (cmd, self.conf), flush=True)
                 c = self.run()
 
@@ -888,9 +935,10 @@ def main():
                          "unless --launch is also given). Binds the web server to "
                          "127.0.0.1 unless --http-host is given: use the SSH port-forward")
     ap.add_argument("--sounder-dir", default=os.path.expanduser("~/repos/HoudiniLab/CC/Sounder"))
-    ap.add_argument("--venv", default=os.path.expanduser("~/houdini_test"),
+    ap.add_argument("--venv", default=os.environ.get("VIRTUAL_ENV") or os.path.expanduser("~/houdini_test"),
                     help="virtualenv prefix holding SoapySDR and the Houdini "
-                         "plugin, used when --launch runs the sounder")
+                         "plugin, used when --launch or --control runs the sounder "
+                         "(default: the activated venv, else %(default)s)")
     ap.add_argument("--conf", default="files/houdini-1u.json")
     ap.add_argument("--storepath", default="/tmp/houdini_hdf5")
     ap.add_argument("--max-frame", type=int, default=2_000_000_000,
@@ -1062,6 +1110,8 @@ PAGE = r"""<!doctype html>
       <div class="d-flex align-items-center gap-2" id="ctl" hidden>
         <select class="form-select form-select-sm" id="ctl-conf" style="width:auto"
                 title="Config for Start / Restart"></select>
+        <button class="btn btn-sm btn-outline-secondary" data-cmd="check"
+                title="Check this host and both radios before starting">Check</button>
         <button class="btn btn-sm btn-success" data-cmd="start">Start</button>
         <button class="btn btn-sm btn-warning" data-cmd="restart">Restart</button>
         <button class="btn btn-sm btn-danger" data-cmd="stop">Stop</button>
@@ -1073,6 +1123,7 @@ PAGE = r"""<!doctype html>
     </div>
   </div>
 </header>
+<div id="check" class="px-3 pt-3" hidden></div>
 <div id="sync"></div>
 <div class="csi-cards" id="ants"></div>
 <script>
@@ -1850,16 +1901,44 @@ async function pollCtl(){
       ctlConfs=key; sel.innerHTML='';
       for(const c of st.configs){
         const o=document.createElement('option'); o.value=c;
-        o.textContent=c.replace(/^files\//,''); sel.appendChild(o);
+        const d=st.desc[c]||'';
+        o.textContent=d?d:c.replace(/^files\//,''); o.title=c; sel.appendChild(o);
       }
       sel.value=st.conf;
     }
+    drawCheck(st.check);
     let t=st.state;
     if(st.state==='running') t+=' (pid '+st.pid+')';
     else if(st.state==='exited') t+=' rc '+st.rc;
     if(st.attempt>1 && st.state!=='stopped') t+=', attempt '+st.attempt;
     document.getElementById('ctl-state').textContent=t+' · '+String(st.conf).replace(/^files\//,'');
   }catch(err){}
+}
+// The last setup check, as a list with the fix under each problem. Shown after
+// a Check, and after a Start the quick check refused; the close button hides it
+// until the next check.
+let checkShown=null, checkClosed=null;
+function esc(x){ return String(x).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function drawCheck(ck){
+  const box=document.getElementById('check');
+  // A quick check that passed (every normal Start) needs no panel.
+  if(!ck || ck.id===checkClosed || (ck.quick && ck.ok)){ box.hidden=true; return; }
+  box.hidden=false;
+  if(ck.id===checkShown) return;
+  checkShown=ck.id;
+  const col={PASS:'green',WARN:'orange',FAIL:'red',INFO:'secondary'};
+  let rows='';
+  for(const r of ck.results){
+    rows+='<tr><td><span class="badge bg-'+col[r.level]+'-lt text-'+col[r.level]+'">'+esc(r.level)+'</span></td>'
+      +'<td class="text-nowrap">'+esc(r.what)+'</td><td>'+esc(r.detail)
+      +(r.fix?'<div class="text-secondary small">'+esc(r.fix)+'</div>':'')+'</td></tr>';
+  }
+  box.innerHTML='<div class="card"><div class="card-header py-2"><h3 class="card-title">'
+    +(ck.ok?'Setup check passed':'Setup check: NOT READY, fix each FAIL')
+    +' <span class="text-secondary small">('+(ck.quick?'quick, radios not opened':'full')+', '+esc(ck.conf)+', '+esc(ck.when)+')</span></h3>'
+    +'<div class="card-actions"><button class="btn btn-sm btn-ghost-secondary" id="check-close">Close</button></div></div>'
+    +'<div class="table-responsive"><table class="table table-sm table-vcenter card-table mb-0">'+rows+'</table></div></div>';
+  document.getElementById('check-close').addEventListener('click',()=>{ checkClosed=ck.id; box.hidden=true; });
 }
 async function sendCtl(cmd){
   const conf=document.getElementById('ctl-conf').value||null;
