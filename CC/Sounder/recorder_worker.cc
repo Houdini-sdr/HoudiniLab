@@ -424,13 +424,16 @@ void RecorderWorker::sendCsi(Packet* pkt) {
   (void)::send(csi_sock_, buf.data(), buf.size(), 0);
   // The impulse response of the same H, at the same (throttled) rate: one
   // inverse FFT per SENT frame, Hann-windowed over the occupied tones
-  // (houdini/cir.h). 128 taps centred on the strongest, dB relative to it;
-  // the tap spacing is 1 / sample rate, the resolution about 1 / occupied BW.
+  // (houdini/cir.h). Up to 128 taps centred on the strongest, dB relative to
+  // it; the tap spacing is 1 / sample rate, the resolution about 2 / occupied
+  // BW (the Hann mainlobe).
   // [magic 'CIR1'][frame][ant][ntaps][pre][peak][N][tap_ns f32][dB f32]*ntaps
   if (cir_) {
     // The strongest tap in the MIDDLE of the window, so the page's centre line
     // and its "peak" label sit on it (they were at 50 % with the peak at 12 %).
-    constexpr int kPre = 64, kTaps = 128;
+    // Never wider than the CIR itself: at fft 64 a 128-tap window showed the
+    // response twice and made the mean excess delay negative (an Opus review).
+    const int kTaps = std::min(128, N), kPre = kTaps / 2;
     int peak = 0;
     const std::vector<float> db = houdini::cirWindowDb(cir_->power(H), kPre, kTaps, &peak);
     std::vector<uint8_t> cb(32 + 4 * db.size());
@@ -796,10 +799,12 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
   }
   std::vector<std::complex<float>> pts;
   pts.reserve(kMaxPts);
-  // A STRIDE through every (symbol, tone) pair, so the sample covers the whole
-  // band and every symbol: filling in tone order took the lowest 600 tones of
-  // one symbol at fft 4096 (41 % of the band), and the MER described only
-  // those (a standards check, 2026-09-23).
+  // A STRIDE through the (symbol, tone) pairs of the symbols used here (the
+  // middle ones), so the sample spans the whole band and those symbols:
+  // filling in tone order took the lowest 600 tones of one symbol at fft 4096
+  // (41 % of the band), and the MER described only those (a standards check,
+  // 2026-09-23). The CNS score now includes the band edges too, so its
+  // earlier baselines are not comparable.
   const size_t cand = Ys.size() * data_ind.size();
   const size_t stride = std::max<size_t>(1, (cand + kMaxPts - 1) / kMaxPts);
   for (size_t si = 0; si < Ys.size() && pts.size() < kMaxPts; ++si) {

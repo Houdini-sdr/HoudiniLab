@@ -273,9 +273,9 @@ def _delay_stats(db, pre, tap_ns):
     delay (the last tap above the threshold), all relative to the strongest
     tap at index `pre`. The threshold is 20 dB below the peak or 6 dB above the
     noise floor (the median of the window's outer quarter), whichever is
-    higher, and is reported. A single path is NOT 0 ns: the band limit sets a
-    floor of about 1/B (the Hann-windowed CIR's mainlobe), so values near
-    that floor are unresolved."""
+    higher, and is reported. A single path is NOT 0 ns: the Hann-windowed
+    CIR's mainlobe (about 2/B wide) gives a lone path an RMS spread of about
+    0.5/B, so values near that are unresolved."""
     q = max(1, len(db) // 8)
     tail = sorted(db[:q] + db[-q:])
     floor = tail[len(tail) // 2] if tail else -60.0
@@ -1306,9 +1306,11 @@ function drawCir(card,r){
 function drawQuality(card){
   const m=card.metRec, q=[];
   if(m){
-    const rb=(m.occ%12===0)?(m.occ/12)+' RB × 12 × ':m.occ+' × ';
+    // Resource blocks only at an NR numerology (38.211 4.2: 15 x 2^mu kHz).
+    const nr=[15,30,60,120,240].some(v=>Math.abs(m.scs_khz-v)<1e-6);
+    const rb=(nr && m.occ%12===0)?(m.occ/12)+' RB × 12 × ':m.occ+' tones × ';
     q.push('ch '+m.ch+' · IF/NCO '+m.fc_mhz.toFixed(3)+' MHz · transmission BW '
-           +m.bw_mhz.toFixed(2)+' MHz ('+rb+m.scs_khz.toFixed(0)+' kHz, fft '+m.fft+')');
+           +m.bw_mhz.toFixed(2)+' MHz ('+rb+(+m.scs_khz.toFixed(3))+' kHz, fft '+m.fft+')');
   }
   const cn=card.cnsRec;
   if(cn && cn.mer_db!==undefined && Date.now()-(card.cnsT||0)<2000)
@@ -1318,7 +1320,9 @@ function drawQuality(card){
   if(c){
     let t='RMS delay spread '+c.rms_ns.toFixed(1)+' ns · mean excess '+c.mean_ns.toFixed(1)
          +' ns · max excess '+c.max_ns.toFixed(1)+' ns (thr '+c.thr_db.toFixed(0)+' dB re peak';
-    if(m && m.bw_mhz>0) t+=', resolution ≈ '+(1e3/m.bw_mhz).toFixed(0)+' ns';
+    // Hann mainlobe ~2/B; a lone path's RMS spread floor ~0.5/B.
+    if(m && m.bw_mhz>0) t+=', resolution ≈ '+(2e3/m.bw_mhz).toFixed(0)+' ns, single-path floor ≈ '
+                           +(0.5e3/m.bw_mhz).toFixed(0)+' ns';
     q.push(t+')');
   }
   card.quality.textContent=q.join('\n');
