@@ -29,6 +29,7 @@
 #include "include/rx_gap_sink.h"
 #include "include/utils.h"
 #include "houdini/replay_strobe.h"
+#include "houdini/slot_align.h"
 #include "houdini/tx_rx_boundary.h"
 #include "sync/beacon_shape.h"
 
@@ -679,20 +680,24 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
     if (st + n > cg) st = cg - n;
     return st;
   };
-  const long long p_start = align_slot(p_at);  // aligned pilot slot start
-  // Fill the per-frame cache. Centroid-align EACH rx slot to its OWN energy near
-  // its expected offset from the pilot -- the UE snaps each slot's tx time to the
-  // 384-tick TDD grid independently, so the pilot->data spacing isn't exactly an
-  // integer number of slots; extracting the data at pilot+gap would leave it
-  // ~260 samples off. Aligning each slot lands every slot at [prefix..] so the
-  // recorded data lines up with the pilot for offline equalization.
+  // Place the pilot once, by its leading edge (AP-79, houdini/slot_align.h):
+  // the UE sends the pilot and its data slots as one burst at exact whole-slot
+  // offsets, so every other slot sits a whole number of slots from it. The per-slot alignment this replaces took
+  // in the neighbour's energy when P and U are adjacent and extracted U 264-317
+  // samples early (R1c). HOUDINI_BS_ALIGN_PER_SLOT=1 restores it for an A/B.
+  static const bool per_slot = getenv("HOUDINI_BS_ALIGN_PER_SLOT") != nullptr;
+  std::vector<long long> rel_slots;
+  for (size_t k = 0; k < K; ++k)
+    rel_slots.push_back(static_cast<long long>(htdd_rx_slots_.at(k)) -
+                        static_cast<long long>(htdd_pilot_slot_));
+  const long long p_start =
+      per_slot ? align_slot(p_at)
+               : houdini::slotalign::burstPilotStart(cse, p_at, static_cast<long long>(n), cfg_->prefix());
   htdd_slot_cache_.resize(K * C * static_cast<size_t>(n) * 2);
   long long u_start = -1;  // aligned start of the uplink-data slot, if present
   for (size_t k = 0; k < K; ++k) {
-    const long long guess = p_start +
-        (static_cast<long long>(htdd_rx_slots_.at(k)) -
-         static_cast<long long>(htdd_pilot_slot_)) * n;
-    const long long st = align_slot(guess);
+    const long long guess = p_start + rel_slots.at(k) * n;
+    const long long st = per_slot ? align_slot(guess) : std::max(0LL, std::min(guess, static_cast<long long>(cg) - static_cast<long long>(n)));
     if (htdd_rx_slots_.at(k) != htdd_pilot_slot_) u_start = st;
     // The centroid start is derived from lane 0 but applies to every lane (the
     // combined stream is sample-aligned), so extract slot k from each lane's own
