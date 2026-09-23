@@ -348,6 +348,9 @@ add_test(NAME link_health COMMAND link_health_test
 add_executable(replay_strobe_test tests/comms-func/replay_strobe_test.cc)
 target_include_directories(replay_strobe_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 add_test(NAME replay_strobe COMMAND replay_strobe_test)
+add_executable(pilot_ladder_test tests/comms-func/pilot_ladder_test.cc)
+target_include_directories(pilot_ladder_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_test(NAME pilot_ladder COMMAND pilot_ladder_test)
 
 # AP-79: nr_pss_bl's acquisition thresholds derived on a simulated link.
 add_executable(detection_calibration_test tests/comms-func/detection_calibration_test.cc)

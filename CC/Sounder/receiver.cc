@@ -29,6 +29,7 @@
 #include "include/comms-lib.h"
 #include "include/logger.h"
 #include "include/macros.h"
+#include "include/houdini/pilot_ladder.h"
 #include "include/node_version.h"
 #include "sync/grid_tracker.h"
 #include "sync/resync_policy.h"
@@ -985,7 +986,6 @@ void Receiver::clientTxPilots(size_t user_id, long long base_time,
     const double frame_d = (frame_period > 0.0)
                                ? frame_period
                                : static_cast<double>(config_->samps_per_frame());
-    const long long frame = llround(frame_d);
     // The driver only ACCEPTS burst anchors on the 384-tick / 3125 ns grid
     // (the finest ns-exact grid, TxTickAnchor SH-248), but a burst's INTERIOR
     // advances tick-exactly. So compose ONE burst per frame -- [front-pad
@@ -1041,11 +1041,11 @@ void Receiver::clientTxPilots(size_t user_id, long long base_time,
     const long long end = txTime + llround(horizon * frame_d);
     // Every burst is txTime + i * tracked_period for integer i, so the whole
     // ladder rides the tracked grid and no rounding accumulates along it.
-    long long i0 = 0;
-    if (pilot_cursor + frame > txTime) {
-      i0 = static_cast<long long>(std::ceil(
-          static_cast<double>(pilot_cursor + frame - txTime) / frame_d));
-    }
+    // Resume at the first burst more than half a frame past the cursor: the
+    // old ceil(cursor + frame) rule skipped a frame whenever this call's
+    // txTime landed a fraction of a sample early on the tracked grid, which
+    // left 25 % of frames without a pilot (AP-79 R0/R1; houdini/pilot_ladder.h).
+    const long long i0 = houdini::ladder::resumeIndex(pilot_cursor, txTime, frame_d);
     // There used to be a re-anchor flag set by the escalation and consumed
     // here. i0 above subsumes it: it ALWAYS resumes on the current grid at the
     // first index past what is already queued, which is exactly what the flag
