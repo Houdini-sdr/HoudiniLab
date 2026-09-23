@@ -12,6 +12,18 @@
 #include "include/utils.h"
 
 int pin_to_core(int core_id) {
+  // HOUDINI_CORE_BASE shifts every pinned thread together, wrapping at the
+  // core count. The sounder numbers its cores from 0, which on a big.LITTLE
+  // host (the DGX Spark rig: 0-4 and 10-14 efficiency, 15-19 fast) puts the
+  // spinning dispatch thread and the per-radio threads on the slow cores; at
+  // AP-79 R1 core 0 ran at 99 % with the dispatch thread and a second thread
+  // on it. Base 15 moves cores 0-4 onto 15-19. Unset keeps the old numbering.
+  static const int base = [] {
+    const char* e = std::getenv("HOUDINI_CORE_BASE");
+    return e != nullptr ? std::atoi(e) : 0;
+  }();
+  const int n = static_cast<int>(sysconf(_SC_NPROCESSORS_ONLN));
+  if (base != 0 && n > 0 && core_id >= 0) core_id = (core_id + base) % n;
   pthread_t current_thread = pthread_self();
   return pin_thread_to_core(core_id, current_thread);
 }

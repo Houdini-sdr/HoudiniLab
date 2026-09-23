@@ -609,6 +609,8 @@ same shell that launches it.
 | `HOUDINI_PILOT_HORIZON` | from config `ue_pilot_horizon` (96) | How many frames of client bursts are queued ahead of real time. Larger survives slower host loops; every extra frame delays a timing correction reaching the wire. |
 | `HOUDINI_BS_RX_DEBUG` | unset | Base station prints its rederivation of the client schedule (`pilot_grid_off`, `pu_spacing_err`). Both should sit within one sample of zero. |
 | `HOUDINI_UE_TX_DEBUG` | unset | Client prints its burst scheduling (frames queued, pad). |
+| `HOUDINI_CORE_BASE` | 0 | Shifts every thread the sounder pins by this many cores (wrapping at the core count). On a host whose fast cores are not numbered from 0, set it to the first fast core so the busy dispatch thread runs there. Find the fast cores with `lscpu -e=CPU,MAXMHZ`. |
+| `HOUDINI_BS_ALIGN_PER_SLOT` | unset | Base station aligns each received slot on its own energy instead of placing the pilot by its leading edge and every other slot a whole number of slots from it. For an A/B only: with pilot and data in adjacent slots it extracts the data slot hundreds of samples early. |
 | `HOUDINI_CSI_R_DEBUG` | unset | Recorder prints the per frame pilot re-alignment it chose (`r`, and the blind score behind it), one line per 30 corrections. |
 | `HOUDINI_CFO_LOG_EVERY` | 10 | How many beacon detections pass per `Beacon CFO` line. The default logs one in ten, so a quiet run is expected. Set it to 1 for a calibration run where you want every estimate. |
 | `HOUDINI_CNS_DUMP_LOW` | unset | Directory for autopsy dumps of the first few low scoring constellations. The directory must already exist. |
