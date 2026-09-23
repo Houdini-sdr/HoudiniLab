@@ -80,8 +80,12 @@ SoapySDR::Kwargs RadioHoudini::txStreamArgs(const RadioParams& p) {
   // default; at AP-79 R2 the two UE TX pacers landed on the core the sounder's
   // dispatch thread spins on (99 %), and bursts went late. The plugin takes
   // cpu_affinity at setupStream; the env names match its houdini_setup.py.
+  // A comma list ("17,18") gives each TX stream its own core (RadioSoapy).
   if (const char* e = std::getenv("HOUDINI_TX_AFFINITY")) {
     if (p.tx_mode == "stream") tx["cpu_affinity"] = e;
+  }
+  if (const char* e = std::getenv("HOUDINI_TX_RTPRIO")) {
+    if (p.tx_mode == "stream") tx["rt_priority"] = e;
   }
   return tx;
 }

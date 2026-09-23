@@ -9,6 +9,7 @@
 #include "include/RadioSoapy.h"
 
 #include <algorithm>
+#include <sstream>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -271,9 +272,18 @@ RadioSoapy::RadioSoapy(const RadioParams& params, Type type, const SoapySDR::Kwa
       // SH-235: the Houdini driver rejects a multi-channel TX stream on both
       // modes (replay beacon and live pilot). Open one single-channel TX stream
       // per channel; xmit routes each channel's buffer to its own stream.
-      for (auto ch : tx_channels) {
-        tx_streams_.push_back(
-            dev_->setupStream(SOAPY_SDR_TX, soapyFmt, {ch}, txStreamArgs));
+      // A comma-separated cpu_affinity gives each TX stream its own core, in
+      // stream order (AP-79 R2: two live pacers sharing one core); a single
+      // value applies to all, as the driver takes it.
+      std::vector<std::string> tx_cores;
+      if (txStreamArgs.count("cpu_affinity") != 0u) {
+        std::stringstream ss(txStreamArgs.at("cpu_affinity"));
+        for (std::string c; std::getline(ss, c, ',');) tx_cores.push_back(c);
+      }
+      for (size_t k = 0; k < tx_channels.size(); ++k) {
+        SoapySDR::Kwargs a = txStreamArgs;
+        if (tx_cores.size() > 1) a["cpu_affinity"] = tx_cores.at(std::min(k, tx_cores.size() - 1));
+        tx_streams_.push_back(dev_->setupStream(SOAPY_SDR_TX, soapyFmt, {tx_channels[k]}, a));
       }
       // One combined RX stream over the RX channels. Since SH-142/SH-159 landed
       // the driver activates a >1-channel RX stream and readStream fills buffs[i]
