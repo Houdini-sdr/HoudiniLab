@@ -117,7 +117,12 @@ RadioHoudini::RadioHoudini(const RadioParams& params,
     if (params.tx_rate_hz != 2.0 * params.rate_hz) {
       throw std::invalid_argument("RadioHoudini: only TX = 2 x sample_rate is interpolated");
     }
-    tx_interp_ = std::make_unique<houdini::boundary::TxBurstInterpolator>();
+    // Shape the TX spectrum with the channel filter whenever the waveform fits
+    // its passband (every first-pass channel does): unshaped splatter beyond
+    // 40.2 MHz folds back onto the sub-6 channel at the far ADC.
+    const bool prefilter = params.half_bw_hz > 0.0 &&
+                           params.half_bw_hz <= houdini::rfplan::Rules{}.filter_pass_hz;
+    tx_interp_ = std::make_unique<houdini::boundary::TxBurstInterpolator>(prefilter);
   }
   if (mode_v_ != nullptr) {
     auto on = houdini::boundary::laneFlags(

@@ -58,7 +58,7 @@ constexpr long long kHoudiniStrobeOffsetTicks = 384;
 
 class BeaconShape {
  public:
-  /// Build from a shape name (legacy, legacy_guard, dot11, nr, nr_pss).
+  /// Build from a shape name (legacy, legacy_guard, dot11, nr, nr_pss, nr_pss_bl).
   /// Throws std::invalid_argument naming the valid names: a typo that quietly
   /// ships the old beacon is exactly the failure the parameter exists to
   /// make visible.

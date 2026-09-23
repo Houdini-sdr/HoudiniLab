@@ -63,7 +63,7 @@ bool equal(const void* a, const std::vector<cs16>& b) {
 // new content (a new pad), then sent again. Returns whether the second output
 // is the interpolation of the NEW content.
 bool rewriteInPlaceIsFresh(TxBurstInterpolator::CacheKey key) {
-  TxBurstInterpolator ti(key);
+  TxBurstInterpolator ti(false, key);
   auto buf = burst(4096, 0.05, 9000.0);
   const void* p[1] = {buf.data()};
   ti.run(p, 1, buf.size());
@@ -93,6 +93,74 @@ int main() {
     const auto o = ti.run(p, 2, a.size());
     check(o.buffs.size() == 2 && equal(o.buffs[0], direct(a)) && equal(o.buffs[1], direct(b)),
           "two channels are interpolated independently, each from its own buffer");
+  }
+  {  // TX spectral shaping: energy 40.2 to 61.44 MHz from the NCO folds back
+     // onto the sub-6 channel at the far ADC, so the prefiltered output must
+     // hold it >= 60 dB down, and the unshaped output (the mutant) must not
+    auto splatter = [](const TxBurstInterpolator::Out& o, size_t nch0) {
+      // energy of channel 0's TX output in |f| 40.2..61.44 MHz vs total, 245.76 MSPS
+      const auto* p = static_cast<const cs16*>(o.buffs[nch0]);
+      const size_t n = o.samples;
+      double in = 0.0, out = 0.0;
+      for (size_t k = 0; k < n; k += 3) {  // every 3rd bin is plenty for a band ratio
+        std::complex<double> acc(0, 0);
+        for (size_t t = 0; t < n; ++t) {
+          const double ph = -2.0 * M_PI * static_cast<double>((k * t) % n) / static_cast<double>(n);
+          acc += std::complex<double>(p[t].real(), p[t].imag()) * std::complex<double>(std::cos(ph), std::sin(ph));
+        }
+        const double f = std::fabs((k < n / 2 ? static_cast<double>(k) : static_cast<double>(k) - n) * 245.76e6 / n);
+        (f >= 40.2e6 && f <= 61.44e6 ? out : in) += std::norm(acc);
+      }
+      return 10.0 * std::log10(out / in);
+    };
+    // A burst with hard edges and a symbol-boundary jump: the splatter source.
+    std::vector<cs16> b(1024, cs16(0, 0));
+    for (size_t k = 64; k < 960; ++k) {
+      const double f = (k < 512) ? 0.07 : -0.13;  // two "symbols", in band (8.6 and -16 MHz)
+      const double ph = 2.0 * M_PI * f * static_cast<double>(k);
+      b[k] = cs16(static_cast<int16_t>(std::lround(8000 * std::cos(ph))), static_cast<int16_t>(std::lround(8000 * std::sin(ph))));
+    }
+    const void* p[1] = {b.data()};
+    TxBurstInterpolator shaped(true), raw(false);
+    const double s_shaped = splatter(shaped.run(p, 1, b.size()), 0);
+    const double s_raw = splatter(raw.run(p, 1, b.size()), 0);
+    std::printf("TX splatter 40.2-61.44 MHz: shaped %.1f dB, unshaped %.1f dB\n", s_shaped, s_raw);
+    check(s_shaped <= -60.0, "prefiltered TX holds 40.2 to 61.44 MHz >= 60 dB down [mutation: no prefilter]");
+    check(s_raw > -60.0, "mutant without the prefilter leaves the folding band above -60 dB");
+    // margins: content prefilterLead() zeros in reproduces the long-padded
+    // result; one zero fewer must not
+    auto matches = [](size_t lead, size_t tail) {
+      const size_t body = 96;
+      std::vector<cs16> tight(lead + body + tail, cs16(0, 0)), wide(tight.size() + 128, cs16(0, 0));
+      for (size_t k = 0; k < body; ++k) {
+        const cs16 v(static_cast<int16_t>(3000 + 37 * k), static_cast<int16_t>(-2000 + 11 * k));
+        tight[lead + k] = v;
+        wide[64 + lead + k] = v;
+      }
+      TxBurstInterpolator a(true), w(true);
+      const void* pt[1] = {tight.data()};
+      const void* pw[1] = {wide.data()};
+      const auto ot = a.run(pt, 1, tight.size());
+      const auto ow = w.run(pw, 1, wide.size());
+      const auto* yt = static_cast<const cs16*>(ot.buffs[0]);
+      const auto* yw = static_cast<const cs16*>(ow.buffs[0]);
+      for (size_t k = 0; k < ow.samples; ++k) {
+        const bool inside = k >= 128 && k < 128 + 2 * tight.size();
+        const cs16 ref = inside ? yt[k - 128] : cs16(0, 0);
+        if (std::abs(ref.real() - yw[k].real()) > 1 || std::abs(ref.imag() - yw[k].imag()) > 1) return false;
+      }
+      return true;
+    };
+    const size_t L = TxBurstInterpolator::prefilterLead(), T = TxBurstInterpolator::prefilterTail();
+    std::printf("prefiltered burst margins: %zu before, %zu after\n", L, T);
+    // The stated margins are the filters' exact support. At int16 the outer
+    // taps of the Kaiser-windowed channel filter sit under one LSB, so a cut
+    // becomes VISIBLE only from about 8 samples in (measured: 7 cut still
+    // matches, 9 does not); the check therefore proves sufficiency at the stated
+    // margins and that it can fail at 9, not bit-tightness at 1.
+    check(matches(L, T) && !matches(L - 9, T) && !matches(L, T - 9),
+          "prefiltered margins reproduce the unbounded burst, and a 9-sample cut visibly truncates it");
+    check(L <= 32 && T <= 32, "prefiltered margins fit the 32-tick slot prefix/postfix");
   }
   {  // a null channel (the beacon load's non-beacon streams) passes through
     TxBurstInterpolator ti;

@@ -213,7 +213,7 @@ const std::vector<SyncConfig::Spec>& SyncConfig::schema() {
   static const std::vector<Spec> kSchema = {
       // beacon
       {"beacon.type", nullptr, 0, 0,
-       "Which beacon waveform the base station transmits (legacy, legacy_guard, dot11, nr, nr_pss).",
+       "Which beacon waveform the base station transmits (legacy, legacy_guard, dot11, nr, nr_pss, nr_pss_bl; nr_pss_bl is the band-limited mode-V beacon, AP-79).",
        KNOB_ACCESS(std::string, beacon.type), nullptr, EP::kClamp},
       {"beacon.tx_full_scale", "HOUDINI_BEACON_FS", 1e-3, 1.0,
        "Transmit peak of the beacon as a fraction of DAC full scale. 0.6 shipped; lower it to stand in for path loss on a cable.",

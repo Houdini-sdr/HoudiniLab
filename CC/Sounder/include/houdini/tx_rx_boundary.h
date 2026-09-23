@@ -15,6 +15,15 @@
  * vld 2): the PL moves TX data in 8-sample beats (fpga lane, TDD_FRAMER_DESIGN
  * section 1c).
  *
+ * SPECTRAL SHAPING (prefilter). At the sub-6 NCO any TX energy 40.2 to 61.4
+ * MHz from the NCO lands, through the far ADC's real-sampling mirror, back ON
+ * the channel (at 65.2 - f), so unshaped splatter from symbol and burst edges
+ * caps the link: measured -33 dB for the band-limited beacon. With prefilter
+ * on, every burst first passes the +-24 MHz channel filter at the tick rate
+ * (72 dB down from +-40.2), then the halfband. The burst then needs
+ * kPrefilterLead zeros ahead of its content and kPrefilterTail after it: the
+ * slot's 32-tick prefix and postfix cover both.
+ *
  * The UE re-sends the SAME burst every frame until its pad changes, so the
  * interpolated output is cached per channel and reused when the input content
  * is unchanged (a memcmp of the input, far cheaper than the filter). The cache
@@ -49,7 +58,13 @@ class TxBurstInterpolator {
  public:
   enum class CacheKey { kContent, kAddress };  // kAddress exists only as the test's mutant
 
-  explicit TxBurstInterpolator(CacheKey key = CacheKey::kContent) : key_(key) {}
+  /// Zero input samples a prefiltered burst needs before / after its content:
+  /// the channel filter's half length plus the halfband's own margins.
+  static size_t prefilterLead() { return dsp::ChannelFilter().halfLength() + dsp::HalfbandInterp2().contextBefore(); }
+  static size_t prefilterTail() { return dsp::ChannelFilter().halfLength() + dsp::HalfbandInterp2().contextAfter(); }
+
+  explicit TxBurstInterpolator(bool prefilter = false, CacheKey key = CacheKey::kContent)
+      : prefilter_(prefilter), key_(key) {}
 
   struct Out {
     std::vector<const void*> buffs;  ///< one per channel, 2 x beatPaddedInput(n) samples
@@ -82,7 +97,18 @@ class TxBurstInterpolator {
         L.in.assign(in, in + n);
         L.in.resize(np, cs16(0, 0));
         L.out.resize(2 * np);
-        o.saturated += hb_.runCs16(L.in.data(), np, L.out.data());
+        if (prefilter_) {
+          fin_.resize(np);
+          fmid_.resize(np);
+          fout_.resize(2 * np);
+          for (size_t k = 0; k < np; ++k)
+            fin_[k] = {static_cast<float>(L.in[k].real()), static_cast<float>(L.in[k].imag())};
+          chan_.run(fin_.data(), np, fmid_.data());
+          hb_.run(fmid_.data(), np, fout_.data());
+          o.saturated += dsp::HalfbandInterp2::quantize(fout_.data(), 2 * np, L.out.data());
+        } else {
+          o.saturated += hb_.runCs16(L.in.data(), np, L.out.data());
+        }
         L.in.resize(n);  // the comparison copy is the caller's n samples
         L.n = n;
         L.addr = buffs[c];
@@ -103,8 +129,11 @@ class TxBurstInterpolator {
     const void* addr = nullptr;
     bool valid = false;
   };
+  bool prefilter_;
   CacheKey key_;
   dsp::HalfbandInterp2 hb_;
+  dsp::ChannelFilter chan_;
+  std::vector<std::complex<float>> fin_, fmid_, fout_;
   std::vector<Lane> lanes_;
   size_t hits_ = 0, misses_ = 0;
 };

@@ -16,6 +16,7 @@
 #include <optional>
 #include <random>
 
+#include "houdini/tx_rx_boundary.h"
 #include "sync/beacon_shapes.h"
 #include "sync/detector.h"
 #include "include/comms-lib.h"
@@ -210,6 +211,21 @@ Config::Config(const std::string& jsonfile, const std::string& directory,
   cp_size_ = tddConf.value("cp_size", 0);
   dl_pilots_en_ = tddConf.value("enable_dl_pilots", false);
   prefix_ = tddConf.value("ofdm_tx_zero_prefix", 0);
+  if (adc_fs_hz_ > 0.0 && tx_rate_ != rate_) {
+    // The prefiltered TX interpolator (RadioHoudini) needs zeros around every
+    // burst's content, and the slot's zero prefix/postfix are what provide
+    // them; too few and the filter's ramps are cut off at the buffer edge,
+    // bringing back the splatter the prefilter exists to remove.
+    const int need_pre = static_cast<int>(houdini::boundary::TxBurstInterpolator::prefilterLead());
+    const int need_post = static_cast<int>(houdini::boundary::TxBurstInterpolator::prefilterTail());
+    if (tddConf.value("ofdm_tx_zero_prefix", 0) < need_pre ||
+        tddConf.value("ofdm_tx_zero_postfix", 0) < need_post) {
+      throw std::invalid_argument(
+          "mode V with tx_sample_rate = 2 x sample_rate needs ofdm_tx_zero_prefix >= " +
+          std::to_string(need_pre) + " and ofdm_tx_zero_postfix >= " + std::to_string(need_post) +
+          " (the TX prefilter and interpolator margins)");
+    }
+  }
   postfix_ = tddConf.value("ofdm_tx_zero_postfix", 0);
   symbol_data_subcarrier_num_ = tddConf.value("ofdm_data_num", fft_size_);
   pilot_seq_ = tddConf.value("pilot_seq", "lts");

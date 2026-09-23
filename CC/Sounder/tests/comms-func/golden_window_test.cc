@@ -120,7 +120,8 @@ int main(int argc, char** argv) {
   {
     bool threw = false;
     try { BeaconShape::make("legacyy", Platform::kHoudini, Numerology::houdiniDefault()); } catch (const std::invalid_argument&) { threw = true; }
-    check(threw && BeaconShape::names().size() == 5, "BeaconShape: an unknown name throws; five names");
+    // Six since AP-79 added nr_pss_bl, the band-limited mode-V beacon.
+    check(threw && BeaconShape::names().size() == 6, "BeaconShape: an unknown name throws; six names (nr_pss_bl added, AP-79)");
     const auto h = BeaconShape::make("nr_pss", Platform::kHoudini, Numerology::houdiniDefault());
     const auto i = BeaconShape::make("nr_pss", Platform::kIrisUhd, Numerology::houdiniDefault());
     check(h.replicaTail() == 144 && i.replicaTail() == 0,

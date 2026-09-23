@@ -27,18 +27,31 @@
 #include "include/macros.h"
 #include "include/rx_gap_sink.h"
 #include "include/utils.h"
+#include "houdini/tx_rx_boundary.h"
 #include "sync/beacon_shape.h"
 
 // AP-79: TX samples per tick (2 when the TX stream runs at twice the tick
 // rate and RadioHoudini::xmit interpolates), and the zero ticks placed ahead of
 // the beacon core in the replay image so the interpolator's lead-in is not
-// truncated (the halfband reaches 6 input samples back). The strobe offset is
+// truncated (channel prefilter 17 + halfband 6 input samples back). The strobe offset is
 // pulled in by the same amount, so the core still plays at +384 and the UE's
 // beacon geometry (BeaconShape::expectedEndOffset) is unchanged.
 static int txPerTick(const Config* cfg) {
   return (cfg->tx_rate() > 1.5 * cfg->rate()) ? 2 : 1;
 }
-static int beaconLeadTicks(const Config* cfg) { return txPerTick(cfg) == 2 ? 8 : 0; }
+static int beaconLeadTicks(const Config* cfg) {
+  // The prefiltered interpolator's lead (TxBurstInterpolator::prefilterLead,
+  // 23 today) rounded up to the 4-tick grid (24), so the strobe offset
+  // 384 - lead stays on it (360).
+  if (txPerTick(cfg) != 2) return 0;
+  const int need = static_cast<int>(houdini::boundary::TxBurstInterpolator::prefilterLead());
+  return (need + 3) / 4 * 4;
+}
+static int beaconTailTicks(const Config* cfg) {
+  return txPerTick(cfg) == 2
+             ? static_cast<int>(houdini::boundary::TxBurstInterpolator::prefilterTail())
+             : 0;
+}
 
 void HoudiniFramer::buildBeacon(std::vector<int16_t>& iq) {
   // Houdini TX replay RAM depth: 4096 TX samples, so 4096 / (TX per tick)
@@ -65,7 +78,7 @@ void HoudiniFramer::buildBeacon(std::vector<int16_t>& iq) {
   const int p = cfg_->prefix();
   const int n = cfg_->beacon_size();
   std::vector<std::complex<float>> loop(kReplayDepth, std::complex<float>(0, 0));
-  if (lead + n + 6 > kReplayDepth) {
+  if (lead + n + beaconTailTicks(cfg_) > kReplayDepth) {
     throw std::invalid_argument("Houdini beacon: core of " + std::to_string(n) +
                                 " ticks does not fit the replay RAM (" +
                                 std::to_string(kReplayDepth) + " ticks at this TX rate)");

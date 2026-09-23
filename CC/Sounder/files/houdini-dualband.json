@@ -1,6 +1,6 @@
 {
  "_comment": "AP-79 dual-band demo, HS-202 mode V: sub-6 ISM 2.4 (2400 to 2450 MHz, NCO 2425) both ways plus the X-band IF (NCO 4380) UE to BS, one numerology on both bands. Derived from houdini-2ch-decouple.json (the AP-78 two-channel demo) with the P + U schedule of houdini-ul.json. BS .22: TX ch0 (A, sub-6 beacon), RX ch0 (A, sub-6 uplink) + ch2 (C, X-IF uplink). UE .21: RX ch0 (A, sub-6 beacon), TX ch0 (A, sub-6) + ch1 (B, X-IF). Wiring per plan section 6: .22 DAC_B -> .21 ADC_D, .21 DAC_B -> .22 ADC_D, .21 DAC_A -> .22 ADC_B.",
- "_status": "TARGET CONFIG, NOT YET RUNNABLE, and refused at load until it is: tx_sample_rate twice sample_rate is rejected until the x2 TX interpolator is wired into the TX path. Consumed today: rfdc_adc_fs_mhz, rfdc_dac_fs_mhz, channel_nco_frequency, houdini_tx/rx_gain_db (the mode-V bring-up, houdini/mode_v_bringup.h), fft_size 4096 and cp_size 288 (no longer clamped). Pending on feat/sub6-xband-demo: the TX interpolator in the TX path with tick-valued offsets doubled, the RX channel filter applied per lane, and a band-limited beacon shape (beacon_type is omitted until it exists; the default is wideband). This note goes when the last lands.",
+ "_status": "TARGET CONFIG, NOT YET RUNNABLE, and refused at load until it is: tx_sample_rate twice sample_rate is rejected until the x2 TX interpolator is wired into the TX path. Consumed today: rfdc_adc_fs_mhz, rfdc_dac_fs_mhz, channel_nco_frequency, houdini_tx/rx_gain_db (the mode-V bring-up, houdini/mode_v_bringup.h), fft_size 4096 and cp_size 288 (no longer clamped). Also in: the x2 TX interpolation at the radio boundary (bursts built in ticks), the RX channel filter per lane,. The band-limited beacon (nr_pss_bl) and the TX prefilter are in. Pending only the software lane's confirmation of the TDD_REPLAY_STROBE units at vld 2; the guard goes with it, and this note too.",
  "serial_file": "files/topology-houdini-dualband.json",
  "radio_type": "houdini",
  "remote_port": "55132",
@@ -49,6 +49,12 @@
   "GGPUGGGGGGGGGGGGGGGG"
  ],
  "ue_modulation": "QPSK",
+
+ "_beacon_note": "nr_pss_bl: the band-limited beacon (AP-79): the 127-tone NR PSS at 240 kHz (512-point, +-15.2 MHz) behind NR's 36-sample CP, then a guarded TRS pair on the central 96 tones of a 256-point symbol (+-23 MHz); 1076 ticks, inside the replay RAM at TX 245.76. The argmax pick: the shipped first_path rule lands 2 samples early on this lobe, which is about 8 samples wide (beacon_bandlimit_test).",
+ "sync": {
+  "beacon": {"type": "nr_pss_bl"},
+  "detector": {"pick": "argmax"}
+ },
  "max_frame": 2000,
  "beamsweep": false,
 

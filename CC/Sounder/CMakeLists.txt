@@ -319,6 +319,12 @@ add_executable(tx_rx_boundary_test tests/comms-func/tx_rx_boundary_test.cc)
 target_include_directories(tx_rx_boundary_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 add_test(NAME tx_rx_boundary COMMAND tx_rx_boundary_test)
 
+# AP-79: the band-limited beacon: its band, its fit, and the real detector
+# through the channel-filtered lane.
+add_executable(beacon_bandlimit_test tests/comms-func/beacon_bandlimit_test.cc)
+target_link_libraries(beacon_bandlimit_test houdini_sync -lpthread ${MUFFT_LIBRARIES})
+add_test(NAME beacon_bandlimit COMMAND beacon_bandlimit_test)
+
 # The index-convention check AP-34(a) did not have. Links the real CommsLib so
 # it exercises the REAL detector; a replica would agree with itself.
 add_executable(beacon_geometry_test

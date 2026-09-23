@@ -44,6 +44,7 @@ enum class Shape {
   kDot11,        ///< the actual 802.11a/g/n legacy preamble: STF + LTF.
   kNr,           ///< NR PSS (38.211 7.4.2.2) + CP + a CSI-RS tracking pair.
   kNrPss,        ///< the kNr core, matched-filtered on its PSS: NR's ARCHITECTURE.
+  kNrPssBl,      ///< kNrPss fitted inside a +-24 MHz channel (AP-79 mode V).
 };
 
 /// Everything a consumer needs: the waveform, what to correlate against, and
@@ -231,6 +232,11 @@ inline void scaleToPeak(std::vector<cf>& v, double peak) {
   for (auto& x : v) x *= g;
 }
 
+/// AP-79: the band-limited NR shape's PSS spacing and the half bandwidth every
+/// field of it stays inside (the sub-6 RX lane's channel filter passes +-24 MHz).
+constexpr double kBlPssScsHz = 240e3;
+constexpr double kBlHalfBwHz = 23.5e6;
+
 /// The NR core: PSS, cyclic guard, two copies of a TRS symbol. Shared by kNr
 /// and kNrPss, which transmit the SAME burst and differ only in what the
 /// detector correlates against. Returns the PSS symbol length.
@@ -348,6 +354,54 @@ inline Desc make(Shape s, const Numerology& num) {
       buildNr(d, num);
       break;
     }
+    case Shape::kNrPssBl: {
+      // AP-79 MODE V. Every other shape fills the whole 122.88 output: the
+      // gold and STS fields by construction, nr_pss's PSS at the 960 kHz
+      // default spacing and its TRS pair on every bin. The sub-6 channel is
+      // +-25 MHz and its RX lane is filtered to +-24 (the channel's 0 dBc
+      // mirror sits beyond 40.2 MHz), so this is nr_pss's architecture with
+      // every field inside that band: the 127-tone PSS at 240 kHz (a 512-point
+      // symbol at 122.88, +-15.2 MHz) behind NR's normal cyclic prefix (144 /
+      // 2048 of the symbol, 36 samples), then the guarded TRS pair on only the
+      // central tones that fit +-kBlHalfBwHz. The detector matches the PSS,
+      // the CFO estimator reads the TRS pair, as in nr_pss.
+      d.name = "nr_pss_bl";
+      Numerology pn = num;
+      pn.scs_hz = kBlPssScsHz;
+      const auto held = pn.ifftSizeIfExact(127);
+      const size_t nfft = held.value_or(512);
+      d.numerology_held = held.has_value();
+      std::vector<cf> pss_tones;
+      for (float v : nrPssMSeq(0)) pss_tones.push_back(cf(v, 0.f));
+      auto pss = toneIfft(pss_tones, nfft);
+      unitPower(pss);
+      const size_t cp = nfft * 144 / 2048;
+      const size_t trs_len = nfft / 2;
+      const double spacing = num.rate_hz / static_cast<double>(trs_len);
+      size_t n_trs = static_cast<size_t>(std::floor(2.0 * kBlHalfBwHz / spacing));
+      n_trs = std::min(n_trs - (n_trs % 2), trs_len - 2);
+      const auto c = gold38211(2 * n_trs, 0x1u);
+      std::vector<cf> trs_tones(n_trs);
+      const float r = static_cast<float>(1.0 / std::sqrt(2.0));
+      for (size_t i = 0; i < n_trs; ++i)
+        trs_tones[i] = cf(r * (1.f - 2.f * c[2 * i]), r * (1.f - 2.f * c[2 * i + 1]));
+      auto trs = toneIfft(trs_tones, trs_len);
+      unitPower(trs);
+      d.core.assign(pss.end() - static_cast<long>(cp), pss.end());
+      d.core.insert(d.core.end(), pss.begin(), pss.end());
+      d.coarse_reps = 0;
+      d.guard_len = 16;
+      d.fine_off = d.core.size() + d.guard_len;
+      d.fine_len = trs_len;
+      d.fine_reps = 2;
+      appendGuardedReps(d.core, trs, d.guard_len, 2);
+      scaleToPeak(d.core, 1.0);
+      d.replica.assign(d.core.begin() + static_cast<long>(cp),
+                       d.core.begin() + static_cast<long>(cp + nfft));
+      d.replica_off = cp;
+      d.replica_reps = 1;
+      break;
+    }
     case Shape::kNrPss: {
       // THE SAME BURST, DETECTED THE WAY NR DETECTS IT. kNr transmits a PSS and
       // hands the detector the TRACKING pair, so it runs an NR waveform through
@@ -389,11 +443,12 @@ inline bool parse(const std::string& s, Shape* out) {
   if (s == "dot11" || s == "802.11") { *out = Shape::kDot11; return true; }
   if (s == "nr" || s == "5gnr") { *out = Shape::kNr; return true; }
   if (s == "nr_pss" || s == "5gnr_pss") { *out = Shape::kNrPss; return true; }
+  if (s == "nr_pss_bl") { *out = Shape::kNrPssBl; return true; }
   return false;
 }
 
 inline const char* kAllNames[] = {"legacy", "legacy_guard", "dot11", "nr",
-                                  "nr_pss"};
+                                  "nr_pss", "nr_pss_bl"};
 
 }  // namespace shapes
 }  // namespace sync
