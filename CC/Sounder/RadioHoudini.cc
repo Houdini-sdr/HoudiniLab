@@ -16,6 +16,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <set>
 #include <vector>
 
 #include "SoapySDR/Errors.hpp"
@@ -155,15 +156,90 @@ void RadioHoudini::printSettings() const {
   Sounder::NodeVersions::instance().add(params_.label, dev_->getHardwareInfo());
 }
 
+RadioHoudini::~RadioHoudini() {
+  {
+    std::lock_guard<std::mutex> lk(health_mtx_);
+    health_stop_ = true;
+  }
+  health_cv_.notify_all();
+  if (health_thread_.joinable()) health_thread_.join();
+}
+
+void RadioHoudini::maybeStartHealth() {
+  // AP-79: the software lane's link-health checks (houdini/link_health.h) on
+  // THIS session's handle, once streaming. HOUDINI_LINK_HEALTH_S sets the
+  // period (default 5 s; 0 turns it off).
+  if (health_started_.exchange(true)) return;
+  double period = 5.0;
+  if (const char* e = std::getenv("HOUDINI_LINK_HEALTH_S")) period = std::atof(e);
+  if (!(period > 0.0)) return;
+  health_thread_ = std::thread([this, period] { healthLoop(period); });
+}
+
+void RadioHoudini::healthLoop(double period_s) {
+  auto wait = [this](double s) {
+    std::unique_lock<std::mutex> lk(health_mtx_);
+    return !health_cv_.wait_for(lk, std::chrono::duration<double>(s), [this] { return health_stop_; });
+  };
+  if (!wait(2.0)) return;  // let the streams settle before the baseline
+  const std::string label = params_.label;
+  try {
+    houdini::health::LinkHealth h([this](const std::string& k) { return dev_->readSetting(k); }, label);
+    std::string standing;
+    for (const auto& f : h.baselineFailures()) standing += (standing.empty() ? "" : "; ") + f;
+    MLPD_INFO("%s link health: baseline taken; preflight FAILs standing at start: %s\n", label.c_str(),
+              standing.empty() ? "none" : standing.c_str());
+    std::set<std::string> reported;  // blind/drift alarms already warned about
+    unsigned long long p_err = app_rx_err_, p_short = app_rx_short_, p_pad = app_rx_pad_,
+                       p_txs = app_tx_short_, p_sat = app_tx_sat_;
+    for (unsigned n = 1; wait(period_s); ++n) {
+      const auto rep = h.check();
+      const unsigned long long c_err = app_rx_err_, c_short = app_rx_short_, c_pad = app_rx_pad_,
+                               c_txs = app_tx_short_, c_sat = app_tx_sat_;
+      char app[160];
+      std::snprintf(app, sizeof app, " | app: rx_err +%llu, rx_short +%llu, rx_pad +%llu, tx_short +%llu, tx_sat +%llu",
+                    c_err - p_err, c_short - p_short, c_pad - p_pad, c_txs - p_txs, c_sat - p_sat);
+      const bool app_bad = c_err != p_err || c_pad != p_pad || c_txs != p_txs || c_sat != p_sat;
+      p_err = c_err; p_short = c_short; p_pad = c_pad; p_txs = c_txs; p_sat = c_sat;
+      // Unattended, a condition that cannot clear within a session (a sticky
+      // or saturated egress counter, a drifted config section) would WARN
+      // every period and bury the new alarms: warn when one first appears or
+      // changes; the periodic line still carries it. Counter rises and new
+      // preflight items are new by construction and always warn.
+      bool fresh = !rep.increases.empty() || !rep.new_failures.empty();
+      std::set<std::string> standing;
+      for (const auto* v : {&rep.blind, &rep.drift})
+        for (const auto& s : *v) {
+          standing.insert(s);
+          if (reported.count(s) == 0) fresh = true;
+        }
+      reported = standing;
+      if (fresh || app_bad) {
+        MLPD_WARN("%s link health: %s%s\n", label.c_str(), rep.line().c_str(), app);
+      } else if (n % 12 == 0) {
+        MLPD_INFO("%s link health: %s%s\n", label.c_str(), rep.line().c_str(), app);
+      }
+    }
+  } catch (const std::exception& e) {
+    MLPD_WARN("%s link health stopped: %s (a key this device does not report?)\n", label.c_str(), e.what());
+  }
+}
+
 int RadioHoudini::xmit(const void* const* buffs, int samples, int flags,
                        long long& frameTime) {
   // AP-79: at TX = 2 x sample_rate every burst, built at the tick rate, is
   // interpolated here as a whole and padded to a whole 8-sample TX beat. The
   // time is in ns and does not change; the caller counts in ticks, so a full
   // write reports its own sample count back.
-  if (!tx_interp_ || samples <= 0) return RadioSoapy::xmit(buffs, samples, flags, frameTime);
+  if (!tx_interp_ || samples <= 0) {
+    const int r0 = RadioSoapy::xmit(buffs, samples, flags, frameTime);
+    // RadioSoapy::xmit returns 0 on a radio with no TX stream: not a short write.
+    if (!params_.tx_channels.empty() && r0 < samples) app_tx_short_.fetch_add(1, std::memory_order_relaxed);
+    return r0;
+  }
   const auto o = tx_interp_->run(buffs, params_.tx_channels.size(), static_cast<size_t>(samples));
   if (o.saturated > 0) {
+    app_tx_sat_.fetch_add(1, std::memory_order_relaxed);
     static size_t warned = 0;
     if (warned++ < 5) {
       MLPD_WARN("%s: %zu I/Q components saturated in the x2 TX interpolation; "
@@ -172,6 +248,8 @@ int RadioHoudini::xmit(const void* const* buffs, int samples, int flags,
     }
   }
   const int r = RadioSoapy::xmit(o.buffs.data(), static_cast<int>(o.samples), flags, frameTime);
+  if (!params_.tx_channels.empty() && r < static_cast<int>(o.samples))
+    app_tx_short_.fetch_add(1, std::memory_order_relaxed);
   if (r < 0) return r;
   return r >= static_cast<int>(o.samples) ? samples : r / 2;
 }
@@ -267,6 +345,8 @@ int RadioHoudini::recv(void* const* buffs, int samples, long long& frameTime) {
     int r =
         dev_->readStream(rxs_, cur.data(), samples - got, flags, t, 1000000);
     if (r <= 0) {
+      if (r < 0) app_rx_err_.fetch_add(1, std::memory_order_relaxed);
+      if (got > 0) app_rx_short_.fetch_add(1, std::memory_order_relaxed);
       if (got == 0) {
       // Account the call before leaving, or the drain cost already added above
       // is divided across a call count that never saw it -- over-reporting
@@ -322,6 +402,8 @@ int RadioHoudini::recv(void* const* buffs, int samples, long long& frameTime) {
   }
   rx_sample_pos_ += got;
   last_pad_samples_ = padded;
+  if (padded > 0) app_rx_pad_.fetch_add(1, std::memory_order_relaxed);
+  if (got > 0) maybeStartHealth();
   if ((getenv("HOUDINI_CL_RX_DEBUG") != nullptr ||
        getenv("HOUDINI_DUMP_WIN") != nullptr) &&
       got > 0 && buffs[0] != nullptr) {

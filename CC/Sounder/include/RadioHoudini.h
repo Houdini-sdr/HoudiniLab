@@ -8,17 +8,23 @@
 #ifndef RADIO_HOUDINI_H_
 #define RADIO_HOUDINI_H_
 
+#include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <memory>
+#include <mutex>
+#include <thread>
 #include <vector>
 
 #include "RadioSoapy.h"
 #include "houdini/mode_v_bringup.h"
+#include "houdini/link_health.h"
 #include "houdini/tx_rx_boundary.h"
 
 class RadioHoudini : public RadioSoapy {
  public:
   explicit RadioHoudini(const RadioParams& params);
+  ~RadioHoudini() override;
 
   /// AP-79 mode V: the per-channel plan the bring-up derived and applied,
   /// null on the one-rate path. rxChannelFilter(ch) says whether RX `ch`
@@ -67,6 +73,17 @@ class RadioHoudini : public RadioSoapy {
   std::shared_ptr<houdini::modev::Result> mode_v_;  // null unless mode V
   std::unique_ptr<houdini::boundary::TxBurstInterpolator> tx_interp_;  // TX = 2 x rate
   std::unique_ptr<houdini::boundary::RxLaneFilters> rx_filters_;       // any lane filtered
+
+  // AP-79 link health: the software lane's checks on this handle, on a thread
+  // started at the first successful read; plus what only the app can count.
+  void maybeStartHealth();
+  void healthLoop(double period_s);
+  std::atomic<bool> health_started_{false};
+  bool health_stop_ = false;
+  std::mutex health_mtx_;
+  std::condition_variable health_cv_;
+  std::thread health_thread_;
+  std::atomic<unsigned long long> app_rx_err_{0}, app_rx_short_{0}, app_rx_pad_{0}, app_tx_short_{0}, app_tx_sat_{0};
   double rx_rate_ = 0.0;         // cached RX sample rate for the grid tracker
   int64_t rx_sample_pos_ = 0;    // absolute samples emitted across recv calls
   size_t last_pad_samples_ = 0;  // zeros inserted into the last window

@@ -337,6 +337,13 @@ target_include_directories(dc_fft_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/inclu
 target_link_libraries(dc_fft_test ${MUFFT_LIBRARIES})
 add_test(NAME dc_fft COMMAND dc_fft_test)
 
+# AP-79: the link-health monitor port, pinned to the software lane's T0 cases
+# and to real captures from a streaming mode-V node.
+add_executable(link_health_test tests/comms-func/link_health_test.cc)
+target_include_directories(link_health_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_test(NAME link_health COMMAND link_health_test
+         ${CMAKE_CURRENT_SOURCE_DIR}/tests/comms-func/fixtures/link_health/mode_v_streaming_21.txt)
+
 # The index-convention check AP-34(a) did not have. Links the real CommsLib so
 # it exercises the REAL detector; a replica would agree with itself.
 add_executable(beacon_geometry_test
