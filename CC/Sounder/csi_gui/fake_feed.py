@@ -129,8 +129,9 @@ def send_adc(sock, dest, frame, ant, samps, rate, clip, legacy=False):
 
 
 def send_cir(sock, dest, frame, ant, rate):
-    """CIR1: a direct path and an echo 8 dB down 6 taps later, over a -50 dB floor."""
-    pre, ntaps = 16, 128
+    """CIR1: a direct path and an echo 8 dB down 6 taps later, over a -50 dB floor,
+    the strongest tap centred in the window as the sounder sends it."""
+    pre, ntaps = 64, 128
     db = [-50.0 + random.gauss(0, 2) for _ in range(ntaps)]
     db[pre] = 0.0
     db[pre + 6] = -8.0 + random.gauss(0, 0.3)

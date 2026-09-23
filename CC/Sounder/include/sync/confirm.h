@@ -48,7 +48,12 @@ class SnrWindowGuard {
   }
 
   /// Energy of the presumed core [end_idx - core_len, end_idx) against the
-  /// rest of the window, in dB. Returns -99 for an impossible span and +99 for
+  /// rest of the window, in dB. What it is, in standard terms: a burst/gap
+  /// power ratio, (S+N)/N, over the full receive bandwidth of an UNFILTERED
+  /// read, NOT an SS-SINR (TS 38.215 5.1.6 measures per resource element in
+  /// the signal's own band). It reads 3 dB at 0 dB SNR, and an out-of-band
+  /// tone in the window (the ADC's Fs/2 spur, AP-79) lowers it with the link
+  /// unchanged. A sound GATE; quote it as a ratio, not as the link's SNR. Returns -99 for an impossible span and +99 for
   /// a window with no noise samples left to compare against.
   double snrDb(const std::complex<int16_t>* w, size_t n, ssize_t end_idx) const {
     const size_t core_len = core_len_;

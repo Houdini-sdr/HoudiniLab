@@ -194,7 +194,8 @@ void RecorderWorker::streamCsi(Packet* pkt, NodeType node_type) {
   // Saturation on the OTHER slots still has to be caught, so peak and clip counts are
   // accumulated over every slot and ride along with the pilot's envelope.
   sendAdc(pkt, is_pilot);
-  sendMeta(pkt->ant_id, std::chrono::duration_cast<std::chrono::nanoseconds>(
+  if (node_type == kBS)  // the channel mapping below is the BS's RX list
+    sendMeta(pkt->ant_id, std::chrono::duration_cast<std::chrono::nanoseconds>(
                             std::chrono::steady_clock::now().time_since_epoch())
                             .count());
   // H is estimated only for a pilot whose H will be USED: the CSI datagram
@@ -422,11 +423,14 @@ void RecorderWorker::sendCsi(Packet* pkt) {
     std::memcpy(&buf[24 + 8 * N + 4 * k], &raw_ph[k], 4);
   (void)::send(csi_sock_, buf.data(), buf.size(), 0);
   // The impulse response of the same H, at the same (throttled) rate: one
-  // inverse FFT per SENT frame (houdini/cir.h). 128 taps from 16 before the
-  // strongest, dB relative to it; the tap spacing is 1 / sample rate.
+  // inverse FFT per SENT frame, Hann-windowed over the occupied tones
+  // (houdini/cir.h). 128 taps centred on the strongest, dB relative to it;
+  // the tap spacing is 1 / sample rate, the resolution about 1 / occupied BW.
   // [magic 'CIR1'][frame][ant][ntaps][pre][peak][N][tap_ns f32][dB f32]*ntaps
   if (cir_) {
-    constexpr int kPre = 16, kTaps = 128;
+    // The strongest tap in the MIDDLE of the window, so the page's centre line
+    // and its "peak" label sit on it (they were at 50 % with the peak at 12 %).
+    constexpr int kPre = 64, kTaps = 128;
     int peak = 0;
     const std::vector<float> db = houdini::cirWindowDb(cir_->power(H), kPre, kTaps, &peak);
     std::vector<uint8_t> cb(32 + 4 * db.size());
@@ -792,10 +796,17 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
   }
   std::vector<std::complex<float>> pts;
   pts.reserve(kMaxPts);
+  // A STRIDE through every (symbol, tone) pair, so the sample covers the whole
+  // band and every symbol: filling in tone order took the lowest 600 tones of
+  // one symbol at fft 4096 (41 % of the band), and the MER described only
+  // those (a standards check, 2026-09-23).
+  const size_t cand = Ys.size() * data_ind.size();
+  const size_t stride = std::max<size_t>(1, (cand + kMaxPts - 1) / kMaxPts);
   for (size_t si = 0; si < Ys.size() && pts.size() < kMaxPts; ++si) {
     const auto& Y = Ys[si];
     const std::complex<float> dr = sym_derot[si];
     for (size_t j = 0; j < data_ind.size() && pts.size() < kMaxPts; ++j) {
+      if ((si * data_ind.size() + j) % stride != 0) continue;
       const size_t k = data_ind[j];
       const std::complex<float> h = Hc[k];
       if (std::abs(h) < hmin || std::norm(h) < 1e-9f) continue;  // deep fade
@@ -841,6 +852,9 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
     static std::atomic<unsigned> cns_total{0};
     static std::atomic<unsigned> cns_low{0};
     const unsigned tot = cns_total.fetch_add(1) + 1;
+    // 0.7 is a GROSS-failure flag, not a quality figure: on QPSK in AWGN it
+    // corresponds to about 10.6 dB MER (EVM ~29 %); the 3GPP QPSK EVM limit
+    // (17.5 %) sits near 0.88 (a standards check, 2026-09-23).
     if (score < 0.7) {
       const unsigned lo = cns_low.fetch_add(1) + 1;
       if ((lo & (lo - 1)) == 0) {

@@ -31,18 +31,42 @@ int main() {
     std::complex<double> a(0, 0);
     for (int m = 0; m < N; ++m) {
       const int k = (m + N / 2) % N;  // natural bin m is DC-centred index k
-      a += std::complex<double>(H[k].real(), H[k].imag()) * std::polar(1.0, 2 * M_PI * m * t / N);
+      const double w = 0.5 - 0.5 * std::cos(2 * M_PI * (k + 0.5) / N);  // Hann over the occupied span (all N here)
+      a += w * std::complex<double>(H[k].real(), H[k].imag()) * std::polar(1.0, 2 * M_PI * m * t / N);
     }
     worst = std::max(worst, std::fabs(std::norm(a) - p[t]) / (N * N));
   }
   // (Skipping the DC-centred to natural reorder cannot be caught here: a shift
   // of N/2 in frequency only multiplies h by (-1)^t, leaving |h|^2 unchanged.)
-  check(worst < 1e-4, "power() equals the naive IDFT's |h|^2 (mutation: a forward FFT, the delays mirror)");
+  check(worst < 1e-4, "power() equals the naive Hann-windowed IDFT's |h|^2 (mutation: a forward FFT, the delays mirror)");
   int pk = -1;
   const auto w = houdini::cirWindowDb(p, 8, 32, &pk);
   check(pk == 40, "the strongest tap is the direct path, tap 40 (mutation: a forward FFT puts it at N - 40)");
   check(w.size() == 32 && std::fabs(w[8]) < 1e-3, "the window starts 8 taps before the peak, which reads 0 dB");
-  check(std::fabs(w[8 + 12] - (-6.02f)) < 0.05f, "the echo 12 taps later reads -6.0 dB (mutation: amplitude, not power, gives -3)");
+  check(std::fabs(w[8 + 12] - (-6.02f)) < 0.3f, "the echo 12 taps later reads -6.0 dB (mutation: amplitude, not power, gives -3)");
+  // A SINGLE path through the R3 band (1596 of 4096 tones), at a half-sample
+  // delay: the Hann mainlobe spans +-2 resolution bins, and one bin is
+  // N / occ = 2.57 taps here, so +-5.1 taps; beyond it every tap (from 8 on)
+  // is under -30 dB, so a clean cable reads as one mainlobe, not as a comb of
+  // sinc sidelobes that look like echoes.
+  {
+    const int N2 = 4096, occ = 1596, lo = N2 / 2 - occ / 2;
+    std::vector<std::complex<float>> H2(N2, {0.0f, 0.0f});
+    for (int k = lo; k < lo + occ; ++k) {
+      const double f = static_cast<double>(k - N2 / 2);
+      const std::complex<double> h = std::polar(1.0, -2 * M_PI * f * 100.5 / N2);
+      H2[k] = std::complex<float>(static_cast<float>(h.real()), static_cast<float>(h.imag()));
+    }
+    houdini::CirFromH c2(N2);
+    int pk3 = -1;
+    const auto w3 = houdini::cirWindowDb(c2.power(H2), 64, 128, &pk3);
+    float worst_far = -99.0f;
+    for (int i = 0; i < 128; ++i)
+      if (std::abs(i - 64) >= 8) worst_far = std::max(worst_far, w3[i]);
+    std::printf("      one path, R3 band: worst tap 8+ from the peak %.1f dB\n", worst_far);
+    check(worst_far < -30.0f, "one path at R3's occupancy: every tap 8+ taps from the peak under -30 dB (mutation: "
+                              "no window, the sinc sidelobes still reach -21 dB 8 taps out)");
+  }
   // The window wraps: a peak at tap 2 with 8 pre-taps reads taps N-6..N-1 first.
   std::vector<float> q(N, 1e-6f);
   q[2] = 1.0f;

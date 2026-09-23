@@ -43,10 +43,29 @@ class CirFromH {
   CirFromH(const CirFromH&) = delete;
   CirFromH& operator=(const CirFromH&) = delete;
 
-  /// Power per tap, |h[t]|^2, t = 0..N-1, from the DC-centred H (index N/2 is DC).
+  /// Power per tap, |h[t]|^2, t = 0..N-1, from the DC-centred H (index N/2 is
+  /// DC). H is Hann-windowed over its occupied span (the tones where it is
+  /// non-zero) first: an unwindowed band edge makes a single path a sinc whose
+  /// sidelobes (-13, -18, -21 dB ...) read as echoes and put a ~11 ns floor
+  /// under the RMS delay spread; the Hann's first sidelobe is -31 dB, at the
+  /// cost of a mainlobe twice as wide (sounder practice; ITU-R P.1407).
   std::vector<float> power(const std::vector<std::complex<float>>& h_dc) {
     if (static_cast<int>(h_dc.size()) != n_) throw std::invalid_argument("CirFromH: H is not N points");
-    for (int k = 0; k < n_; ++k) in_[k] = h_dc[static_cast<size_t>((k + n_ / 2) % n_)];  // natural order
+    int lo = n_, hi = -1;
+    for (int k = 0; k < n_; ++k)
+      if (std::norm(h_dc[static_cast<size_t>(k)]) > 0.0f) {
+        lo = std::min(lo, k);
+        hi = std::max(hi, k);
+      }
+    const double span = static_cast<double>(hi - lo + 1);
+    for (int k = 0; k < n_; ++k) {
+      const int kc = (k + n_ / 2) % n_;  // natural bin k is DC-centred index kc
+      const float w = (hi < lo) ? 0.0f
+                                : (kc < lo || kc > hi)
+                                      ? 0.0f
+                                      : static_cast<float>(0.5 - 0.5 * std::cos(2.0 * M_PI * (kc - lo + 0.5) / span));
+      in_[k] = h_dc[static_cast<size_t>(kc)] * w;
+    }
     mufft_execute_plan_1d(plan_, out_, in_);
     std::vector<float> p(static_cast<size_t>(n_));
     for (int t = 0; t < n_; ++t) p[static_cast<size_t>(t)] = std::norm(out_[t]);

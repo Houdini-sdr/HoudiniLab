@@ -198,22 +198,55 @@ def _ideal(mod):
     return [(a / nrm, b / nrm) for a in lv for b in lv]
 
 
-def _mer(pts, mod):
-    """Decision-directed error of unit-power points against the ideal alphabet:
-    (EVM rms %, MER dB). It is MER, not SNR: it includes the equalizer's H
-    error, carrier-offset leakage and phase noise, and over the sounder's point
-    sample (up to 600 of one frame's tones). Unbiased above ~15 dB, reads high
-    below (a decision error lands on the wrong point). None for too few points."""
+def _slice_err2(x, lvl):
+    """Squared distance of one unit-power coordinate to the nearest of the
+    alphabet's per-axis levels (odd integers / norm): O(1), not a search."""
+    k = min(lvl - 1, max(0, int(round((x + lvl - 1) / 2.0))))
+    return (x - (2 * k - (lvl - 1))) ** 2
+
+
+def _mer_err(pts, mod):
+    """Mean decision-directed error power of unit-power points against the
+    square-QAM alphabet, and the point count; None for too few points."""
     if len(pts) < 8 or mod not in (2, 4, 6):
         return None
-    ref = _ideal(mod)
+    lvl = int(round(math.sqrt(2 ** mod)))
+    nrm = math.sqrt(sum(((-(lvl - 1) + 2 * i) ** 2) * 2 for i in range(lvl)) / lvl)
     err = 0.0
     for x, y in pts:
-        err += min((x - a) ** 2 + (y - b) ** 2 for a, b in ref)
-    e = err / len(pts)
+        err += (_slice_err2(x * nrm, lvl) + _slice_err2(y * nrm, lvl)) / (nrm * nrm)
+    return err / len(pts), len(pts)
+
+
+def _mer(pts, mod):
+    """One record's (EVM rms %, MER dB). MER in the TR 101 290 sense (hard
+    decisions, not an SNR): it includes the equalizer's H error, carrier-offset
+    leakage and phase noise, over the sounder's point sample. Unbiased above
+    ~15 dB, reads high below (a decision error lands on the wrong point)."""
+    r = _mer_err(pts, mod)
+    if r is None:
+        return None
+    e = r[0]
     if e <= 0.0:
         return 0.0, 99.0
     return 100.0 * math.sqrt(e), -10.0 * math.log10(e)
+
+
+# The dashboard's MER is averaged over about a second of records per antenna,
+# as ERROR POWER (then converted), the way 3GPP and 802.11 average EVM, rather
+# than a per-frame number that jumps with every refresh.
+MER_WINDOW_S = 1.0
+_mer_hist = {}
+
+
+def _mer_avg(ant, e, n, now):
+    h = _mer_hist.setdefault(ant, collections.deque())
+    h.append((now, e * n, n))
+    while h and now - h[0][0] > MER_WINDOW_S:
+        h.popleft()
+    tot_e = sum(x[1] for x in h)
+    tot_n = sum(x[2] for x in h)
+    return (tot_e / tot_n if tot_n else e), tot_n
 
 
 def _parse_cns(payload):
@@ -224,23 +257,40 @@ def _parse_cns(payload):
     vals = struct.unpack_from("<%df" % (2 * npt), payload, off)
     pts = [[vals[2 * i], vals[2 * i + 1]] for i in range(npt)]
     rec = {"frame": int(frame), "mod": int(mod), "pts": pts}
-    q = _mer(pts, int(mod))
-    if q is not None:
-        rec["evm_pct"], rec["mer_db"] = round(q[0], 2), round(q[1], 1)
+    r = _mer_err(pts, int(mod))
+    if r is not None:
+        e, n = _mer_avg(int(ant), r[0], r[1], time.monotonic())
+        e = max(e, 1e-10)
+        rec["evm_pct"] = round(100.0 * math.sqrt(e), 2)
+        rec["mer_db"] = round(-10.0 * math.log10(e), 1)
+        rec["mer_pts"] = int(n)
     return int(ant), rec
 
 
-def _delay_spread_ns(db, tap_ns, floor_db=-20.0):
-    """RMS delay spread of the taps within `floor_db` of the peak (power
-    weighted about their mean delay). The -20 dB floor keeps the estimator's
-    noise out; a one-tap channel reads 0."""
-    w = [10 ** (v / 10.0) if v >= floor_db else 0.0 for v in db]
+def _delay_stats(db, pre, tap_ns):
+    """The power delay profile's standard figures (ITU-R P.1407 section 2; TR
+    38.901 section 7.5): RMS delay spread, mean excess delay and maximum excess
+    delay (the last tap above the threshold), all relative to the strongest
+    tap at index `pre`. The threshold is 20 dB below the peak or 6 dB above the
+    noise floor (the median of the window's outer quarter), whichever is
+    higher, and is reported. A single path is NOT 0 ns: the band limit sets a
+    floor of about 1/B (the Hann-windowed CIR's mainlobe), so values near
+    that floor are unresolved."""
+    q = max(1, len(db) // 8)
+    tail = sorted(db[:q] + db[-q:])
+    floor = tail[len(tail) // 2] if tail else -60.0
+    thr = max(-20.0, floor + 6.0)
+    w = [10 ** (v / 10.0) if v >= thr else 0.0 for v in db]
     tot = sum(w)
     if tot <= 0.0:
-        return 0.0
+        return {"rms_ns": 0.0, "mean_ns": 0.0, "max_ns": 0.0, "thr_db": round(thr, 1)}
     mu = sum(i * wi for i, wi in enumerate(w)) / tot
     var = sum(wi * (i - mu) ** 2 for i, wi in enumerate(w)) / tot
-    return math.sqrt(var) * tap_ns
+    last = max(i for i, wi in enumerate(w) if wi > 0.0)
+    return {"rms_ns": round(math.sqrt(var) * tap_ns, 1),
+            "mean_ns": round((mu - pre) * tap_ns, 1),
+            "max_ns": round((last - pre) * tap_ns, 1),
+            "thr_db": round(thr, 1)}
 
 
 def _parse_cir(payload):
@@ -252,10 +302,10 @@ def _parse_cir(payload):
     db = list(struct.unpack_from("<%df" % ntaps, payload, CIR_HDR.size))
     if not all(math.isfinite(v) for v in db):
         return None
-    return int(ant), {"frame": int(frame), "db": [round(v, 2) for v in db],
-                      "pre": int(pre), "peak": int(peak), "n": int(n),
-                      "tap_ns": float(tap_ns),
-                      "rms_ns": round(_delay_spread_ns(db, tap_ns), 1)}
+    rec = {"frame": int(frame), "db": [round(v, 2) for v in db],
+           "pre": int(pre), "peak": int(peak), "n": int(n), "tap_ns": float(tap_ns)}
+    rec.update(_delay_stats(db, int(pre), float(tap_ns)))
+    return int(ant), rec
 
 
 def _parse_met(payload):
@@ -974,12 +1024,12 @@ function makeCard(ant){
        +'<li class="nav-item"><a href="#" class="nav-link" data-view="adc">ADC</a></li>'
      +'</ul>'
      +'<div class="csi-plots csi-view" data-view="channel">'
-      +frame('|H| (dB) vs subcarrier','csi-h-line',magLabels(),['','',''],off)
+      +frame('|H| (dB rel.) vs subcarrier','csi-h-line',magLabels(),['','',''],off)
       // Raw above corrected [user]: raw = arg(H) exactly as measured (window
       // back-off ramp + per-run offset); corrected = de-ramped and run-anchored.
       +'<div class="csi-phase-stack">'
       +frame('phase (raw, rad)','csi-h-half',['1.0π','0.0π','-1.0π'],['','',''])
-      +frame('phase (corrected, rad)','csi-h-half',['1.0π','0.0π','-1.0π'],['','',''])
+      +frame('phase, bulk delay removed (rad)','csi-h-half',['1.0π','0.0π','-1.0π'],['','',''])
       +'</div>'
       +frame('waterfall |H| (time down)','csi-h-wf',['older','','now'],['','',''])
       +frame('constellation (equalized U)','csi-h-cons',
@@ -1230,9 +1280,9 @@ function idealPts(mod){
   for(const a of lv)for(const b of lv) out.push([a/nrm,b/nrm]);
   return out;
 }
-// CIR: fixed 0..-60 dB, the x axis in ns from the strongest tap (set once per
-// window geometry). A one-tap line at 0 dB is a clean cable; echoes show as
-// later taps; the RMS delay spread is in the quality line.
+// CIR: Hann-windowed |h|^2 on a fixed 0..-60 dB axis, the strongest tap in the
+// middle (the centre line and the "peak" label), the x axis in ns from it.
+// A clean cable reads as ONE mainlobe about 1/B wide, not a single tap.
 function drawCir(card,r){
   card.cirRec=r;
   const d=card.dim.cir;
@@ -1247,17 +1297,30 @@ function drawCir(card,r){
   drawQuality(card);
 }
 // The channel's constants (MET1, from the config the sounder loaded) and its
-// quality: MER/EVM of the constellation sample (decision-directed, so MER, not
-// SNR) and the CIR's RMS delay spread.
+// quality, labelled as a wireless engineer reads them (a standards check):
+// the NCO is the converter's IF (the X lane is up-converted later), the
+// bandwidth is the TRANSMISSION bandwidth (N_RB x 12 x SCS when the tones
+// make whole resource blocks), MER is decision-directed (TR 101 290), averaged
+// over ~1 s as error power, and the delay figures carry their threshold and
+// the resolution (about 1/B).
 function drawQuality(card){
   const m=card.metRec, q=[];
-  if(m) q.push('ch '+m.ch+' · centre '+m.fc_mhz.toFixed(3)+' MHz · '
-               +m.bw_mhz.toFixed(2)+' MHz occupied ('+m.occ+' × '+m.scs_khz.toFixed(3)
-               +' kHz, fft '+m.fft+')');
+  if(m){
+    const rb=(m.occ%12===0)?(m.occ/12)+' RB × 12 × ':m.occ+' × ';
+    q.push('ch '+m.ch+' · IF/NCO '+m.fc_mhz.toFixed(3)+' MHz · transmission BW '
+           +m.bw_mhz.toFixed(2)+' MHz ('+rb+m.scs_khz.toFixed(0)+' kHz, fft '+m.fft+')');
+  }
   const cn=card.cnsRec;
-  if(cn && cn.mer_db!==undefined)
-    q.push('MER '+cn.mer_db.toFixed(1)+' dB · EVM '+cn.evm_pct.toFixed(2)+' %');
-  if(card.cirRec) q.push('RMS delay spread '+card.cirRec.rms_ns.toFixed(1)+' ns');
+  if(cn && cn.mer_db!==undefined && Date.now()-(card.cnsT||0)<2000)
+    q.push('MER '+cn.mer_db.toFixed(1)+' dB · EVM '+cn.evm_pct.toFixed(2)+' % (decision-directed, 1 s avg, '
+           +cn.mer_pts+' pts)');
+  const c=card.cirRec;
+  if(c){
+    let t='RMS delay spread '+c.rms_ns.toFixed(1)+' ns · mean excess '+c.mean_ns.toFixed(1)
+         +' ns · max excess '+c.max_ns.toFixed(1)+' ns (thr '+c.thr_db.toFixed(0)+' dB re peak';
+    if(m && m.bw_mhz>0) t+=', resolution ≈ '+(1e3/m.bw_mhz).toFixed(0)+' ns';
+    q.push(t+')');
+  }
   card.quality.textContent=q.join('\n');
   card.quality.style.whiteSpace='pre-line';
 }
@@ -1547,9 +1610,10 @@ function onData(obj){
       drawCsi(card,rec.csi,true); card.lastCsi=rec.csi.frame; pktCount++;
     }
     if(rec.cns && rec.cns.frame!==card.lastCns){
-      drawCons(card,rec.cns); card.lastCns=rec.cns.frame; drawQuality(card);
+      drawCons(card,rec.cns); card.lastCns=rec.cns.frame; card.cnsT=Date.now(); drawQuality(card);
     }
-    if(rec.met) card.metRec=rec.met;
+    if(rec.met && !card.metRec) { card.metRec=rec.met; drawQuality(card); }
+    else if(rec.met) card.metRec=rec.met;
     if(rec.cir && rec.cir.frame!==card.lastCir){
       drawCir(card,rec.cir); card.lastCir=rec.cir.frame;
     }
