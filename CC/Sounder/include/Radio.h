@@ -56,7 +56,6 @@ struct RadioParams {
   double rx_freq_offset_hz = 0.0;  ///< deliberate detune for CFO validation (AP-33)
   double tx_freq_offset_hz = 0.0;
   // Houdini stream facts.
-  int rx_local_port = 10002;  ///< host UDP port the RX stream binds
   std::string tx_mode = "stream";  ///< "replay" (the BS beacon RAM) or "stream" (the UE)
   bool tdd = false;           ///< the driver's TDD tick anchor for the UE pilot
   bool mts = true;            ///< multi-tile sync on every stream (AP-23)

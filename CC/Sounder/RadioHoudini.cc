@@ -44,12 +44,16 @@ SoapySDR::Kwargs RadioHoudini::deviceArgs(const RadioParams& p) {
 
 SoapySDR::Kwargs RadioHoudini::rxStreamArgs(const RadioParams& p) {
   SoapySDR::Kwargs rx;
-  // The host UDP port a single-channel RX stream binds. On a COMBINED (>1
-  // channel) stream the driver rejects local_port: the wire fixes each channel's
-  // port at 10001 + channel (SH-142/SH-159), so leave it unset and let the
-  // driver assign per channel.
-  if (p.rx_channels.size() <= 1) {
-    rx["local_port"] = std::to_string(p.rx_local_port);
+  // The host UDP port a single-channel RX stream binds. The FPGA sends each
+  // RX channel to a FIXED destination port, 10001 + channel (the RX stream
+  // contract, SH-142/SH-159), whatever the host binds; the driver accepts any
+  // local_port and a mismatched one delivers NOTHING (every datagram lands on
+  // NoPorts). AP-79's R0 hit exactly that: a port fixed at 10002 (ch1's,
+  // right for the old channel-B demo) on channel A. So derive it from the
+  // channel. On a COMBINED (>1 channel) stream the driver rejects local_port
+  // and assigns the per-channel ports itself, so leave it unset.
+  if (p.rx_channels.size() == 1) {
+    rx["local_port"] = std::to_string(10001 + p.rx_channels.front());
   }
   // Break-at-gap (SH-253). The driver defaults this ON, but the whole gap
   // account depends on it: recv only compares timestamps BETWEEN reads, so a

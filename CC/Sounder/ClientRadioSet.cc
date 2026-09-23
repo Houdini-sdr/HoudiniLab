@@ -252,10 +252,9 @@ void ClientRadioSet::init(ClientRadioContext* context) {
   p.rx_gain_db = _cfg->houdini_rx_gain_db();
   p.rx_freq_offset_hz = ueRxFreqOffsetHz();
   p.tx_freq_offset_hz = ueTxFreqOffsetHz();
-  // Houdini UE: one RX host port per radio; the UE feeds pilots live, so
-  // host-fed streaming TX (SH-183); ue_tdd_pilot asks for the driver's TDD
-  // tick anchor (SH-248/SH-301).
-  p.rx_local_port = 10002 + i;
+  // Houdini UE: the UE feeds pilots live, so host-fed streaming TX (SH-183);
+  // ue_tdd_pilot asks for the driver's TDD tick anchor (SH-248/SH-301). The
+  // RX host port follows the channel (RadioHoudini::rxStreamArgs).
   p.tx_mode = "stream";
   p.tdd = _cfg->ue_tdd_pilot();
   const Radio::Type type = radioTypeFor(*_cfg);

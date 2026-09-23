@@ -273,10 +273,8 @@ void BaseRadioSet::init(BaseRadioContext* context) {
   p.half_bw_hz = _cfg->occupied_half_bw_hz();
   p.tx_gain_db = _cfg->houdini_tx_gain_db();
   p.rx_gain_db = _cfg->houdini_rx_gain_db();
-  // Houdini BS: the RX host port 10002 (the FPGA egresses ch1 there; the BS
-  // and UE are on different interface IPs, so both can bind it), and the
-  // beacon is device BRAM replay (tx_mode=replay).
-  p.rx_local_port = 10002;
+  // Houdini BS: the beacon is device BRAM replay (tx_mode=replay). The RX
+  // host port follows the channel (RadioHoudini::rxStreamArgs).
   p.tx_mode = "replay";
   const Radio::Type type = radioTypeFor(*_cfg);
   try {
