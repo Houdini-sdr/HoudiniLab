@@ -41,7 +41,9 @@ open(os.path.join(fake, "SoapySDR.py"), "w").write(
     "        import os\n"
     "        assert os.environ.get('SOAPY_SDR_PLUGIN_PATH', '').endswith('modules0.8-3'), 'no plugin path'\n"
     "        self.ip = a['remote'].split('//')[1].split(':')[0]\n"
-    "    def getHardwareInfo(self): return json.load(open(%r))[self.ip]\n" % info_file)
+    "    def getHardwareInfo(self): return json.load(open(%r))[self.ip]\n"
+    "    @staticmethod\n"
+    "    def unmake(d): open(%r, 'a').write(d.ip + '\\n')\n" % (info_file, os.path.join(root, "unmade")))
 same = {k: "v1" for k in ("fpga_version", "fpga_commit", "fpga_board", "device_version",
                           "device_build", "host_version", "host_build", "proto_version")}
 json.dump({"127.0.0.1": same, "127.0.0.2": same}, open(info_file, "w"))
@@ -62,6 +64,8 @@ def run(*extra, conf="files/houdini-x.json"):
 rc, rep, lv = run()
 check(rc == 0 and rep["ok"], "a ready host passes (rc 0)")
 check(lv.get("stack match") == "PASS" and lv.get("server 127.0.0.2") == "PASS", "full form: servers answer and stacks match")
+check(sorted(open(os.path.join(root, "unmade")).read().split()) == ["127.0.0.1", "127.0.0.2"],
+      "each radio opened for its stack is closed cleanly (unmake), not dropped at exit")
 # A real sounder on this host (a rig host mid-run) runs on other radios than the
 # fake 127.0.0.x ones, so it may add a note or, for another user's process, a WARN.
 check(all(l != "WARN" for w, l in lv.items() if w != "radios free"), "no warnings on a ready host: %s" % lv)

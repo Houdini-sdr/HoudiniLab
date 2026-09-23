@@ -236,6 +236,9 @@ def check_no_sounder(rep, nodes):
 
 
 def check_servers(rep, nodes, port):
+    # A bare connect, so the quick form opens no radio. The server logs one
+    # "handlerLoop() FAIL: recv(header)" per probe (a connection that sends no
+    # RPC header); known and harmless.
     ok = []
     for ip in nodes:
         try:
@@ -255,9 +258,12 @@ def hwinfo(ip, port):
     import SoapySDR
     sdr = SoapySDR.Device({"driver": "houdinisdr", "remote": "tcp://%s:%s" % (ip, port),
                            "remote:driver": "houdinisdr-device", "remote:type": "houdinisdr"})
-    info = dict(sdr.getHardwareInfo())
-    del sdr
-    return info
+    try:
+        return dict(sdr.getHardwareInfo())
+    finally:
+        # A clean close: a connection dropped at process exit leaves a
+        # "handlerLoop() FAIL: recv(header)" in each radio's server journal.
+        SoapySDR.Device.unmake(sdr)
 
 
 def check_versions(rep, sd, nodes, port, env):
