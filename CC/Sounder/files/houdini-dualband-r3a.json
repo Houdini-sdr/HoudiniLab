@@ -1,0 +1,83 @@
+{
+ "_comment": "AP-79 ladder rung R3a: the 5G-like numerology of houdini-dualband.json (R3: fft 4096, SCS 30 kHz, CP 288, 14 symbols, 0.5 ms slots, 10 ms frame) on the SUB-6 lane only, so R3's numerology is proven before the X-IF lane is added back (R3 = R3a + UE TX B at 4380 -> BS RX C). Generated from houdini-dualband.json by removing the X-IF channels; every other key is identical.",
+ "_r3_comment": "AP-79 dual-band demo, HS-202 mode V: sub-6 ISM 2.4 (2400 to 2450 MHz, NCO 2425) both ways plus the X-band IF (NCO 4380) UE to BS, one numerology on both bands. Derived from houdini-2ch-decouple.json (the AP-78 two-channel demo) with the P + U schedule of houdini-ul.json. BS .22: TX ch0 (A, sub-6 beacon), RX ch0 (A, sub-6 uplink) + ch2 (C, X-IF uplink). UE .21: RX ch0 (A, sub-6 beacon), TX ch0 (A, sub-6) + ch1 (B, X-IF). Wiring per plan section 6: .22 DAC_B -> .21 ADC_D, .21 DAC_B -> .22 ADC_D, .21 DAC_A -> .22 ADC_B.",
+ "_status": "RUNNABLE in software, NOT YET RUN on the rig (AP-79): every key is consumed, the TX interpolator, TX prefilter, RX channel filter and band-limited beacon are in, and the replay strobe contract at vld 2 is confirmed by the software and fpga lanes. Carried calibrations (tx_advance, corr_scale) are re-measured at the first run.",
+ "serial_file": "files/topology-houdini-dualband.json",
+ "radio_type": "houdini",
+ "remote_port": "55132",
+ "bs_hw_framer": true,
+ "ue_tdd_pilot": true,
+ "ue_tx_advance_ticks": 0,
+ "_rates_note": "sample_rate stays 122.88e6: it is the RX rate AND the device tick, and every slot/frame count below is in those ticks. The TX stream runs at tx_sample_rate; every TX waveform is generated at 122.88 and x2 interpolated at the radio boundary (include/dsp/band_filters.h). DAC 5898.24 / interpolation 24, ADC 4915.2 / decimation 40.",
+ "sample_rate": 122880000.0,
+ "tx_sample_rate": 245760000.0,
+ "rfdc_adc_fs_mhz": 4915.2,
+ "rfdc_dac_fs_mhz": 5898.24,
+ "_frequency_note": "Common NCO is the sub-6 2425 MHz; only the X-band channels override it (TX ch1 = B, RX ch2 = C). Zone, ADC calibration mode, inverse sinc and the +-25 MHz RX channel filter are DERIVED per channel from the NCO and the converter rates (PG269 rules), not configured: sub-6 -> zone 1, cal mode 1, filter on; X-IF -> zone 2, cal mode 2, filter off. frequency is the carrier the CFO ppm is quoted against (the sub-6 beacon link).",
+ "frequency": 2425000000.0,
+ "nco_frequency": 2425000000.0,
+ "_gain_note": "Written explicitly on every opened channel: make() now resets RX DSA to 0 dB and TX VOP to 20 mA. TX 0 dB = maximum VOP, where the software lane measured linearity (W2). The ue_*_gain_* fields below are Iris units and inert on Houdini.",
+ "houdini_tx_gain_db": 0.0,
+ "houdini_rx_gain_db": 0.0,
+ "channel": "A",
+ "tx_channel": "A",
+ "rx_channel": "A",
+ "ue_channel": "A",
+ "ue_tx_channel": "A",
+ "ue_rx_channel": "A",
+ "_numerology_note": "5G-like, fixed CP [user; plan section 3.3]: SCS 30 kHz = 122.88 MHz / 4096, CP 288 (NR normal), symbol 4384 ticks. 14 symbols = 61376 ticks + zero prefix 32 + postfix 32 = 61440 ticks = exactly 0.5 ms (NR's slot) = 160 x 384, so every slot starts on the 384-tick TDD grid, as the old 1 ms frame did. 1596 data subcarriers = 133 RB = 47.88 MHz (+-23.94, inside the +-24 MHz filter passband). Rollback 40 MHz: ofdm_data_num 1272 (106 RB) with nco_frequency 2420e6 (houdini-dualband-40.json).",
+ "fft_size": 4096,
+ "cp_size": 288,
+ "ofdm_symbol_per_slot": 14,
+ "ofdm_data_num": 1596,
+ "ofdm_tx_zero_prefix": 32,
+ "ofdm_tx_zero_postfix": 32,
+ "_schedule_note": "B, G, P, U then guards: 20 slots x 0.5 ms = 10 ms (NR's radio frame). The UE sends its pilot in slot 2 and uplink data in slot 3 on BOTH its TX channels (sub-6 and X-IF; the BS separates them by channel, as in AP-78's shared pilot slot).",
+ "frame_schedule": [
+  "BGPUGGGGGGGGGGGGGGGG"
+ ],
+ "ue_frame_schedule": [
+  "GGPUGGGGGGGGGGGGGGGG"
+ ],
+ "ue_modulation": "QPSK",
+ "_beacon_note": "nr_pss_bl: the band-limited beacon (AP-79): the 127-tone NR PSS at 240 kHz behind NR's 36-sample CP, then a guarded TRS pair on the central 96 tones (+-23 MHz); 1076 ticks. tx_full_scale 0.34 = -16 dBFS RMS at its 6.6 dB PAPR, the plan's DAC back-off. The argmax pick: the shipped first_path rule lands 2 samples early on this lobe (beacon_bandlimit_test).",
+ "sync": {
+  "beacon": {
+   "type": "nr_pss_bl",
+   "tx_full_scale": 0.34
+  },
+  "detector": {
+   "pick": "argmax",
+   "min_bar": 0.1
+  },
+  "confirm": {
+   "snr_floor_db": 25.0
+  }
+ },
+ "max_frame": 2000,
+ "beamsweep": false,
+ "_carried_note": "tx_advance is re-measured at mode V (169, see _tx_advance_note). The detection thresholds are DERIVED for nr_pss_bl on a simulated link (tests/comms-func/detection_calibration_test.cc): corr_scale 5 (coherence bar 0.2; noise-only max 0.080 of 400 windows, a beacon 30 dB under bench level 0.90), snr_floor_db 25 (legacy's 30 shifted by the measured -5.2 dB for this beacon at 0.34 peak on the filtered lane, 16.6 dB margin). detector.min_bar 0.1 stops the resync retry relaxation (+1 on corr_scale per retry) from walking the bar into the noise (at corr_scale 5 it moves it 20% a retry). ue_pilot_horizon counts FRAMES.",
+ "_tx_advance_note": "BENCH CALIBRATION, mode-V converter path (AP-79, 2026-09-23): 169 = 247 (the one-rate path's value) + the mean pilot_grid_off of -78 samples (sd 3.8, no drift over 80 s) measured at R1 with HOUDINI_BS_RX_DEBUG=1 once the BS framer placed the pilot by its leading edge (4e0fcbf). Mode V moves the pilot 78 samples EARLY against the one-rate path: the x24 DAC interpolation and x40 ADC decimation carry a different pipeline latency. The converter latency is the same at every mode-V rung, BUT the BS framer's pilot edge (the measurement) carries a bias that depends on the pilot waveform, and this rung's fft-4096 pilot differs from R1's: RE-MEASURE pilot_grid_off here before trusting 169 (an Opus review, L2). Re-derive after any cabling or converter change by the same procedure.",
+ "tx_advance": [
+  169
+ ],
+ "corr_scale": [
+  5
+ ],
+ "corr_scale_init": [
+  5
+ ],
+ "ue_pilot_horizon": 10,
+ "ue_rx_gain_a": [
+  65
+ ],
+ "ue_tx_gain_a": [
+  81
+ ],
+ "ue_rx_gain_b": [
+  65
+ ],
+ "ue_tx_gain_b": [
+  81
+ ]
+}

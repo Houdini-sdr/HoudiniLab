@@ -54,7 +54,8 @@ double outOfBandDb(Config& c, double edge_hz) {
 
 int main() {
   for (const char* f : {"files/houdini-r0.json", "files/houdini-dualband-r1.json", "files/houdini-dualband-r2.json",
-                        "files/houdini-dualband.json", "files/houdini-dualband-40.json"}) {
+                        "files/houdini-dualband.json", "files/houdini-dualband-40.json",
+                        "files/houdini-dualband-r3a.json"}) {
     try {
       Config c(f, "/tmp", false, false, false);
       const bool mode_v = c.mode_v();
