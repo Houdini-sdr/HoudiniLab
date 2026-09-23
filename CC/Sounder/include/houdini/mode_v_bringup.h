@@ -35,6 +35,7 @@
  */
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <tuple>
@@ -370,9 +371,10 @@ inline PostSetup postSetupCheck(SoapySDR::Device& dev, const Plan& p, const Resu
   const std::string pf = dev.readSetting("RFDC_PREFLIGHT");
   ps.preflight = pf.substr(0, pf.find('\n'));
   if (ps.preflight.rfind("FAIL ", 0) == 0) {
+    // The FAIL part ends at the first of the optional ' known ' and
+    // ' suppressed ' tails (SH-423); link_health.h preflightFailBody.
     std::string body = ps.preflight.substr(5);
-    const size_t k = body.find(" known ");
-    if (k != std::string::npos) body = body.substr(0, k);
+    body = body.substr(0, std::min(body.find(" known "), body.find(" suppressed ")));
     size_t q = 0;
     while (q <= body.size()) {
       const size_t e = std::min(body.find(';', q), body.size());

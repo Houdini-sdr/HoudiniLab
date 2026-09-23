@@ -302,6 +302,12 @@ int main() {
     const auto pg = houdini::modev::postSetupCheck(g, bsPlan(), rg);
     check(pg.failures.size() == 1 && pg.failures[0] == "ADC0.1:FIFOUSRDAT_OF,FIFOUSRDAT_UF",
           "post-setup: a FAIL outside the known part is collected (informational until the post-activate clear)");
+    FakeDevice h;  // SH-423: a ' suppressed ' tail with no known part (mutation: cut at ' known ' alone)
+    h.preflight = "FAIL ADC0.1:FIFOUSRDAT_OF suppressed DAC0.0:FIFO_OVR(46600/s,backoff=8s)";
+    const auto rh = houdini::modev::bringUp(h, bsPlan());
+    const auto ph = houdini::modev::postSetupCheck(h, bsPlan(), rh);
+    check(ph.failures.size() == 1 && ph.failures[0] == "ADC0.1:FIFOUSRDAT_OF",
+          "post-setup: the suppressed tail is not glued onto the last FAIL item");
   }
   {
     using houdini::modev::detail::chanList;

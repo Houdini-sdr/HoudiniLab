@@ -123,14 +123,24 @@ inline Counters parseEgressStatus(const std::string& raw) {
   return out;
 }
 
+/// The FAIL part of an RFDC_PREFLIGHT verdict line. The grammar is
+/// 'ok' | 'FAIL <item>;..', then an optional ' known <item>;..', then an
+/// optional ' suppressed <item>;..' (SH-423's IRQ-storm backoff). Either tail
+/// may appear without the other, so the FAIL part ends at the FIRST marker:
+/// cutting at ' known ' alone glues 'suppressed ..' onto the last FAIL item.
+/// A suppression is never a failure (the masked bit keeps latching, so a real
+/// fault still reads FAIL). Returns "" for an 'ok' line.
+inline std::string preflightFailBody(const std::string& line) {
+  if (line.rfind("FAIL ", 0) != 0) return "";
+  const std::string body = line.substr(5);
+  return body.substr(0, std::min(body.find(" known "), body.find(" suppressed ")));
+}
+
 /// The FAIL items of an RFDC_PREFLIGHT verdict line ('ok ..' -> none):
-/// 'FAIL A;B known C' -> {A, B}; the known part is never a failure.
+/// 'FAIL A;B known C suppressed D' -> {A, B}.
 inline std::set<std::string> preflightItems(const std::string& line) {
   std::set<std::string> out;
-  if (line.rfind("FAIL ", 0) != 0) return out;
-  std::string body = line.substr(5);
-  const auto k = body.find(" known ");
-  if (k != std::string::npos) body = body.substr(0, k);
+  const std::string body = preflightFailBody(line);
   for (const auto& i : detail::split(body, ';'))
     if (!i.empty()) out.insert(i);
   return out;

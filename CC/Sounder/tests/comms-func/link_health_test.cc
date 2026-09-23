@@ -111,6 +111,14 @@ int main(int argc, char** argv) {
               preflightItems("FAIL ADC0.1:FIFOUSRDAT_OF,FIFOUSRDAT_UF;ADC2.1:X known DAC0.0:FIFO_OVR(HS-207)") ==
                   std::set<std::string>{"ADC0.1:FIFOUSRDAT_OF,FIFOUSRDAT_UF", "ADC2.1:X"},
           "preflight items: failures split from the known part");
+    // SH-423's ' suppressed ' tail, with and without a known part. Mutation:
+    // cut at ' known ' alone and the first case yields {"A suppressed X(..)"}.
+    check(preflightItems("FAIL A suppressed DAC0.0:FIFO_OVR(46600/s,backoff=8s)") ==
+                  std::set<std::string>{"A"} &&
+              preflightItems("FAIL A;B known DAC0.0:FIFO_OVR(HS-207) suppressed DAC0.0:FIFO_OVR(46600/s,backoff=8s)") ==
+                  std::set<std::string>{"A", "B"} &&
+              preflightItems("ok known DAC0.0:FIFO_OVR(HS-207) suppressed DAC0.0:FIFO_OVR(46600/s,backoff=8s)").empty(),
+          "preflight items: a suppression is never a failure, with or without a known part");
   }
   {  // test_a_standing_preflight_failure_is_baseline_and_a_new_one_alarms
     FakeNode n;
