@@ -1,0 +1,13 @@
+# Real readSetting captures from a STREAMING mode-V node, for the link-health
+# parser port (AP-79). Software lane, .21, device d72ee358, one MTS group
+# {TX ch0 replay, RX ch0 stream at 122.88}, TX 245.76 (HS-207 arm A), end of a
+# 5-minute run, 2026-09-22. ring_ovfl's 22718 accrued while the capture script
+# was NOT reading (a 1 s pause after activate and after its loop): judge it by
+# its increase. marked=p0:7 stood from before the run (sticky until an eth reset).
+TX_BANK_STATUS=ch0:acked=0,late=0,under=0,seqerr=0,zerofill=0,fill=0,hwm=0,drops=0,last_seq=0,active=1,clkerr=0,free=64,cap=64,afull=0,aempty=1,gated=0,smiss=0,aclose=0,parked=0,late_seen=0,efault=0,played=0,clear_drops=0,clear_busy=0;ch1:acked=0,late=0,under=0,seqerr=0,zerofill=0,fill=0,hwm=0,drops=0,last_seq=0,active=0,clkerr=0,free=64,cap=64,afull=0,aempty=1,gated=0,smiss=0,aclose=0,parked=0,late_seen=0,efault=0,played=0,clear_drops=0,clear_busy=0
+RX_BANK_STATUS=ch0:gated=0,aborts=0,hwm=0;ch1:gated=0,aborts=0,hwm=0;ch2:gated=0,aborts=0,hwm=0;ch3:gated=0,aborts=0,hwm=0
+TX_HOST_STATUS=eob_recloses=0
+RX_HOST_STATUS=rxq_ovfl=0 rxq_ovfl_ch0=0 ring_ovfl=22718 ring_ovfl_ch0=22718
+EGRESS_STATUS=drop=p0:0,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marked=p0:7,p1:0,p2:0,p3:0
+RFDC_PREFLIGHT=FAIL ADC0.1:FIFOUSRDAT_OF,FIFOUSRDAT_UF known DAC0.0:FIFO_OVR(HS-207)
+RFDC_INTR_FIRE_COUNT=14032361
