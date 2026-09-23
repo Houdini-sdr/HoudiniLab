@@ -16,7 +16,6 @@
 
 #include <cstddef>
 #include <memory>
-#include <string>
 
 class Config;
 
@@ -52,13 +51,6 @@ class IClientRadioSet {
   /// Switch a radio's RX channel filter for the reads that follow (AP-79: off
   /// around reads that are thrown away). A no-op on sets without one.
   virtual void setRxFilter(size_t /*radio_id*/, bool /*on*/) {}
-  /// A device setting on one client radio: the clock-steering actuator
-  /// (AP-79, CLOCK_ADJ). Empty / false on sets that have none, or when the
-  /// device refuses; never throws.
-  virtual std::string readRadioSetting(size_t /*radio_id*/, const std::string& /*key*/) { return ""; }
-  virtual bool writeRadioSetting(size_t /*radio_id*/, const std::string& /*key*/, const std::string& /*value*/) {
-    return false;
-  }
 };
 
 /// The sets this build provides for this configuration: the native-UHD sets

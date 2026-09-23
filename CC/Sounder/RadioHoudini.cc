@@ -61,8 +61,6 @@ SoapySDR::Kwargs RadioHoudini::rxStreamArgs(const RadioParams& p) {
   // splice INSIDE one returned buffer would be invisible. Asked for explicitly
   // rather than inherited from a default another repo owns (AP-10).
   rx["rx_gap_break"] = "1";
-  // The plugin's RX receive loop, placed like the TX pacer (see txStreamArgs).
-  if (const char* e = std::getenv("HOUDINI_RX_AFFINITY")) rx["cpu_affinity"] = e;
   // MTS (AP-23): pin the converter bring-up latency and align the ADC/DAC
   // tiles the RX-stamp -> TX-time arithmetic crosses.
   if (p.mts) rx["mts"] = "true";
@@ -76,17 +74,6 @@ SoapySDR::Kwargs RadioHoudini::txStreamArgs(const RadioParams& p) {
   // window grid (SH-248/SH-301) instead of whole milliseconds.
   if (p.tdd) tx["tdd"] = "1";
   if (p.mts) tx["mts"] = "true";
-  // The host plugin's TX pacer thread for a live stream is kernel-placed by
-  // default; at AP-79 R2 the two UE TX pacers landed on the core the sounder's
-  // dispatch thread spins on (99 %), and bursts went late. The plugin takes
-  // cpu_affinity at setupStream; the env names match its houdini_setup.py.
-  // A comma list ("17,18") gives each TX stream its own core (RadioSoapy).
-  if (const char* e = std::getenv("HOUDINI_TX_AFFINITY")) {
-    if (p.tx_mode == "stream") tx["cpu_affinity"] = e;
-  }
-  if (const char* e = std::getenv("HOUDINI_TX_RTPRIO")) {
-    if (p.tx_mode == "stream") tx["rt_priority"] = e;
-  }
   return tx;
 }
 
@@ -193,11 +180,6 @@ void RadioHoudini::writeStateRecord(const std::string& label, SoapySDR::Device& 
     };
     info(SOAPY_SDR_RX, "RX", rx_channels);
     info(SOAPY_SDR_TX, "TX", tx_channels);
-    // The calibration state per ADC block: the SH-377 oracle for a degraded
-    // bring-up (a uniform coefficient set), and the modes it ran with. AP-79
-    // pairs these with the beacon SNR, which spread +-5 dB across bring-ups.
-    section("RFDC_ADC_CAL", [&] { return dev.readSetting("RFDC_ADC_CAL"); });
-    section("RFDC_CAL_COEFFS", [&] { return dev.readSetting("RFDC_CAL_COEFFS"); });
     section("RFDC_SNAPSHOT", [&] { return dev.readSetting("RFDC_SNAPSHOT"); });
     std::fclose(f);
     MLPD_INFO("%s: RFDC state record (%s) %s\n", label.c_str(), stage.c_str(), path.c_str());

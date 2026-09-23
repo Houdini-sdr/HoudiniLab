@@ -505,7 +505,7 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
   // AP-79: this capture is continuous and only its P/U slots are used, so the
   // channel filter runs on the extracted slots below, not on the whole read.
   // NB the framer's own decisions below (the energy search, the presence gate,
-  // the P/U tagging, the LTS check, align_slot) therefore run on the RAW lane,
+  // the P/U tagging, the LTS check, the pilot edge) therefore run on the RAW lane,
   // which in mode V carries the channel's 0 dBc real-sampling mirror (AP-79
   // review): untested at mode V, to be watched on the first run.
   // HOUDINI_BS_FILTER_WHOLE=1 filters the whole capture again (the pre-change
@@ -518,7 +518,7 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
   // them; latch it before any later recv on this radio overwrites the radio's copy.
   htdd_frame_pad_ = r->lastPadSamples();
   if (cg < fn) {
-    // Short read: the frame is not fully covered. align_slot() clamps a slot start
+    // Short read: the frame is not fully covered. the slot placement clamps a slot start
     // to cg, so any slot past the received data would be extracted from the tail
     // and look perfectly valid downstream. Fold the shortfall into the frame's
     // untrusted count so consumers refuse those slots instead of trusting them.
@@ -545,7 +545,7 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
   // slots of the buffer a SECOND copy (next frame) is also fully contained
   // near the tail -- and the densest-window search picks between two
   // equal-energy copies by noise. The tail copy leaves no room for the
-  // frame's later rx slots: u_start ran past cg and align_slot's clamp
+  // frame's later rx slots: u_start ran past cg and the placement clamp
   // served tail junk (noise, partial bursts, or the pilot itself) as the
   // data slot -- the ~2% garbage-constellation class (measured: frame 5220
   // p_start=139160 pu_spacing_err=-8088 with the pilot burst in the "U"
@@ -657,47 +657,22 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
           pilot_ss, bc);
     }
   }
-  // Centroid-align a slot's energy near `guess` -> transmitted [prefix][energy]
-  // [postfix] layout (energy edge at ~prefix). Window ~1.25 slots so it can't
-  // reach into an adjacent slot and drag the centroid.
-  auto align_slot = [&](long long guess) -> long long {
-    long long w0 = guess - n / 8;
-    if (w0 < 0) w0 = 0;
-    long long w1 = w0 + 5 * n / 4;
-    if (w1 > cg) w1 = cg;
-    double peak = 0.0;
-    for (long long i = w0 + 64; i + 64 <= w1; ++i) {
-      const double m = cse[i + 64] - cse[i - 64];
-      if (m > peak) peak = m;
-    }
-    const double thr = 0.15 * peak;
-    long long cnt = 0;
-    double isum = 0.0;
-    for (long long i = w0 + 64; i + 64 <= w1; ++i)
-      if (cse[i + 64] - cse[i - 64] > thr) { ++cnt; isum += static_cast<double>(i); }
-    long long st = (cnt > 0 ? std::llround(isum / cnt) : (guess + n / 2)) - n / 2;
-    if (st < 0) st = 0;
-    if (st + n > cg) st = cg - n;
-    return st;
-  };
   // Place the pilot once, by its leading edge (AP-79, houdini/slot_align.h):
   // the UE sends the pilot and its data slots as one burst at exact whole-slot
-  // offsets, so every other slot sits a whole number of slots from it. The per-slot alignment this replaces took
-  // in the neighbour's energy when P and U are adjacent and extracted U 264-317
-  // samples early (R1c). HOUDINI_BS_ALIGN_PER_SLOT=1 restores it for an A/B.
-  static const bool per_slot = getenv("HOUDINI_BS_ALIGN_PER_SLOT") != nullptr;
+  // offsets, so every other slot sits a whole number of slots from it. The
+  // per-slot centroid alignment this replaced took in the neighbour's energy
+  // when P and U are adjacent and extracted U 264-317 samples early (R1c).
   std::vector<long long> rel_slots;
   for (size_t k = 0; k < K; ++k)
     rel_slots.push_back(static_cast<long long>(htdd_rx_slots_.at(k)) -
                         static_cast<long long>(htdd_pilot_slot_));
   const long long p_start =
-      per_slot ? align_slot(p_at)
-               : houdini::slotalign::burstPilotStart(cse, p_at, static_cast<long long>(n), cfg_->prefix());
+      houdini::slotalign::burstPilotStart(cse, p_at, static_cast<long long>(n), cfg_->prefix());
   htdd_slot_cache_.resize(K * C * static_cast<size_t>(n) * 2);
   long long u_start = -1;  // aligned start of the uplink-data slot, if present
   for (size_t k = 0; k < K; ++k) {
     const long long guess = p_start + rel_slots.at(k) * n;
-    const long long st = per_slot ? align_slot(guess) : std::max(0LL, std::min(guess, static_cast<long long>(cg) - static_cast<long long>(n)));
+    const long long st = std::max(0LL, std::min(guess, static_cast<long long>(cg) - static_cast<long long>(n)));
     if (htdd_rx_slots_.at(k) != htdd_pilot_slot_) u_start = st;
     // The centroid start is derived from lane 0 but applies to every lane (the
     // combined stream is sample-aligned), so extract slot k from each lane's own

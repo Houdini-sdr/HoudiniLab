@@ -15,7 +15,6 @@
 #include <unistd.h>
 
 #include <atomic>
-#include <future>
 #include <chrono>
 #include <climits>
 #include <limits>
@@ -31,7 +30,6 @@
 #include "include/logger.h"
 #include "include/macros.h"
 #include "include/houdini/pilot_ladder.h"
-#include "include/sync/clock_steer.h"
 #include "include/node_version.h"
 #include "sync/grid_tracker.h"
 #include "sync/resync_policy.h"
@@ -807,8 +805,8 @@ void* Receiver::clientTxRx_launch(void* in_context) {
   auto buffer = context->buffer;
   delete context;
   // An exception escaping a thread's start routine is std::terminate WITHOUT
-  // unwinding, so the scope guards in the thread (the clock-steering release,
-  // AP-79) would never run. Catch here: log, stop the run, and let it unwind.
+  // unwinding (no destructor runs, the run dies with "terminate called").
+  // Catch here: log it, stop the run, and let the stack unwind.
   try {
     if (me->config_->hw_framer())
       me->clientTxRx(tid);
@@ -1837,103 +1835,6 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   }
   houdini::sync::GridTracker tracker;
   tracker.reset(tracker_cfg);
-  // AP-79: the in-sounder clock steering (sync/clock_steer.h), off by default.
-  // It lives here because this thread owns the tracked period, so a push's
-  // known frequency step is fed forward into it with no lock. Armed only when
-  // the UE's CLOCK_ADJ reads ref=calibrated (the actuator exists only then);
-  // the guard releases the node to its calibrated hold however this thread
-  // exits, unless steer.keep.
-  houdini::sync::ClockSteer steer(config_->sync().steer);
-  // A push is ONE CLOCK_ADJ write plus its readback, which hold the device's
-  // stream lock ~200 ms (the driver's own CLOCK_ADJ note). That is longer than
-  // the pilot horizon, so it runs in a job off this thread, which polls it
-  // once a frame and applies the offset and the feed-forward when it lands.
-  struct SteerJob {
-    bool wrote = false;
-    std::string rb;  ///< rb_dac read back after the write
-  };
-  struct SteerState {
-    int cal = -1;      ///< the calibration DAC code; -1 = steering off
-    bool dirty = false;  ///< a write was attempted, or the node was steered at entry
-    int push = 0, code = 0;  ///< the push in flight, and its target code
-    std::future<SteerJob> job;
-  } steer_state;
-  auto steerNow = [] {
-    return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
-  };
-  // CLOCK_ADJ reads "ref=<r> cal_dac=<n> rb_dac=<n> ...": one field by name.
-  auto clockAdjField = [](const std::string& st, const std::string& key) -> std::string {
-    const std::string k = key + "=";
-    size_t p = 0;
-    while ((p = st.find(k, p)) != std::string::npos) {
-      if (p == 0 || st[p - 1] == ' ') {
-        const size_t e = st.find(' ', p);
-        return st.substr(p + k.size(), (e == std::string::npos ? st.size() : e) - p - k.size());
-      }
-      ++p;
-    }
-    return "";
-  };
-  // A whole non-negative decimal field, or -1.
-  auto clockAdjCode = [](const std::string& v) -> long {
-    if (v.empty()) return -1;
-    char* end = nullptr;
-    const long x = std::strtol(v.c_str(), &end, 10);
-    return (end != nullptr && *end == '\0' && x >= 0) ? x : -1;
-  };
-  if (config_->sync().steer.enable && stampAnchored()) {
-    const std::string st = client_radio_set_->readRadioSetting(tid, "CLOCK_ADJ");
-    const std::string ref = clockAdjField(st, "ref");
-    const long cal = clockAdjCode(clockAdjField(st, "cal_dac")), rb = clockAdjCode(clockAdjField(st, "rb_dac"));
-    if (ref == "calibrated" && cal >= 0 && rb >= 0) {
-      steer_state.cal = static_cast<int>(cal);
-      steer.start(static_cast<int>(rb - cal), steerNow());
-      if (rb != cal) {
-        // Left steered by an earlier session: this one takes it over, and
-        // releases it at exit like its own.
-        steer_state.dirty = true;
-        MLPD_WARN("Clock steering [%d]: the node is ALREADY steered %+ld counts from its calibration "
-                  "code; steering from there and releasing at exit\n",
-                  tid, rb - cal);
-      }
-      MLPD_INFO("Clock steering ON [%d]: CLOCK_ADJ %s; period %.0f s, gain %.2f, deadband %.3f ppm, "
-                "max push %d, authority +-%d counts, %.4f ppm/count\n",
-                tid, st.c_str(), config_->sync().steer.period_s, config_->sync().steer.gain,
-                config_->sync().steer.deadband_ppm, config_->sync().steer.max_push,
-                config_->sync().steer.max_offset, config_->sync().steer.ppm_per_count);
-    } else {
-      MLPD_WARN("Clock steering requested but OFF [%d]: CLOCK_ADJ reads '%s' (needs ref=calibrated "
-                "with cal_dac and rb_dac)\n",
-                tid, st.c_str());
-    }
-  }
-  struct SteerRelease {
-    IClientRadioSet* set;
-    int tid;
-    const SteerState& state;
-    const houdini::sync::ClockSteer& steer;
-    bool keep;
-    ~SteerRelease() {
-      if (state.cal < 0) return;
-      // A write still in flight lands first, so the release is the last word.
-      if (state.job.valid()) {
-        try {
-          const_cast<std::future<SteerJob>&>(state.job).wait();
-        } catch (...) {
-        }
-      }
-      if (!state.dirty) return;
-      if (keep) {
-        MLPD_INFO("Clock steering [%d]: keeping offset %+d counts at exit\n", tid, steer.offset());
-        return;
-      }
-      const bool ok = set->writeRadioSetting(static_cast<size_t>(tid), "CLOCK_ADJ", "release");
-      MLPD_INFO("Clock steering [%d]: %s to the calibrated hold after %d confirmed push(es), offset "
-                "was %+d; now %s\n",
-                tid, ok ? "released" : "RELEASE FAILED, node left steered", steer.pushes(), steer.offset(),
-                set->readRadioSetting(static_cast<size_t>(tid), "CLOCK_ADJ").c_str());
-    }
-  } steer_release{client_radio_set_.get(), tid, steer_state, steer, config_->sync().steer.keep};
   // Frame-start grid point n frames after the tracked reference.
   auto houdiniGridStart = [&](long long n) {
     return houdini_pilot_ref + llround(static_cast<double>(n) *
@@ -2053,27 +1954,6 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   };
 
   while (config_->running() == true) {
-    // Clock steering: land a finished push (sync/clock_steer.h). Polled once
-    // a frame, so the feed-forward follows the DAC's move within a frame.
-    if (steer_state.job.valid() &&
-        steer_state.job.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
-      const SteerJob j = steer_state.job.get();
-      if (j.wrote && j.rb == std::to_string(steer_state.code)) {
-        steer.applied(steer_state.push);
-        // FEED-FORWARD: the push is a known step of the UE clock, so the BS
-        // frame spans that much more of its ticks from now on.
-        houdini_frame_period *= steer.periodScale(steer_state.push);
-        houdini_frame_period = std::min(kGridPeriodHi, std::max(kGridPeriodLo, houdini_frame_period));
-        MLPD_INFO("Clock steer [%d]: tracked eps %+.4f ppm averaged over %.0f s -> push %+d to offset %+d "
-                  "(CLOCK_ADJ %d confirmed); period fed forward to %.4f\n",
-                  tid, steer.lastMeanPpm(), config_->sync().steer.period_s, steer_state.push, steer.offset(),
-                  steer_state.code, houdini_frame_period);
-      } else {
-        MLPD_WARN("Clock steer [%d]: CLOCK_ADJ %d not confirmed (write %s, readback rb_dac '%s'); offset "
-                  "held at %+d, and the node is released at exit\n",
-                  tid, steer_state.code, j.wrote ? "ok" : "FAILED", j.rb.c_str(), steer.offset());
-      }
-    }
     if (config_->max_frame() > 0 && frame_id >= config_->max_frame()) {
       MLPD_WARN(
           "Client sync loop: frame_id (%zu) >= max_frame (%zu), tid %d -- "
@@ -2381,29 +2261,6 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
                   std::min(kGridPeriodHi, std::max(kGridPeriodLo,
                                                    houdini_frame_period));
               houdini_grid_updates++;
-              if (steer_state.cal >= 0) {
-                // The sensor is the tracked rate itself, the eps logged above.
-                const double eps_ppm =
-                    (static_cast<double>(config_->samps_per_frame()) / houdini_frame_period - 1.0) * 1e6;
-                // One push in flight at a time: the window still closes on
-                // schedule, but a decision taken while a write is pending is
-                // dropped (the next window sees its effect).
-                const int push = steer.observe(eps_ppm, steerNow());
-                if (push != 0 && !steer_state.job.valid()) {
-                  steer_state.push = push;
-                  steer_state.code = steer_state.cal + steer.offset() + push;
-                  steer_state.dirty = true;  // from here the node may have moved
-                  IClientRadioSet* set = client_radio_set_.get();
-                  const int code = steer_state.code;
-                  steer_state.job = std::async(std::launch::async, [set, tid, code, clockAdjField] {
-                    SteerJob j;
-                    j.wrote = set->writeRadioSetting(static_cast<size_t>(tid), "CLOCK_ADJ", std::to_string(code));
-                    if (j.wrote)
-                      j.rb = clockAdjField(set->readRadioSetting(static_cast<size_t>(tid), "CLOCK_ADJ"), "rb_dac");
-                    return j;
-                  });
-                }
-              }
             } else if (kf > 0) {
               // Only the kalman arm reaches here: its innovation gate rejected
               // the observation. The detection is still ALIVE on the grid --

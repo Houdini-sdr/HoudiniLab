@@ -300,9 +300,11 @@ void RecorderWorker::sendCsi(Packet* pkt) {
   const int es = symStart(d, slot);  // symbol-0 start (fixed prefix by default; sym_start knob)
   int s0 = nsym / 8, s1 = nsym - nsym / 8;
   if (s1 <= s0) { s0 = 0; s1 = nsym; }
-  // Per-symbol estimates, averaged with each symbol's common rotation removed
-  // (AP-79 #5, houdini/csi_average.h); HOUDINI_CSI_NO_DEROTATE is the A/B.
-  static const bool derotate = std::getenv("HOUDINI_CSI_NO_DEROTATE") == nullptr;
+  // Per-symbol estimates, averaged. HOUDINI_CSI_DEROTATE=1 removes each
+  // symbol's common rotation first (AP-79 #5, houdini/csi_average.h): OFF by
+  // default until R3 measures it, since at fft 64/256 the rotation is
+  // negligible and the chained estimate only adds noise.
+  static const bool derotate = std::getenv("HOUDINI_CSI_DEROTATE") != nullptr;
   std::vector<std::vector<std::complex<float>>> gs;
   for (int sym = s0; sym < s1; ++sym) {
     const int base = es + sym * (cp + N) + cp;

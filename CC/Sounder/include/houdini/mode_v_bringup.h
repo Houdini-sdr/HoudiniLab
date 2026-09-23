@@ -39,6 +39,8 @@
 #include <cmath>
 #include <cstdio>
 #include <tuple>
+
+#include "houdini/link_health.h"
 #include <cstdlib>
 #include <limits>
 #include <map>
@@ -371,10 +373,7 @@ inline PostSetup postSetupCheck(SoapySDR::Device& dev, const Plan& p, const Resu
   const std::string pf = dev.readSetting("RFDC_PREFLIGHT");
   ps.preflight = pf.substr(0, pf.find('\n'));
   if (ps.preflight.rfind("FAIL ", 0) == 0) {
-    // The FAIL part ends at the first of the optional ' known ' and
-    // ' suppressed ' tails (SH-423); link_health.h preflightFailBody.
-    std::string body = ps.preflight.substr(5);
-    body = body.substr(0, std::min(body.find(" known "), body.find(" suppressed ")));
+    const std::string body = houdini::health::preflightFailBody(ps.preflight);
     size_t q = 0;
     while (q <= body.size()) {
       const size_t e = std::min(body.find(';', q), body.size());
