@@ -22,7 +22,8 @@ Per run:
     lvl_sd = sd of that over the windows, in dB
     floor  = rms of the beacon-free samples, dBFS
   From the log: acquisition coherence (median over the detections), pilot seat
-  (mean, sd), beacon SNR (median over the re-syncs), CNS low.
+  (mean, sd), beacon SNR (median over the re-syncs), CNS low, and the device
+  [WARNING] and IntrStatus line counts (these reach only the client, SH-438).
 """
 import glob, json, math, os, re, statistics as st, sys
 import numpy as np
@@ -153,6 +154,8 @@ def logfig(run):
             "seat": st.mean(seat) if seat else float("nan"), "seat_sd": st.pstdev(seat) if seat else float("nan"),
             "bsnr": st.median(snr) if snr else float("nan"),
             "cns_low": "%s/%s" % (cns[-1][1], cns[-1][0]) if cns else "none",
+            # device warnings reach only the client (SH-438): count them here
+            "warn": len(re.findall(r"\[WARNING\]", L)), "intr": len(re.findall(r"IntrStatus", L)),
             "bad": len(re.findall(r"BAD SYNC|UE PILOT LOST", L))}
 
 
@@ -193,7 +196,7 @@ for sd in sys.argv[1:]:
     print("== %s (%d runs)" % (sd, len(rows)))
     for r in rows:
         print("  %-16s " % r["run"] + " ".join("%s=%s" % (k, fmt(r.get(k, float("nan"))).strip()) for k in KEYS if k in r)
-              + " cns_low=%s bad=%s" % (r.get("cns_low"), r.get("bad")))
+              + " cns_low=%s bad=%s warn=%s intr=%s" % (r.get("cns_low"), r.get("bad"), r.get("warn"), r.get("intr")))
 print()
 print("%-10s" % "metric" + "".join("%26s" % s for s, _ in stages))
 ref = None
