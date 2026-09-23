@@ -341,6 +341,7 @@ target_include_directories(cir_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include 
 target_link_libraries(cir_test ${MUFFT_LIBRARIES})
 add_test(NAME cir COMMAND cir_test)
 add_test(NAME csi_gui_metrics COMMAND python3 test_metrics.py WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/csi_gui)
+add_test(NAME csi_gui_control COMMAND python3 test_control.py WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/csi_gui)
 
 # AP-79: the link-health monitor port, pinned to the software lane's T0 cases
 # and to real captures from a streaming mode-V node.

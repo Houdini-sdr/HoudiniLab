@@ -22,6 +22,10 @@ Usage (on the DGX, then browse via SSH port-forward ``-L 8080:localhost:8080``):
     # B) backend only receives (you run `sounder --view` yourself):
     python3 csi_server.py
 
+    # C) Start / Stop / Restart and a config choice on the page (localhost only;
+    #    add --launch to also start at once):
+    python3 csi_server.py --control --conf files/houdini-dualband.json
+
 Wire formats (little-endian), one datagram per (frame, antenna) per kind:
 
   CSI2  [magic][frame][ant][num_sc][rate f32][reps]  then num_sc * (H_re f32, H_im f32)
@@ -70,8 +74,10 @@ Wire formats (little-endian), one datagram per (frame, antenna) per kind:
 import argparse
 import collections
 import json
+import glob
 import math
 import os
+import queue
 import signal
 import socket
 import struct
@@ -457,8 +463,45 @@ class Handler(BaseHTTPRequestHandler):
             self._static(self.path[len("/vendor/"):].split("?", 1)[0])
         elif self.path.startswith("/stream"):
             self._sse()
+        elif self.path.startswith("/control"):
+            self._control_state()
         else:
             self.send_error(404)
+
+    def _json(self, code, obj):
+        body = json.dumps(obj).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _control_state(self):
+        sup = getattr(self.server, "control", None)
+        if sup is None:
+            self._json(200, {"enabled": False})
+            return
+        st = sup.snapshot()
+        st.update({"enabled": True, "configs": sup.configs()})
+        self._json(200, st)
+
+    def do_POST(self):
+        """Dashboard control: {"cmd": "start"|"stop"|"restart", "conf": "files/..."}.
+        Only with --control (which binds the dashboard to localhost), and only
+        for configs under the sounder's files/houdini*.json."""
+        sup = getattr(self.server, "control", None)
+        if not self.path.startswith("/control") or sup is None:
+            self.send_error(404)
+            return
+        try:
+            n = int(self.headers.get("Content-Length", "0"))
+            req = json.loads(self.rfile.read(min(n, 4096)) or b"{}")
+        except (ValueError, json.JSONDecodeError):
+            self._json(400, {"error": "bad request"})
+            return
+        err = sup.request(str(req.get("cmd", "")), req.get("conf"))
+        self._json(400 if err else 202, {"error": err} if err else {"queued": req.get("cmd")})
 
     def _static(self, name):
         """Serve one vendored asset out of ``csi_gui/vendor``.
@@ -611,6 +654,7 @@ class SounderSupervisor:
     STOP_GRACE_S = 4.0
 
     def __init__(self, args, udp_dest):
+        self.args = args
         self.sd = args.sounder_dir
         self.env = os.environ.copy()
         self.env["HOUDINI_CSI_UDP"] = udp_dest
@@ -623,17 +667,85 @@ class SounderSupervisor:
         self.env["PATH"] = os.path.join(venv, "bin") + os.pathsep + self.env.get("PATH", "")
         self.env["LD_LIBRARY_PATH"] = os.path.join(venv, "lib")
         self.env["SOAPY_SDR_PLUGIN_PATH"] = os.path.join(venv, "lib", "SoapySDR", "modules0.8-3")
-        # Tear down against the radios THIS run will use: the config names its
-        # own topology file, so a config pointed at a different bench tears down
-        # that bench rather than whatever the default topology happens to list.
-        topo = _topology_of(self.sd, args.conf)
+        self.proc = None
+        self.stopping = False
+        # Dashboard control (--control): the HTTP threads only QUEUE commands;
+        # the main thread, which forks the sounder (PR_SET_PDEATHSIG is tied to
+        # the forking thread), executes them. `state` is what the page shows.
+        self.cmds = queue.Queue()
+        self.state_lock = threading.Lock()
+        self.state = {"state": "stopped", "pid": None, "rc": None, "attempt": 0, "conf": None}
+        self.set_conf(args.conf)
+
+    def set_conf(self, conf):
+        """The command lines for one config. Tear down against the radios THIS
+        run will use: the config names its own topology file, so a config
+        pointed at a different bench tears down that bench rather than whatever
+        the default topology happens to list."""
+        topo = _topology_of(self.sd, conf)
         self.td_cmd = ["python3", "csi_gui/teardown_framer.py"]
         if topo:
             self.td_cmd += ["--topology", topo]
-        self.cmd = ["./build/sounder", "--view", "--conf_file", args.conf,
-                    "--storepath", args.storepath]
-        self.proc = None
-        self.stopping = False
+        self.cmd = ["./build/sounder", "--view", "--conf_file", conf,
+                    "--storepath", self.args.storepath]
+        self.conf = conf
+        self._set(conf=conf)
+
+    def _set(self, **kw):
+        with self.state_lock:
+            self.state.update(kw)
+
+    def snapshot(self):
+        with self.state_lock:
+            return dict(self.state)
+
+    def configs(self):
+        """The configs the page may choose: the sounder's own files/houdini*.json."""
+        return sorted(os.path.relpath(p, self.sd)
+                      for p in glob.glob(os.path.join(self.sd, "files", "houdini*.json")))
+
+    def request(self, cmd, conf=None):
+        """From any thread: queue start / stop / restart. Returns an error or None."""
+        if cmd not in ("start", "stop", "restart"):
+            return "unknown command"
+        if conf is not None and conf not in self.configs():
+            return "config not allowed: %s" % conf
+        self.cmds.put((cmd, conf))
+        return None
+
+    def _kill(self):
+        """SIGTERM the running sounder's group, then SIGKILL what is left."""
+        proc = self.proc
+        if proc is None or proc.poll() is not None:
+            return
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        deadline = time.time() + self.STOP_GRACE_S
+        while proc.poll() is None and time.time() < deadline:
+            time.sleep(0.1)
+        if proc.poll() is None:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+    def _pending(self):
+        try:
+            return self.cmds.get_nowait()
+        except queue.Empty:
+            return None
+
+    def _wait(self, seconds):
+        """Sleep, but return a queued command as soon as one arrives."""
+        deadline = time.time() + seconds
+        while time.time() < deadline and not self.stopping:
+            c = self._pending()
+            if c is not None:
+                return c
+            time.sleep(0.1)
+        return None
 
     def _teardown(self):
         try:
@@ -655,44 +767,65 @@ class SounderSupervisor:
         return proc
 
     def run(self):
-        """Supervise until the sounder gives up or stop() is called. Main thread only."""
+        """One session: teardown, start, retry a failed start, until the sounder
+        gives up, stop() is called, or a dashboard command arrives (returned, for
+        serve() to act on). Main thread only."""
         for attempt in range(1, self.ATTEMPTS + 1):
             if self.stopping:
-                return
+                return None
+            self._set(state="tearing down", attempt=attempt, pid=None, rc=None)
             self._teardown()
-            time.sleep(self.SETTLE_AFTER_TEARDOWN_S)
-            if self.stopping:
-                return
+            c = self._wait(self.SETTLE_AFTER_TEARDOWN_S)
+            if c is not None or self.stopping:
+                return c
+            self._set(state="starting")
             self.proc = self._start()
+            self._set(state="running", pid=self.proc.pid)
             print("[csi] sounder pid %d, attempt %d of %d"
                   % (self.proc.pid, attempt, self.ATTEMPTS), flush=True)
             while self.proc.poll() is None and not self.stopping:
-                time.sleep(0.5)
+                c = self._pending()
+                if c is not None:
+                    return c
+                time.sleep(0.2)
             if self.stopping:
-                return
+                return None
+            self._set(state="exited", rc=self.proc.returncode, pid=None)
             print("[sounder] exited rc=%s, retrying..." % self.proc.returncode, flush=True)
-            time.sleep(self.RETRY_DELAY_S)
+            c = self._wait(self.RETRY_DELAY_S)
+            if c is not None:
+                return c
+        self._set(state="gave up")
         print("[csi] sounder gave up after %d attempts; dashboard stays up"
               % self.ATTEMPTS, flush=True)
+        return None
+
+    def serve(self, autostart):
+        """Main thread: optionally run a session now, then act on dashboard
+        commands for the life of the process. A command that arrives during a
+        session interrupts it (stop, or a restart with its config)."""
+        c = self.run() if autostart else None
+        while not self.stopping:
+            if c is None:
+                try:
+                    c = self.cmds.get(timeout=0.5)
+                except queue.Empty:
+                    continue
+            cmd, conf = c
+            c = None
+            self._set(state="stopping")
+            self._kill()
+            self._set(state="stopped", pid=None)
+            if cmd in ("start", "restart"):
+                if conf:
+                    self.set_conf(conf)
+                print("[csi] dashboard %s: %s" % (cmd, self.conf), flush=True)
+                c = self.run()
 
     def stop(self):
         """SIGTERM the sounder's group, then SIGKILL what is left. Safe to repeat."""
         self.stopping = True
-        proc = self.proc
-        if proc is None or proc.poll() is not None:
-            return
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-        except ProcessLookupError:
-            return
-        deadline = time.time() + self.STOP_GRACE_S
-        while proc.poll() is None and time.time() < deadline:
-            time.sleep(0.1)
-        if proc.poll() is None:
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+        self._kill()
 
 
 def main():
@@ -700,7 +833,8 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--udp-host", default="0.0.0.0", help="CSI UDP bind host")
     ap.add_argument("--udp-port", type=int, default=9999, help="CSI UDP bind port")
-    ap.add_argument("--http-host", default="0.0.0.0", help="web server bind host")
+    ap.add_argument("--http-host", default=None,
+                    help="web server bind host (default 0.0.0.0; 127.0.0.1 with --control)")
     ap.add_argument("--http-port", type=int, default=8080, help="web server port")
     ap.add_argument("--fps", type=float, default=30.0, help="dashboard push rate")
     ap.add_argument("--mag-top", type=float, default=90.0,
@@ -715,6 +849,11 @@ def main():
                          "card will read as stale (default: %(default)s)")
     ap.add_argument("--launch", action="store_true",
                     help="also launch the sounder in viewing mode on this host")
+    ap.add_argument("--control", action="store_true",
+                    help="Start / Stop / Restart and a config choice on the page (runs "
+                         "the sounder on this host like --launch, but only when asked "
+                         "unless --launch is also given). Binds the web server to "
+                         "127.0.0.1 unless --http-host is given: use the SSH port-forward")
     ap.add_argument("--sounder-dir", default=os.path.expanduser("~/repos/HoudiniLab/CC/Sounder"))
     ap.add_argument("--venv", default=os.path.expanduser("~/houdini_test"),
                     help="virtualenv prefix holding SoapySDR and the Houdini "
@@ -739,8 +878,12 @@ def main():
     t.start()
 
     sup = None
-    if args.launch:
+    if args.launch or args.control:
         sup = SounderSupervisor(args, "%s:%d" % (args.dest_host, args.udp_port))
+    if args.http_host is None:
+        # Buttons that start a radio transmitting are not for the whole lab
+        # network: with --control, localhost, reached through the SSH port-forward.
+        args.http_host = "127.0.0.1" if args.control else "0.0.0.0"
 
     def _stats_loop():
         while True:
@@ -778,6 +921,7 @@ def main():
         except Exception as exc:  # noqa: BLE001 -- markers are cosmetic
             print("[csi] conf parse for guard markers failed: %s" % exc)
     srv.daemon_threads = True
+    srv.control = sup if args.control else None
     # Serve in a daemon thread so the main thread can wait for Ctrl+C. (Calling
     # srv.shutdown() from a signal handler on the serve_forever thread deadlocks.)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -796,7 +940,9 @@ def main():
     signal.signal(signal.SIGTERM, _sigterm)
 
     try:
-        if sup is not None:
+        if sup is not None and args.control:
+            sup.serve(autostart=args.launch)  # main thread: PR_SET_PDEATHSIG
+        elif sup is not None:
             sup.run()  # main thread: PR_SET_PDEATHSIG is tied to the forking thread
         while True:
             time.sleep(0.5)
@@ -880,6 +1026,14 @@ PAGE = r"""<!doctype html>
       <span>Houdini live CSI</span>
     </span>
     <div class="ms-auto d-flex align-items-center gap-3">
+      <div class="d-flex align-items-center gap-2" id="ctl" hidden>
+        <select class="form-select form-select-sm" id="ctl-conf" style="width:auto"
+                title="Config for Start / Restart"></select>
+        <button class="btn btn-sm btn-success" data-cmd="start">Start</button>
+        <button class="btn btn-sm btn-warning" data-cmd="restart">Restart</button>
+        <button class="btn btn-sm btn-danger" data-cmd="stop">Stop</button>
+        <span class="text-secondary tnum" id="ctl-state"></span>
+      </div>
       <span class="text-secondary tnum" id="meta">connecting&hellip;</span>
       <button class="btn btn-icon btn-ghost-secondary" id="theme"
               title="Toggle light / dark" aria-label="Toggle light / dark"></button>
@@ -1648,8 +1802,49 @@ function connect(){
   es.onerror=()=>{ document.getElementById('meta').innerHTML=
      '<span class="text-red">disconnected, retrying&hellip;</span>'; };
 }
+// ---- sounder control (only when the server runs with --control) ----------
+// Polled, not on the SSE stream: the controls must work while no sounder runs.
+let ctlConfs='';
+async function pollCtl(){
+  try{
+    const st=await (await fetch('/control',{cache:'no-store'})).json();
+    const box=document.getElementById('ctl');
+    if(!st.enabled){ box.hidden=true; return; }
+    box.hidden=false;
+    const sel=document.getElementById('ctl-conf');
+    const key=st.configs.join('|');
+    if(key!==ctlConfs){
+      ctlConfs=key; sel.innerHTML='';
+      for(const c of st.configs){
+        const o=document.createElement('option'); o.value=c;
+        o.textContent=c.replace(/^files\//,''); sel.appendChild(o);
+      }
+      sel.value=st.conf;
+    }
+    let t=st.state;
+    if(st.state==='running') t+=' (pid '+st.pid+')';
+    else if(st.state==='exited') t+=' rc '+st.rc;
+    if(st.attempt>1 && st.state!=='stopped') t+=', attempt '+st.attempt;
+    document.getElementById('ctl-state').textContent=t+' · '+String(st.conf).replace(/^files\//,'');
+  }catch(err){}
+}
+async function sendCtl(cmd){
+  const conf=document.getElementById('ctl-conf').value||null;
+  const el=document.getElementById('ctl-state');
+  try{
+    const r=await fetch('/control',{method:'POST',headers:{'Content-Type':'application/json'},
+                                    body:JSON.stringify({cmd:cmd,conf:(cmd==='stop'?null:conf)})});
+    const j=await r.json();
+    if(j.error) el.textContent=j.error;
+  }catch(err){ el.textContent='control request failed'; }
+  pollCtl();
+}
+for(const b of document.querySelectorAll('#ctl [data-cmd]'))
+  b.addEventListener('click',()=>sendCtl(b.dataset.cmd));
 initTheme();
 connect();
+pollCtl();
+setInterval(pollCtl,1000);
 </script>
 </body></html>
 """

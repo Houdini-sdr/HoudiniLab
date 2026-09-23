@@ -355,10 +355,36 @@ from before that path existed, and it is not part of this demo.
 | `--mag-span` | 40 | Height of the fixed magnitude axis, in dB below `--mag-top` |
 | `--csi-fps` | sounder default (30) | Per antenna stream rate out of the sounder |
 | `--dest-host` | 127.0.0.1 | Where the sounder sends datagrams, when using `--launch` |
+| `--control` | off | Start, Stop and Restart buttons and a config list (the sounder's `files/houdini*.json`) in the page header; section 4.4 |
+| `--http-host` | 0.0.0.0, or 127.0.0.1 with `--control` | Web server bind address |
 
 Run the backend on the same host as the sounder unless you have a reason not
 to. If you split them, set `--dest-host` to the backend's address and make sure
 UDP port 9999 is open between the two.
+
+### 4.4 Start and stop from the page
+
+To restart the experiment from the browser, run the backend with `--control`:
+
+```sh
+cd <path-to-HoudiniLab>/CC/Sounder
+python3 csi_gui/csi_server.py --control --conf <config>
+```
+
+1. Open the dashboard through the SSH port-forward (section 5). With
+   `--control` the web server listens on 127.0.0.1 only, so the forward is the
+   only way in. Do not add `--http-host 0.0.0.0` on a shared network: anyone
+   who can reach the page can then start the radios.
+2. The header shows a config list, Start, Restart, Stop, and the sounder's
+   state. Nothing runs until you press Start (add `--launch` to start at once).
+3. Start and Restart tear down the framers, wait for the boards to release,
+   then launch `sounder --view` with the config selected in the list, retrying
+   a failed start as `--launch` does. Stop ends the sounder and leaves it
+   stopped.
+4. The list offers only the sounder's own `files/houdini*.json`. To run another
+   config, copy it there under that name.
+
+Ctrl+C on the backend still stops the sounder with it.
 
 ## 5. View the dashboard
 
