@@ -48,8 +48,20 @@ int main() {
     f = houdini::csi::pilotSlopeFit(kk, acc);
     all = all && f.ok && std::fabs(f.slope - slope) < 1e-9 && std::fabs(std::remainder(f.intercept - c0, 2 * M_PI)) < 1e-9;
   }
-  check(all, "every common phase from -180 to +180 degrees: exact (mutation: the intercept without the common "
-             "phase added back)");
+  check(all, "every common phase from -180 to +180 degrees: exact");
+  // The 802.11 layout at fft 64 (pilots at +-7 and +-21) with a 1.2-sample
+  // residual and the common phase near 0: the unwrapped fit reads it exactly
+  // (an Opus review measured the unit-mean form reading -0.63).
+  {
+    std::vector<double> k64{-21, -7, 7, 21};
+    std::vector<std::complex<double>> a64;
+    const double s64 = 2.0 * M_PI * 1.2 / 64.0;
+    for (double k : k64) a64.push_back(std::polar(1.0, 0.1 + s64 * k));
+    const auto g = houdini::csi::pilotSlopeFit(k64, a64);
+    check(g.ok && std::fabs(g.slope * 64.0 / (2.0 * M_PI) - 1.2) < 1e-9,
+          "fft 64, pilots +-7/+-21, a 1.2-sample residual: read as 1.2 (mutation: reference the tones to their "
+          "unit-vector mean, which flips and reads -0.63)");
+  }
   kk.resize(1);
   acc.resize(1);
   check(!houdini::csi::pilotSlopeFit(kk, acc).ok, "one tone: no fit");
