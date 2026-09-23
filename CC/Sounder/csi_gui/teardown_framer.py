@@ -167,6 +167,8 @@ def teardown_node(hs, teardown, ip, ch, passes):
                   "      whose launcher was killed. Try this first, no sudo "
                   "needed:\n"
                   "          python3 tools/rig_release_holders.py\n"
+                  "      (it stops EVERY sounder and dashboard on this host, "
+                  "including a running --control dashboard)\n"
                   "      Only if that finds nothing does the server itself need "
                   "restarting:\n"
                   "          sudo systemctl restart SoapySDRServer   (on %s)"

@@ -19,14 +19,16 @@ with open(os.path.join(sd, "build", "sounder"), "w") as f:  # records its config
 os.chmod(os.path.join(sd, "build", "sounder"), 0o755)
 with open(os.path.join(sd, "csi_gui", "teardown_framer.py"), "w") as f:
     f.write("open(%r, 'a').write('teardown\\n')\n" % log)
-# Stand-in setup check: logs its form, and FAILs while the flag file exists.
-flag = os.path.join(sd, "fail_check")
+# Stand-in setup check: logs its form, FAILs while the flag file exists, and
+# takes a second while the slow file exists.
+flag = os.path.join(sd, "fail_check"); slow = os.path.join(sd, "slow_check")
 with open(os.path.join(sd, "csi_gui", "check_setup.py"), "w") as f:
     f.write("import json, os, sys\nq = '--quick' in sys.argv\n"
             "open(%r, 'a').write('check %%s\\n' %% ('quick' if q else 'full'))\n"
             "bad = os.path.exists(%r)\n"
+            "import time; os.path.exists(%r) and time.sleep(1.5)\n"
             "print(json.dumps({'ok': not bad, 'quick': q, 'conf': sys.argv[2], 'results': "
-            "[{'level': 'FAIL' if bad else 'PASS', 'what': 'stand-in', 'detail': '', 'fix': ''}]}))\n" % (log, flag))
+            "[{'level': 'FAIL' if bad else 'PASS', 'what': 'stand-in', 'detail': '', 'fix': ''}]}))\n" % (log, flag, slow))
 for n in ("houdini-a.json", "houdini-b.json", "other.json"):
     open(os.path.join(sd, "files", n), "w").write('{"_description": "desc of %s"}' % n)
 args = types.SimpleNamespace(sounder_dir=sd, max_frame=1, csi_fps=0, venv=sd,
@@ -82,6 +84,15 @@ def driver():
         check(wait_for(lambda: get()["state"] == "stopped" and not get()["check"]["quick"]),
               "Check runs the full form")
         os.remove(flag)
+        # Stop pressed while Start's quick check runs: nothing is torn down or started.
+        open(slow, "w").close(); open(log, "w").close()
+        post({"cmd": "start"})
+        check(wait_for(lambda: get()["state"] == "checking"), "Start: checking")
+        check(post({"cmd": "check"})[0] == 400, "Check while a check runs is refused, not queued")
+        post({"cmd": "stop"})
+        check(wait_for(lambda: get()["state"] == "stopped") and starts() == [] and "teardown" not in events(),
+              "Stop during the quick check: no teardown, no sounder")
+        os.remove(slow)
         open(log, "w").close()
         check(post({"cmd": "start", "conf": "files/other.json"})[0] == 400, "a config outside the list is refused")
         check(post({"cmd": "start", "conf": "../../etc/passwd"})[0] == 400, "a path outside the sounder is refused")

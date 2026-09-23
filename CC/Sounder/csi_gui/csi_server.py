@@ -744,7 +744,7 @@ class SounderSupervisor:
             return "config not allowed: %s" % conf
         # "exited" is the retry wait inside a session: a Start or Check queued then
         # would be dropped by _pending, so refuse it here instead.
-        live = self.snapshot()["state"] in ("tearing down", "starting", "running", "exited")
+        live = self.snapshot()["state"] in ("checking", "tearing down", "starting", "running", "exited")
         if cmd == "start" and live:
             return "already running (use Restart)"
         if cmd == "check" and live:
@@ -900,6 +900,9 @@ class SounderSupervisor:
                 # or server is named on the page instead of as a sounder exit code.
                 if not self._check(quick=True):
                     self._set(state="check failed")
+                    continue
+                c = self._pending()  # a Stop or Restart pressed during the check
+                if c is not None:
                     continue
                 print("[csi] dashboard %s: %s" % (cmd, self.conf), flush=True)
                 c = self.run()
@@ -1891,7 +1894,7 @@ function connect(){
 }
 // ---- sounder control (only when the server runs with --control) ----------
 // Polled, not on the SSE stream: the controls must work while no sounder runs.
-let ctlConfs='';
+let ctlConfs='', ctlMsg=null;
 async function pollCtl(){
   try{
     const st=await (await fetch('/control',{cache:'no-store'})).json();
@@ -1914,7 +1917,10 @@ async function pollCtl(){
     if(st.state==='running') t+=' (pid '+st.pid+')';
     else if(st.state==='exited') t+=' rc '+st.rc;
     if(st.attempt>1 && st.state!=='stopped') t+=', attempt '+st.attempt;
-    document.getElementById('ctl-state').textContent=t+' · '+String(st.conf).replace(/^files\//,'');
+    // A refused command is shown for a few seconds in place of the state line;
+    // the next poll would otherwise overwrite it before it could be read.
+    document.getElementById('ctl-state').textContent=(ctlMsg && Date.now()<ctlMsg.until)?ctlMsg.text
+      :t+' · '+String(st.conf).replace(/^files\//,'');
   }catch(err){}
 }
 // The last setup check, as a list with the fix under each problem. Shown after
@@ -1952,8 +1958,8 @@ async function sendCtl(cmd){
     const r=await fetch('/control',{method:'POST',headers:{'Content-Type':'application/json'},
                                     body:JSON.stringify({cmd:cmd,conf:(cmd==='stop'?null:conf)})});
     const j=await r.json();
-    if(j.error) el.textContent=j.error;
-  }catch(err){ el.textContent='control request failed'; }
+    if(j.error) ctlMsg={text:j.error, until:Date.now()+5000};
+  }catch(err){ ctlMsg={text:'control request failed', until:Date.now()+5000}; }
   pollCtl();
 }
 for(const b of document.querySelectorAll('#ctl [data-cmd]'))

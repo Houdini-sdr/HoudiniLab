@@ -82,7 +82,7 @@ def check_config(rep, sd, conf):
         with open(tpath, encoding="utf-8") as f:
             t = json.load(f)
         bs, ue = roles_from_topology(t)
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError, AttributeError, TypeError) as e:  # not JSON, or not the topology shape
         rep.add("FAIL", "topology", "%s: %s" % (topo, e),
                 "Create %s with your radios' addresses (walkthrough section 3)." % topo)
         return cfg, [], []
@@ -213,7 +213,9 @@ def check_no_sounder(rep, nodes):
     if held:
         rep.add("FAIL", "radios free", "a sounder on this host is using these radios (pid %s)"
                 % ", ".join(map(str, held)),
-                "Stop it, or run: python3 tools/rig_release_holders.py")
+                # Name the pids: tools/rig_release_holders.py would also kill this
+                # dashboard and every sounder on the host, including other benches'.
+                "Stop the run that started it, or end it with: kill %s" % " ".join(map(str, held)))
     elif unknown:
         rep.add("WARN", "radios free", "a sounder is running (pid %s) and its radios could not be read"
                 % ", ".join(map(str, unknown)),
@@ -302,10 +304,11 @@ def main():
     nodes = list(dict.fromkeys(bs + ue))
     check_no_sounder(rep, nodes)
     port = (cfg or {}).get("remote_port", "55132")  # config.cc's default
-    if not isinstance(port, str):
+    if not isinstance(port, str) or not port.isdigit():
         # config.cc reads it as a string and throws on a number
-        rep.add("FAIL", "config", "remote_port is %r, not a string" % (port,),
-                "Quote it in the config: \"remote_port\": \"%s\"" % port)
+        rep.add("FAIL", "config", "remote_port is %r, not a quoted port number" % (port,),
+                "Write it as a quoted number in the config, e.g. \"remote_port\": \"55132\"")
+        nodes = []  # no port to probe
     up = check_servers(rep, nodes, port)
     if not args.quick and up == nodes and nodes:
         check_versions(rep, sd, nodes, port, plugin_env(args.venv))
