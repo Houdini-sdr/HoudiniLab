@@ -434,16 +434,23 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
     // matter how its run turned out, and an offline analysis of them said nothing
     // about the good/bad split it was meant to explain. HOUDINI_CSI_DUMP=<n> skips
     // n frames (default 30, about a second at the shipped throttle).
-    static std::atomic<int> seen{0};
-    static std::atomic<bool> dumped{false};
+    // One shot PER ANTENNA (AP-79 R2 judges each band's lane on its own):
+    // antenna 0 keeps the historical name cns_dump.bin, antenna k writes
+    // cns_dump_ant<k>.bin. Up to 8 antennas; beyond that, none.
+    constexpr size_t kMaxDumpAnt = 8;
+    static std::atomic<int> seen[kMaxDumpAnt] = {};
+    static std::atomic<bool> dumped[kMaxDumpAnt] = {};
+    const size_t da = pkt->ant_id;
     int skip = std::atoi(std::getenv("HOUDINI_CSI_DUMP"));
     if (skip <= 1) skip = 30;
     bool exp = false;
-    if (seen.fetch_add(1) >= skip &&
-        dumped.compare_exchange_strong(exp, true)) {
-      FILE* f = std::fopen(Utils::dumpPath("cns_dump.bin").c_str(), "wb");
+    const std::string dump_name =
+        da == 0 ? std::string("cns_dump.bin") : "cns_dump_ant" + std::to_string(da) + ".bin";
+    if (da < kMaxDumpAnt && seen[da].fetch_add(1) >= skip &&
+        dumped[da].compare_exchange_strong(exp, true)) {
+      FILE* f = std::fopen(Utils::dumpPath(dump_name.c_str()).c_str(), "wb");
       if (f == nullptr) {
-        MLPD_WARN("HOUDINI_CSI_DUMP: cannot open %s (%s)\n", Utils::dumpPath("cns_dump.bin").c_str(),
+        MLPD_WARN("HOUDINI_CSI_DUMP: cannot open %s (%s)\n", Utils::dumpPath(dump_name.c_str()).c_str(),
                   std::strerror(errno));
       }
       if (f) {
@@ -461,7 +468,7 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
         }
         std::fwrite(d, sizeof(short), static_cast<size_t>(slot) * 2, f);
         std::fclose(f);
-        MLPD_INFO("CSI dump written to %s\n", Utils::dumpPath("cns_dump.bin").c_str());
+        MLPD_INFO("CSI dump written to %s (antenna %zu)\n", Utils::dumpPath(dump_name.c_str()).c_str(), da);
       }
     }
   }
