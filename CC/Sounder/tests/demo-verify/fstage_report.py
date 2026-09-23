@@ -10,6 +10,9 @@ Per run:
              so a cable loss moves it 1:1 in dB; relative only)
     flat   = p95 - p5 of 20log10|H| over the data tones (max-min is inflated by
              estimation error, DEMO_VERIFICATION 9.13(d))
+    tilt   = least-squares slope of 20log10|H| across the data tones, as dB from
+             the lowest to the highest tone index (a filter's in-channel tilt;
+             which RF edge is the high index is the sounder's tone orientation)
     rms/pk = U-slot raw samples, dBFS against the int16 container (32767)
     MER    = median over U symbols, decision-directed QPSK after per-symbol CPE
              removal, the csi_dump_eval.py method (audited, 9.13(d))
@@ -81,7 +84,9 @@ def ul(path):
     pw = np.array([np.mean(np.abs(x[a0:a0 + M]) ** 2) for a0 in starts])
     idle = [a0 for a0, q in zip(starts, pw) if q < 2 * pw.min()]
     flo = inband(x, idle, M, band)
-    return {"level": float(np.median(hd)), "sig_in": sig, "floor_in": flo, "snr_rx": sig - flo, "nidle": len(idle), "flat": float(np.percentile(hd, 95) - np.percentile(hd, 5)),
+    dk = di.astype(float)
+    tilt = float(np.polyfit(dk, hd, 1)[0] * (dk.max() - dk.min()))
+    return {"level": float(np.median(hd)), "tilt": tilt, "sig_in": sig, "floor_in": flo, "snr_rx": sig - flo, "nidle": len(idle), "flat": float(np.percentile(hd, 95) - np.percentile(hd, 5)),
             "rms": db20(float(np.sqrt(np.mean(a ** 2))) / FS), "pk": db20(float(a.max()) / FS),
             "mer": float(np.median(mer)) if mer else float("nan"), "nsym": len(mer), "N": N}
 
@@ -171,8 +176,8 @@ def run_row(run):
     return row
 
 
-KEYS = ["ul0_level", "ul0_sig_in", "ul0_floor_in", "ul0_snr_rx", "ul0_mer", "ul0_flat", "ul0_rms", "ul0_pk",
-        "ul1_level", "ul1_sig_in", "ul1_floor_in", "ul1_snr_rx", "ul1_mer", "ul1_flat", "ul1_rms", "ul1_pk",
+KEYS = ["ul0_level", "ul0_tilt", "ul0_sig_in", "ul0_floor_in", "ul0_snr_rx", "ul0_mer", "ul0_flat", "ul0_rms", "ul0_pk",
+        "ul1_level", "ul1_tilt", "ul1_sig_in", "ul1_floor_in", "ul1_snr_rx", "ul1_mer", "ul1_flat", "ul1_rms", "ul1_pk",
         "dl_lvl", "dl_lvl_sd", "dl_floor", "dl_floor_in", "coh", "seat", "seat_sd", "bsnr"]
 
 

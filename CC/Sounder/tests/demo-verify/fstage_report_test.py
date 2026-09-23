@@ -12,10 +12,15 @@ N, cp, es, nsym = 256, 64, 96, 12
 di = np.arange(80, 176, dtype=np.int32)          # R2's 96 data tones
 FS = 32767.0
 nf_db, sig_db = -80.0, -30.0                     # total noise power, in-band signal power (dBFS)
+# |H| carries a known tilt: +0.40 dB from the lowest to the highest data tone,
+# and the received slot is shaped by the same H (a flat channel would hide a
+# report that reads tilt off the wrong array)
+tilt_true = 0.40
+hshape = 10 ** ((tilt_true * (di - di.min()) / (di.max() - di.min())) / 20)
 slot = np.zeros(4096, complex)
 for k in range(nsym):
     Xc = np.zeros(N, complex)
-    Xc[di] = (rng.choice([-1, 1], len(di)) + 1j * rng.choice([-1, 1], len(di))) / math.sqrt(2)
+    Xc[di] = hshape * (rng.choice([-1, 1], len(di)) + 1j * rng.choice([-1, 1], len(di))) / math.sqrt(2)
     t = np.fft.ifft(np.fft.ifftshift(Xc))        # DC-centred bins -> time
     t = np.concatenate([t[-cp:], t])
     slot[es + k * (cp + N): es + (k + 1) * (cp + N)] = t
@@ -25,7 +30,7 @@ slot += FS * 10 ** (nf_db / 20) / math.sqrt(2) * (rng.standard_normal(4096) + 1j
 s16 = np.round(np.stack([slot.real, -slot.imag], 1)).astype(np.int16)   # the dump stores the un-conjugated RX
 f = tempfile.NamedTemporaryFile(delete=False, suffix=".bin")
 f.write(np.array([N, cp, es, nsym, len(di)], np.int32).tobytes())
-H = np.zeros(N, np.complex64); H[di] = 1
+H = np.zeros(N, np.complex64); H[di] = hshape
 f.write(np.stack([H.real, H.imag], 1).astype(np.float32).tobytes())
 f.write(di.tobytes()); f.write(s16.tobytes()); f.close()
 u = fr.ul(f.name)
@@ -36,4 +41,5 @@ snr_true = sig_db - floor_true
 check(abs(u["snr_rx"] - snr_true) < 1.0, "SNR_rx %.2f dB, truth %.2f" % (u["snr_rx"], snr_true))
 check(abs(u["mer"] - snr_true) < 1.0, "MER %.2f dB matches the in-band SNR %.2f (receive-noise-limited by construction)" % (u["mer"], snr_true))
 check(u["nidle"] >= 3, "idle segments found on both sides of the burst")
+check(abs(u["tilt"] - tilt_true) < 0.01, "|H| tilt %.3f dB, truth %.2f (lowest to highest tone)" % (u["tilt"], tilt_true))
 print("%d failure(s)" % fails); sys.exit(1 if fails else 0)

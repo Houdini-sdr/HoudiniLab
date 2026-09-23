@@ -515,20 +515,23 @@ int RadioHoudini::recv(void* const* buffs, int samples, long long& frameTime) {
     int pf = 0;
     long long pt = 0;
     int pr = dev_->readStream(rxs_, jb.data(), drain_samps, pf, pt, 1000000);
+    if (pr < 0) app_rx_err_.fetch_add(1, std::memory_order_relaxed);
     if (pr > 0 && (pf & SOAPY_SDR_HAS_TIME) != 0 && rx_rate_ > 0.0) {
       long long head_ns = pt + Sounder::sampleToNs(pr, rx_rate_);
       const long long start_ns = place(head_ns);
-      // A placer that asks for more than 50 ms is wrong, not slow: skip the
-      // placement rather than stall the loop (the window is then unplaced).
+      // More than 50 ms still to skip is wrong, not slow: a bad placer, or the
+      // stream's time jumping BACK mid-skip. Leave the window unplaced rather
+      // than stall the loop. Checked on every read, not just the first.
       const long long kMaxSkip = static_cast<long long>(0.05 * rx_rate_);
       long long left = std::llround(static_cast<double>(start_ns - head_ns) * 1e-9 * rx_rate_);
-      if (left > kMaxSkip) {
-        MLPD_WARN("placed RX window %lld samples ahead (limit %lld): read unplaced\n", left, kMaxSkip);
-        left = 0;
-      }
       while (left > 0) {
+        if (left > kMaxSkip) {
+          MLPD_WARN("placed RX window %lld samples ahead (limit %lld): read unplaced\n", left, kMaxSkip);
+          break;
+        }
         pr = dev_->readStream(rxs_, jb.data(), static_cast<size_t>(std::min<long long>(left, drain_samps)), pf,
                               pt, 1000000);
+        if (pr < 0) app_rx_err_.fetch_add(1, std::memory_order_relaxed);
         if (pr <= 0 || (pf & SOAPY_SDR_HAS_TIME) == 0) break;
         head_ns = pt + Sounder::sampleToNs(pr, rx_rate_);
         left = std::llround(static_cast<double>(start_ns - head_ns) * 1e-9 * rx_rate_);

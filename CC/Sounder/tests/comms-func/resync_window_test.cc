@@ -53,7 +53,9 @@ int main() {
       accepted += (off >= geo.lead && off + geo.tail <= geo.request);
     }
     char msg[256];
-    // Fails under: ceil -> floor in placedWindowStart, or `- want` -> `+ want`.
+    // Fails under: `- want` -> `+ want`. (Not under ceil -> floor: the loop's
+    // own ceil re-derives the same frame, so off stays want; the next check
+    // catches that one.)
     std::snprintf(msg, sizeof msg, "%s: the loop's own off is exactly want (%lld) for %lld of %d windows",
                   geo.name, want, off_ok, kTrials);
     check(off_ok == kTrials, msg);

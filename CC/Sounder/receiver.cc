@@ -1861,9 +1861,12 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   // beacon. Triggers: 2 CONSECUTIVE exhausted episodes OR >= 4 SNR-valid
   // detections held without agreeing with each other (incoherent state).
   // Under TARGETED resync an attempt only counts when the grid predicted the
-  // full beacon inside the window (every placed window since AP-80, so an
-  // episode now takes ~100 loop iterations, well under a second, where it took
-  // tens of seconds at random phase), so one exhausted episode
+  // full beacon inside the window (every placed window since AP-80: an
+  // episode now takes ~100 loop iterations, about 0.3 s at R2 and 1-2 s at R3,
+  // where it took tens of seconds at random phase, and a lost beacon escalates
+  // about 3 s after the loss since episodes still start on the 2.6 s cadence;
+  // the attempts are back to back, so the hold-off's two consecutive
+  // detections are now a few frames apart), so one exhausted episode
   // means ~100 predicted-position windows in a row failed to detect -- at a
   // healthy SNR that is not chance but a dead or moved beacon; two episodes
   // are pure confirmation (Opus review M4: the old ~4.7%-by-chance figure
