@@ -94,6 +94,25 @@ int main() {
     }
   }
   check(true, "periodScale moves the tracked eps by exactly -k x ppm_per_count (mutation: 1 - k x ...)");
+  // A session that INHERITS an offset outside the authority (a node left
+  // steered +50 counts) steps back at most max_push a push, never in one jump.
+  {
+    ClockSteer w(c);
+    w.start(50, 0.0);
+    int worst = 0;
+    for (double t = 1.0; t <= 600.0; t += 1.0) {
+      // A steady +0.5 ppm demand: every decision pushes, and the authority
+      // clamp is what turns the +2 into a step back toward +30.
+      const int p = w.observe(0.5, t);
+      if (p != 0) {
+        worst = std::max(worst, std::abs(p));
+        w.applied(p);
+      }
+    }
+    check(worst <= c.max_push && w.offset() == c.max_offset,
+          "an inherited +50 offset returns inside the authority in max_push steps (mutation: clamp the step "
+          "only before the authority clamp, a -20 jump)");
+  }
   // A non-finite sensor value is ignored, not averaged.
   ClockSteer z(c);
   z.start(0, 0.0);

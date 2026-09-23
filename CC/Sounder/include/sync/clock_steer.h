@@ -16,9 +16,11 @@
  * (k x 0.1251 ppm), so the caller moves the tracked period by the same step at
  * the moment of the push, and the tracker never has to chase it.
  *
- * WHERE. In the UE's sync thread, not a thread of its own: that thread owns
- * the tracked period, so the feed-forward needs no lock, and a push (one RPC,
- * a few ms) every period_s is well inside its slack.
+ * WHERE. The DECISION and the feed-forward are in the UE's sync thread, which
+ * owns the tracked period, so they need no lock. The ACTUATOR write is not: a
+ * CLOCK_ADJ write holds the device's stream lock about 200 ms, longer than the
+ * pilot horizon, so receiver.cc runs it as a job the sync thread polls once a
+ * frame (an Opus review, M2).
  *
  * SIGN, the thing most likely to be got backwards (the Python loop says the
  * same): eps = (f_BS - f_UE) / f_UE, which receiver.cc computes as
@@ -61,8 +63,9 @@ class ClockSteer {
 
   /// One accepted tracker observation of eps (ppm) at time `t_s`. Returns the
   /// push to apply now, in counts (0: none). The caller writes the actuator
-  /// and, only if that succeeded, calls applied(); a failed write leaves the
-  /// window running so the next decision retries with fresh data.
+  /// and, only if that is confirmed, calls applied(). The window closes at
+  /// every decision, so a failed write is retried at the next one, a period
+  /// later, with fresh data.
   int observe(double eps_ppm, double t_s) {
     if (!started_ || !std::isfinite(eps_ppm)) return 0;
     sum_ += eps_ppm;
@@ -80,7 +83,10 @@ class ClockSteer {
     push = std::max<long long>(-cfg_.max_push, std::min<long long>(cfg_.max_push, push));
     const long long target =
         std::max<long long>(-cfg_.max_offset, std::min<long long>(cfg_.max_offset, offset_ + push));
-    return static_cast<int>(target - offset_);
+    // The step clamp again AFTER the authority clamp: a session that starts
+    // outside the authority (an inherited offset) would otherwise be pulled
+    // back in one large step.
+    return static_cast<int>(std::max<long long>(-cfg_.max_push, std::min<long long>(cfg_.max_push, target - offset_)));
   }
 
   /// The actuator took `push` counts.

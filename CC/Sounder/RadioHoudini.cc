@@ -113,7 +113,9 @@ void RadioHoudini::writeModeVRecord(const std::string& label, SoapySDR::Device& 
     if (ch == ' ' || ch == '.' || ch == '/') ch = '_';
   const std::time_t now = std::time(nullptr);
   char stamp[32];
-  std::strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", std::localtime(&now));
+  std::tm tmv{};
+    localtime_r(&now, &tmv);  // localtime is not thread-safe; the BS radios start in parallel
+    std::strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", &tmv);
   const std::string name = "modev_" + tag + "_" + stamp + ".txt";
   const std::string path = Utils::dumpPath(name.c_str());
   FILE* f = std::fopen(path.c_str(), "w");
@@ -152,7 +154,9 @@ void RadioHoudini::writeStateRecord(const std::string& label, SoapySDR::Device& 
       if (ch == ' ' || ch == '.' || ch == '/') ch = '_';
     const std::time_t now = std::time(nullptr);
     char stamp[32];
-    std::strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", std::localtime(&now));
+    std::tm tmv{};
+    localtime_r(&now, &tmv);  // localtime is not thread-safe; the BS radios start in parallel
+    std::strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", &tmv);
     const std::string name = "rfdc_" + tag + "_" + stage + "_" + stamp + ".txt";
     const std::string path = Utils::dumpPath(name.c_str());
     FILE* f = std::fopen(path.c_str(), "w");
