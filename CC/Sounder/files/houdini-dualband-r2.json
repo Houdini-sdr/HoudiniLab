@@ -1,0 +1,79 @@
+{
+ "serial_file": "files/topology-houdini-dualband.json",
+ "radio_type": "houdini",
+ "remote_port": "55132",
+ "bs_hw_framer": true,
+ "ue_tdd_pilot": true,
+ "ue_tx_advance_ticks": 0,
+ "_rates_note": "sample_rate stays 122.88e6: it is the RX rate AND the device tick, and every slot/frame count below is in those ticks. The TX stream runs at tx_sample_rate; every TX waveform is generated at 122.88 and x2 interpolated at the radio boundary (include/dsp/band_filters.h). DAC 5898.24 / interpolation 24, ADC 4915.2 / decimation 40.",
+ "sample_rate": 122880000.0,
+ "tx_sample_rate": 245760000.0,
+ "rfdc_adc_fs_mhz": 4915.2,
+ "rfdc_dac_fs_mhz": 5898.24,
+ "_frequency_note": "Common NCO is the sub-6 2425 MHz; only the X-band channels override it (TX ch1 = B, RX ch2 = C). Zone, ADC calibration mode, inverse sinc and the +-25 MHz RX channel filter are DERIVED per channel from the NCO and the converter rates (PG269 rules), not configured: sub-6 -> zone 1, cal mode 1, filter on; X-IF -> zone 2, cal mode 2, filter off. frequency is the carrier the CFO ppm is quoted against (the sub-6 beacon link).",
+ "frequency": 2425000000.0,
+ "nco_frequency": 2425000000.0,
+ "_gain_note": "Written explicitly on every opened channel: make() now resets RX DSA to 0 dB and TX VOP to 20 mA. TX 0 dB = maximum VOP, where the software lane measured linearity (W2). The ue_*_gain_* fields below are Iris units and inert on Houdini.",
+ "houdini_tx_gain_db": 0.0,
+ "houdini_rx_gain_db": 0.0,
+ "channel": "A",
+ "tx_channel": "A",
+ "rx_channel": "AC",
+ "ue_channel": "A",
+ "ue_tx_channel": "AB",
+ "ue_rx_channel": "A",
+ "fft_size": 256,
+ "cp_size": 64,
+ "ofdm_symbol_per_slot": 12,
+ "ofdm_data_num": 96,
+ "ofdm_tx_zero_prefix": 128,
+ "ofdm_tx_zero_postfix": 128,
+ "frame_schedule": [
+  "BGPUGGGGGGGGGGGGGGGGGGGGGGGGGG"
+ ],
+ "ue_frame_schedule": [
+  "GGPUGGGGGGGGGGGGGGGGGGGGGGGGGG"
+ ],
+ "ue_modulation": "QPSK",
+ "_beacon_note": "nr_pss_bl: the band-limited beacon (AP-79): the 127-tone NR PSS at 240 kHz (512-point, +-15.2 MHz) behind NR's 36-sample CP, then a guarded TRS pair on the central 96 tones of a 256-point symbol (+-23 MHz); 1076 ticks, inside the replay RAM at TX 245.76. The argmax pick: the shipped first_path rule lands 2 samples early on this lobe, which is about 8 samples wide (beacon_bandlimit_test).",
+ "sync": {
+  "beacon": {
+   "type": "nr_pss_bl"
+  },
+  "detector": {
+   "pick": "argmax"
+  }
+ },
+ "max_frame": 2000,
+ "beamsweep": false,
+ "_carried_note": "tx_advance and corr_scale carried from the last demo; RE-MEASURE at mode V. ue_pilot_horizon 96 frames x 1 ms = 96 ms of lead, as before.",
+ "tx_advance": [
+  247
+ ],
+ "corr_scale": [
+  100
+ ],
+ "corr_scale_init": [
+  10
+ ],
+ "ue_pilot_horizon": 96,
+ "ue_rx_gain_a": [
+  65
+ ],
+ "ue_tx_gain_a": [
+  81
+ ],
+ "ue_rx_gain_b": [
+  65
+ ],
+ "ue_tx_gain_b": [
+  81
+ ],
+ "_comment": "AP-79 ladder rung R2: R1 plus the X-band IF (UE TX ch1 -> BS RX ch2 at NCO 4380), same fft 256 numerology and 1 ms frame. Proves the per-channel NCO and zones with both bands at once. Next rung: houdini-dualband.json (R3, the 5G-like numerology).",
+ "_numerology_note": "fft 256 at 122.88 = 480 kHz subcarriers; cp 64; 12 symbols x 320 + zero prefix 128 + postfix 128 = 4096 ticks, the old slot, 30 slots = 1 ms. 96 data subcarriers = 46.08 MHz (+-23.04, inside the +-24 MHz filter). The 128-tick prefix/postfix covers the TX prefilter margins (23/22).",
+ "_schedule_note": "B, G, P, U then guards over 30 x 4096-tick slots = 1 ms, the old frame.",
+ "channel_nco_frequency": {
+  "B": 4380000000.0,
+  "C": 4380000000.0
+ }
+}
