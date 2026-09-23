@@ -354,6 +354,14 @@ add_executable(detection_calibration_test tests/comms-func/detection_calibration
 target_link_libraries(detection_calibration_test houdini_sync -lpthread ${MUFFT_LIBRARIES})
 add_test(NAME detection_calibration COMMAND detection_calibration_test)
 
+# AP-79: the run configs through the real Config (the pilot slot is one slot,
+# fft_size symbols, inside the channel). Builds the sounder's own sources.
+add_executable(config_pilot_test tests/comms-func/config_pilot_test.cc ${SOUNDER_SOURCES})
+target_include_directories(config_pilot_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(config_pilot_test houdini_sync -lpthread ${GFLAGS_LIBRARIES} ${UHD_LIBRARIES}
+    ${SoapySDR_LIBRARIES} ${HDF5_LIBRARIES} ${MUFFT_LIBRARIES})
+add_test(NAME config_pilot COMMAND config_pilot_test WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+
 # The index-convention check AP-34(a) did not have. Links the real CommsLib so
 # it exercises the REAL detector; a replica would agree with itself.
 add_executable(beacon_geometry_test

@@ -1103,10 +1103,37 @@ void Config::genPilots() {
     pilot_sym_t_ = CommsLib::getSequence(CommsLib::LTS_SEQ);
     symbol_data_subcarrier_num_ = Consts::kNumMappedSubcarriers_80211;
   } else {  // Construct Zadoff-Chu-based pilot
-    pilot_sym_f_ = CommsLib::getSequence(CommsLib::LTE_ZADOFF_CHU_F,
-                                         symbol_data_subcarrier_num_);
-    pilot_sym_t_ = CommsLib::getSequence(CommsLib::LTE_ZADOFF_CHU,
-                                         symbol_data_subcarrier_num_);
+    // The ZC tones on the ofdm_data_num CENTRE subcarriers of an fft_size
+    // grid (the placement getDataSc uses), and the symbol the IFFT of that
+    // grid at fft_size. The sequence generator pads its tones to the next
+    // power of two ABOVE ofdm_data_num instead, which equals fft_size only
+    // when ofdm_data_num does: at fft 256 with 96 data subcarriers it built
+    // 128-point symbols (a 2560-sample pilot slot against the 4096-sample
+    // slot everything else uses, tones at twice the spacing and outside the
+    // +-24 MHz filters), and at fft 4096 with 1596 it built 2048-point ones
+    // (AP-79 final review). Unchanged whenever ofdm_data_num == fft_size.
+    const auto zc = CommsLib::getSequence(CommsLib::LTE_ZADOFF_CHU_F,
+                                          symbol_data_subcarrier_num_);
+    const size_t padded = zc.at(0).size();
+    const size_t lead = (padded - symbol_data_subcarrier_num_) / 2;  // the generator's own centring
+    const size_t start = (fft_size_ - symbol_data_subcarrier_num_) / 2;
+    if (symbol_data_subcarrier_num_ > fft_size_) {
+      throw std::invalid_argument("ofdm_data_num " + std::to_string(symbol_data_subcarrier_num_) +
+                                  " exceeds fft_size " + std::to_string(fft_size_));
+    }
+    pilot_sym_f_.assign(2, std::vector<float>(fft_size_, 0.0f));
+    std::vector<std::complex<float>> grid(fft_size_, std::complex<float>(0.0f, 0.0f));
+    for (size_t i = 0; i < symbol_data_subcarrier_num_; ++i) {
+      pilot_sym_f_[0][start + i] = zc[0][lead + i];
+      pilot_sym_f_[1][start + i] = zc[1][lead + i];
+      grid[start + i] = std::complex<float>(zc[0][lead + i], zc[1][lead + i]);
+    }
+    const auto t = CommsLib::IFFT(grid, static_cast<int>(fft_size_), 1.f / static_cast<float>(fft_size_), false, true);
+    pilot_sym_t_.assign(2, std::vector<float>(fft_size_, 0.0f));
+    for (size_t i = 0; i < fft_size_; ++i) {
+      pilot_sym_t_[0][i] = t[i].real();
+      pilot_sym_t_[1][i] = t[i].imag();
+    }
   }
 
   auto iq_tmp_ci16 = Utils::float_to_cint16(pilot_sym_t_);
@@ -1146,6 +1173,15 @@ void Config::genPilots() {
     pilot_ci16_.insert(pilot_ci16_.end(), iq_ci16.begin(), iq_ci16.end());
   pilot_ci16_.insert(pilot_ci16_.end(), postfix_zpad.begin(),
                      postfix_zpad.end());
+  // Every consumer (the UE's burst composition copies samps_per_slot samples
+  // from it, the BS's CSI windows fft_size bodies against pilot_sym_f) takes
+  // the pilot slot to be exactly one slot long: refuse anything else here,
+  // where the numbers are known, rather than on the rig (AP-79 final review).
+  if (pilot_ci16_.size() != samps_per_slot_) {
+    throw std::invalid_argument("pilot slot is " + std::to_string(pilot_ci16_.size()) + " samples, the slot " +
+                                std::to_string(samps_per_slot_) + " (fft_size " + std::to_string(fft_size_) +
+                                ", cp_size " + std::to_string(cp_size_) + ")");
+  }
 
   pilot_ = Utils::cint16_to_uint32(pilot_ci16_, false, "QI");
 

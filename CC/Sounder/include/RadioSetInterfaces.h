@@ -48,6 +48,9 @@ class IClientRadioSet {
   virtual int drainTxStatus(size_t radio_id) = 0;
   virtual void radioStop() = 0;
   virtual bool getRadioNotFound() = 0;
+  /// Switch a radio's RX channel filter for the reads that follow (AP-79: off
+  /// around reads that are thrown away). A no-op on sets without one.
+  virtual void setRxFilter(size_t /*radio_id*/, bool /*on*/) {}
 };
 
 /// The sets this build provides for this configuration: the native-UHD sets

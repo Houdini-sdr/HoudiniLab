@@ -60,7 +60,20 @@ Terminal 1, the dashboard backend:
 cd ~/repos/HoudiniLab-ap79/CC/Sounder && python3 csi_gui/csi_server.py
 ```
 
-Terminal 2, the sounder, rung R1 first:
+Terminal 2, the sounder. R0 FIRST, the control, exactly as the last demo ran
+(no link-health thread: unset it so the control changes nothing):
+
+```sh
+cd ~/repos/HoudiniLab-ap79/CC/Sounder
+source ~/houdini_test/bin/activate
+export LD_LIBRARY_PATH=$VIRTUAL_ENV/lib
+export SOAPY_SDR_PLUGIN_PATH=$VIRTUAL_ENV/lib/SoapySDR/modules0.8-3
+export HOUDINI_MAX_FRAME=2000000000 HOUDINI_UE_TX_DEBUG=1
+unset HOUDINI_LINK_HEALTH_S
+./build/sounder --view --conf_file files/houdini-r0.json 2>&1 | tee ap79_r0_$(date +%H%M).log
+```
+
+Then R1 (and later rungs), with the mode-V monitoring on:
 
 ```sh
 cd ~/repos/HoudiniLab-ap79/CC/Sounder

@@ -2472,8 +2472,13 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
         for (size_t ch = 0; ch < num_rx_buffs; ++ch) {
           tb.at(ch) = throwaway.data() + ch * want;
         }
+        // These samples are thrown away: skip the RX channel filter for them
+        // (AP-79 final review; ~29 of every 30 slots on the UE, ~1.2 cores for
+        // a continuously read lane).
+        this->client_radio_set_->setRxFilter(tid, false);
         const int got = this->client_radio_set_->radioRx(
             tid, tb.data(), static_cast<int>(want), rx_data_time);
+        this->client_radio_set_->setRxFilter(tid, true);
         // Advance by the slots ACTUALLY consumed. A short read (rx_gap_break
         // truncates; ret=2032 against a 12288 request observed live) would
         // otherwise skip slots whose samples are still in the stream, putting

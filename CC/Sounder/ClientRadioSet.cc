@@ -10,6 +10,7 @@
 #include <atomic>
 #include <cstdlib>
 #include "include/ClientRadioSet.h"
+#include "include/RadioHoudini.h"
 
 #include "SoapySDR/Errors.hpp"
 #include "SoapySDR/Formats.hpp"
@@ -319,6 +320,11 @@ void ClientRadioSet::radioStop(void) {
 }
 
 int ClientRadioSet::triggers(int i) { return (radios.at(i)->getTriggers()); }
+
+void ClientRadioSet::setRxFilter(size_t radio_id, bool on) {
+  if (radio_id >= radios.size() || radios.at(radio_id) == nullptr) return;
+  if (auto* h = dynamic_cast<RadioHoudini*>(radios.at(radio_id).get())) h->setRecvFilter(on);
+}
 
 int ClientRadioSet::radioRx(size_t radio_id, void* const* buffs, int numSamps,
                             long long& frameTime) {

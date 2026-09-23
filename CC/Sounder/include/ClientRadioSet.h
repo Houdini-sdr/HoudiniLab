@@ -18,6 +18,9 @@ class ClientRadioSet : public IClientRadioSet {
   ClientRadioSet(Config* cfg);
   ~ClientRadioSet(void) override;
   int triggers(int i) override;
+  /// AP-79: switch a Houdini radio's RX channel filter for the reads that
+  /// follow (off around reads that are thrown away); no-op on other backends.
+  void setRxFilter(size_t radio_id, bool on) override;
   int radioRx(size_t radio_id, void* const* buffs, int numSamps,
               long long& frameTime) override;
   int radioTx(size_t radio_id, const void* const* buffs, int numSamps,
