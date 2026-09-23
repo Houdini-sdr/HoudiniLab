@@ -742,7 +742,9 @@ class SounderSupervisor:
             return "unknown command"
         if conf is not None and conf not in self.configs():
             return "config not allowed: %s" % conf
-        live = self.snapshot()["state"] in ("tearing down", "starting", "running")
+        # "exited" is the retry wait inside a session: a Start or Check queued then
+        # would be dropped by _pending, so refuse it here instead.
+        live = self.snapshot()["state"] in ("tearing down", "starting", "running", "exited")
         if cmd == "start" and live:
             return "already running (use Restart)"
         if cmd == "check" and live:
@@ -934,7 +936,8 @@ def main():
                          "the sounder on this host like --launch, but only when asked "
                          "unless --launch is also given). Binds the web server to "
                          "127.0.0.1 unless --http-host is given: use the SSH port-forward")
-    ap.add_argument("--sounder-dir", default=os.path.expanduser("~/repos/HoudiniLab/CC/Sounder"))
+    ap.add_argument("--sounder-dir", default=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                    help="the sounder checkout to run (default: the one this file is in)")
     ap.add_argument("--venv", default=os.environ.get("VIRTUAL_ENV") or os.path.expanduser("~/houdini_test"),
                     help="virtualenv prefix holding SoapySDR and the Houdini "
                          "plugin, used when --launch or --control runs the sounder "
@@ -1921,8 +1924,10 @@ let checkShown=null, checkClosed=null;
 function esc(x){ return String(x).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 function drawCheck(ck){
   const box=document.getElementById('check');
-  // A quick check that passed (every normal Start) needs no panel.
-  if(!ck || ck.id===checkClosed || (ck.quick && ck.ok)){ box.hidden=true; return; }
+  // A quick check that passed cleanly (every normal Start) needs no panel; one
+  // with a WARN (a stale build, say) is shown.
+  const clean=ck && ck.ok && !ck.results.some(r=>r.level==='WARN');
+  if(!ck || ck.id===checkClosed || (ck.quick && clean)){ box.hidden=true; return; }
   box.hidden=false;
   if(ck.id===checkShown) return;
   checkShown=ck.id;
@@ -1934,7 +1939,7 @@ function drawCheck(ck){
       +(r.fix?'<div class="text-secondary small">'+esc(r.fix)+'</div>':'')+'</td></tr>';
   }
   box.innerHTML='<div class="card"><div class="card-header py-2"><h3 class="card-title">'
-    +(ck.ok?'Setup check passed':'Setup check: NOT READY, fix each FAIL')
+    +(!ck.ok?'Setup check: NOT READY, fix each FAIL':clean?'Setup check passed':'Setup check passed, with warnings')
     +' <span class="text-secondary small">('+(ck.quick?'quick, radios not opened':'full')+', '+esc(ck.conf)+', '+esc(ck.when)+')</span></h3>'
     +'<div class="card-actions"><button class="btn btn-sm btn-ghost-secondary" id="check-close">Close</button></div></div>'
     +'<div class="table-responsive"><table class="table table-sm table-vcenter card-table mb-0">'+rows+'</table></div></div>';

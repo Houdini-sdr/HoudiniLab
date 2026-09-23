@@ -37,13 +37,21 @@ open(util, "w").write("#!/bin/sh\necho 'Available factories... houdinisdr, remot
 info_file = os.path.join(root, "info.json")
 open(os.path.join(fake, "SoapySDR.py"), "w").write(
     "import json\nclass Device:\n"
-    "    def __init__(self, a): self.ip = a['remote'].split('//')[1].split(':')[0]\n"
+    "    def __init__(self, a):\n"
+    "        import os\n"
+    "        assert os.environ.get('SOAPY_SDR_PLUGIN_PATH', '').endswith('modules0.8-3'), 'no plugin path'\n"
+    "        self.ip = a['remote'].split('//')[1].split(':')[0]\n"
     "    def getHardwareInfo(self): return json.load(open(%r))[self.ip]\n" % info_file)
 same = {k: "v1" for k in ("fpga_version", "fpga_commit", "fpga_board", "device_version",
                           "device_build", "host_version", "host_build", "proto_version")}
 json.dump({"127.0.0.1": same, "127.0.0.2": same}, open(info_file, "w"))
 
 env = dict(os.environ, HOUDINI_EXAMPLES=ex, PYTHONPATH=fake)
+for k in ("SOAPY_SDR_PLUGIN_PATH", "LD_LIBRARY_PATH", "VIRTUAL_ENV"):  # the checker must set them itself
+    env.pop(k, None)
+open(os.path.join(sd, "files", "topo-other.json"), "w").write(
+    '{"BaseStations": {"BS0": {"sdr": ["127.0.0.9"]}}, "Clients": {"sdr": ["127.0.0.8"]}}')
+json.dump({"serial_file": "files/topo-other.json"}, open(os.path.join(sd, "files", "houdini-other.json"), "w"))
 def run(*extra, conf="files/houdini-x.json"):
     out = subprocess.run([sys.executable, os.path.abspath("check_setup.py"), "--sounder-dir", sd,
                           "--venv", venv, "--conf", conf, "--json"] + list(extra),
@@ -54,7 +62,9 @@ def run(*extra, conf="files/houdini-x.json"):
 rc, rep, lv = run()
 check(rc == 0 and rep["ok"], "a ready host passes (rc 0)")
 check(lv.get("stack match") == "PASS" and lv.get("server 127.0.0.2") == "PASS", "full form: servers answer and stacks match")
-check(all(l != "WARN" for l in lv.values()), "no warnings on a ready host: %s" % lv)
+# A real sounder on this host (a rig host mid-run) runs on other radios than the
+# fake 127.0.0.x ones, so it may add a note or, for another user's process, a WARN.
+check(all(l != "WARN" for w, l in lv.items() if w != "radios free"), "no warnings on a ready host: %s" % lv)
 rc, rep, lv = run("--quick")
 check(rc == 0 and "stack match" not in lv, "--quick does not open the radios")
 
@@ -68,16 +78,31 @@ rc, rep, lv = run(conf="files/none.json"); check(rc == 1 and lv["config"] == "FA
 os.utime(os.path.join(sd, "a.cc"), None); os.utime(exe, (time.time() - 60, time.time() - 60))
 rc, rep, lv = run("--quick"); check(rc == 0 and lv["build"] == "WARN", "a source newer than the binary is a WARN, not a FAIL")
 os.utime(exe, None)
+os.makedirs(os.path.join(sd, "sync")); open(os.path.join(sd, "sync", "det.cc"), "w").close()
+os.utime(exe, (time.time() - 60, time.time() - 60))
+os.utime(os.path.join(sd, "a.cc"), (time.time() - 120, time.time() - 120))  # only sync/det.cc is newer
+rc, rep, lv = run("--quick"); check(lv["build"] == "WARN" and "sync" in [r for r in rep["results"] if r["what"] == "build"][0]["detail"],
+                                    "a newer source in a subdirectory (sync/) is seen too")
+os.utime(exe, None)
+cfg = json.load(open(os.path.join(sd, "files", "houdini-x.json")))
+json.dump(dict(cfg, remote_port=int(cfg["remote_port"])), open(os.path.join(sd, "files", "houdini-int.json"), "w"))
+rc, rep, lv = run("--quick", conf="files/houdini-int.json")
+check(rc == 1 and lv["config"] == "FAIL", "a numeric remote_port fails 'config' (the sounder would throw)")
 os.rename(exe, exe + ".x"); rc, rep, lv = run("--quick"); check(rc == 1 and lv["build"] == "FAIL", "no binary fails 'build'"); os.rename(exe + ".x", exe)
 open(util, "w").write("#!/bin/sh\necho 'Available factories... remote'\n")
 rc, rep, lv = run("--quick"); check(rc == 1 and lv["plugin"] == "FAIL", "SoapySDR not loading the Houdini module fails 'plugin'")
 open(util, "w").write("#!/bin/sh\necho 'Available factories... houdinisdr, remote'\n")
 env["HOUDINI_EXAMPLES"] = root; rc, rep, lv = run("--quick")
 check(rc == 0 and lv["teardown"] == "WARN", "missing host examples is a WARN"); env["HOUDINI_EXAMPLES"] = ex
-snd = os.path.join(root, "sounder"); shutil.copy("/bin/sleep", snd)
-p = subprocess.Popen([snd, "30"]); time.sleep(0.2)
-rc, rep, lv = run("--quick"); check(rc == 1 and lv["radios free"] == "FAIL", "another sounder running fails 'radios free'")
-p.kill(); p.wait()
+# A process named `sounder` (a script keeps its own name as comm) run from the
+# sounder directory with a --conf_file, as the real one is.
+snd = os.path.join(root, "sounder"); open(snd, "w").write("#!/bin/sh\nsleep 30\n"); os.chmod(snd, 0o755)
+p = subprocess.Popen([snd, "--conf_file", "files/houdini-x.json"], cwd=sd, start_new_session=True); time.sleep(0.3)
+rc, rep, lv = run("--quick"); check(rc == 1 and lv["radios free"] == "FAIL", "a sounder on the same radios fails 'radios free'")
+os.killpg(p.pid, 9); p.wait()
+p = subprocess.Popen([snd, "--conf_file", "files/houdini-other.json"], cwd=sd, start_new_session=True); time.sleep(0.3)
+rc, rep, lv = run("--quick"); check(rc == 0 and lv["radios free"] == "PASS", "a sounder on other radios does not block")
+os.killpg(p.pid, 9); p.wait()
 srv.shutdown(socket.SHUT_RDWR); srv.close()
 rc, rep, lv = run(); check(rc == 1 and lv["server 127.0.0.1"] == "FAIL" and "stack match" not in lv,
                           "a server that does not answer fails, and the stack read is skipped")

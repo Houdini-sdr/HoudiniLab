@@ -246,10 +246,13 @@ sounder can configure with `-DSOUNDER_BUILD_TESTS=OFF`.
 
 ### 2.6 Point the demo at your bench
 
-Each config names its topology file in `serial_file` (the legacy configs use
-`files/topology-houdini.json`, the dual-band ones
-`files/topology-houdini-dualband.json`). Edit that file and replace the two
-addresses with your own. The base station goes under `BaseStations`, the client
+Each config names its topology file in `serial_file`: `houdini-1u`,
+`houdini-ul` and `houdini-2ch-decouple` use `files/topology-houdini.json`, and
+every `houdini-dualband*` config plus `houdini-r0` use
+`files/topology-houdini-dualband.json`. Edit the one your config names and
+replace the two addresses with your own. If you use configs from both groups,
+edit both files: on the original bench the two files give the same two boards
+opposite roles, so check which board is the base station in each. The base station goes under `BaseStations`, the client
 under `Clients`:
 
 ```json
@@ -314,7 +317,7 @@ list shows. All of them run one client. Each names its own topology file in
 | Config | What it runs |
 |---|---|
 | `files/houdini-dualband.json` | The dual-band demo: sub-6 2425 MHz plus the X-band IF at 4380 MHz, 5G-like numerology (4096 FFT, 30 kHz spacing, 133 RB) |
-| `files/houdini-dualband-40.json` | The same at 40 MHz (106 RB), the fallback if the 50 MHz link disappoints |
+| `files/houdini-dualband-40.json` | The demo at 40 MHz (106 RB) with sub-6 centred at 2420 MHz, the fallback if the 50 MHz link disappoints |
 | `files/houdini-dualband-r3a.json` | The demo numerology on sub-6 only |
 | `files/houdini-dualband-r2.json` | Both bands at 256 FFT, 480 kHz spacing |
 | `files/houdini-dualband-r1.json` | Sub-6 only at 256 FFT, 480 kHz spacing |
@@ -461,7 +464,10 @@ python3 csi_gui/csi_server.py --control --conf <config>
    then launch `sounder --view` with the config selected in the list, retrying
    a failed start as `--launch` does. Start does nothing while a sounder
    runs; use Restart. Stop ends the sounder and leaves it stopped.
-4. The list offers the sounder's own `files/houdini*.json` plus the `--conf`
+4. **Check** runs the full setup check (section 0, step 3) against the config in
+   the list, including opening both radios, so it only runs while no sounder
+   does. It can take up to a minute per radio, and Stop waits for it to finish.
+5. The list offers the sounder's own `files/houdini*.json` plus the `--conf`
    you started the backend with. To run another config, copy it there under
    that name.
 

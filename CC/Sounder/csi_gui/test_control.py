@@ -102,6 +102,11 @@ def driver():
         check(starts() == ["files/houdini-a.json"] and events()[:2] == ["check quick", "teardown"],
               "start ran a quick check, a teardown, then the current config")
         check(post({"cmd": "check"})[0] == 400, "Check while running is refused")
+        with sup.state_lock:  # the retry wait inside a session
+            saved = sup.state["state"]; sup.state["state"] = "exited"
+        check(sup.request("check") and sup.request("start"), "Check and Start are refused in the retry wait, not dropped")
+        with sup.state_lock:
+            sup.state["state"] = saved
         n_checks = events().count("check full")
         sup.cmds.put(("check", None)); time.sleep(0.6)
         check(get()["pid"] == pid1 and events().count("check full") == n_checks,

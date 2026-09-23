@@ -103,13 +103,23 @@ def check_build(rep, sd):
                 "Build it: cd %s && cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j "
                 "(walkthrough section 2.5)." % sd)
         return
-    srcs = glob.glob(os.path.join(sd, "*.cc")) + glob.glob(os.path.join(sd, "include", "**", "*.h"), recursive=True)
+    srcs = []
+    for dirpath, dirs, files in os.walk(sd):
+        # the build tree, the vendored FFT library and the radio-free tests are not the sounder
+        dirs[:] = [d for d in dirs if d not in ("build", "mufft", "tests", "csi_gui", ".git")]
+        srcs += [os.path.join(dirpath, f) for f in files if f.endswith((".cc", ".cpp", ".h", ".hpp"))]
     newest = max(srcs, key=os.path.getmtime) if srcs else None
     if newest and os.path.getmtime(newest) > os.path.getmtime(exe):
         rep.add("WARN", "build", "%s is newer than build/sounder" % os.path.relpath(newest, sd),
                 "Rebuild (cmake --build build -j) unless you meant to run the older binary.")
     else:
         rep.add("PASS", "build", "build/sounder present and up to date")
+
+
+def plugin_env(venv):
+    """The environment that loads the Houdini plugin: the sounder's (csi_server.py)."""
+    return dict(os.environ, LD_LIBRARY_PATH=os.path.join(venv, "lib"),
+                SOAPY_SDR_PLUGIN_PATH=os.path.join(venv, "lib", "SoapySDR", "modules0.8-3"))
 
 
 def check_plugin(rep, venv):
@@ -124,7 +134,7 @@ def check_plugin(rep, venv):
                 "Install the SoapyHoudiniSDR host plugin into this venv (walkthrough section 2.4).")
         return
     util = os.path.join(venv, "bin", "SoapySDRUtil")
-    env = dict(os.environ, LD_LIBRARY_PATH=os.path.join(venv, "lib"), SOAPY_SDR_PLUGIN_PATH=moddir)
+    env = plugin_env(venv)
     try:
         out = subprocess.run([util, "--info"], env=env, timeout=30, stdout=subprocess.PIPE,
                              stderr=subprocess.STDOUT).stdout.decode("utf-8", "replace")
@@ -166,14 +176,51 @@ def running_sounders():
     return found
 
 
-def check_no_sounder(rep):
-    pids = running_sounders()
-    if pids:
-        rep.add("FAIL", "radios free", "a sounder is already running on this host (pid %s)"
-                % ", ".join(map(str, pids)),
+def radios_of(pid):
+    """The radio addresses a running sounder uses, from its --conf_file and its
+    working directory, or None when that cannot be read (another user's process)."""
+    try:
+        with open("/proc/%d/cmdline" % pid, "rb") as f:
+            argv = f.read().decode("utf-8", "replace").split("\0")
+        cwd = os.readlink("/proc/%d/cwd" % pid)
+        conf = None
+        for i, a in enumerate(argv):
+            if a == "--conf_file" and i + 1 < len(argv):
+                conf = argv[i + 1]
+            elif a.startswith("--conf_file="):
+                conf = a.split("=", 1)[1]
+        with open(os.path.join(cwd, conf), encoding="utf-8") as f:
+            topo = json.load(f)["serial_file"]
+        with open(os.path.join(cwd, topo), encoding="utf-8") as f:
+            bs, ue = roles_from_topology(json.load(f))
+        return set(bs + ue)
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def check_no_sounder(rep, nodes):
+    """A sounder on the same radios holds them; one on other radios (a shared
+    host, another bench) does not block this run."""
+    held, unknown, other = [], [], []
+    for pid in running_sounders():
+        r = radios_of(pid)
+        if r is None:
+            unknown.append(pid)
+        elif r & set(nodes):
+            held.append(pid)
+        else:
+            other.append(pid)
+    if held:
+        rep.add("FAIL", "radios free", "a sounder on this host is using these radios (pid %s)"
+                % ", ".join(map(str, held)),
                 "Stop it, or run: python3 tools/rig_release_holders.py")
+    elif unknown:
+        rep.add("WARN", "radios free", "a sounder is running (pid %s) and its radios could not be read"
+                % ", ".join(map(str, unknown)),
+                "If it uses these radios, stop it first: the start will fail with the radios held.")
     else:
-        rep.add("PASS", "radios free", "no other sounder on this host")
+        rep.add("PASS", "radios free", "no other sounder on these radios"
+                + (" (pid %s runs on other radios)" % ", ".join(map(str, other)) if other else ""))
 
 
 def check_servers(rep, nodes, port):
@@ -201,14 +248,14 @@ def hwinfo(ip, port):
     return info
 
 
-def check_versions(rep, sd, nodes, port):
+def check_versions(rep, sd, nodes, port, env):
     infos = {}
     for ip in nodes:
         # A child process with a timeout: a radio that accepts the connection but
         # never answers must not hang the check.
         try:
             out = subprocess.run([sys.executable, os.path.abspath(__file__), "--hwinfo", ip, str(port)],
-                                 cwd=sd, timeout=60, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                                 cwd=sd, env=env, timeout=60, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             if out.returncode != 0:
                 raise RuntimeError((out.stderr.decode("utf-8", "replace").strip().splitlines() or ["?"])[-1])
             infos[ip] = json.loads(out.stdout)
@@ -252,12 +299,16 @@ def main():
     check_build(rep, sd)
     check_plugin(rep, args.venv)
     check_examples(rep)
-    check_no_sounder(rep)
     nodes = list(dict.fromkeys(bs + ue))
+    check_no_sounder(rep, nodes)
     port = (cfg or {}).get("remote_port", "55132")  # config.cc's default
+    if not isinstance(port, str):
+        # config.cc reads it as a string and throws on a number
+        rep.add("FAIL", "config", "remote_port is %r, not a string" % (port,),
+                "Quote it in the config: \"remote_port\": \"%s\"" % port)
     up = check_servers(rep, nodes, port)
     if not args.quick and up == nodes and nodes:
-        check_versions(rep, sd, nodes, port)
+        check_versions(rep, sd, nodes, port, plugin_env(args.venv))
     elif not args.quick:
         rep.add("INFO", "stack", "skipped: not every radio's server answers")
 
