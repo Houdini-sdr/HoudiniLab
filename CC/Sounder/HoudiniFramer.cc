@@ -29,8 +29,22 @@
 #include "include/utils.h"
 #include "sync/beacon_shape.h"
 
+// AP-79: TX samples per tick (2 when the TX stream runs at twice the tick
+// rate and RadioHoudini::xmit interpolates), and the zero ticks placed ahead of
+// the beacon core in the replay image so the interpolator's lead-in is not
+// truncated (the halfband reaches 6 input samples back). The strobe offset is
+// pulled in by the same amount, so the core still plays at +384 and the UE's
+// beacon geometry (BeaconShape::expectedEndOffset) is unchanged.
+static int txPerTick(const Config* cfg) {
+  return (cfg->tx_rate() > 1.5 * cfg->rate()) ? 2 : 1;
+}
+static int beaconLeadTicks(const Config* cfg) { return txPerTick(cfg) == 2 ? 8 : 0; }
+
 void HoudiniFramer::buildBeacon(std::vector<int16_t>& iq) {
-  constexpr int kReplayDepth = 4096;  // Houdini TX replay RAM depth (samples)
+  // Houdini TX replay RAM depth: 4096 TX samples, so 4096 / (TX per tick)
+  // ticks of image built here (xmit doubles it at TX = 2 x rate).
+  const int kReplayDepth = 4096 / txPerTick(cfg_);
+  const int lead = beaconLeadTicks(cfg_);
 
   // Rebuild the STS+gold core of config's beacon (indices [prefix, prefix+
   // beacon_size) skip the zero pre/postfix). Conjugate it: the matched-NCO R2C
@@ -51,8 +65,13 @@ void HoudiniFramer::buildBeacon(std::vector<int16_t>& iq) {
   const int p = cfg_->prefix();
   const int n = cfg_->beacon_size();
   std::vector<std::complex<float>> loop(kReplayDepth, std::complex<float>(0, 0));
-  for (int k = 0; k < n && k < kReplayDepth; ++k) {
-    loop[k] = std::conj(std::complex<float>(
+  if (lead + n + 6 > kReplayDepth) {
+    throw std::invalid_argument("Houdini beacon: core of " + std::to_string(n) +
+                                " ticks does not fit the replay RAM (" +
+                                std::to_string(kReplayDepth) + " ticks at this TX rate)");
+  }
+  for (int k = 0; k < n && lead + k < kReplayDepth; ++k) {
+    loop[lead + k] = std::conj(std::complex<float>(
         static_cast<float>(bc.at(p + k).real()),
         static_cast<float>(bc.at(p + k).imag())));
   }
@@ -383,15 +402,22 @@ void HoudiniFramer::armTdd(void) {
       // acquisition just needs more detect windows to first see it
       // (~1 in 12.9 windows carries the beacon now). Samples == ticks at the
       // one supported rate (122.88 MSPS; the whole layer assumes it).
+      // AP-79: in TX samples when the TX stream runs at 2 x the tick rate
+      // (len counts 2-TX-sample units, offs ticks); n_load is in ticks (the
+      // image before xmit's x2), and the strobe starts `lead` ticks early so
+      // the core still plays at +384.
+      const long long k_tx = txPerTick(cfg_);
+      const long long offs = kTddGridTicks - beaconLeadTicks(cfg_);
       const size_t span_units =
-          static_cast<size_t>((htdd_symbol_ticks_ - kTddGridTicks) / 2);
+          static_cast<size_t>((htdd_symbol_ticks_ - offs) * k_tx / 2);
       const size_t len_units = std::max<size_t>(
-          (static_cast<size_t>(cfg_->beacon_size()) + 1) / 2,
-          std::min(n_load / 2, span_units));
+          (static_cast<size_t>(k_tx) *
+               static_cast<size_t>(beaconLeadTicks(cfg_) + cfg_->beacon_size()) + 1) / 2,
+          std::min(static_cast<size_t>(k_tx) * n_load / 2, span_units));
         dev->writeSetting("TDD_REPLAY_STROBE",
                           "ch" + std::to_string(tx_ch) +
                               ":len=" + std::to_string(len_units) +
-                              ",loops=1,offs=" + std::to_string(kTddGridTicks));
+                              ",loops=1,offs=" + std::to_string(offs));
       };
       setup_framer();
       htdd_epoch_ = armTddOnce(dev, setup_framer, htdd_symbol_ticks_,

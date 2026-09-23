@@ -94,6 +94,14 @@ int main() {
     check(o.buffs.size() == 2 && equal(o.buffs[0], direct(a)) && equal(o.buffs[1], direct(b)),
           "two channels are interpolated independently, each from its own buffer");
   }
+  {  // a null channel (the beacon load's non-beacon streams) passes through
+    TxBurstInterpolator ti;
+    auto b = burst(2048, 0.04, 7000.0);
+    const void* p[2] = {nullptr, b.data()};
+    const auto o = ti.run(p, 2, b.size());
+    check(o.buffs.size() == 2 && o.buffs[0] == nullptr && equal(o.buffs[1], direct(b)),
+          "a null channel stays null (not read, not zero-filled); the other is interpolated");
+  }
   {  // the cache
     TxBurstInterpolator ti;
     auto b = burst(4096, 0.05, 9000.0);

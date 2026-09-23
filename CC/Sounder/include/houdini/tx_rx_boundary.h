@@ -63,6 +63,13 @@ class TxBurstInterpolator {
     const size_t np = beatPaddedInput(n);
     o.samples = 2 * np;
     for (size_t c = 0; c < nch; ++c) {
+      // A null channel is one the caller does not write (the beacon load
+      // passes nullptr for every non-beacon TX stream, and RadioSoapy::xmit
+      // skips it): it stays null, is never read, and is never cached.
+      if (buffs[c] == nullptr) {
+        o.buffs.push_back(nullptr);
+        continue;
+      }
       Lane& L = lanes_[c];
       const auto* in = static_cast<const cs16*>(buffs[c]);
       const bool same = L.valid && L.n == n &&

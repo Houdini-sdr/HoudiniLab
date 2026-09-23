@@ -112,7 +112,20 @@ RadioHoudini::RadioHoudini(const RadioParams& params,
                            MLPD_INFO("%s mode V: %s\n", label.c_str(), entry.c_str());
                          }
                        }),
-      mode_v_(std::move(mv)) {}
+      mode_v_(std::move(mv)) {
+  if (params.tx_rate_hz > 0.0 && params.tx_rate_hz != params.rate_hz) {
+    if (params.tx_rate_hz != 2.0 * params.rate_hz) {
+      throw std::invalid_argument("RadioHoudini: only TX = 2 x sample_rate is interpolated");
+    }
+    tx_interp_ = std::make_unique<houdini::boundary::TxBurstInterpolator>();
+  }
+  if (mode_v_ != nullptr) {
+    auto on = houdini::boundary::laneFlags(
+        params.rx_channels, [this](size_t ch) { return rxChannelFilter(ch); });
+    auto f = std::make_unique<houdini::boundary::RxLaneFilters>(std::move(on));
+    if (f->any()) rx_filters_ = std::move(f);
+  }
+}
 
 void RadioHoudini::setup(int ch, double rxgain, double txgain) {
   // The mixer NCO is the only tuning knob and there is no antenna, analog
@@ -135,6 +148,27 @@ void RadioHoudini::printSettings() const {
   // Register this node's gateware/firmware/host stack for the cross-node
   // skew check the Receiver runs once every radio set is up.
   Sounder::NodeVersions::instance().add(params_.label, dev_->getHardwareInfo());
+}
+
+int RadioHoudini::xmit(const void* const* buffs, int samples, int flags,
+                       long long& frameTime) {
+  // AP-79: at TX = 2 x sample_rate every burst, built at the tick rate, is
+  // interpolated here as a whole and padded to a whole 8-sample TX beat. The
+  // time is in ns and does not change; the caller counts in ticks, so a full
+  // write reports its own sample count back.
+  if (!tx_interp_ || samples <= 0) return RadioSoapy::xmit(buffs, samples, flags, frameTime);
+  const auto o = tx_interp_->run(buffs, params_.tx_channels.size(), static_cast<size_t>(samples));
+  if (o.saturated > 0) {
+    static size_t warned = 0;
+    if (warned++ < 5) {
+      MLPD_WARN("%s: %zu I/Q components saturated in the x2 TX interpolation; "
+                "lower the TX level (the halfband overshoots near edges)\n",
+                params_.label.c_str(), o.saturated);
+    }
+  }
+  const int r = RadioSoapy::xmit(o.buffs.data(), static_cast<int>(o.samples), flags, frameTime);
+  if (r < 0) return r;
+  return r >= static_cast<int>(o.samples) ? samples : r / 2;
 }
 
 long long RadioHoudini::txTimeNs(long long frame_ticks, double rate_hz, bool tdd_pilot,
@@ -333,6 +367,12 @@ int RadioHoudini::recv(void* const* buffs, int samples, long long& frameTime) {
       p_drain = p_read = 0;
       p_calls = p_chunks = p_drained = 0;
     }
+  }
+  // AP-79: the lanes whose channel's mirror lands in the output get the
+  // +-25 MHz channel filter before any consumer (detector, CFO, framer, CSI)
+  // sees them. Every Houdini read comes through here.
+  if (rx_filters_ != nullptr && got > 0) {
+    rx_filters_->apply(buffs, num_rx_ch_, static_cast<size_t>(got));
   }
   return got;
 }

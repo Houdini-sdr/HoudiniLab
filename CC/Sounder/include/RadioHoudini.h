@@ -14,6 +14,7 @@
 
 #include "RadioSoapy.h"
 #include "houdini/mode_v_bringup.h"
+#include "houdini/tx_rx_boundary.h"
 
 class RadioHoudini : public RadioSoapy {
  public:
@@ -45,6 +46,11 @@ class RadioHoudini : public RadioSoapy {
   /// drain it, then accumulate a contiguous window, zero-padding any
   /// dropped-packet gap the timestamps reveal (AP-10).
   int recv(void* const* buffs, int samples, long long& frameTime) override;
+  /// AP-79: at TX = 2 x sample_rate the burst (built in ticks) is x2
+  /// interpolated and beat-padded here; otherwise RadioSoapy::xmit unchanged.
+  int xmit(const void* const* buffs, int samples, int flags, long long& frameTime) override;
+  /// TX samples per tick: 2 when the TX stream runs at twice sample_rate.
+  int txSamplesPerTick() const { return tx_interp_ != nullptr ? 2 : 1; }
   size_t lastPadSamples() const override { return last_pad_samples_; }
   int64_t rxSamplePos() const override { return rx_sample_pos_; }
 
@@ -59,6 +65,8 @@ class RadioHoudini : public RadioSoapy {
   static houdini::modev::Plan modeVPlan(const RadioParams& p);
 
   std::shared_ptr<houdini::modev::Result> mode_v_;  // null unless mode V
+  std::unique_ptr<houdini::boundary::TxBurstInterpolator> tx_interp_;  // TX = 2 x rate
+  std::unique_ptr<houdini::boundary::RxLaneFilters> rx_filters_;       // any lane filtered
   double rx_rate_ = 0.0;         // cached RX sample rate for the grid tracker
   int64_t rx_sample_pos_ = 0;    // absolute samples emitted across recv calls
   size_t last_pad_samples_ = 0;  // zeros inserted into the last window
