@@ -11,7 +11,7 @@ until the software lane hands over the rig.
 
 1. Confirm the stack on both nodes, and write it down: `fpga_commit` (the
    identity; `fpga_version` is cosmetic), `device_build` (the SH-421/SH-422
-   build, `80f102e7` when this was written), `host_build`. The sounder prints
+   build, `a1c8ecb7` when this was written), `host_build`. The sounder prints
    them at bring-up and warns `VERSION SKEW:` if the nodes differ; each
    node's mode-V session record (section 3) keeps them.
 2. Confirm the rig is quiet:
@@ -209,6 +209,15 @@ checked the sense with tones, not through this path).
   real time at R1, so short runs only).
 - **A deliberate detune** (AP-33) puts `mts_phase_stale(RFDC_NCO_REARM)` in
   the preflight's FAIL list, which the monitor reports as new: expected then.
+- **Driver messages that are expected** (device `a1c8ecb7`, the SH-422 fold):
+  each zone write WARNs that the NCO "reads back as 0.000 MHz against the new
+  zone ... re-issue setFrequency" (the bring-up's next step does exactly that);
+  an RX setup's per-block `IntrStatus ... WATCH` now names only a bit that
+  survives the post-bounce clear (on `.22`: `ADC 0.1 [SUBADC_DCDR]`, the known
+  SH-227 class): log it, and treat it as a fault only if the preflight also
+  FAILs. A new preflight item `<blk>:rate_unbalanced(...)` FAILs a block whose
+  rate differs from its tile's; the sounder writes one rate on every channel
+  of each direction, so it should never appear.
 - **CPU**: one core per node in the device server for HS-207; the UE's RX
   channel filter costs about 1.2 cores for a continuously read lane.
 
