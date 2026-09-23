@@ -423,10 +423,16 @@ void HoudiniFramer::armTdd(void) {
       const long long offs = kTddGridTicks - beaconLeadTicks(cfg_);
       const size_t span_units =
           static_cast<size_t>((htdd_symbol_ticks_ - offs) * k_tx / 2);
-      const size_t len_units = std::max<size_t>(
+      size_t len_units = std::max<size_t>(
           (static_cast<size_t>(k_tx) *
                static_cast<size_t>(beaconLeadTicks(cfg_) + cfg_->beacon_size()) + 1) / 2,
           std::min(static_cast<size_t>(k_tx) * n_load / 2, span_units));
+      // The PL plays whole 8-unit beats (16 TX samples); the driver warns and
+      // the RTL drops the tail of a non-multiple (software lane, 2026-09-22).
+      // Round up, but never past the loaded image (4096 TX samples = 2048
+      // units, itself a whole number of beats).
+      len_units = std::min(((len_units + 7) / 8) * 8,
+                           std::max<size_t>(8, (static_cast<size_t>(k_tx) * n_load / 2) / 8 * 8));
         dev->writeSetting("TDD_REPLAY_STROBE",
                           "ch" + std::to_string(tx_ch) +
                               ":len=" + std::to_string(len_units) +
