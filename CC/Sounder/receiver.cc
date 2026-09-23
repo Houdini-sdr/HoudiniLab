@@ -30,6 +30,7 @@
 #include "include/logger.h"
 #include "include/macros.h"
 #include "include/houdini/pilot_ladder.h"
+#include "include/sync/clock_steer.h"
 #include "include/node_version.h"
 #include "sync/grid_tracker.h"
 #include "sync/resync_policy.h"
@@ -1827,6 +1828,68 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   }
   houdini::sync::GridTracker tracker;
   tracker.reset(tracker_cfg);
+  // AP-79: the in-sounder clock steering (sync/clock_steer.h), off by default.
+  // It lives here because this thread owns the tracked period, so a push's
+  // known frequency step is fed forward into it with no lock. Armed only when
+  // the UE's CLOCK_ADJ reads ref=calibrated (the actuator exists only then);
+  // the guard releases the node to its calibrated hold however this thread
+  // exits, unless steer.keep.
+  houdini::sync::ClockSteer steer(config_->sync().steer);
+  struct SteerState {
+    int cal = -1;  ///< the calibration DAC code; -1 = steering off
+  } steer_state;
+  auto steerNow = [] {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+  };
+  // CLOCK_ADJ reads "ref=<r> cal_dac=<n> rb_dac=<n> ...": one field by name.
+  auto clockAdjField = [](const std::string& st, const std::string& key) -> std::string {
+    const std::string k = key + "=";
+    size_t p = 0;
+    while ((p = st.find(k, p)) != std::string::npos) {
+      if (p == 0 || st[p - 1] == ' ') {
+        const size_t e = st.find(' ', p);
+        return st.substr(p + k.size(), (e == std::string::npos ? st.size() : e) - p - k.size());
+      }
+      ++p;
+    }
+    return "";
+  };
+  if (config_->sync().steer.enable && stampAnchored()) {
+    const std::string st = client_radio_set_->readRadioSetting(tid, "CLOCK_ADJ");
+    const std::string ref = clockAdjField(st, "ref"), cal = clockAdjField(st, "cal_dac"),
+                      rb = clockAdjField(st, "rb_dac");
+    if (ref == "calibrated" && !cal.empty() && !rb.empty()) {
+      steer_state.cal = std::atoi(cal.c_str());
+      steer.start(std::atoi(rb.c_str()) - steer_state.cal, steerNow());
+      MLPD_INFO("Clock steering ON [%d]: CLOCK_ADJ %s; period %.0f s, gain %.2f, deadband %.3f ppm, "
+                "max push %d, authority +-%d counts, %.4f ppm/count\n",
+                tid, st.c_str(), config_->sync().steer.period_s, config_->sync().steer.gain,
+                config_->sync().steer.deadband_ppm, config_->sync().steer.max_push,
+                config_->sync().steer.max_offset, config_->sync().steer.ppm_per_count);
+    } else {
+      MLPD_WARN("Clock steering requested but OFF [%d]: CLOCK_ADJ reads '%s' (needs ref=calibrated "
+                "with cal_dac and rb_dac)\n",
+                tid, st.c_str());
+    }
+  }
+  struct SteerRelease {
+    IClientRadioSet* set;
+    int tid;
+    const SteerState& state;
+    const houdini::sync::ClockSteer& steer;
+    bool keep;
+    ~SteerRelease() {
+      if (state.cal < 0 || steer.pushes() == 0) return;
+      if (keep) {
+        MLPD_INFO("Clock steering [%d]: keeping offset %+d counts at exit\n", tid, steer.offset());
+        return;
+      }
+      const bool ok = set->writeRadioSetting(static_cast<size_t>(tid), "CLOCK_ADJ", "release");
+      MLPD_INFO("Clock steering [%d]: %s to the calibrated hold after %d push(es), offset was %+d; now %s\n",
+                tid, ok ? "released" : "RELEASE FAILED, node left steered", steer.pushes(), steer.offset(),
+                set->readRadioSetting(static_cast<size_t>(tid), "CLOCK_ADJ").c_str());
+    }
+  } steer_release{client_radio_set_.get(), tid, steer_state, steer, config_->sync().steer.keep};
   // Frame-start grid point n frames after the tracked reference.
   auto houdiniGridStart = [&](long long n) {
     return houdini_pilot_ref + llround(static_cast<double>(n) *
@@ -2253,6 +2316,35 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
                   std::min(kGridPeriodHi, std::max(kGridPeriodLo,
                                                    houdini_frame_period));
               houdini_grid_updates++;
+              if (steer_state.cal >= 0) {
+                // The sensor is the tracked rate itself, the eps logged above.
+                const double eps_ppm =
+                    (static_cast<double>(config_->samps_per_frame()) / houdini_frame_period - 1.0) * 1e6;
+                const int push = steer.observe(eps_ppm, steerNow());
+                if (push != 0) {
+                  const int code = steer_state.cal + steer.offset() + push;
+                  const bool wrote =
+                      client_radio_set_->writeRadioSetting(tid, "CLOCK_ADJ", std::to_string(code));
+                  const std::string rb =
+                      wrote ? clockAdjField(client_radio_set_->readRadioSetting(tid, "CLOCK_ADJ"), "rb_dac") : "";
+                  if (wrote && rb == std::to_string(code)) {
+                    steer.applied(push);
+                    // FEED-FORWARD: the push is a known step of the UE clock,
+                    // so the BS frame spans that much more of its ticks now.
+                    houdini_frame_period *= steer.periodScale(push);
+                    houdini_frame_period =
+                        std::min(kGridPeriodHi, std::max(kGridPeriodLo, houdini_frame_period));
+                    MLPD_INFO("Clock steer [%d]: tracked eps %+.4f ppm averaged over %.0f s -> push %+d "
+                              "to offset %+d (CLOCK_ADJ %d); period fed forward to %.4f\n",
+                              tid, steer.lastMeanPpm(), config_->sync().steer.period_s, push,
+                              steer.offset(), code, houdini_frame_period);
+                  } else {
+                    MLPD_WARN("Clock steer [%d]: CLOCK_ADJ %d not applied (write %s, readback rb_dac '%s'); "
+                              "holding offset %+d\n",
+                              tid, code, wrote ? "ok" : "FAILED", rb.c_str(), steer.offset());
+                  }
+                }
+              }
             } else if (kf > 0) {
               // Only the kalman arm reaches here: its innovation gate rejected
               // the observation. The detection is still ALIVE on the grid --

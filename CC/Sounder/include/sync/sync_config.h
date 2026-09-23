@@ -179,6 +179,20 @@ struct GridTrackerConfig {
   double kf_innov_gate = 4.0;
 };
 
+/// The UE's in-sounder clock steering (AP-79): the tracked grid rate as the
+/// sensor, CLOCK_ADJ on the UE as the actuator. Off by default. See
+/// sync/clock_steer.h for the loop and why it lives in the sync thread.
+struct ClockSteerConfig {
+  bool enable = false;
+  double period_s = 20.0;       ///< at most one push per period
+  double gain = 0.7;            ///< fraction of the averaged offset removed per push
+  double deadband_ppm = 0.06;   ///< half the actuator quantum: nothing smaller to correct
+  int max_offset = 30;          ///< bounded authority, counts from the calibration point
+  int max_push = 2;             ///< counts per push, so no single step is large
+  double ppm_per_count = 0.1251;  ///< measured (AP-48); +1 count RAISES the UE's clock
+  bool keep = false;            ///< leave the steered code in place at exit
+};
+
 struct ResyncConfig {
   double residual_ppm = 0.1;      ///< assumed clock error after tracking
   double scatter_tol_us = 2.0;    ///< tracking gate, time
@@ -215,6 +229,7 @@ struct SyncConfig {
   CfoConfig cfo;
   GridTrackerConfig tracker;
   ResyncConfig resync;
+  ClockSteerConfig steer;
   bool allow_env_overrides = false;
 
   /// What an out-of-range ENVIRONMENT value does (JSON is always strict).
