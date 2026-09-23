@@ -320,6 +320,23 @@ void ClientRadioSet::radioStop(void) {
 
 int ClientRadioSet::triggers(int i) { return (radios.at(i)->getTriggers()); }
 
+void ClientRadioSet::placeNextRx(size_t radio_id, std::function<long long(long long)> start_for_head) {
+  if (radio_id >= radios.size() || radios.at(radio_id) == nullptr) return;
+  auto* h = dynamic_cast<RadioHoudini*>(radios.at(radio_id).get());
+  if (h == nullptr) return;
+  // The radio works in ns; radioRx hands the caller ticks except on the
+  // hw_framer path, where it passes the radio's time through. Convert the same
+  // way, so the placed start and the window's stamp share one time base.
+  if (_cfg->hw_framer()) {
+    h->placeNextWindow(std::move(start_for_head));
+    return;
+  }
+  const double rate = _cfg->rate();
+  h->placeNextWindow([f = std::move(start_for_head), rate](long long head_ns) {
+    return SoapySDR::ticksToTimeNs(f(SoapySDR::timeNsToTicks(head_ns, rate)), rate);
+  });
+}
+
 void ClientRadioSet::setRxFilter(size_t radio_id, bool on) {
   if (radio_id >= radios.size() || radios.at(radio_id) == nullptr) return;
   if (auto* h = dynamic_cast<RadioHoudini*>(radios.at(radio_id).get())) h->setRecvFilter(on);

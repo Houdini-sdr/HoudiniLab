@@ -502,6 +502,39 @@ int RadioHoudini::recv(void* const* buffs, int samples, long long& frameTime) {
     p_drained += static_cast<size_t>(drained_samps);
   }
   if (rx_rate_ == 0.0) rx_rate_ = dev_->getSampleRate(SOAPY_SDR_RX, 0);
+  // AP-80: a PLACED window. The drain leaves the read at the live head of the
+  // stream, so where a window falls against the frame is set by the loop's
+  // wall-clock timing, and that locks to whole frames (DEMO_VERIFICATION 9.16).
+  // When the caller placed this window, learn the head's time from one read and
+  // discard up to the placed start. Each read's own stamp re-anchors the count,
+  // so a dropped packet cannot misplace the window. The discard is under one
+  // frame (houdini/resync_window.h) and counts in the RX PROFILE's read time.
+  if (placer_) {
+    const auto place = std::move(placer_);
+    placer_ = nullptr;
+    int pf = 0;
+    long long pt = 0;
+    int pr = dev_->readStream(rxs_, jb.data(), drain_samps, pf, pt, 1000000);
+    if (pr > 0 && (pf & SOAPY_SDR_HAS_TIME) != 0 && rx_rate_ > 0.0) {
+      long long head_ns = pt + Sounder::sampleToNs(pr, rx_rate_);
+      const long long start_ns = place(head_ns);
+      // A placer that asks for more than 50 ms is wrong, not slow: skip the
+      // placement rather than stall the loop (the window is then unplaced).
+      const long long kMaxSkip = static_cast<long long>(0.05 * rx_rate_);
+      long long left = std::llround(static_cast<double>(start_ns - head_ns) * 1e-9 * rx_rate_);
+      if (left > kMaxSkip) {
+        MLPD_WARN("placed RX window %lld samples ahead (limit %lld): read unplaced\n", left, kMaxSkip);
+        left = 0;
+      }
+      while (left > 0) {
+        pr = dev_->readStream(rxs_, jb.data(), static_cast<size_t>(std::min<long long>(left, drain_samps)), pf,
+                              pt, 1000000);
+        if (pr <= 0 || (pf & SOAPY_SDR_HAS_TIME) == 0) break;
+        head_ns = pt + Sounder::sampleToNs(pr, rx_rate_);
+        left = std::llround(static_cast<double>(start_ns - head_ns) * 1e-9 * rx_rate_);
+      }
+    }
+  }
   Sounder::TimeGridTracker grid(rx_rate_);
   std::vector<void*> cur(num_rx_ch_);
   int got = 0;

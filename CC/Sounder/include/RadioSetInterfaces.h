@@ -15,6 +15,7 @@
 #define RADIO_SET_INTERFACES_H_
 
 #include <cstddef>
+#include <functional>
 #include <memory>
 
 class Config;
@@ -51,6 +52,12 @@ class IClientRadioSet {
   /// Switch a radio's RX channel filter for the reads that follow (AP-79: off
   /// around reads that are thrown away). A no-op on sets without one.
   virtual void setRxFilter(size_t /*radio_id*/, bool /*on*/) {}
+  /// AP-80: place the NEXT radioRx window. `start_for_head` maps the stream's
+  /// head (the tick just after its newest sample, in radioRx's time base) to
+  /// the tick the window must start at, and the read discards up to it, so a
+  /// due re-sync sees the predicted beacon whatever the loop's period. A no-op
+  /// on sets that cannot, which keep their random-phase windows.
+  virtual void placeNextRx(size_t /*radio_id*/, std::function<long long(long long)> /*start_for_head*/) {}
 };
 
 /// The sets this build provides for this configuration: the native-UHD sets

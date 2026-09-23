@@ -30,6 +30,7 @@
 #include "include/logger.h"
 #include "include/macros.h"
 #include "include/houdini/pilot_ladder.h"
+#include "include/houdini/resync_window.h"
 #include "include/node_version.h"
 #include "sync/grid_tracker.h"
 #include "sync/resync_policy.h"
@@ -1860,7 +1861,9 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   // beacon. Triggers: 2 CONSECUTIVE exhausted episodes OR >= 4 SNR-valid
   // detections held without agreeing with each other (incoherent state).
   // Under TARGETED resync an attempt only counts when the grid predicted the
-  // full beacon inside the window (~2% of windows), so one exhausted episode
+  // full beacon inside the window (every placed window since AP-80, so an
+  // episode now takes ~100 loop iterations, well under a second, where it took
+  // tens of seconds at random phase), so one exhausted episode
   // means ~100 predicted-position windows in a row failed to detect -- at a
   // healthy SNR that is not chance but a dead or moved beacon; two episodes
   // are pure confirmation (Opus review M4: the old ~4.7%-by-chance figure
@@ -1972,6 +1975,18 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
     //Slot 0 / Beacon...
     const auto prof_t0 = loop_profile_every > 0 ? profile_clock::now() : profile_clock::time_point{};
     const int request_samples = samples_per_slot - beacon_adjust;
+    // AP-80: a due re-sync PLACES its window so the grid's next predicted
+    // beacon end sits in the middle of the band the targeted check accepts
+    // (houdini/resync_window.h), instead of waiting for a random phase: the
+    // loop locks to whole frames, and a random-phase window then missed the
+    // beacon for 15-25 s at a time (DEMO_VERIFICATION 9.16).
+    if (policy.looking() && stampAnchored() && houdini_pilot_ref_valid) {
+      const long long beacon_end = static_cast<long long>(config_->shape().expectedEndOffset());
+      const long long want = houdini::sync::placedWant(geom.lead, geom.tail, request_samples);
+      client_radio_set_->placeNextRx(tid, [&, beacon_end, want](long long head) {
+        return houdini::sync::placedWindowStart(head, houdini_pilot_ref, houdini_frame_period, beacon_end, want);
+      });
+    }
     const int rx_status = client_radio_set_->radioRx(
         tid, rxbuff.data(), request_samples, rx_beacon_time);
     beacon_adjust = 0;
@@ -1999,11 +2014,12 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
       houdini::sync::Detection resync_det;  // the targeted search's evidence
       if (stampAnchored() && houdini_pilot_ref_valid) {
         // TARGETED liveness check: the anchored grid predicts exactly where
-        // the beacon END lands in this (drained, random-phase) window, so
-        // only attempt when it is inside (~1.4% of frames at kLead=1280 -- the others count
-        // as NO attempt, so an exhausted episode really means "the beacon
-        // was absent at its predicted spot ~100 times"), and search only
-        // that neighborhood. A whole-window earliest-crossing search kept
+        // the beacon END lands in this window, which the read PLACED on it
+        // (AP-80, above), so only attempt when it is inside (a placed window
+        // always is, unless its read hit a gap -- the others count as NO
+        // attempt, so an exhausted episode really means "the beacon was
+        // absent at its predicted spot ~100 times"), and search only that
+        // neighborhood. A whole-window earliest-crossing search kept
         // losing the race to ~11 dB detections at the window edge (best
         // reading: the beacon itself straddling the edge with partial core
         // energy -- same-board TX coupling measured cold, ledger 4.40), so

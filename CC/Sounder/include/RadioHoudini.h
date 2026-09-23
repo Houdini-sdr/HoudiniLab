@@ -11,6 +11,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -35,6 +36,11 @@ class RadioHoudini : public RadioSoapy {
   /// turns the whole-read filter off and filters the slices it extracts
   /// (filterRxSlice). Default on (the UE's windows are used whole).
   void setRecvFilter(bool on) { recv_filter_ = on; }
+  /// AP-80: the next recv() places its window (IClientRadioSet::placeNextRx),
+  /// in this radio's own time base (ns). One-shot.
+  void placeNextWindow(std::function<long long(long long)> start_ns_for_head_ns) {
+    placer_ = std::move(start_ns_for_head_ns);
+  }
   bool rxLaneFiltered(size_t lane) const { return rx_filters_ != nullptr && rx_filters_->laneOn(lane); }
   void filterRxSlice(const void* capture, size_t cap_len, size_t start, size_t n, void* dst) {
     rx_filters_->filterSlice(static_cast<const houdini::boundary::cs16*>(capture), cap_len, start, n,
@@ -93,6 +99,7 @@ class RadioHoudini : public RadioSoapy {
   std::unique_ptr<houdini::boundary::TxBurstInterpolator> tx_interp_;  // TX = 2 x rate
   std::unique_ptr<houdini::boundary::RxLaneFilters> rx_filters_;       // any lane filtered
   bool recv_filter_ = true;  // off when the BS framer filters its slices itself
+  std::function<long long(long long)> placer_;  // set for one recv() by placeNextWindow
 
   // AP-79 link health: the software lane's checks on this handle, on a thread
   // started at the first successful read; plus what only the app can count.
