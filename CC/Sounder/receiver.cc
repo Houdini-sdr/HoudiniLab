@@ -938,16 +938,32 @@ void Receiver::clientTxPilots(size_t user_id, long long base_time,
   // it on EVERY frame across a horizon ahead of real time -- then whichever frame
   // the BS listens on, a pilot is there. A per-thread cursor keeps the schedule
   // continuous and non-overlapping (each client tid runs this on one thread).
-  // Viewing mode also sends an uplink DATA slot (U) each frame so the BS can
-  // equalize it and render the constellation. It rides the same continuous burst,
-  // offset from the pilot by (U_slot - P_slot) slots.
+  // Viewing mode also sends uplink DATA (U) each frame so the BS can equalize
+  // it and render the constellation. It rides the same continuous burst,
+  // offset from the pilot by (U_slot - P_slot) slots. EVERY U slot of the
+  // schedule carries data (AP-79 [user]; for now the same data in each), on
+  // every TX channel, so both bands send P + U in the same slots.
   const bool ul_present = !config_->cl_ul_slots().at(user_id).empty() &&
                           config_->ue_data_ci16().size() >= (size_t)num_samps;
-  const long long ul_off =
-      ul_present ? (static_cast<long long>(config_->cl_ul_slots().at(user_id).at(0)) -
-                    static_cast<long long>(config_->cl_pilot_slots().at(user_id).at(0))) *
-                       num_samps
-                 : 0;
+  std::vector<long long> ul_offs;
+  if (ul_present) {
+    const long long p0 = static_cast<long long>(config_->cl_pilot_slots().at(user_id).at(0));
+    for (const auto u : config_->cl_ul_slots().at(user_id)) {
+      const long long off = (static_cast<long long>(u) - p0) * num_samps;
+      // A U slot before (or on) the first pilot cannot ride this burst, which
+      // starts at the pilot: say so once rather than drop it silently.
+      if (off >= num_samps) {
+        ul_offs.push_back(off);
+      } else {
+        static bool warned = false;
+        if (!warned) {
+          warned = true;
+          MLPD_WARN("UE uplink: U slot %zu precedes the first pilot slot %lld and is not sent; "
+                    "put the U slots after the P slot\n", static_cast<size_t>(u), p0);
+        }
+      }
+    }
+  }
   static const int horizon_env = [] {
     const char* he = std::getenv("HOUDINI_PILOT_HORIZON");
     return he != nullptr ? std::atoi(he) : -1;
@@ -1037,7 +1053,6 @@ void Receiver::clientTxPilots(size_t user_id, long long base_time,
     // than either keeping or removing it, because an atomic that nothing reads
     // still looks load-bearing to the next reader.
     int nsched = 0;
-    const bool ul_fits = ul_present && ul_off >= num_samps;
     for (long long i = i0;; ++i) {
       const long long cur = txTime + llround(static_cast<double>(i) * frame_d);
       if (cur > end) break;
@@ -1053,7 +1068,7 @@ void Receiver::clientTxPilots(size_t user_id, long long base_time,
           const long long off = (pslot_of(c) - base_slot) * num_samps;
           span = std::max(span, off + num_samps);
         }
-        if (ul_fits) span = std::max(span, ul_off + num_samps);
+        for (const long long off : ul_offs) span = std::max(span, off + num_samps);
         const size_t total = static_cast<size_t>(pad) + static_cast<size_t>(span);
         // total kept even so the burst ends on a whole 2-sample TX unit; the
         // trailing zero does not move any signal.
@@ -1063,9 +1078,8 @@ void Receiver::clientTxPilots(size_t user_id, long long base_time,
           const long long poff = pad + (pslot_of(c) - base_slot) * num_samps;
           std::memcpy(bursts[c].data() + poff, config_->pilot_ci16().data(),
                       static_cast<size_t>(num_samps) * 4);
-          if (ul_fits) {
-            std::memcpy(bursts[c].data() + pad + ul_off,
-                        ue_databuffA_.at(0),
+          for (const long long off : ul_offs) {  // the same data in every U slot
+            std::memcpy(bursts[c].data() + pad + off, ue_databuffA_.at(0),
                         static_cast<size_t>(num_samps) * 4);
           }
         }
