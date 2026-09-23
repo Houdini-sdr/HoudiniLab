@@ -103,16 +103,18 @@ The ladder, one change per rung; run each only after the one before passes:
 | R0 | `files/houdini-r0.json` | the CONTROL: the last known-good single-band demo (NCO 500, 122.88 both ways, fft 64, legacy beacon) on this build, this stack and the plan's cabling. If R0 fails, the problem is the stack or the rig, not mode V |
 | R1 | `files/houdini-dualband-r1.json` | mode-V clocks, TX 245.76, sub-6 at 2425, nr_pss_bl, fft 256, 1 ms frame |
 | R2 | `files/houdini-dualband-r2.json` | the X-band IF channel (UE TX B to BS RX C at 4380) |
-| R3 | `files/houdini-dualband.json` | the 5G-like numerology (fft 4096, 0.5 ms slots, 10 ms frame) |
+| R3a | `files/houdini-dualband-r3a.json` | the 5G-like numerology (fft 4096, SCS 30 kHz, 0.5 ms slots, 10 ms frame) on sub-6 only |
+| R3 | `files/houdini-dualband.json` | R3a plus the X-band IF: the demo target |
 | R3-40 | `files/houdini-dualband-40.json` | the 40 MHz rollback of R3 |
 
-R1 and R2 run on the calibrated hold (0.3 to 0.5 ppm), where the carrier
-offset is harmless at their fft 256. R3 needs the clock steered and the CSI
-pilot average de-rotated per symbol; both are planned after the first run: an
-in-sounder steering thread on the UE (the separate `clock_steer_loop.py` needs
-its own connection, which would reset a running session, and its `--ue-ip`
-defaults to `.22`, which is the BS here) and the BS-side de-rotation. R3 is
-also to be split into R3a (fft 4096, sub-6 only) and R3b (+ X-IF).
+Every rung has run (DEMO_VERIFICATION section 9). R1 and R2 run on the
+calibrated hold (0.3 to 0.5 ppm), where the carrier offset is harmless at fft
+256. At R3's 30 kHz spacing it costs about 2.5 dB of EVM (ICI); the rest of
+R3's floor is oscillator phase noise, a property of the clocking. R3 decodes
+without steering. The in-sounder clock steering (branch `park/clock-steer`)
+rolls in only after the validation runs, against their regression data; the
+per-symbol CSI de-rotation is in but OFF by default (`HOUDINI_CSI_DEROTATE=1`)
+until an R3 A/B measures it.
 
 ## 3. What the sounder logs
 
@@ -178,11 +180,14 @@ demo's own bar (beacon acquired, CSI datagrams climbing, both as before).
    expected on cables).
 4. **Tracking**, 5 minutes: `beacon alive` on the targeted re-syncs, no
    escalation, no `UE PILOT LOST`; the sync residual REPORTED as a statistic,
-   and passing when at least 99 % of re-syncs sit within +-2 samples and none
-   beyond the gate (8.51 saw a maximum of 12 to 14 on the legacy beacon,
-   inside the gate); the beacon's in-window SNR (the `snr` of the re-sync
-   lines, the SNR the sync layer gates on) at least 10 dB over its 25 dB floor
-   (about 42 dB predicted on cables).
+   and none beyond the gate. (The "99 % within +-2" bar first written here
+   was missed by every run: under a thermal ramp the residual carries the
+   tracker's alpha-beta lag, -5..-14 samples, which the BS absorbs by placing
+   each frame by the pilot's edge; DEMO_VERIFICATION 9.10.) The beacon's
+   in-window SNR (the `snr` of the re-sync lines) at least 10 dB over its 25 dB
+   floor. It reads 41-42 dB or 46-50 dB depending on the bring-up: the ADC's
+   Fs/2 spur, outside the channel, counts as noise because the sync reads are
+   unfiltered (9.8); the link is the same.
 5. **Clock**: the tracked offset (`Beacon CFO frame N: tracked ... ppm`) reads
    a steady value near the calibrated hold (0.3 to 0.5 ppm on 2026-09-01).
    Recorded, not gated.
@@ -194,8 +199,10 @@ demo's own bar (beacon acquired, CSI datagrams climbing, both as before).
    3 dB fails) with no mirror-image structure (single-tone mirror rejection
    measured -87 to -96 dBc). The sounder computes no CSI SNR; none is gated.
 7. **Uplink data**: the QPSK constellation shows four clean clusters; the
-   recorder's CNS score and the blind EVM from `evm_compare.py` on the dump
-   are recorded (first numbers, not gated).
+   constellation-low count is read from the periodic SUMMARY line
+   `(D datagrams, L low)`, never from the throttled warning's
+   `low occurrence K of D` (K is only ever a power of two, AP-58); the EVM is
+   measured on a `HOUDINI_CSI_DUMP` capture (first numbers, not gated).
 8. **Health**: 5 minutes with no link-health alarm beyond the baseline, and
    app counters `rx_err`, `rx_pad`, `tx_short`, `tx_sat` all zero. The
    interrupt rate is about 46.6k/s on BOTH nodes (HS-207, known: any open TX
@@ -209,13 +216,11 @@ checked the sense with tones, not through this path).
 
 ## 4a. What to watch on the first run
 
-- **The BS framer's decisions run on the RAW sub-6 lane.** The slots it
-  extracts are channel-filtered exactly, but its energy search, presence gate,
-  P/U tagging, LTS check and slot alignment now see the capture unfiltered,
-  which at mode V carries the channel's 0 dBc real-sampling mirror. Untested
-  at mode V. If BS frames are rejected or P/U mis-tagged, A/B a short run with
-  `HOUDINI_BS_FILTER_WHOLE=1` (filters the whole capture as before, about 1.3x
-  real time at R1, so short runs only).
+- **The BS framer's decisions run on the RAW sub-6 lane** (energy search,
+  presence gate, P/U tagging, LTS check, pilot edge); the extracted slots are
+  channel-filtered exactly. Verified at every rung on 2026-09-23 (`pu_spacing_err`
+  0 on every frame). `HOUDINI_BS_FILTER_WHOLE=1` remains the A/B if it ever
+  looks wrong.
 - **A deliberate detune** (AP-33) puts `mts_phase_stale(RFDC_NCO_REARM)` in
   the preflight's FAIL list, which the monitor reports as new: expected then.
 - **Driver messages that are expected** (device `e002dead`, the final
