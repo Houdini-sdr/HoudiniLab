@@ -41,7 +41,10 @@ scp /tmp/ap79.bundle houdini@168.6.244.26:/tmp/
 # on the rig host
 cd ~/repos/HoudiniLab
 git fetch /tmp/ap79.bundle feat/sub6-xband-demo:ap79-run
-git worktree add ~/repos/HoudiniLab-ap79 ap79-run     # once; later: git -C ~/repos/HoudiniLab-ap79 reset --hard ap79-run
+git worktree add ~/repos/HoudiniLab-ap79 ap79-run     # once
+# later ships: fetch INSIDE the worktree (FETCH_HEAD is per worktree), and
+# note the reset puts the empty mufft directory back, so relink after it:
+#   cd ~/repos/HoudiniLab-ap79 && git fetch /tmp/ap79.bundle feat/sub6-xband-demo && git reset --hard FETCH_HEAD
 # the built submodule. A new worktree leaves an EMPTY mufft directory, and
 # `ln -sfn` onto a directory puts the link INSIDE it (the build then fails
 # on dc_fft_test), so remove the directory first:
