@@ -260,6 +260,17 @@ inline Counters counterIncreases(const Counters& prev, const Counters& cur) {
   return out;
 }
 
+/// The previous-check state after this check: every counter read now, plus
+/// the last known value of any counter this read did not return. Replacing
+/// the state with an empty or partial read erased the baseline, and the next
+/// full read then reported every counter's whole running total as new (a
+/// metric audit, 2026-09-23).
+inline Counters carryCounters(const Counters& prev, const Counters& cur) {
+  Counters out = prev;
+  for (const auto& kv : cur) out[kv.first] = kv.second;
+  return out;
+}
+
 struct Report {
   std::string label;
   double seconds = 0.0;
@@ -329,7 +340,7 @@ class LinkHealth {
     r.increases = counterIncreases(prev_, cur);
     r.blind = blindCounters(cur);
     r.drift = configDrift(baseline_, snapshotConfig(read_("RFDC_SNAPSHOT")));
-    prev_ = cur;
+    prev_ = carryCounters(prev_, cur);
     prev_irq_ = ir;
     prev_t_ = t;
     return r;

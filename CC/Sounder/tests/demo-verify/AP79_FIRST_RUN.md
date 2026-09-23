@@ -201,7 +201,7 @@ demo's own bar (beacon acquired, CSI datagrams climbing, both as before).
 7. **Uplink data**: the QPSK constellation shows four clean clusters; the
    constellation-low count is read from the periodic SUMMARY line
    `(D datagrams, L low)`, never from the throttled warning's
-   `low occurrence K of D` (K is only ever a power of two, AP-58); the EVM is
+   `low #K of D` (K is only ever a power of two, AP-58; the warning now says so); the EVM is
    measured on a `HOUDINI_CSI_DUMP` capture (first numbers, not gated).
 8. **Health**: 5 minutes with no link-health alarm beyond the baseline, and
    app counters `rx_err`, `rx_pad`, `tx_short`, `tx_sat` all zero. The

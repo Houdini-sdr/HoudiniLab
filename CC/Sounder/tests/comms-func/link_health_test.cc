@@ -93,6 +93,16 @@ int main(int argc, char** argv) {
     const auto inc = counterIncreases({{"a", 1}, {"b", 5}}, {{"a", 3}, {"b", 0}, {"c", 2}});
     check(inc == Counters{{"a", 2}, {"c", 2}}, "a rise is flagged, a clear (fall) is not, a new counter counts from zero");
   }
+  {  // an empty read between two full ones must not erase the baseline
+    const Counters full{{"a", 10}, {"b", 7}};
+    const Counters kept = carryCounters(carryCounters(Counters{}, full), Counters{});
+    check(counterIncreases(kept, full).empty(),
+          "an empty read does not erase the baseline: the next full read reports nothing new (mutation: prev = cur, "
+          "every counter's running total reads as new)");
+    const Counters later{{"a", 12}, {"b", 7}};
+    check(counterIncreases(carryCounters(kept, Counters{{"b", 7}}), later) == Counters{{"a", 2}},
+          "a partial read keeps the missing counter's last value (mutation: prev = cur, a +12 false alarm)");
+  }
   {  // test_saturated_or_sticky_egress_is_flagged_even_at_baseline
     const auto b = blindCounters({{"egress.drop_p0", 255}, {"egress.drop_p1", 254}, {"egress.marked_p2", 255},
                                   {"egress.stall_seen", 1}, {"egress.stall_evt", 255}, {"tx0.late", 255}});

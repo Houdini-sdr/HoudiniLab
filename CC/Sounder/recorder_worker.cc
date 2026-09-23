@@ -784,8 +784,9 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
       const unsigned lo = cns_low.fetch_add(1) + 1;
       if ((lo & (lo - 1)) == 0) {
         MLPD_WARN(
-            "CNS score %.3f at frame %u, r=%.3f (low occurrence %u of %u "
-            "datagrams)\n",
+            "CNS score %.3f at frame %u, r=%.3f (low #%u of %u datagrams; "
+            "printed at powers of two only, the true total is on the "
+            "periodic summary line)\n",
             score, pkt->frame_id, fix_r, lo, tot);
       }
       // Autopsy dump of the first few low scorers, HOUDINI_CSI_DUMP format

@@ -376,7 +376,9 @@ int ClientRadioSet::radioTx(size_t radio_id, const void* const* buffs,
         try {
           const std::string b =
               radios.at(radio_id)->RawDev()->readSetting("TX_BANK_STATUS");
-          const size_t p = b.find("ch1:");
+          // The first TX channel's bank (the label used to be fixed at ch1).
+          const auto txc = Utils::strToChannels(_cfg->cl_tx_channel());
+          const size_t p = b.find("ch" + std::to_string(txc.empty() ? 0 : txc.front()) + ":");
           MLPD_INFO("UE TX dbg: xmit r=%d/%d txNs=%lld bank[%s]\n", r, numSamps,
                     frameTimeNs,
                     (p == std::string::npos ? b : b.substr(p, 70)).c_str());
