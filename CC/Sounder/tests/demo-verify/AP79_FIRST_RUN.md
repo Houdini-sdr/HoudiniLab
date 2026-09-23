@@ -36,13 +36,17 @@ checkout.
 
 ```sh
 # on this VM
-git -C /space/vmshare/repos/HoudiniLab bundle create /tmp/ap79.bundle develop..feat/sub6-xband-demo
+git -C /space/vmshare/repos/HoudiniLab bundle create /tmp/ap79.bundle <rig develop tip>..feat/sub6-xband-demo   # the rig's develop (fec37ff on 2026-09-22), not ours
 scp /tmp/ap79.bundle houdini@168.6.244.26:/tmp/
 # on the rig host
 cd ~/repos/HoudiniLab
 git fetch /tmp/ap79.bundle feat/sub6-xband-demo:ap79-run
 git worktree add ~/repos/HoudiniLab-ap79 ap79-run     # once; later: git -C ~/repos/HoudiniLab-ap79 reset --hard ap79-run
-ln -sfn ~/repos/HoudiniLab/CC/Sounder/mufft ~/repos/HoudiniLab-ap79/CC/Sounder/mufft   # the built submodule
+# the built submodule. A new worktree leaves an EMPTY mufft directory, and
+# `ln -sfn` onto a directory puts the link INSIDE it (the build then fails
+# on dc_fft_test), so remove the directory first:
+rmdir ~/repos/HoudiniLab-ap79/CC/Sounder/mufft
+ln -s ~/repos/HoudiniLab/CC/Sounder/mufft ~/repos/HoudiniLab-ap79/CC/Sounder/mufft
 source ~/houdini_test/bin/activate
 cd ~/repos/HoudiniLab-ap79/CC/Sounder && cmake -B build && cmake --build build -j"$(nproc)"
 ( cd build && ctest )                                   # all pass (17 at this writing) before any run
