@@ -74,6 +74,40 @@ int main() {
   const auto cse3 = capture(cg, truth, n, pu, {1000.0, 1000.0}, 32, 256, 3);
   check(std::llabs(houdini::slotalign::burstPilotStart(cse3, truth + 100, n, 32) - truth) <= 2,
         "prefix 32 / postfix 256: exact (mutation: subtract a fixed 128 instead of the prefix)");
+  // The review's case (L1, L2, L9): OFDM-like content (Gaussian I/Q, so the
+  // windowed energy fluctuates), a POSITIVE noise floor, U within +-5 % of P,
+  // and the coarse guess off by up to 0.45 of a slot either way. A noise-like
+  // envelope moves the half-plateau crossing by a waveform-dependent bias
+  // (tens of samples), which the bench tx_advance absorbs for a given pilot,
+  // so the tolerance here is 32 samples: half R1's zero prefix, and well
+  // inside R3's 288-sample CP window.
+  {
+    bool ok = true;
+    long long worst = 0;
+    for (unsigned seed = 1; seed <= 20; ++seed)
+      for (double u : {0.95, 1.0, 1.05})
+        for (double gerr : {-0.45, -0.25, 0.0, 0.25, 0.45}) {
+          std::mt19937 g(seed * 97u + static_cast<unsigned>(u * 100));
+          std::normal_distribution<double> nd(0.0, 1.0);
+          std::vector<double> e(static_cast<size_t>(cg), 0.0);
+          for (auto& v : e) v = 9.0 * (nd(g) * nd(g) + nd(g) * nd(g));  // |noise|^2, positive
+          for (int k = 0; k < 2; ++k)
+            for (long long i = 128; i < n - 128; ++i) {
+              const double a = (k ? u : 1.0) * 1000.0;
+              const double re = a * nd(g), im = a * nd(g);
+              e[static_cast<size_t>(truth + k * n + i)] += re * re + im * im;
+            }
+          std::vector<double> c(e.size() + 1, 0.0);
+          for (size_t i = 0; i < e.size(); ++i) c[i + 1] = c[i] + e[i];
+          const long long guess = truth + static_cast<long long>(gerr * static_cast<double>(n));
+          const long long d = houdini::slotalign::burstPilotStart(c, guess, n, 128) - truth;
+          worst = std::max(worst, std::llabs(d));
+          if (std::llabs(d) > 32) ok = false;
+        }
+    std::printf("      OFDM-like, U 0.95-1.05, guess +-0.45 slot: worst error %lld samples (300 trials)\n", worst);
+    check(ok, "OFDM-like P+U, guess off by up to 0.45 slot: the pilot within 32 samples (mutation: the old "
+              "median over guess+n/4..3n/4 and a search from guess-n/4)");
+  }
   const std::vector<long long> p = {0};
   const auto cse4 = capture(cg, truth, n, p, {1000.0}, 128, 128, 4);
   check(houdini::slotalign::burstPilotStart(cse4, cg, n, 128) <= cg - n,
