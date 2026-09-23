@@ -263,6 +263,57 @@ int main() {
     check(differs, "mutant: the slot filtered without its context differs at its edges");
   }
 
+  {
+    // AP-79 #6, PLACEMENT: an R3-like burst (32 zeros, noise-like content, 32
+    // zeros) behind every pad 0..383, as the UE's ladder sends it. The
+    // reference is the full computation on the zero-EXTENDED burst (64 zeros
+    // appended, so no output of it takes the filter's edge path), cut at the
+    // burst's own padded length: the filter on the unbounded signal. A burst
+    // with fewer leading zeros than placeLead() takes the full path, and is
+    // compared with the full path on itself.
+    std::vector<cs16> content(6000, cs16(0, 0));
+    uint32_t lcg = 12345u;
+    for (size_t k = 32; k + 32 < content.size(); ++k) {
+      lcg = lcg * 1664525u + 1013904223u;
+      const int16_t re = static_cast<int16_t>(static_cast<int>((lcg >> 16) % 12001) - 6000);
+      lcg = lcg * 1664525u + 1013904223u;
+      const int16_t im = static_cast<int16_t>(static_cast<int>((lcg >> 16) % 12001) - 6000);
+      content[k] = cs16(re, im);
+    }
+    for (bool pre : {true, false}) {
+      TxBurstInterpolator placed(pre);
+      TxBurstInterpolator full(pre, TxBurstInterpolator::CacheKey::kContent, false);
+      bool exact = true;
+      int first_bad = -1, fallbacks = 0;
+      for (int pad = 0; pad < 384; ++pad) {
+        std::vector<cs16> in(static_cast<size_t>(pad), cs16(0, 0));
+        in.insert(in.end(), content.begin(), content.end());
+        const size_t np = houdini::boundary::beatPaddedInput(in.size());
+        const bool fallback = static_cast<size_t>(pad) + 32 < placed.placeLead();
+        fallbacks += fallback ? 1 : 0;
+        std::vector<cs16> ref_in(in);
+        if (!fallback) ref_in.resize(in.size() + 64, cs16(0, 0));
+        const void* rb[1] = {ref_in.data()};
+        const auto ro = full.run(rb, 1, ref_in.size());
+        std::vector<cs16> ref(static_cast<const cs16*>(ro.buffs[0]), static_cast<const cs16*>(ro.buffs[0]) + 2 * np);
+        const void* ib[1] = {in.data()};
+        const auto po = placed.run(ib, 1, in.size());
+        if (po.samples != 2 * np || !equal(po.buffs[0], ref)) {
+          exact = false;
+          if (first_bad < 0) first_bad = pad;
+        }
+      }
+      std::printf("      placement (%s): misses %zu over 384 pads, %d fell back, first mismatch %d\n",
+                  pre ? "prefilter" : "halfband only", placed.misses(), fallbacks, first_bad);
+      check(exact, std::string("placement is bit-exact against the zero-extended full computation for every pad (") +
+                       (pre ? "prefilter" : "halfband only") +
+                       ") (mutation: place the core at the input offset instead of twice it)");
+      check(placed.misses() <= static_cast<size_t>(1 + fallbacks),
+            std::string("one interpolation serves every placeable pad (") + (pre ? "prefilter" : "halfband only") +
+                ") (mutation: key the cache on the burst with its pad, a miss per pad)");
+    }
+  }
+
   std::printf("-- mutation matrix (each line must read PASS: the mutant was caught) --\n");
   check(!rewriteInPlaceIsFresh(TxBurstInterpolator::CacheKey::kAddress),
         "mutant address-keyed cache transmits the STALE burst after an in-place rewrite");

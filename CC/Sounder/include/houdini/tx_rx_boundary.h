@@ -31,6 +31,19 @@
  * buffers in place when the pad changes, so an address-keyed cache would
  * transmit a stale burst; the test builds that mutant.
  *
+ * PLACEMENT (AP-79 #6). The pad changes on almost every burst once the grid is
+ * tracked, and at R3 (two 61440-sample slots) one interpolation costs 28-29 ms,
+ * against a pad change every 1.6-2.7 frames. But a pad change only SHIFTS the
+ * same content, and the filters are shift-invariant, so the content is
+ * interpolated once (with a fixed lead of zeros) and each burst is that output
+ * placed at twice the leading-zero offset: a memcmp and a memcpy. It is
+ * BIT-exact, not merely close, when every non-zero output is computed on the
+ * filters' interior path: the channel filter's edge path sums in a different
+ * order. So the content is keyed with placeLead() zeros before it and computed
+ * with as many appended after it, which is the filter on the zero-extended
+ * signal; a burst with fewer leading zeros takes the full computation. The
+ * test compares placement with that reference for every pad 0..383.
+ *
  * RX. Lane i of a combined stream is RX channel rx_channels[i]; the lanes
  * whose channel's mirror lands in the output (rf_plan) are filtered in place,
  * the others are left bit-exact.
@@ -65,8 +78,14 @@ class TxBurstInterpolator {
   static size_t prefilterLead() { return dsp::ChannelFilter().halfLength() + dsp::HalfbandInterp2().contextBefore(); }
   static size_t prefilterTail() { return dsp::ChannelFilter().halfLength() + dsp::HalfbandInterp2().contextAfter(); }
 
-  explicit TxBurstInterpolator(bool prefilter = false, CacheKey key = CacheKey::kContent)
-      : prefilter_(prefilter), key_(key) {}
+  explicit TxBurstInterpolator(bool prefilter = false, CacheKey key = CacheKey::kContent, bool place = true)
+      : prefilter_(prefilter), key_(key), place_(place && key == CacheKey::kContent) {}
+
+  /// Zeros placement needs before the content (and appends after it): every
+  /// non-zero output of the channel filter (support +-half) must have its whole
+  /// support inside the buffer, so 2 x half; the halfband is per-sample and
+  /// shift-invariant.
+  size_t placeLead() const { return prefilter_ ? 2 * chan_.halfLength() : hb_.contextBefore() + 1; }
 
   struct Out {
     std::vector<const void*> buffs;  ///< one per channel, 2 x beatPaddedInput(n) samples
@@ -89,6 +108,8 @@ class TxBurstInterpolator {
       }
       Lane& L = lanes_[c];
       const auto* in = static_cast<const cs16*>(buffs[c]);
+      if (place_ && placeOne(L, in, n, np, o)) continue;
+      L.placed = false;
       const bool same = L.valid && L.n == n &&
                         (key_ == CacheKey::kAddress ? L.addr == buffs[c]
                                                     : std::memcmp(L.in.data(), in, n * sizeof(cs16)) == 0);
@@ -130,9 +151,78 @@ class TxBurstInterpolator {
     size_t n = 0;
     const void* addr = nullptr;
     bool valid = false;
+    // placement: `core` is the content's interpolation, `in` its input (from
+    // placeLead() zeros before the content to the end), `at` the input offset
+    // of that copy in the last burst placed, `np` that burst's padded length
+    bool placed = false;
+    std::vector<cs16> core;
+    size_t at = 0, np = 0;
   };
+
+  // Interpolate `in` (n samples, padded to np) into `out` (2 np samples).
+  size_t interpolate(const cs16* in, size_t n, size_t np, std::vector<cs16>& scratch, cs16* out) {
+    scratch.assign(in, in + n);
+    scratch.resize(np, cs16(0, 0));
+    if (prefilter_) {
+      fin_.resize(np);
+      fmid_.resize(np);
+      fout_.resize(2 * np);
+      for (size_t k = 0; k < np; ++k)
+        fin_[k] = {static_cast<float>(scratch[k].real()), static_cast<float>(scratch[k].imag())};
+      chan_.run(fin_.data(), np, fmid_.data());
+      hb_.run(fmid_.data(), np, fout_.data());
+      return dsp::HalfbandInterp2::quantize(fout_.data(), 2 * np, out);
+    }
+    return hb_.runCs16(scratch.data(), np, out);
+  }
+
+  // The placement path; false when this burst lacks the zero margins.
+  bool placeOne(Lane& L, const cs16* in, size_t n, size_t np, Out& o) {
+    const size_t lead = placeLead();
+    size_t z = 0;
+    while (z < n && in[z] == cs16(0, 0)) ++z;
+    size_t e = n;
+    while (e > z && in[e - 1] == cs16(0, 0)) --e;
+    if (z == n || z < lead) return false;
+    // The key and the core are [lead zeros | content], without the burst's
+    // own trailing zeros; the core is computed with `lead` zeros of our own
+    // after the content, so its every output is on the interior path.
+    const size_t at = z - lead, m = e - at;
+    const bool same = L.valid && L.placed && L.in.size() == m &&
+                      std::memcmp(L.in.data(), in + at, m * sizeof(cs16)) == 0;
+    if (same && L.at == at && L.np == np) {
+      ++hits_;  // the identical burst: its placed output stands
+      o.buffs.push_back(L.out.data());
+      return true;
+    }
+    if (same) {
+      ++hits_;
+    } else {
+      ++misses_;
+      const size_t mp = beatPaddedInput(m + lead);
+      L.core.resize(2 * mp);
+      o.saturated += interpolate(in + at, m, mp, scratch_, L.core.data());
+      L.in.assign(in + at, in + e);
+    }
+    // Place: zeros, then the core at twice the offset, cut at the burst's
+    // padded end exactly where the full computation's output ends.
+    L.out.assign(2 * np, cs16(0, 0));
+    const size_t keep = std::min(L.core.size(), 2 * np - 2 * at);
+    std::memcpy(L.out.data() + 2 * at, L.core.data(), keep * sizeof(cs16));
+    L.at = at;
+    L.np = np;
+    L.n = n;
+    L.addr = in;
+    L.valid = true;
+    L.placed = true;
+    o.buffs.push_back(L.out.data());
+    return true;
+  }
+
   bool prefilter_;
   CacheKey key_;
+  bool place_;
+  std::vector<cs16> scratch_;
   dsp::HalfbandInterp2 hb_;
   dsp::ChannelFilter chan_;
   std::vector<std::complex<float>> fin_, fmid_, fout_;
