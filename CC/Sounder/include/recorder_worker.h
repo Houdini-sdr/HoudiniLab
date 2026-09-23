@@ -11,10 +11,12 @@
 
 #include <complex>
 #include <cstdint>
+#include <memory>
 #include <unordered_map>
 #include <vector>
 
 #include "config.h"
+#include "houdini/dc_fft.h"
 #include "hdf5_lib.h"
 #include "receiver.h"
 
@@ -55,13 +57,14 @@ class RecorderWorker {
   bool rx_conj_ = false;
   int csi_sock_ = -1;
   std::vector<std::complex<float>> pilot_ref_;  // DC-centered freq-domain pilot
-  std::vector<std::complex<float>> dft_;        // NxN DC-centered DFT coefficients
+  std::unique_ptr<houdini::DcCenteredFft> fft_;  // DC-centred per-symbol FFT (AP-79)
   double csi_throttle_ns_ = 0.0;                // per-antenna min send interval
   // OFDM symbol-0 start within a received slot. Default = the nominal prefix (a fixed,
   // manually-tunable offset via HOUDINI_CSI_SYM_START); the energy-edge auto-detector
   // slotEnergyStart() is opt-in only (HOUDINI_CSI_SYM_START=auto) because its 15%
   // threshold can mis-trigger on pre-symbol leakage and mis-align the FFT windows.
-  int csi_sym_start_ = -1;
+  int csi_sym_start_ = 0;       // may be negative (see recorder_worker.cc)
+  bool csi_sym_auto_ = false;   // HOUDINI_CSI_SYM_START=auto: the energy-edge detector
   // Houdini: unstable beacon re-locks leave the pilot slot ~1 sample off the data on
   // ~40% of frames, ramping H and ringing the (otherwise-fine) data. Per constellation
   // frame, pick the integer pilot re-align (a ramp on the cached H) that maximizes the

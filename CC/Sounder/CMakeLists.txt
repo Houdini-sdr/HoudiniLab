@@ -331,6 +331,12 @@ add_executable(commslib_fft_test tests/comms-func/commslib_fft_test.cc)
 target_link_libraries(commslib_fft_test houdini_sync -lpthread ${MUFFT_LIBRARIES})
 add_test(NAME commslib_fft COMMAND commslib_fft_test)
 
+# AP-79: the CSI view's per-symbol FFT against the DFT-matrix definition.
+add_executable(dc_fft_test tests/comms-func/dc_fft_test.cc)
+target_include_directories(dc_fft_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/mufft)
+target_link_libraries(dc_fft_test ${MUFFT_LIBRARIES})
+add_test(NAME dc_fft COMMAND dc_fft_test)
+
 # The index-convention check AP-34(a) did not have. Links the real CommsLib so
 # it exercises the REAL detector; a replica would agree with itself.
 add_executable(beacon_geometry_test

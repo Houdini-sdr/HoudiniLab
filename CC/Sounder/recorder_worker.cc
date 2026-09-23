@@ -78,17 +78,10 @@ void RecorderWorker::initCsi(void) {
   pilot_ref_.resize(N);
   for (int k = 0; k < N; ++k)
     pilot_ref_[k] = {pf.at(0).at(k), pf.at(1).at(k)};  // DC-centered
-  // Xs[k] = sum_n x[n] * dft_[k*N+n] gives the DC-centered spectrum directly
-  // (natural bin (k+N/2)%N), matching the DC-centered pilot reference.
-  dft_.resize(static_cast<size_t>(N) * N);
-  for (int k = 0; k < N; ++k) {
-    const int m = (k + N / 2) % N;
-    for (int n = 0; n < N; ++n) {
-      const double ph = -2.0 * M_PI * m * n / N;
-      dft_[static_cast<size_t>(k) * N + n] = {static_cast<float>(std::cos(ph)),
-                                              static_cast<float>(std::sin(ph))};
-    }
-  }
+  // The DC-centred spectrum (natural bin (k+N/2)%N), matching the DC-centred
+  // pilot reference. An FFT with a plan made once (AP-79): the explicit N x N
+  // DFT matrix this replaced was 16.7 M multiply-adds a symbol at fft 4096.
+  fft_ = std::make_unique<houdini::DcCenteredFft>(N);
   double fps = 30.0;
   if (const char* f = std::getenv("HOUDINI_CSI_FPS")) fps = std::max(0.5, atof(f));
   csi_throttle_ns_ = 1e9 / fps;
@@ -104,10 +97,17 @@ void RecorderWorker::initCsi(void) {
   // (measured: es=prefix 19.8% EVM -> es=prefix-CP/2 3.2% on a window-ISI run). Backing
   // off CP/2 centers the window in the guard for two-sided jitter margin. Still fully
   // manual: HOUDINI_CSI_SYM_START overrides (an int, or "auto" for the energy-edge detector).
+  // May be NEGATIVE, legitimately: it is the symbol-0 start backed off by
+  // CP/2 and the body is read from es + cp, so a zero prefix shorter than
+  // CP/2 (the 5G-like R3: prefix 32, CP 288 -> -112, body at 176) is valid.
+  // "auto" is therefore its own flag, not a negative sentinel (AP-79: the
+  // sentinel silently switched R3 to the energy-edge detector).
   csi_sym_start_ = static_cast<int>(cfg_->prefix()) -
                    static_cast<int>(cfg_->cp_size()) / 2;
-  if (const char* sym_env = std::getenv("HOUDINI_CSI_SYM_START"))
-    csi_sym_start_ = (std::string(sym_env) == "auto") ? -1 : std::atoi(sym_env);
+  if (const char* sym_env = std::getenv("HOUDINI_CSI_SYM_START")) {
+    csi_sym_auto_ = std::string(sym_env) == "auto";
+    if (!csi_sym_auto_) csi_sym_start_ = std::atoi(sym_env);
+  }
   // Per-frame pilot-vs-data timing re-align (Houdini framer jitter). Default on for Houdini.
   csi_timing_fix_ = fixes.csi_timing;
   if (std::getenv("HOUDINI_CSI_NO_TIMING_FIX")) csi_timing_fix_ = false;
@@ -119,7 +119,7 @@ void RecorderWorker::initCsi(void) {
   view_mode_ = true;
   MLPD_INFO("CSI view mode: streaming to %s:%d (%d subcarriers, ~%.0f fps/ant, rx_conj=%d, "
             "sym_start=%s, timing_fix=%d, phase_fix=%d)\n", host.c_str(), port, N, fps, rx_conj_ ? 1 : 0,
-            csi_sym_start_ >= 0 ? std::to_string(csi_sym_start_).c_str() : "auto",
+            !csi_sym_auto_ ? std::to_string(csi_sym_start_).c_str() : "auto",
             csi_timing_fix_ ? 1 : 0, csi_phase_fix_ ? 1 : 0);
 }
 
@@ -146,26 +146,13 @@ int RecorderWorker::slotEnergyStart(const short* d, int slot) const {
 // Symbol-0 start for a received slot: the fixed csi_sym_start_ (manual, the default)
 // when >= 0, else the opt-in energy-edge auto-detector.
 int RecorderWorker::symStart(const short* d, int slot) const {
-  return csi_sym_start_ >= 0 ? csi_sym_start_ : slotEnergyStart(d, slot);
+  return !csi_sym_auto_ ? csi_sym_start_ : slotEnergyStart(d, slot);
 }
 
 // DC-centered FFT of the fft-size symbol body starting at sample `base` in `d`.
 std::vector<std::complex<float>> RecorderWorker::symbolFft(const short* d,
                                                           int base) const {
-  const int N = static_cast<int>(cfg_->fft_size());
-  const float qs = rx_conj_ ? -1.0f : 1.0f;  // conjugate RX (undo R2C spectral inversion)
-  std::vector<std::complex<float>> out(N);
-  for (int k = 0; k < N; ++k) {
-    const std::complex<float>* row = &dft_[static_cast<size_t>(k) * N];
-    std::complex<float> acc(0.0f, 0.0f);
-    for (int n = 0; n < N; ++n) {
-      const std::complex<float> x(static_cast<float>(d[2 * (base + n)]),
-                                  qs * static_cast<float>(d[2 * (base + n) + 1]));
-      acc += x * row[n];
-    }
-    out[k] = acc;
-  }
-  return out;
+  return fft_->run(d, base, rx_conj_);  // conjugate RX (undo R2C spectral inversion)
 }
 
 // Route a received slot: pilot -> CSI (+ cache H); uplink data -> constellation.
@@ -316,6 +303,7 @@ void RecorderWorker::sendCsi(Packet* pkt) {
   int used = 0;
   for (int sym = s0; sym < s1; ++sym) {
     const int base = es + sym * (cp + N) + cp;
+    if (base < 0) continue;  // a symbol whose body starts before the slot (AP-79 guard)
     if (base + N > slot) break;
     auto F = symbolFft(d, base);
     for (int k = 0; k < N; ++k) {
@@ -496,6 +484,7 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
   std::vector<std::vector<std::complex<float>>> Ys;
   for (int sym = s0; sym < s1; ++sym) {
     const int base = es + sym * (cp + N) + cp;
+    if (base < 0) continue;  // a symbol whose body starts before the slot (AP-79 guard)
     if (base + N > slot) break;
     Ys.push_back(symbolFft(d, base));
   }
