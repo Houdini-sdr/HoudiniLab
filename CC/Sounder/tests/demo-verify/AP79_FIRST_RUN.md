@@ -45,7 +45,7 @@ git worktree add ~/repos/HoudiniLab-ap79 ap79-run     # once; later: git -C ~/re
 ln -sfn ~/repos/HoudiniLab/CC/Sounder/mufft ~/repos/HoudiniLab-ap79/CC/Sounder/mufft   # the built submodule
 source ~/houdini_test/bin/activate
 cd ~/repos/HoudiniLab-ap79/CC/Sounder && cmake -B build && cmake --build build -j"$(nproc)"
-( cd build && ctest )                                   # all pass (16 at this writing) before any run
+( cd build && ctest )                                   # all pass (17 at this writing) before any run
 strings build/sounder | grep -c "preflight before the post-activate clear"   # 1 = this build or later, not a stale one
 ```
 
@@ -180,7 +180,7 @@ demo's own bar (beacon acquired, CSI datagrams climbing, both as before).
 6. **CSI (sub-6 uplink, BS ch0)**: the `[csi]` counter climbs steadily for
    antenna 0 and no BS frame is rejected for want of a pilot. The channel
    estimate is judged from a `HOUDINI_CSI_DUMP` capture: |H| across the 96
-   data subcarriers RECORDED as its spread (expected well under 1 dB: the
+   occupied subcarriers (88 data tones plus 8 pilot tones at R1) RECORDED as its spread (expected well under 1 dB: the
    decimator and interpolator are flat to 0.19 dB over +-24 MHz, W2; more than
    3 dB fails) with no mirror-image structure (single-tone mirror rejection
    measured -87 to -96 dBc). The sounder computes no CSI SNR; none is gated.

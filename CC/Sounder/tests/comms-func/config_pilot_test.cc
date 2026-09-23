@@ -16,6 +16,7 @@
  * Run from CC/Sounder (the configs' relative paths): ctest sets the working
  * directory.
  */
+#include <algorithm>
 #include <cmath>
 #include <complex>
 #include <cstdio>
@@ -61,6 +62,34 @@ int main() {
                   c.pilot_ci16().size(), c.pilot_sym_f().at(0).size(), c.fft_size(), c.symbol_data_subcarrier_num());
       check(c.pilot_ci16().size() == c.samps_per_slot(), std::string(f) + ": the pilot slot is exactly one slot");
       check(c.pilot_sym_f().at(0).size() == c.fft_size(), std::string(f) + ": the pilot's frequency grid is fft_size points");
+      {
+        // The data symbols' pilot tones: every one must carry a real value
+        // (unit magnitude ZC on the fft grid, or the 802.11 pilots at fft 64),
+        // or the BS's timing fit and phase fix run on noise (final review 2).
+        double min_mag = 1e9;
+        for (const auto& v : c.pilot_sc()) min_mag = std::min(min_mag, static_cast<double>(std::abs(v)));
+        std::printf("  %zu data-symbol pilot tones, smallest |value| %.3f\n", c.pilot_sc().size(), min_mag);
+        check(!c.pilot_sc().empty() && min_mag > 0.5, std::string(f) + ": every data-symbol pilot tone carries a value (|v| > 0.5)");
+        // And they are what the UE actually transmits: the pilot tones of the
+        // first data symbol of the built U slot.
+        const size_t n = c.fft_size();
+        const size_t body = static_cast<size_t>(c.prefix()) + c.cp_size();
+        const auto& ud = c.ue_data_ci16();
+        std::vector<std::complex<double>> F(n);
+        for (size_t k = 0; k < n; ++k) {
+          std::complex<double> a(0, 0);
+          for (size_t t = 0; t < n; ++t) {
+            const double ph = -2.0 * M_PI * static_cast<double>((k * t) % n) / static_cast<double>(n);
+            a += std::complex<double>(ud[body + t].real(), ud[body + t].imag()) * std::complex<double>(std::cos(ph), std::sin(ph));
+          }
+          F[(k + n / 2) % n] = a;  // DC-centred, like the grid
+        }
+        double worst = 1e9, strong = 0;
+        for (size_t j = 0; j < c.data_ind().size(); ++j) strong = std::max(strong, std::abs(F[c.data_ind()[j]]));
+        for (size_t i = 0; i < c.pilot_sc_ind().size(); ++i) worst = std::min(worst, std::abs(F[c.pilot_sc_ind()[i]]));
+        std::printf("  transmitted pilot tones: weakest %.1f dB under the strongest data tone\n", 20 * std::log10(strong / worst));
+        check(20 * std::log10(strong / worst) < 20.0, std::string(f) + ": every pilot tone is actually transmitted in the U slot");
+      }
       if (mode_v) {
         const double oob = outOfBandDb(c, 24e6);
         std::printf("  pilot symbol energy outside +-24 MHz: %.1f dB\n", oob);

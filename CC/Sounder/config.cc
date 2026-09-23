@@ -1197,9 +1197,22 @@ void Config::genPilots() {
 #endif
 
   data_ind_ = CommsLib::getDataSc(fft_size_, symbol_data_subcarrier_num_);
-  pilot_sc_ = CommsLib::getPilotScValue(fft_size_, symbol_data_subcarrier_num_);
   pilot_sc_ind_ =
       CommsLib::getPilotScIndex(fft_size_, symbol_data_subcarrier_num_);
+  if (fft_size_ == Consts::kFftSize_80211) {
+    pilot_sc_ = CommsLib::getPilotScValue(fft_size_, symbol_data_subcarrier_num_);
+  } else {
+    // The data symbols' pilot tones carry the PILOT's own values at those
+    // subcarriers: the ZC grid built above (DC-centred, unit magnitude, the
+    // placement the data symbol uses). getPilotScValue took them from an FFT
+    // of the generator's power-of-two time sequence read at natural bins,
+    // which at fft != ofdm_data_num lands mostly between its spectral lobes:
+    // 6 of R1's 8 pilot tones read ~1e-7, so the UE sent nothing there and
+    // the BS's timing fit and phase fix ran on noise (AP-79 final review 2).
+    pilot_sc_.clear();
+    for (const size_t k : pilot_sc_ind_)
+      pilot_sc_.push_back(std::complex<float>(pilot_sym_f_.at(0).at(k), pilot_sym_f_.at(1).at(k)));
+  }
 
   // UE uplink-data slot (symbol U): a DISTINCT random modulated OFDM symbol per
   // symbol slot (so the BS tells it from the identical-LTS pilot by self-similarity),
