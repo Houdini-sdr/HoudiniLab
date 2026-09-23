@@ -13,7 +13,9 @@ sd = tempfile.mkdtemp(prefix="csi_ctl_")
 log = os.path.join(sd, "log")
 os.makedirs(os.path.join(sd, "build")); os.makedirs(os.path.join(sd, "csi_gui")); os.makedirs(os.path.join(sd, "files"))
 with open(os.path.join(sd, "build", "sounder"), "w") as f:  # records its config, then runs until killed
-    f.write("#!/bin/sh\necho \"start $3\" >> %s\nexec sleep 60\n" % log)
+    # plus a child that ignores SIGTERM: only a group SIGKILL ends it
+    f.write("#!/bin/sh\necho \"start $3\" >> %s\n"
+            "sh -c 'trap \"\" TERM; while :; do sleep 0.2; done' &\necho $! >> %s.kids\nexec sleep 60\n" % (log, log))
 os.chmod(os.path.join(sd, "build", "sounder"), 0o755)
 with open(os.path.join(sd, "csi_gui", "teardown_framer.py"), "w") as f:
     f.write("open(%r, 'a').write('teardown\\n')\n" % log)
@@ -21,6 +23,9 @@ for n in ("houdini-a.json", "houdini-b.json", "other.json"):
     open(os.path.join(sd, "files", n), "w").write("{}")
 args = types.SimpleNamespace(sounder_dir=sd, max_frame=1, csi_fps=0, venv=sd,
                              conf="files/houdini-a.json", storepath=sd)
+# The operator's own --conf is offered even when it is not files/houdini*.json.
+check(cs.SounderSupervisor(types.SimpleNamespace(**dict(vars(args), conf="files/other.json")),
+                           "x").configs()[-1] == "files/other.json", "the --conf config is always in the list")
 sup = cs.SounderSupervisor(args, "127.0.0.1:1")
 sup.SETTLE_AFTER_TEARDOWN_S = 0.2; sup.RETRY_DELAY_S = 0.2; sup.STOP_GRACE_S = 2.0
 
@@ -28,9 +33,10 @@ srv = cs.ThreadingHTTPServer(("127.0.0.1", 0), cs.Handler); srv.daemon_threads =
 srv.control = sup
 threading.Thread(target=srv.serve_forever, daemon=True).start()
 url = "http://127.0.0.1:%d/control" % srv.server_address[1]
-def post(obj):
-    req = urllib.request.Request(url, data=json.dumps(obj).encode(), method="POST",
-                                 headers={"Content-Type": "application/json"})
+def post(obj, headers=None, raw=None):
+    h = {"Content-Type": "application/json"}; h.update(headers or {})
+    req = urllib.request.Request(url, data=raw if raw is not None else json.dumps(obj).encode(),
+                                 method="POST", headers=h)
     try:
         with urllib.request.urlopen(req) as r: return r.status, json.load(r)
     except urllib.error.HTTPError as e:
@@ -58,14 +64,25 @@ def driver():
         check(post({"cmd": "start", "conf": "files/other.json"})[0] == 400, "a config outside the list is refused")
         check(post({"cmd": "start", "conf": "../../etc/passwd"})[0] == 400, "a path outside the sounder is refused")
         check(post({"cmd": "reboot"})[0] == 400, "an unknown command is refused")
+        check(post({"cmd": "start"}, {"Content-Type": "text/plain"})[0] == 403,
+              "a non-JSON POST (what a cross-site no-cors fetch sends) is refused")
+        check(post({"cmd": "start"}, {"Origin": "http://evil.example"})[0] == 403, "a foreign Origin is refused")
+        check(post(None, raw=b"[1]")[0] == 400 and post(None, raw=b"{bad")[0] == 400,
+              "a body that is not a JSON object is a 400")
+        check(post(None, raw=b"{" + b" " * 5000 + b"}")[0] == 400, "an oversized body is a 400")
         check(starts() == [], "nothing launched by refused requests")
         check(post({"cmd": "start"})[0] == 202, "start is accepted")
         check(wait_for(lambda: get()["state"] == "running"), "start: running")
         pid1 = get()["pid"]; seen["pid1"] = pid1
+        check(post({"cmd": "start"})[0] == 400, "Start while running is refused")
+        sup.cmds.put(("start", None)); time.sleep(0.6)  # one queued before the state showed running
+        check(get()["pid"] == pid1 and alive(pid1), "a queued Start does not restart a live session")
         check(starts() == ["files/houdini-a.json"], "start ran the current config after a teardown")
         post({"cmd": "restart", "conf": "files/houdini-b.json"})
         check(wait_for(lambda: get()["state"] == "running" and get()["pid"] != pid1), "restart: a new sounder is running")
         check(not alive(pid1), "restart killed the old sounder")
+        kid1 = int(open(log + ".kids").read().split()[0])
+        check(not alive(kid1), "restart killed the old sounder's SIGTERM-proof child (group SIGKILL)")
         check(get()["conf"] == "files/houdini-b.json" and starts()[-1] == "files/houdini-b.json", "restart switched config")
         check(open(log).read().count("teardown") == 2, "every start is preceded by a teardown")
         pid2 = get()["pid"]

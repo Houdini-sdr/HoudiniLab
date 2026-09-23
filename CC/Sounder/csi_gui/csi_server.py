@@ -494,10 +494,28 @@ class Handler(BaseHTTPRequestHandler):
         if not self.path.startswith("/control") or sup is None:
             self.send_error(404)
             return
+        # A page on any other site can POST to localhost too. Requiring JSON
+        # forces the browser's CORS preflight, which this server never answers,
+        # and a foreign Origin is refused outright.
+        origin = self.headers.get("Origin")
+        host = self.headers.get("Host", "")
+        if (self.headers.get("Content-Type", "").split(";")[0].strip() != "application/json"
+                or (origin is not None and origin.split("://", 1)[-1] != host)):
+            self._json(403, {"error": "forbidden"})
+            return
         try:
             n = int(self.headers.get("Content-Length", "0"))
-            req = json.loads(self.rfile.read(min(n, 4096)) or b"{}")
-        except (ValueError, json.JSONDecodeError):
+        except ValueError:
+            n = -1
+        if not 0 <= n <= 4096:
+            self.close_connection = True
+            self._json(400, {"error": "bad request"})
+            return
+        try:
+            req = json.loads(self.rfile.read(n) or b"{}")
+        except ValueError:
+            req = None
+        if not isinstance(req, dict):
             self._json(400, {"error": "bad request"})
             return
         err = sup.request(str(req.get("cmd", "")), req.get("conf"))
@@ -676,6 +694,7 @@ class SounderSupervisor:
         self.state_lock = threading.Lock()
         self.state = {"state": "stopped", "pid": None, "rc": None, "attempt": 0, "conf": None}
         self.set_conf(args.conf)
+        self.launch_conf = args.conf  # the operator's --conf is always a valid choice
 
     def set_conf(self, conf):
         """The command lines for one config. Tear down against the radios THIS
@@ -701,8 +720,9 @@ class SounderSupervisor:
 
     def configs(self):
         """The configs the page may choose: the sounder's own files/houdini*.json."""
-        return sorted(os.path.relpath(p, self.sd)
-                      for p in glob.glob(os.path.join(self.sd, "files", "houdini*.json")))
+        return sorted({os.path.relpath(p, self.sd)
+                       for p in glob.glob(os.path.join(self.sd, "files", "houdini*.json"))}
+                      | {self.launch_conf})
 
     def request(self, cmd, conf=None):
         """From any thread: queue start / stop / restart. Returns an error or None."""
@@ -710,6 +730,8 @@ class SounderSupervisor:
             return "unknown command"
         if conf is not None and conf not in self.configs():
             return "config not allowed: %s" % conf
+        if cmd == "start" and self.snapshot()["state"] in ("tearing down", "starting", "running"):
+            return "already running (use Restart)"
         self.cmds.put((cmd, conf))
         return None
 
@@ -722,20 +744,31 @@ class SounderSupervisor:
             os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
         except ProcessLookupError:
             return
+        pgid = proc.pid  # the sounder leads its own session (setsid in _die_with_parent)
         deadline = time.time() + self.STOP_GRACE_S
         while proc.poll() is None and time.time() < deadline:
             time.sleep(0.1)
-        if proc.poll() is None:
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+        # The whole group, even when the leader went on SIGTERM: a child left
+        # behind would still hold the radios when the next start runs.
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            print("[csi] sounder pid %d did not exit after SIGKILL" % proc.pid, flush=True)
 
     def _pending(self):
-        try:
-            return self.cmds.get_nowait()
-        except queue.Empty:
-            return None
+        """The next command for a live session. A Start is dropped: one queued
+        before the state showed the session (a double click) must not restart it."""
+        while True:
+            try:
+                c = self.cmds.get_nowait()
+            except queue.Empty:
+                return None
+            if c[0] != "start":
+                return c
 
     def _wait(self, seconds):
         """Sleep, but return a queued command as soon as one arrives."""

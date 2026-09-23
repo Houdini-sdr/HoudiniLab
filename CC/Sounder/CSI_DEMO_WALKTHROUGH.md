@@ -379,10 +379,11 @@ python3 csi_gui/csi_server.py --control --conf <config>
    state. Nothing runs until you press Start (add `--launch` to start at once).
 3. Start and Restart tear down the framers, wait for the boards to release,
    then launch `sounder --view` with the config selected in the list, retrying
-   a failed start as `--launch` does. Stop ends the sounder and leaves it
-   stopped.
-4. The list offers only the sounder's own `files/houdini*.json`. To run another
-   config, copy it there under that name.
+   a failed start as `--launch` does. Start does nothing while a sounder
+   runs; use Restart. Stop ends the sounder and leaves it stopped.
+4. The list offers the sounder's own `files/houdini*.json` plus the `--conf`
+   you started the backend with. To run another config, copy it there under
+   that name.
 
 Ctrl+C on the backend still stops the sounder with it.
 
