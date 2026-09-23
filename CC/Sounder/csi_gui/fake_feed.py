@@ -34,6 +34,8 @@ MAGIC_CSI2 = 0x43534932
 MAGIC_CNS = 0x434E5331
 MAGIC_ADC = 0x41444331
 MAGIC_ADC2 = 0x41444332
+MAGIC_CIR = 0x43495231
+MAGIC_MET = 0x4D455431
 ADC_FS = 32767
 ADC_COLS = 250
 
@@ -126,6 +128,22 @@ def send_adc(sock, dest, frame, ant, samps, rate, clip, legacy=False):
     sock.sendto(head + body, dest)
 
 
+def send_cir(sock, dest, frame, ant, rate):
+    """CIR1: a direct path and an echo 8 dB down 6 taps later, over a -50 dB floor."""
+    pre, ntaps = 16, 128
+    db = [-50.0 + random.gauss(0, 2) for _ in range(ntaps)]
+    db[pre] = 0.0
+    db[pre + 6] = -8.0 + random.gauss(0, 0.3)
+    head = struct.pack("<IIIIIIIf", MAGIC_CIR, frame, ant, ntaps, pre, 40, 4096, 1e9 / rate)
+    sock.sendto(head + struct.pack("<%df" % ntaps, *db), dest)
+
+
+def send_met(sock, dest, ant):
+    """MET1: antenna 0 the sub-6 lane, antenna 1 the X-IF, as the R3 config."""
+    ch, fc = (0, 2425e6) if ant % 2 == 0 else (2, 4380e6)
+    sock.sendto(struct.pack("<IIIIIddd", MAGIC_MET, ant, ch, 4096, 1596, fc, 30e3, 1596 * 30e3), dest)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -172,6 +190,10 @@ def main():
                 send_cns(sock, dest, frame, ant, args.mod, args.evm)
                 send_adc(sock, dest, frame, ant, args.samps, args.rate, args.clip,
                          args.legacy)
+                if not args.legacy:
+                    send_cir(sock, dest, frame, ant, args.rate)
+                    if frame % max(1, int(args.fps)) == 0:
+                        send_met(sock, dest, ant)
             frame += 1
             time.sleep(1.0 / args.fps)
     except KeyboardInterrupt:

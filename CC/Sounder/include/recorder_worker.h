@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "config.h"
+#include "houdini/cir.h"
 #include "houdini/dc_fft.h"
 #include "hdf5_lib.h"
 #include "receiver.h"
@@ -58,6 +59,9 @@ class RecorderWorker {
   int csi_sock_ = -1;
   std::vector<std::complex<float>> pilot_ref_;  // DC-centered freq-domain pilot
   std::unique_ptr<houdini::DcCenteredFft> fft_;  // DC-centred per-symbol FFT (AP-79)
+  std::unique_ptr<houdini::CirFromH> cir_;       // the view's impulse response (AP-79)
+  std::unordered_map<uint32_t, long long> met_last_ns_;  // channel-info send timer
+  void sendMeta(uint32_t ant, long long now_ns);
   double csi_throttle_ns_ = 0.0;                // per-antenna min send interval
   // OFDM symbol-0 start within a received slot. Default = the nominal prefix (a fixed,
   // manually-tunable offset via HOUDINI_CSI_SYM_START); the energy-edge auto-detector

@@ -53,6 +53,11 @@ Wire formats (little-endian), one datagram per (frame, antenna) per kind:
         resid-slope figure the panel also prints is the tracking RESIDUAL and is
         not a third opinion on the same quantity. `cfo_beacon` is NaN on any
         record with no detection behind it, and the field is then dropped.
+  CIR1  [magic][frame][ant][ntaps][pre][peak][N][tap_ns f32] then ntaps * dB f32:
+        the impulse response of the same H (an inverse FFT per SENT CSI frame),
+        `ntaps` taps from `pre` before the strongest, dB re that tap.
+  MET1  [magic][ant][channel][fft][occupied tones][fc f64][scs f64][occupied bw f64]:
+        the channel's constants from the config the sounder loaded, ~1/s.
   ADC2  [magic][frame][ant][cols][samps][rate f32][peak][clipped][slot][any_peak]
         [any_clipped]  then cols * (I_min, I_max, Q_min, Q_max) as int16.  A min/max
         envelope of the whole slot rather than decimated samples, so a brief clip
@@ -81,6 +86,10 @@ MAGIC_CSI2 = 0x43534932  # "CSI2" -- as CSI1 plus per-subcarrier raw phase
 MAGIC_CNS = 0x434E5331   # "CNS1" -- equalized uplink-data constellation
 MAGIC_ADC = 0x41444331   # "ADC1" -- raw-ADC envelope, any slot (legacy)
 MAGIC_ADC2 = 0x41444332  # "ADC2" -- pilot-slot envelope + an all-slot clip ledger
+MAGIC_CIR = 0x43495231   # "CIR1" -- impulse response window, dB re the peak tap
+MAGIC_MET = 0x4D455431   # "MET1" -- the channel's constants (centre, bandwidth)
+CIR_HDR = struct.Struct("<IIIIIIIf")   # magic, frame, ant, ntaps, pre, peak, N, tap_ns
+MET_HDR = struct.Struct("<IIIIIddd")   # magic, ant, channel, fft, occ tones, fc, scs, occ bw
 MAGIC_SYN = 0x53594E31   # "SYN1" -- UE beacon sync state, resid and CFO
 CSI_HDR = struct.Struct("<IIIIf")   # magic, frame, ant, num_sc, rate
 CSI2_HDR = struct.Struct("<IIIIfI")  # ... plus reps (pilot symbols averaged)
@@ -181,6 +190,32 @@ def _parse_adc(payload, v2):
                       "full_scale": 32767}
 
 
+def _ideal(mod):
+    """The square-QAM alphabet at unit average power, as the page draws it."""
+    lvl = int(round(math.sqrt(2 ** mod)))
+    lv = [-(lvl - 1) + 2 * i for i in range(lvl)]
+    nrm = math.sqrt(sum(a * a + b * b for a in lv for b in lv) / (lvl * lvl))
+    return [(a / nrm, b / nrm) for a in lv for b in lv]
+
+
+def _mer(pts, mod):
+    """Decision-directed error of unit-power points against the ideal alphabet:
+    (EVM rms %, MER dB). It is MER, not SNR: it includes the equalizer's H
+    error, carrier-offset leakage and phase noise, and over the sounder's point
+    sample (up to 600 of one frame's tones). Unbiased above ~15 dB, reads high
+    below (a decision error lands on the wrong point). None for too few points."""
+    if len(pts) < 8 or mod not in (2, 4, 6):
+        return None
+    ref = _ideal(mod)
+    err = 0.0
+    for x, y in pts:
+        err += min((x - a) ** 2 + (y - b) ** 2 for a, b in ref)
+    e = err / len(pts)
+    if e <= 0.0:
+        return 0.0, 99.0
+    return 100.0 * math.sqrt(e), -10.0 * math.log10(e)
+
+
 def _parse_cns(payload):
     magic, frame, ant, npt, mod = CNS_HDR.unpack_from(payload, 0)
     off = CNS_HDR.size
@@ -188,7 +223,50 @@ def _parse_cns(payload):
         return None
     vals = struct.unpack_from("<%df" % (2 * npt), payload, off)
     pts = [[vals[2 * i], vals[2 * i + 1]] for i in range(npt)]
-    return int(ant), {"frame": int(frame), "mod": int(mod), "pts": pts}
+    rec = {"frame": int(frame), "mod": int(mod), "pts": pts}
+    q = _mer(pts, int(mod))
+    if q is not None:
+        rec["evm_pct"], rec["mer_db"] = round(q[0], 2), round(q[1], 1)
+    return int(ant), rec
+
+
+def _delay_spread_ns(db, tap_ns, floor_db=-20.0):
+    """RMS delay spread of the taps within `floor_db` of the peak (power
+    weighted about their mean delay). The -20 dB floor keeps the estimator's
+    noise out; a one-tap channel reads 0."""
+    w = [10 ** (v / 10.0) if v >= floor_db else 0.0 for v in db]
+    tot = sum(w)
+    if tot <= 0.0:
+        return 0.0
+    mu = sum(i * wi for i, wi in enumerate(w)) / tot
+    var = sum(wi * (i - mu) ** 2 for i, wi in enumerate(w)) / tot
+    return math.sqrt(var) * tap_ns
+
+
+def _parse_cir(payload):
+    if len(payload) < CIR_HDR.size:
+        return None
+    _m, frame, ant, ntaps, pre, peak, n, tap_ns = CIR_HDR.unpack_from(payload, 0)
+    if len(payload) < CIR_HDR.size + 4 * ntaps or not math.isfinite(tap_ns):
+        return None
+    db = list(struct.unpack_from("<%df" % ntaps, payload, CIR_HDR.size))
+    if not all(math.isfinite(v) for v in db):
+        return None
+    return int(ant), {"frame": int(frame), "db": [round(v, 2) for v in db],
+                      "pre": int(pre), "peak": int(peak), "n": int(n),
+                      "tap_ns": float(tap_ns),
+                      "rms_ns": round(_delay_spread_ns(db, tap_ns), 1)}
+
+
+def _parse_met(payload):
+    if len(payload) != MET_HDR.size:
+        return None
+    _m, ant, ch, fft, occ, fc, scs, bw = MET_HDR.unpack_from(payload, 0)
+    if not (math.isfinite(fc) and math.isfinite(scs) and math.isfinite(bw)):
+        return None
+    return int(ant), {"ch": "ABCD"[ch] if ch < 4 else str(ch), "fc_mhz": fc / 1e6,
+                      "scs_khz": scs / 1e3, "bw_mhz": bw / 1e6, "fft": int(fft),
+                      "occ": int(occ)}
 
 
 def _parse_syn(payload):
@@ -251,6 +329,10 @@ def _udp_loop(bind_host, bind_port):
             parsed, kind = _parse_adc(data, False), "adc"
         elif magic == MAGIC_ADC2:
             parsed, kind = _parse_adc(data, True), "adc"
+        elif magic == MAGIC_CIR:
+            parsed, kind = _parse_cir(data), "cir"
+        elif magic == MAGIC_MET:
+            parsed, kind = _parse_met(data), "met"
         elif magic == MAGIC_SYN:
             rec = _parse_syn(data)
             if rec is not None:
@@ -727,6 +809,8 @@ PAGE = r"""<!doctype html>
 .csi-h-line canvas{height:190px}
 .csi-h-wf   canvas{height:190px}
 .csi-h-cons canvas{height:250px}
+.csi-h-cir  canvas{height:150px}
+.csi-quality{font-size:.8rem;line-height:1.5;align-self:center}
 .csi-h-adc  canvas{height:220px}
 .csi-stage{min-width:0}
 .csi-plot{min-width:0}
@@ -901,6 +985,11 @@ function makeCard(ant){
       +frame('constellation (equalized U)','csi-h-cons',
              [formatAxisValue(CONS_R),'0.00',formatAxisValue(-CONS_R)],
              [formatAxisValue(-CONS_R),'I','+'+formatAxisValue(CONS_R)])
+      // AP-79: the impulse response of the same H (sounder CIR1, one inverse
+      // FFT per sent frame) on a FIXED 0..-60 dB axis, and the channel's numbers.
+      +frame('CIR |h|² (dB re peak) vs delay','csi-h-cir',
+             ['0','-15','-30','-45','-60'],['','peak',''])
+      +'<div class="csi-quality tnum"></div>'
      +'</div>'
      +'<div class="csi-plots csi-adc csi-view" data-view="adc" hidden>'
       +frame('raw ADC min/max envelope, whole slot','csi-h-adc',
@@ -919,7 +1008,9 @@ function makeCard(ant){
   document.getElementById('ants').appendChild(wrap);
   const cvs=[...wrap.querySelectorAll('.csi-view canvas')];
   cards[ant]={magCv:cvs[0],rawPhaseCv:cvs[1],phaseCv:cvs[2],wfCv:cvs[3],
-              consCv:cvs[4],adcCv:cvs[5],dim:null,wfimg:null,
+              consCv:cvs[4],cirCv:cvs[5],adcCv:cvs[6],dim:null,wfimg:null,
+              quality:wrap.querySelector('.csi-quality'),
+              cirX:wrap.querySelectorAll('.csi-h-cir .csi-x-axis span'),
               status:wrap.querySelector('.csi-status'),
               adcStatus:wrap.querySelector('.csi-adc-status'),
               el:wrap,badge:wrap.querySelector('.csi-stale'),
@@ -930,8 +1021,8 @@ function makeCard(ant){
               headPct:wrap.querySelector('.csi-head-pct'),
               headBar:wrap.querySelector('.csi-head-bar'),
               xax:wrap.querySelectorAll('.csi-view[data-view=channel] .csi-x-axis'),
-              lastCsi:-1,lastCns:-1,lastAdc:-1,
-              csiRec:null,cnsRec:null,adcRec:null,frame:0};
+              lastCsi:-1,lastCns:-1,lastAdc:-1,lastCir:-1,
+              csiRec:null,cnsRec:null,adcRec:null,cirRec:null,metRec:null,frame:0};
   // Tabs are per card so you can watch one antenna's ADC while another shows its
   // channel, which is how you find the one converter that is actually clipping.
   // Measure once the card is in the document, and again whenever the grid reflows.
@@ -952,6 +1043,7 @@ function makeCard(ant){
       if(card.csiRec) drawCsi(card,card.csiRec,false);
       if(card.cnsRec) drawCons(card,card.cnsRec);
       if(card.adcRec) drawAdc(card,card.adcRec);
+      if(card.cirRec) drawCir(card,card.cirRec);
     });
   });
 }
@@ -981,11 +1073,12 @@ function fitCard(card, force){
   d.rawph= fitCanvas(card.rawPhaseCv,true);
   d.phase= fitCanvas(card.phaseCv,true);
   d.cons = fitCanvas(card.consCv, true);
+  d.cir  = fitCanvas(card.cirCv,  true);
   d.adc  = fitCanvas(card.adcCv,  true);
   d.wf   = fitCanvas(card.wfCv,   false);
   card.dim=d;
   card.mag=d.mag.ctx; card.rawph=d.rawph.ctx; card.phase=d.phase.ctx;
-  card.cons=d.cons.ctx; card.adc=d.adc.ctx; card.wf=d.wf.ctx;
+  card.cons=d.cons.ctx; card.cir=d.cir.ctx; card.adc=d.adc.ctx; card.wf=d.wf.ctx;
   // Only when the waterfall's device size ACTUALLY changed: its history lives in
   // the bitmap and cannot be resampled honestly, so a real resize has to restart
   // it -- but a no-op refit must not. The card's height changes whenever the
@@ -1137,6 +1230,37 @@ function idealPts(mod){
   for(const a of lv)for(const b of lv) out.push([a/nrm,b/nrm]);
   return out;
 }
+// CIR: fixed 0..-60 dB, the x axis in ns from the strongest tap (set once per
+// window geometry). A one-tap line at 0 dB is a clean cable; echoes show as
+// later taps; the RMS delay spread is in the quality line.
+function drawCir(card,r){
+  card.cirRec=r;
+  const d=card.dim.cir;
+  grid(card.cir,d.w,d.h);
+  line(card.cir,r.db,-60,0,C.mag,d.w,d.h);
+  const key=r.pre+'/'+r.db.length+'/'+r.tap_ns;
+  if(card.cirKey!==key){
+    card.cirKey=key;
+    card.cirX[0].textContent='-'+(r.pre*r.tap_ns).toFixed(0)+' ns';
+    card.cirX[2].textContent='+'+((r.db.length-1-r.pre)*r.tap_ns).toFixed(0)+' ns';
+  }
+  drawQuality(card);
+}
+// The channel's constants (MET1, from the config the sounder loaded) and its
+// quality: MER/EVM of the constellation sample (decision-directed, so MER, not
+// SNR) and the CIR's RMS delay spread.
+function drawQuality(card){
+  const m=card.metRec, q=[];
+  if(m) q.push('ch '+m.ch+' · centre '+m.fc_mhz.toFixed(3)+' MHz · '
+               +m.bw_mhz.toFixed(2)+' MHz occupied ('+m.occ+' × '+m.scs_khz.toFixed(3)
+               +' kHz, fft '+m.fft+')');
+  const cn=card.cnsRec;
+  if(cn && cn.mer_db!==undefined)
+    q.push('MER '+cn.mer_db.toFixed(1)+' dB · EVM '+cn.evm_pct.toFixed(2)+' %');
+  if(card.cirRec) q.push('RMS delay spread '+card.cirRec.rms_ns.toFixed(1)+' ns');
+  card.quality.textContent=q.join('\n');
+  card.quality.style.whiteSpace='pre-line';
+}
 function drawCons(card,cn){
   card.cnsRec=cn;
   const ctx=card.cons, d=card.dim.cons;
@@ -1180,6 +1304,7 @@ function redrawAll(){
     if(card.csiRec) drawCsi(card,card.csiRec,false);
     if(card.cnsRec) drawCons(card,card.cnsRec);
     if(card.adcRec) drawAdc(card,card.adcRec);
+    if(card.cirRec) drawCir(card,card.cirRec);
   }
 }
 
@@ -1422,7 +1547,11 @@ function onData(obj){
       drawCsi(card,rec.csi,true); card.lastCsi=rec.csi.frame; pktCount++;
     }
     if(rec.cns && rec.cns.frame!==card.lastCns){
-      drawCons(card,rec.cns); card.lastCns=rec.cns.frame;
+      drawCons(card,rec.cns); card.lastCns=rec.cns.frame; drawQuality(card);
+    }
+    if(rec.met) card.metRec=rec.met;
+    if(rec.cir && rec.cir.frame!==card.lastCir){
+      drawCir(card,rec.cir); card.lastCir=rec.cir.frame;
     }
     if(rec.adc && rec.adc.frame!==card.lastAdc){
       drawAdc(card,rec.adc); card.lastAdc=rec.adc.frame;

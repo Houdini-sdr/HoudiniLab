@@ -83,6 +83,7 @@ void RecorderWorker::initCsi(void) {
   // pilot reference. An FFT with a plan made once (AP-79): the explicit N x N
   // DFT matrix this replaced was 16.7 M multiply-adds a symbol at fft 4096.
   fft_ = std::make_unique<houdini::DcCenteredFft>(N);
+  cir_ = std::make_unique<houdini::CirFromH>(N);
   double fps = 30.0;
   if (const char* f = std::getenv("HOUDINI_CSI_FPS")) fps = std::max(0.5, atof(f));
   csi_throttle_ns_ = 1e9 / fps;
@@ -193,6 +194,9 @@ void RecorderWorker::streamCsi(Packet* pkt, NodeType node_type) {
   // Saturation on the OTHER slots still has to be caught, so peak and clip counts are
   // accumulated over every slot and ride along with the pilot's envelope.
   sendAdc(pkt, is_pilot);
+  sendMeta(pkt->ant_id, std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count());
   // H is estimated only for a pilot whose H will be USED: the CSI datagram
   // and the constellation are both throttled to csi_throttle_ns_, so an H for
   // every other pilot was computed and thrown away. At R3 (14 FFTs of 4096 per
@@ -417,6 +421,63 @@ void RecorderWorker::sendCsi(Packet* pkt) {
   for (int k = 0; k < N; ++k)
     std::memcpy(&buf[24 + 8 * N + 4 * k], &raw_ph[k], 4);
   (void)::send(csi_sock_, buf.data(), buf.size(), 0);
+  // The impulse response of the same H, at the same (throttled) rate: one
+  // inverse FFT per SENT frame (houdini/cir.h). 128 taps from 16 before the
+  // strongest, dB relative to it; the tap spacing is 1 / sample rate.
+  // [magic 'CIR1'][frame][ant][ntaps][pre][peak][N][tap_ns f32][dB f32]*ntaps
+  if (cir_) {
+    constexpr int kPre = 16, kTaps = 128;
+    int peak = 0;
+    const std::vector<float> db = houdini::cirWindowDb(cir_->power(H), kPre, kTaps, &peak);
+    std::vector<uint8_t> cb(32 + 4 * db.size());
+    const uint32_t cm = 0x43495231u, cf = pkt->frame_id, ca = pkt->ant_id,
+                   cn = static_cast<uint32_t>(db.size()), cpre = kPre,
+                   cpk = static_cast<uint32_t>(peak), cN = static_cast<uint32_t>(N);
+    const float tap_ns = static_cast<float>(1e9 / cfg_->rate());
+    std::memcpy(&cb[0], &cm, 4);
+    std::memcpy(&cb[4], &cf, 4);
+    std::memcpy(&cb[8], &ca, 4);
+    std::memcpy(&cb[12], &cn, 4);
+    std::memcpy(&cb[16], &cpre, 4);
+    std::memcpy(&cb[20], &cpk, 4);
+    std::memcpy(&cb[24], &cN, 4);
+    std::memcpy(&cb[28], &tap_ns, 4);
+    std::memcpy(&cb[32], db.data(), 4 * db.size());
+    (void)::send(csi_sock_, cb.data(), cb.size(), 0);
+  }
+}
+
+// The channel's constants for the view, from the config this run LOADED (so
+// the dashboard can never show another file's numbers): the RX channel the
+// antenna maps to, its NCO, the occupied bandwidth (the pilot's occupied tones
+// x the subcarrier spacing), the spacing and the FFT size. About once a second
+// per antenna; the view keeps the last one.
+// [magic 'MET1'][ant][channel][fft][occupied tones][center_hz f64][scs_hz f64][occ_bw_hz f64]
+void RecorderWorker::sendMeta(uint32_t ant, long long now_ns) {
+  auto it = met_last_ns_.find(ant);
+  if (it != met_last_ns_.end() && now_ns - it->second < 1000000000LL) return;
+  met_last_ns_[ant] = now_ns;
+  const auto chans = Utils::strToChannels(cfg_->bs_rx_channel());
+  const uint32_t ch = chans.empty() ? 0u : static_cast<uint32_t>(chans[ant % chans.size()]);
+  const auto nit = cfg_->channel_nco().find(ch);
+  const double center = nit != cfg_->channel_nco().end() ? nit->second : cfg_->nco();
+  const uint32_t n = static_cast<uint32_t>(cfg_->fft_size());
+  uint32_t occ = 0;
+  for (const auto& v : pilot_ref_)
+    if (std::norm(v) > 1e-12f) ++occ;
+  const double scs = cfg_->rate() / static_cast<double>(n);
+  const double occ_bw = occ * scs;
+  std::vector<uint8_t> mb(44);
+  const uint32_t mm = 0x4D455431u;
+  std::memcpy(&mb[0], &mm, 4);
+  std::memcpy(&mb[4], &ant, 4);
+  std::memcpy(&mb[8], &ch, 4);
+  std::memcpy(&mb[12], &n, 4);
+  std::memcpy(&mb[16], &occ, 4);
+  std::memcpy(&mb[20], &center, 8);
+  std::memcpy(&mb[28], &scs, 8);
+  std::memcpy(&mb[36], &occ_bw, 8);
+  (void)::send(csi_sock_, mb.data(), mb.size(), 0);
 }
 
 // Uplink-data slot -> equalize with the cached H and stream the constellation.
