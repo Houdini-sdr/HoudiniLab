@@ -744,16 +744,21 @@ class SounderSupervisor:
             return "config not allowed: %s" % conf
         # "exited" is the retry wait inside a session: a Start or Check queued then
         # would be dropped by _pending, so refuse it here instead.
-        # "queued": a Start or Restart the main thread has not picked up yet.
-        state = self.snapshot()["state"]
-        live = state in ("queued", "stopping", "checking", "tearing down", "starting", "running", "exited")
-        if cmd == "start" and live:
-            return "busy (%s): use Restart or Stop" % state
-        if cmd == "check" and live:
-            return "stop the sounder first: the full check opens the radios"
-        self.cmds.put((cmd, conf))
-        if cmd in ("start", "restart"):
-            self._set(state="queued")
+        # "queued": a Start or Restart the main thread has not picked up yet. Set
+        # under the lock BEFORE the put, so the main thread's own state (which
+        # takes the same lock) always lands after it and never under it; and only
+        # from an idle state, so a Restart does not hide a live one.
+        with self.state_lock:
+            state = self.state["state"]
+            live = state in ("queued", "stopping", "checking", "tearing down", "starting",
+                             "running", "exited")
+            if cmd == "start" and live:
+                return "busy (%s): use Restart or Stop" % state
+            if cmd == "check" and live:
+                return "stop the sounder first: the full check opens the radios"
+            if cmd in ("start", "restart") and not live:
+                self.state["state"] = "queued"
+            self.cmds.put((cmd, conf))
         return None
 
     def _kill(self):
@@ -1922,7 +1927,7 @@ async function pollCtl(){
     let t=st.state;
     if(st.state==='running') t+=' (pid '+st.pid+')';
     else if(st.state==='exited') t+=' rc '+st.rc;
-    if(st.attempt>1 && st.state!=='stopped') t+=', attempt '+st.attempt;
+    if(st.attempt>1 && st.state!=='stopped' && st.state!=='queued') t+=', attempt '+st.attempt;
     // A refused command is shown for a few seconds in place of the state line;
     // the next poll would otherwise overwrite it before it could be read.
     document.getElementById('ctl-state').textContent=(ctlMsg && Date.now()<ctlMsg.until)?ctlMsg.text
