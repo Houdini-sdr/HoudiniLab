@@ -357,6 +357,9 @@ add_test(NAME slot_align COMMAND slot_align_test)
 add_executable(clock_steer_test tests/comms-func/clock_steer_test.cc)
 target_include_directories(clock_steer_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 add_test(NAME clock_steer COMMAND clock_steer_test)
+add_executable(csi_average_test tests/comms-func/csi_average_test.cc)
+target_include_directories(csi_average_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_test(NAME csi_average COMMAND csi_average_test)
 
 # AP-79: nr_pss_bl's acquisition thresholds derived on a simulated link.
 add_executable(detection_calibration_test tests/comms-func/detection_calibration_test.cc)

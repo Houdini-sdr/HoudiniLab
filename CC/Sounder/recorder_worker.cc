@@ -27,6 +27,7 @@
 #include "include/macros.h"
 #include "include/rx_gap_sink.h"  // RxGapSink -> /Data/Gaps at finalize
 #include "include/utils.h"
+#include "include/houdini/csi_average.h"
 
 namespace Sounder {
 
@@ -299,24 +300,26 @@ void RecorderWorker::sendCsi(Packet* pkt) {
   const int es = symStart(d, slot);  // symbol-0 start (fixed prefix by default; sym_start knob)
   int s0 = nsym / 8, s1 = nsym - nsym / 8;
   if (s1 <= s0) { s0 = 0; s1 = nsym; }
-  std::vector<std::complex<float>> hacc(N, {0.0f, 0.0f});
-  int used = 0;
+  // Per-symbol estimates, averaged with each symbol's common rotation removed
+  // (AP-79 #5, houdini/csi_average.h); HOUDINI_CSI_NO_DEROTATE is the A/B.
+  static const bool derotate = std::getenv("HOUDINI_CSI_NO_DEROTATE") == nullptr;
+  std::vector<std::vector<std::complex<float>>> gs;
   for (int sym = s0; sym < s1; ++sym) {
     const int base = es + sym * (cp + N) + cp;
     if (base < 0) continue;  // a symbol whose body starts before the slot (AP-79 guard)
     if (base + N > slot) break;
     auto F = symbolFft(d, base);
-    for (int k = 0; k < N; ++k) {
-      hacc[k] += F[k] * std::conj(pilot_ref_[k]);
-    }
-    ++used;
+    for (int k = 0; k < N; ++k) F[k] *= std::conj(pilot_ref_[k]);
+    gs.push_back(std::move(F));
   }
+  const int used = static_cast<int>(gs.size());
+  const std::vector<std::complex<float>> hacc_avg = houdini::csi::derotatedAverage(gs, derotate);
   // Cache H per antenna (always -- keeps it fresh for equalizing this ant's data).
   auto& H = csi_h_[pkt->ant_id];
   H.assign(N, {0.0f, 0.0f});
   for (int k = 0; k < N; ++k) {
     const float pw = std::norm(pilot_ref_[k]);
-    if (pw > 1e-6f && used > 0) H[k] = hacc[k] / (static_cast<float>(used) * pw);
+    if (pw > 1e-6f && used > 0) H[k] = hacc_avg[k] / pw;
   }
   // Throttle the CSI datagram (H is cached above regardless).
   const long long now =
