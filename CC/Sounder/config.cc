@@ -155,14 +155,6 @@ Config::Config(const std::string& jsonfile, const std::string& directory,
         "tx_sample_rate must equal sample_rate or twice it (the x2 TX "
         "interpolator is the only one built)");
   }
-  if (tx_rate_ != rate_) {
-    // Guard until the x2 interpolator is wired into the TX path (AP-79, the
-    // next step removes this): without it the waveforms built at sample_rate
-    // would play at twice the speed and twice the bandwidth.
-    throw std::invalid_argument(
-        "tx_sample_rate != sample_rate is not wired yet: the x2 TX interpolator "
-        "is built and tested but not yet in the TX path (AP-79)");
-  }
   adc_fs_hz_ = tddConf.value("rfdc_adc_fs_mhz", 0.0) * 1e6;
   dac_fs_hz_ = tddConf.value("rfdc_dac_fs_mhz", 0.0) * 1e6;
   if ((adc_fs_hz_ > 0.0) != (dac_fs_hz_ > 0.0)) {
@@ -1134,9 +1126,11 @@ void Config::genPilots() {
 
   pilot_ = Utils::cint16_to_uint32(pilot_ci16_, false, "QI");
 
-  size_t remain_size =
-      kFpgaTxRamSize - pilot_.size();  // 4096 is the size of TX_RAM in the FPGA
-  for (size_t j = 0; j < remain_size; j++) pilot_.push_back(0);
+  // Pad to the Iris FPGA TX_RAM (4096 words). Only when the pilot is shorter:
+  // the unsigned difference underflowed for a longer slot (the AP-79 5G-like
+  // numerology's 61440-sample slot) and the loop then pushed zeros until the
+  // process ran out of memory. Houdini does not use this RAM image.
+  if (pilot_.size() < kFpgaTxRamSize) pilot_.resize(kFpgaTxRamSize, 0);
 #if DEBUG_PRINT
   for (size_t j = 0; j < pilot_ci16_.size(); j++) {
     std::cout << "Pilot[" << j << "]: \t " << pilot_ci16_.at(j) << std::endl;

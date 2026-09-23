@@ -429,10 +429,22 @@ void HoudiniFramer::armTdd(void) {
           std::min(static_cast<size_t>(k_tx) * n_load / 2, span_units));
       // The PL plays whole 8-unit beats (16 TX samples); the driver warns and
       // the RTL drops the tail of a non-multiple (software lane, 2026-09-22).
-      // Round up, but never past the loaded image (4096 TX samples = 2048
-      // units, itself a whole number of beats).
-      len_units = std::min(((len_units + 7) / 8) * 8,
-                           std::max<size_t>(8, (static_cast<size_t>(k_tx) * n_load / 2) / 8 * 8));
+      // Round up, but never past the loaded image nor past the window: a burst
+      // that overlaps the gate close is a GATED_DROPS case (fpga lane). The
+      // cap is whole beats, so rounding can only ever shorten into zeros.
+      const size_t cap = std::min(static_cast<size_t>(k_tx) * n_load / 2, span_units) / 8 * 8;
+      // The lead, the core AND the prefiltered interpolator's tail must play
+      // inside the window: a cut tail brings back the splatter the prefilter
+      // removes (review).
+      const size_t need = (static_cast<size_t>(k_tx) *
+                               static_cast<size_t>(beaconLeadTicks(cfg_) + cfg_->beacon_size() +
+                                                   beaconTailTicks(cfg_)) + 1) / 2;
+      if (need > cap) {
+        throw std::invalid_argument("Houdini beacon: " + std::to_string(need) +
+                                    " replay units do not fit the window (" + std::to_string(cap) +
+                                    " whole-beat units between the strobe offset and the slot end)");
+      }
+      len_units = std::min(((len_units + 7) / 8) * 8, cap);
         dev->writeSetting("TDD_REPLAY_STROBE",
                           "ch" + std::to_string(tx_ch) +
                               ":len=" + std::to_string(len_units) +

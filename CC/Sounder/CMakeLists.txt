@@ -325,6 +325,12 @@ add_executable(beacon_bandlimit_test tests/comms-func/beacon_bandlimit_test.cc)
 target_link_libraries(beacon_bandlimit_test houdini_sync -lpthread ${MUFFT_LIBRARIES})
 add_test(NAME beacon_bandlimit COMMAND beacon_bandlimit_test)
 
+# AP-79: CommsLib::FFT / IFFT on an input shorter than the transform (the
+# inherited code overran the heap there).
+add_executable(commslib_fft_test tests/comms-func/commslib_fft_test.cc)
+target_link_libraries(commslib_fft_test houdini_sync -lpthread ${MUFFT_LIBRARIES})
+add_test(NAME commslib_fft COMMAND commslib_fft_test)
+
 # The index-convention check AP-34(a) did not have. Links the real CommsLib so
 # it exercises the REAL detector; a replica would agree with itself.
 add_executable(beacon_geometry_test

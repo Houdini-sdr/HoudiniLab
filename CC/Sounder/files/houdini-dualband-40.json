@@ -1,6 +1,6 @@
 {
  "_comment": "AP-79 40 MHz rollback of the target (houdini-dualband.json) [user: 50 MHz target, 40 MHz rollback if the link at 50 disappoints on the bench]: sub-6 2400 to 2440 MHz at NCO 2420, 106 RB = 1272 subcarriers = 38.16 MHz. Everything else as the target.",
- "_status": "TARGET CONFIG, NOT YET RUNNABLE, and refused at load until it is: tx_sample_rate twice sample_rate is rejected until the x2 TX interpolator is wired into the TX path. Consumed today: rfdc_adc_fs_mhz, rfdc_dac_fs_mhz, channel_nco_frequency, houdini_tx/rx_gain_db (the mode-V bring-up, houdini/mode_v_bringup.h), fft_size 4096 and cp_size 288 (no longer clamped). Also in: the x2 TX interpolation at the radio boundary (bursts built in ticks), the RX channel filter per lane,. The band-limited beacon (nr_pss_bl) and the TX prefilter are in. Pending only the software lane's confirmation of the TDD_REPLAY_STROBE units at vld 2; the guard goes with it, and this note too.",
+ "_status": "RUNNABLE in software, NOT YET RUN on the rig (AP-79): every key is consumed, the TX interpolator, TX prefilter, RX channel filter and band-limited beacon are in, and the replay strobe contract at vld 2 is confirmed by the software and fpga lanes. Carried calibrations (tx_advance, corr_scale) are re-measured at the first run.",
  "serial_file": "files/topology-houdini-dualband.json",
  "radio_type": "houdini",
  "remote_port": "55132",

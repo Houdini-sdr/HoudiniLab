@@ -399,9 +399,12 @@ std::vector<size_t> CommsLib::getPilotScIndex(size_t fftSize, size_t DataScNum,
 }
 
 std::vector<std::complex<float>> CommsLib::IFFT(
-    const std::vector<std::complex<float>>& in, int fftSize, float scale,
+    const std::vector<std::complex<float>>& in_arg, int fftSize, float scale,
     bool normalize, bool fft_shift) {
-  std::vector<std::complex<float>> out(in.size());
+  // AP-79: fftSize points whatever the input length (see CommsLib::FFT).
+  std::vector<std::complex<float>> in(in_arg);
+  in.resize(static_cast<size_t>(fftSize), std::complex<float>(0.f, 0.f));
+  std::vector<std::complex<float>> out(static_cast<size_t>(fftSize));
 
   void* fft_in = mufft_alloc(fftSize * sizeof(std::complex<float>));
   void* fft_out = mufft_alloc(fftSize * sizeof(std::complex<float>));
@@ -440,8 +443,16 @@ std::vector<std::complex<float>> CommsLib::IFFT(
 }
 
 std::vector<std::complex<float>> CommsLib::FFT(
-    const std::vector<std::complex<float>>& in, int fftSize, bool fft_shift) {
-  std::vector<std::complex<float>> out(in.size());
+    const std::vector<std::complex<float>>& in_arg, int fftSize, bool fft_shift) {
+  // AP-79: the transform is fftSize points whatever the input length. The
+  // inherited code sized `out` to in.size() and memcpy'd fftSize samples in
+  // and out, so a shorter input (getPilotScValue passes ofdm_data_num samples
+  // against fft_size) overran both heap buffers: a crash at fft 256 / 96 data
+  // subcarriers and silent corruption at 4096 / 1596. Zero-pad or truncate to
+  // fftSize instead, which is the zero-padded transform the callers mean.
+  std::vector<std::complex<float>> in(in_arg);
+  in.resize(static_cast<size_t>(fftSize), std::complex<float>(0.f, 0.f));
+  std::vector<std::complex<float>> out(static_cast<size_t>(fftSize));
 
   void* fft_in = mufft_alloc(fftSize * sizeof(std::complex<float>));
   void* fft_out = mufft_alloc(fftSize * sizeof(std::complex<float>));
