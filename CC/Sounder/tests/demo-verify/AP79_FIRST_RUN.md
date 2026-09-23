@@ -46,7 +46,7 @@ ln -sfn ~/repos/HoudiniLab/CC/Sounder/mufft ~/repos/HoudiniLab-ap79/CC/Sounder/m
 source ~/houdini_test/bin/activate
 cd ~/repos/HoudiniLab-ap79/CC/Sounder && cmake -B build && cmake --build build -j"$(nproc)"
 ( cd build && ctest )                                   # all pass (16 at this writing) before any run
-strings build/sounder | grep -c "link health: baseline taken"   # 1 = this build, not a stale one
+strings build/sounder | grep -c "preflight before the post-activate clear"   # 1 = this build or later, not a stale one
 ```
 
 ## 2. Launch

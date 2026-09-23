@@ -123,7 +123,11 @@ inline std::map<size_t, std::string> chanList(const std::string& raw) {
   size_t p = 0;
   while (p < raw.size()) {
     const size_t e = std::min(raw.find(';', p), raw.size());
-    const std::string item = raw.substr(p, e - p);
+    std::string item = raw.substr(p, e - p);
+    // Whitespace around an item (a newline at the end, a space after ';')
+    // must not fail a healthy readback (review).
+    const size_t a = item.find_first_not_of(" \t\r\n"), b = item.find_last_not_of(" \t\r\n");
+    item = (a == std::string::npos) ? std::string() : item.substr(a, b - a + 1);
     const size_t c = item.find(':');
     if (item.rfind("ch", 0) == 0 && c != std::string::npos && c > 2)
       out[static_cast<size_t>(std::atoi(item.c_str() + 2))] = item.substr(c + 1);
@@ -291,8 +295,9 @@ inline Result bringUp(SoapySDR::Device& dev, const Plan& p) {
   res.snapshot = dev.readSetting("RFDC_SNAPSHOT");
   // NOT cleared here: the bring-up itself latches benign over-voltage and
   // common-mode flags on the streamed ADCs (SH-372 class), so the preflight is
-  // cleared after activate plus ~1 s and judged from there (software lane,
-  // SH-422 silicon check), by the link-health baseline (RadioHoudini).
+  // cleared once streaming (about 2 s after the first read) and judged from
+  // there (software lane, SH-422 silicon check), by the link-health baseline
+  // (RadioHoudini).
   return res;
 }
 
@@ -325,6 +330,27 @@ inline PostSetup postSetupCheck(SoapySDR::Device& dev, const Plan& p, const Resu
     return info;
   };
   for (const auto& t : r.tx) chan(SOAPY_SDR_TX, t.channel, "TX");
+  // The driver re-applies the zones and the inverse sinc at each tile's
+  // StartUp (inside the setups): read them again now that the tiles are up.
+  {
+    const auto tz = detail::chanList(dev.readSetting("RFDC_TX_NYQUIST_ZONE"));
+    const auto ti = detail::chanList(dev.readSetting("RFDC_TX_INVSINC"));
+    const auto rz = detail::chanList(dev.readSetting("RFDC_RX_NYQUIST_ZONE"));
+    for (const auto& t : r.tx) {
+      const auto a = tz.find(t.channel), b = ti.find(t.channel);
+      if (a == tz.end() || a->second != std::to_string(t.zone) || b == ti.end() ||
+          b->second != "zone" + std::to_string(t.zone))
+        throw std::runtime_error("mode V: TX ch" + std::to_string(t.channel) +
+                                 " zone/inverse sinc changed across the setups (wanted zone " + std::to_string(t.zone) + ")");
+    }
+    for (const auto& x : r.rx) {
+      const auto a = rz.find(x.channel);
+      if (a == rz.end() || a->second != std::to_string(x.zone))
+        throw std::runtime_error("mode V: RX ch" + std::to_string(x.channel) + " zone changed across the setups (wanted " +
+                                 std::to_string(x.zone) + ")");
+    }
+    ps.log.push_back("zones and inverse sinc re-read after the setups: as written");
+  }
   const std::string cal = dev.readSetting("RFDC_ADC_CAL");
   ps.log.push_back("RFDC_ADC_CAL after the setups -> " + cal);
   for (const auto& x : r.rx) {

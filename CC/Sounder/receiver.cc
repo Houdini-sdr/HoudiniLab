@@ -1569,7 +1569,11 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   // per-client array keeps its say, because the policy holds one value.
   const auto resyncScale = [this, tid](size_t retry) -> float {
     if (config_->num_cl_sdrs() > 1) {
-      return config_->corr_scale(tid) + static_cast<float>(retry);
+      // The per-client value, relaxed the same way and held at the policy's
+      // min_bar like the single-client path (AP-79 review).
+      houdini::sync::ThresholdPolicy p = config_->sync().detector.bar;
+      p.corr_scale = config_->corr_scale(tid);
+      return static_cast<float>(p.relaxed(static_cast<int>(retry)));
     }
     return static_cast<float>(
         config_->sync().detector.bar.relaxed(static_cast<int>(retry)));

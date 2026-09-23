@@ -303,6 +303,16 @@ int main() {
     check(pg.failures.size() == 1 && pg.failures[0] == "ADC0.1:FIFOUSRDAT_OF,FIFOUSRDAT_UF",
           "post-setup: a FAIL outside the known part is collected (informational until the post-activate clear)");
   }
+  {
+    using houdini::modev::detail::chanList;
+    using houdini::modev::detail::blockField;
+    const auto m = chanList(" ch0:1 ; ch2:2\n");
+    check(m.size() == 2 && m.at(0) == "1" && m.at(2) == "2", "chanList trims whitespace around items (a newline, a space after ';')");
+    const std::string cal = "0.0:dither=on,cal=mode1,cal_intent=mode1 12.1:cal=mode2";
+    check(blockField(cal, "0.0", "cal") == "mode1" && blockField(cal, "2.1", "cal").empty() &&
+              blockField(cal, "0.0", "cal_intent") == "mode1",
+          "blockField: cal= apart from cal_intent=, and '2.1' does not match inside '12.1' (a missing entry reads empty)");
+  }
   auto throwsRt = [](const std::function<void()>& fn) {
     try { fn(); } catch (const std::runtime_error&) { return true; }
     return false;

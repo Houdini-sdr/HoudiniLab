@@ -84,7 +84,8 @@ void RadioHoudini::logModeV(const std::string& label, const std::vector<std::str
 
 void RadioHoudini::writeModeVRecord(const std::string& label, SoapySDR::Device& dev,
                                     const houdini::modev::Result& r,
-                                    const houdini::modev::PostSetup& ps) {
+                                    const houdini::modev::PostSetup& ps, const std::string& failure) {
+ try {
   // The converter state this session ran with, beside the run (plan rule 5:
   // a capture carries its state). One file per node per bring-up, under
   // HOUDINI_DUMP_DIR (Utils::dumpPath). Best effort: a record that cannot be
@@ -104,7 +105,12 @@ void RadioHoudini::writeModeVRecord(const std::string& label, SoapySDR::Device& 
     return;
   }
   std::fprintf(f, "# %s mode-V session record\n", label.c_str());
-  for (const auto& kv : dev.getHardwareInfo()) std::fprintf(f, "hw %s=%s\n", kv.first.c_str(), kv.second.c_str());
+  if (!failure.empty()) std::fprintf(f, "RESULT: %s\n", failure.c_str());
+  try {
+    for (const auto& kv : dev.getHardwareInfo()) std::fprintf(f, "hw %s=%s\n", kv.first.c_str(), kv.second.c_str());
+  } catch (const std::exception& e) {
+    std::fprintf(f, "hw: getHardwareInfo failed: %s\n", e.what());
+  }
   std::fprintf(f, "## bring-up\n");
   for (const auto& l : r.log) std::fprintf(f, "%s\n", l.c_str());
   std::fprintf(f, "## after the setups\n");
@@ -112,6 +118,11 @@ void RadioHoudini::writeModeVRecord(const std::string& label, SoapySDR::Device& 
   std::fprintf(f, "## RFDC_SNAPSHOT (before the setups)\n%s\n", r.snapshot.c_str());
   std::fclose(f);
   MLPD_INFO("%s mode V: session record %s\n", label.c_str(), path.c_str());
+ } catch (const std::exception& e) {
+  // Best effort, never fatal: a record that cannot be written must not
+  // refuse a healthy radio (review).
+  MLPD_WARN("%s mode V: the session record could not be written: %s\n", label.c_str(), e.what());
+ }
 }
 
 houdini::modev::Plan RadioHoudini::modeVPlan(const RadioParams& p) {
@@ -151,15 +162,28 @@ RadioHoudini::RadioHoudini(const RadioParams& params,
                  mv == nullptr
                      ? std::function<void(SoapySDR::Device&)>()
                      : [mv, plan = modeVPlan(params), label = params.label](SoapySDR::Device& dev) {
-                         *mv = houdini::modev::bringUp(dev, plan);
+                         try {
+                           *mv = houdini::modev::bringUp(dev, plan);
+                         } catch (const std::exception& e) {
+                           // The failed bring-up is the run most worth a record.
+                           writeModeVRecord(label, dev, *mv, houdini::modev::PostSetup{},
+                                            std::string("bring-up FAILED: ") + e.what());
+                           throw;
+                         }
                          logModeV(label, mv->log);
                        },
                  mv == nullptr
                      ? std::function<void(SoapySDR::Device&)>()
                      : [mv, plan = modeVPlan(params), label = params.label](SoapySDR::Device& dev) {
-                         const auto ps = houdini::modev::postSetupCheck(dev, plan, *mv);
+                         houdini::modev::PostSetup ps;
+                         try {
+                           ps = houdini::modev::postSetupCheck(dev, plan, *mv);
+                         } catch (const std::exception& e) {
+                           writeModeVRecord(label, dev, *mv, ps, std::string("post-setup check FAILED: ") + e.what());
+                           throw;
+                         }
                          logModeV(label, ps.log);
-                         writeModeVRecord(label, dev, *mv, ps);
+                         writeModeVRecord(label, dev, *mv, ps, "");
                        }),
       mode_v_(std::move(mv)) {
   if (params.tx_rate_hz > 0.0 && params.tx_rate_hz != params.rate_hz) {
@@ -235,9 +259,24 @@ void RadioHoudini::healthLoop(double period_s) {
   const std::string label = params_.label;
   try {
     // The bring-up latches benign ADC flags (SH-372 class): clear them now
-    // that the group is up and active, so the baseline and every later
-    // verdict describe this session (software lane, SH-422 silicon check).
-    dev_->writeSetting("RFDC_PREFLIGHT", "clear");
+    // that the group is up and active (about 2 s after the first read), so
+    // the baseline and every later verdict describe this session (software
+    // lane, SH-422 silicon check). What is latched is logged first, so the
+    // clear erases nothing without a trace. The driver REFUSES the clear when
+    // a judged bit is still set after it (level-asserted, re-latched, or new):
+    // that refusal names the bits, so it is logged and the baseline is taken
+    // anyway rather than stopping the monitor (review).
+    {
+      const std::string before = dev_->readSetting("RFDC_PREFLIGHT");
+      MLPD_INFO("%s link health: preflight before the post-activate clear: %s\n", label.c_str(),
+                before.substr(0, before.find('\n')).c_str());
+      try {
+        dev_->writeSetting("RFDC_PREFLIGHT", "clear");
+      } catch (const std::exception& e) {
+        MLPD_WARN("%s link health: the preflight clear was refused (a bit still set after it): %s\n",
+                  label.c_str(), e.what());
+      }
+    }
     houdini::health::LinkHealth h([this](const std::string& k) { return dev_->readSetting(k); }, label);
     std::string at_start;
     for (const auto& f : h.baselineFailures()) at_start += (at_start.empty() ? "" : "; ") + f;
