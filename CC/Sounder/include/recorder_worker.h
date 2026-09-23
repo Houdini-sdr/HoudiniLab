@@ -76,6 +76,7 @@ class RecorderWorker {
   bool csi_phase_fix_ = false;
   std::unordered_map<uint32_t, long long> csi_last_ns_;   // CSI (pilot) send timer
   std::unordered_map<uint32_t, long long> cns_last_ns_;   // constellation send timer
+  std::unordered_map<uint32_t, uint32_t> csi_h_frame_;    // frame whose pilot the cached H came from
   std::unordered_map<uint32_t, long long> adc_last_ns_;   // raw-ADC envelope send timer
   // Slots refused because the RX path had zero-padded a dropped-packet gap into them
   // (AP-10), plus a throttle so the warning cannot flood a lossy run.

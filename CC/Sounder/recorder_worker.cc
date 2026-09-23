@@ -193,8 +193,20 @@ void RecorderWorker::streamCsi(Packet* pkt, NodeType node_type) {
   // Saturation on the OTHER slots still has to be caught, so peak and clip counts are
   // accumulated over every slot and ride along with the pilot's envelope.
   sendAdc(pkt, is_pilot);
+  // H is estimated only for a pilot whose H will be USED: the CSI datagram
+  // and the constellation are both throttled to csi_throttle_ns_, so an H for
+  // every other pilot was computed and thrown away. At R3 (14 FFTs of 4096 per
+  // pilot, 0.42 ms each on the host's slow cores) that alone saturated the
+  // recorder with two antennas and crashed the run (AP-79 R3).
   if (is_pilot) {
-    sendCsi(pkt);
+    const long long now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                              std::chrono::steady_clock::now().time_since_epoch())
+                              .count();
+    auto due = [&](const std::unordered_map<uint32_t, long long>& last) {
+      auto it = last.find(pkt->ant_id);
+      return it == last.end() || (now - it->second) >= static_cast<long long>(csi_throttle_ns_);
+    };
+    if (due(csi_last_ns_) || due(cns_last_ns_)) sendCsi(pkt);
   } else if (cfg_->isUlData(pkt->cell_id, radio_id, pkt->slot_id)) {
     sendConstellation(pkt);
   }
@@ -318,6 +330,7 @@ void RecorderWorker::sendCsi(Packet* pkt) {
   const std::vector<std::complex<float>> hacc_avg = houdini::csi::derotatedAverage(gs, derotate);
   // Cache H per antenna (always -- keeps it fresh for equalizing this ant's data).
   auto& H = csi_h_[pkt->ant_id];
+  csi_h_frame_[pkt->ant_id] = pkt->frame_id;
   H.assign(N, {0.0f, 0.0f});
   for (int k = 0; k < N; ++k) {
     const float pw = std::norm(pilot_ref_[k]);
@@ -412,6 +425,10 @@ void RecorderWorker::sendCsi(Packet* pkt) {
 void RecorderWorker::sendConstellation(Packet* pkt) {
   auto hit = csi_h_.find(pkt->ant_id);
   if (hit == csi_h_.end() || hit->second.empty()) return;  // no CSI yet
+  // Equalize only with THIS frame's pilot: if its H was not computed (the
+  // throttle skipped it), wait for the next frame rather than use a stale H.
+  auto hf = csi_h_frame_.find(pkt->ant_id);
+  if (hf == csi_h_frame_.end() || hf->second != pkt->frame_id) return;
   const long long now =
       std::chrono::duration_cast<std::chrono::nanoseconds>(
           std::chrono::steady_clock::now().time_since_epoch())

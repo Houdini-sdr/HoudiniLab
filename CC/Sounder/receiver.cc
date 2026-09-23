@@ -442,7 +442,14 @@ void* Receiver::loopRecv_launch(void* in_context) {
   auto core_id = context->core_id;
   auto buffer = context->buffer;
   delete context;
-  me->loopRecv(tid, core_id, buffer);
+  // As clientTxRx_launch: an exception escaping the start routine terminates
+  // without unwinding (AP-79 R3: "buffer full" took the run down, no teardown).
+  try {
+    me->loopRecv(tid, core_id, buffer);
+  } catch (const std::exception& e) {
+    MLPD_ERROR("BS receive thread %d stopped by an exception: %s\n", tid, e.what());
+    me->config_->running(false);
+  }
   return 0;
 }
 
