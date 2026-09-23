@@ -503,8 +503,15 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
   long long ft = 0;
   // AP-79: this capture is continuous and only its P/U slots are used, so the
   // channel filter runs on the extracted slots below, not on the whole read.
+  // NB the framer's own decisions below (the energy search, the presence gate,
+  // the P/U tagging, the LTS check, align_slot) therefore run on the RAW lane,
+  // which in mode V carries the channel's 0 dBc real-sampling mirror (AP-79
+  // review): untested at mode V, to be watched on the first run.
+  // HOUDINI_BS_FILTER_WHOLE=1 filters the whole capture again (the pre-change
+  // behaviour, about 1.3x real time at R1) for an A/B if frames are rejected.
+  static const bool filter_whole = std::getenv("HOUDINI_BS_FILTER_WHOLE") != nullptr;
   auto* hr = dynamic_cast<RadioHoudini*>(r);
-  if (hr != nullptr) hr->setRecvFilter(false);
+  if (hr != nullptr) hr->setRecvFilter(filter_whole);
   const int cg = r->recv(cb.data(), fn, ft);
   // This one read backs every rx slot of the frame, so its padding applies to all of
   // them; latch it before any later recv on this radio overwrites the radio's copy.
@@ -693,7 +700,7 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
     for (size_t c = 0; c < C; ++c) {
       const int16_t* sc = htdd_cap_buf_.data() + c * static_cast<size_t>(fn) * 2;
       int16_t* dst = htdd_slot_cache_.data() + (k * C + c) * static_cast<size_t>(n) * 2;
-      if (hr != nullptr && hr->rxLaneFiltered(c)) {
+      if (hr != nullptr && !filter_whole && hr->rxLaneFiltered(c)) {
         // The slot through the channel filter, with the capture around it as
         // context: exactly what filtering the whole capture would give here.
         hr->filterRxSlice(sc, static_cast<size_t>(cg), static_cast<size_t>(st), static_cast<size_t>(n), dst);

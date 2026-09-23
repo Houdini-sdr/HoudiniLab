@@ -322,6 +322,13 @@ int main(int argc, char** argv) {
               a.provenanceOf("detector.corr_scale_init") == Source::kDerived &&
               a.detector.bar.relaxed(3) == 28.0,
           "legacy corr_scale: first client's value lands (json), init follows it (derived), relaxed() adds the retry");
+    {
+      houdini::sync::ThresholdPolicy b;
+      b.corr_scale = 5.0;
+      b.min_bar = 0.1;
+      check(b.relaxed(0) == 5.0 && b.relaxed(3) == 8.0 && b.relaxed(5) == 10.0 && b.relaxed(100) == 10.0,
+            "min_bar 0.1 stops the retry relaxation at corr_scale 10 (bar 0.1); unset, the ladder is unchanged");
+    }
     // The sounder's fallback for an ABSENT corr_scale is 1, and it is
     // recorded as derived, not left at the library's 10 (round 4, HIGH 4).
     const auto none = SyncConfig::loadFromText("{}");

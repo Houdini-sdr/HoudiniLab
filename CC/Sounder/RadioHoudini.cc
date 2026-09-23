@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <cstring>
 #include <iostream>
 #include <set>
@@ -71,6 +72,48 @@ SoapySDR::Kwargs RadioHoudini::txStreamArgs(const RadioParams& p) {
   return tx;
 }
 
+void RadioHoudini::logModeV(const std::string& label, const std::vector<std::string>& lines) {
+  for (const auto& entry : lines) {
+    if (entry.rfind("WARNING", 0) == 0) {
+      MLPD_WARN("%s mode V: %s\n", label.c_str(), entry.c_str());
+    } else {
+      MLPD_INFO("%s mode V: %s\n", label.c_str(), entry.c_str());
+    }
+  }
+}
+
+void RadioHoudini::writeModeVRecord(const std::string& label, SoapySDR::Device& dev,
+                                    const houdini::modev::Result& r,
+                                    const houdini::modev::PostSetup& ps) {
+  // The converter state this session ran with, beside the run (plan rule 5:
+  // a capture carries its state). One file per node per bring-up, under
+  // HOUDINI_DUMP_DIR (Utils::dumpPath). Best effort: a record that cannot be
+  // written is warned about, never fatal.
+  std::string tag = label;
+  for (auto& ch : tag)
+    if (ch == ' ' || ch == '.' || ch == '/') ch = '_';
+  const std::time_t now = std::time(nullptr);
+  char stamp[32];
+  std::strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", std::localtime(&now));
+  const std::string name = "modev_" + tag + "_" + stamp + ".txt";
+  const std::string path = Utils::dumpPath(name.c_str());
+  FILE* f = std::fopen(path.c_str(), "w");
+  if (f == nullptr) {
+    MLPD_WARN("%s mode V: cannot write the session record %s (%s)\n", label.c_str(), path.c_str(),
+              std::strerror(errno));
+    return;
+  }
+  std::fprintf(f, "# %s mode-V session record\n", label.c_str());
+  for (const auto& kv : dev.getHardwareInfo()) std::fprintf(f, "hw %s=%s\n", kv.first.c_str(), kv.second.c_str());
+  std::fprintf(f, "## bring-up\n");
+  for (const auto& l : r.log) std::fprintf(f, "%s\n", l.c_str());
+  std::fprintf(f, "## after the setups\n");
+  for (const auto& l : ps.log) std::fprintf(f, "%s\n", l.c_str());
+  std::fprintf(f, "## RFDC_SNAPSHOT (before the setups)\n%s\n", r.snapshot.c_str());
+  std::fclose(f);
+  MLPD_INFO("%s mode V: session record %s\n", label.c_str(), path.c_str());
+}
+
 houdini::modev::Plan RadioHoudini::modeVPlan(const RadioParams& p) {
   houdini::modev::Plan m;
   m.tx_channels = p.tx_channels;
@@ -109,13 +152,14 @@ RadioHoudini::RadioHoudini(const RadioParams& params,
                      ? std::function<void(SoapySDR::Device&)>()
                      : [mv, plan = modeVPlan(params), label = params.label](SoapySDR::Device& dev) {
                          *mv = houdini::modev::bringUp(dev, plan);
-                         for (const auto& entry : mv->log) {
-                           if (entry.rfind("WARNING", 0) == 0) {
-                             MLPD_WARN("%s mode V: %s\n", label.c_str(), entry.c_str());
-                           } else {
-                             MLPD_INFO("%s mode V: %s\n", label.c_str(), entry.c_str());
-                           }
-                         }
+                         logModeV(label, mv->log);
+                       },
+                 mv == nullptr
+                     ? std::function<void(SoapySDR::Device&)>()
+                     : [mv, plan = modeVPlan(params), label = params.label](SoapySDR::Device& dev) {
+                         const auto ps = houdini::modev::postSetupCheck(dev, plan, *mv);
+                         logModeV(label, ps.log);
+                         writeModeVRecord(label, dev, *mv, ps);
                        }),
       mode_v_(std::move(mv)) {
   if (params.tx_rate_hz > 0.0 && params.tx_rate_hz != params.rate_hz) {
@@ -190,6 +234,10 @@ void RadioHoudini::healthLoop(double period_s) {
   if (!wait(2.0)) return;  // let the streams settle before the baseline
   const std::string label = params_.label;
   try {
+    // The bring-up latches benign ADC flags (SH-372 class): clear them now
+    // that the group is up and active, so the baseline and every later
+    // verdict describe this session (software lane, SH-422 silicon check).
+    dev_->writeSetting("RFDC_PREFLIGHT", "clear");
     houdini::health::LinkHealth h([this](const std::string& k) { return dev_->readSetting(k); }, label);
     std::string at_start;
     for (const auto& f : h.baselineFailures()) at_start += (at_start.empty() ? "" : "; ") + f;
@@ -408,9 +456,11 @@ int RadioHoudini::recv(void* const* buffs, int samples, long long& frameTime) {
   }
   // AP-79: the lanes whose channel's mirror lands in the output get the
   // +-25 MHz channel filter before any consumer (detector, CFO, framer, CSI)
-  // sees them. Every Houdini read comes through here, and the window dump
-  // below shows the filtered samples, the ones the detector sees. NB the RX
-  // PROFILE's "read" time now includes this filter (review).
+  // sees them. On the UE every read is filtered here and the window dump below
+  // shows the filtered samples, the ones the detector sees. On the BS the
+  // framer turns this off and filters the slots it extracts instead
+  // (HoudiniFramer::rx), so there the dump shows the RAW capture. The RX
+  // PROFILE's "read" time includes this filter (review).
   if (rx_filters_ != nullptr && recv_filter_ && got > 0) {
     rx_filters_->apply(buffs, num_rx_ch_, static_cast<size_t>(got));
   }

@@ -37,6 +37,8 @@
 
 #include <cmath>
 #include <cstdio>
+#include <tuple>
+#include <cstdlib>
 #include <limits>
 #include <map>
 #include <stdexcept>
@@ -104,6 +106,49 @@ inline std::string join(const std::vector<std::string>& v) {
   for (const auto& x : v) s += (s.empty() ? "" : ";") + x;
   return s;
 }
+/// RFDC_ADC_FS / RFDC_DAC_FS: '0:fs=4915.200,max=.. 2:fs=4915.200,..' (MHz,
+/// one entry per tile; the DAC's `mode=DUC(0->Fs/2) IQ-in` has spaces, so
+/// only the `fs=` fields are read). Every tile's fs, in MHz.
+inline std::vector<double> fsValuesMhz(const std::string& raw) {
+  std::vector<double> out;
+  for (size_t p = raw.find("fs="); p != std::string::npos; p = raw.find("fs=", p + 3)) {
+    if (p > 0 && raw[p - 1] != ':' && raw[p - 1] != ',') continue;  // not e.g. queried_max... (safety)
+    out.push_back(std::atof(raw.c_str() + p + 3));
+  }
+  return out;
+}
+/// 'ch0:1;ch1:2' (zones, inverse sinc) -> {0: "1", 1: "2"}.
+inline std::map<size_t, std::string> chanList(const std::string& raw) {
+  std::map<size_t, std::string> out;
+  size_t p = 0;
+  while (p < raw.size()) {
+    const size_t e = std::min(raw.find(';', p), raw.size());
+    const std::string item = raw.substr(p, e - p);
+    const size_t c = item.find(':');
+    if (item.rfind("ch", 0) == 0 && c != std::string::npos && c > 2)
+      out[static_cast<size_t>(std::atoi(item.c_str() + 2))] = item.substr(c + 1);
+    p = e + 1;
+  }
+  return out;
+}
+/// One field of one block of RFDC_ADC_CAL '0.0:dither=on,cal=mode2,.. 0.1:..':
+/// the value of `key` in the entry for `addr` ("<tile>.<block>"), or "".
+inline std::string blockField(const std::string& raw, const std::string& addr, const std::string& key) {
+  size_t p = raw.find(addr + ":");
+  while (p != std::string::npos && p > 0 && raw[p - 1] != ' ') p = raw.find(addr + ":", p + 1);
+  if (p == std::string::npos) return "";
+  const size_t end = std::min(raw.find(' ', p), raw.size());
+  const std::string entry = raw.substr(p + addr.size() + 1, end - p - addr.size() - 1);
+  size_t q = 0;
+  while (q < entry.size()) {
+    const size_t e = std::min(entry.find(',', q), entry.size());
+    const std::string kv = entry.substr(q, e - q);
+    if (kv.rfind(key + "=", 0) == 0) return kv.substr(key.size() + 1);
+    q = e + 1;
+  }
+  return "";
+}
+
 inline void expectNear(const char* what, size_t ch, double got, double want, double tol) {
   if (!(std::fabs(got - want) <= tol)) {
     char b[160];
@@ -149,10 +194,21 @@ inline Result bringUp(SoapySDR::Device& dev, const Plan& p) {
   const size_t n_tx = dev.getNumChannels(SOAPY_SDR_TX), n_rx = dev.getNumChannels(SOAPY_SDR_RX);
   for (size_t ch = 0; ch < n_tx; ++ch) dev.setSampleRate(SOAPY_SDR_TX, ch, p.tx_rate_hz);
   dev.writeSetting("RFDC_DAC_FS", fmt("%.4f", p.dac_fs_hz / 1e6));
-  logLine("RFDC_DAC_FS -> " + dev.readSetting("RFDC_DAC_FS"));
+  const std::string dac_fs = dev.readSetting("RFDC_DAC_FS");
+  logLine("RFDC_DAC_FS -> " + dac_fs);
   // 3
   dev.writeSetting("RFDC_ADC_FS", fmt("%.4f", p.adc_fs_hz / 1e6));
-  logLine("RFDC_ADC_FS -> " + dev.readSetting("RFDC_ADC_FS"));
+  const std::string adc_fs = dev.readSetting("RFDC_ADC_FS");
+  logLine("RFDC_ADC_FS -> " + adc_fs);
+  // Every tile must read the Fs written (plan 3.1: "readback must equal"): a
+  // discarded or re-picked Fs would change every decimation, zone and alias.
+  for (const auto& [raw, want, what] : {std::tuple<std::string, double, const char*>{dac_fs, p.dac_fs_hz, "RFDC_DAC_FS"},
+                                        {adc_fs, p.adc_fs_hz, "RFDC_ADC_FS"}}) {
+    const auto v = detail::fsValuesMhz(raw);
+    bool ok = !v.empty();
+    for (double f : v) ok = ok && std::fabs(f - want / 1e6) < 1e-3;
+    if (!ok) throw std::runtime_error(std::string("mode V bring-up: ") + what + " reads '" + raw + "', wanted " + fmt("%.3f", want / 1e6) + " MHz on every tile");
+  }
   for (size_t ch = 0; ch < n_rx; ++ch) dev.setSampleRate(SOAPY_SDR_RX, ch, p.rx_rate_hz);
   for (const auto& t : res.tx)
     detail::expectNear("TX rate", t.channel, dev.getSampleRate(SOAPY_SDR_TX, t.channel), p.tx_rate_hz, 1.0);
@@ -167,8 +223,19 @@ inline Result bringUp(SoapySDR::Device& dev, const Plan& p) {
     }
     dev.writeSetting("RFDC_TX_NYQUIST_ZONE", detail::join(z));
     dev.writeSetting("RFDC_TX_INVSINC", detail::join(s));
-    logLine("RFDC_TX_NYQUIST_ZONE " + detail::join(z) + " -> " + dev.readSetting("RFDC_TX_NYQUIST_ZONE"));
-    logLine("RFDC_TX_INVSINC " + detail::join(s) + " -> " + dev.readSetting("RFDC_TX_INVSINC"));
+    const std::string tz = dev.readSetting("RFDC_TX_NYQUIST_ZONE"), ti = dev.readSetting("RFDC_TX_INVSINC");
+    logLine("RFDC_TX_NYQUIST_ZONE " + detail::join(z) + " -> " + tz);
+    logLine("RFDC_TX_INVSINC " + detail::join(s) + " -> " + ti);
+    // The zone must read back, and the inverse sinc resolves `zone` to the
+    // block's zone: 'zone<k>' (software lane's reader).
+    const auto tzm = detail::chanList(tz), tim = detail::chanList(ti);
+    for (const auto& t : res.tx) {
+      const auto a = tzm.find(t.channel), b = tim.find(t.channel);
+      if (a == tzm.end() || a->second != std::to_string(t.zone))
+        throw std::runtime_error("mode V bring-up: RFDC_TX_NYQUIST_ZONE reads '" + tz + "', wanted ch" + std::to_string(t.channel) + ":" + std::to_string(t.zone));
+      if (b == tim.end() || b->second != "zone" + std::to_string(t.zone))
+        throw std::runtime_error("mode V bring-up: RFDC_TX_INVSINC reads '" + ti + "', wanted ch" + std::to_string(t.channel) + ":zone" + std::to_string(t.zone));
+    }
   }
   if (!res.rx.empty()) {
     std::vector<std::string> z, c;
@@ -177,7 +244,14 @@ inline Result bringUp(SoapySDR::Device& dev, const Plan& p) {
       c.push_back("ch" + std::to_string(r.channel) + ":cal=mode" + std::to_string(r.cal_mode));
     }
     dev.writeSetting("RFDC_RX_NYQUIST_ZONE", detail::join(z));
-    logLine("RFDC_RX_NYQUIST_ZONE " + detail::join(z) + " -> " + dev.readSetting("RFDC_RX_NYQUIST_ZONE"));
+    const std::string rz = dev.readSetting("RFDC_RX_NYQUIST_ZONE");
+    logLine("RFDC_RX_NYQUIST_ZONE " + detail::join(z) + " -> " + rz);
+    const auto rzm = detail::chanList(rz);
+    for (const auto& r : res.rx) {
+      const auto a = rzm.find(r.channel);
+      if (a == rzm.end() || a->second != std::to_string(r.zone))
+        throw std::runtime_error("mode V bring-up: RFDC_RX_NYQUIST_ZONE reads '" + rz + "', wanted ch" + std::to_string(r.channel) + ":" + std::to_string(r.zone));
+    }
     // 5
     dev.writeSetting("RFDC_ADC_CAL", detail::join(c));
     logLine("RFDC_ADC_CAL " + detail::join(c) + " -> " + dev.readSetting("RFDC_ADC_CAL"));
@@ -215,7 +289,81 @@ inline Result bringUp(SoapySDR::Device& dev, const Plan& p) {
             (r.channel_filter ? ", +-25 MHz channel filter ON" : ", no channel filter"));
   // 8
   res.snapshot = dev.readSetting("RFDC_SNAPSHOT");
+  // NOT cleared here: the bring-up itself latches benign over-voltage and
+  // common-mode flags on the streamed ADCs (SH-372 class), so the preflight is
+  // cleared after activate plus ~1 s and judged from there (software lane,
+  // SH-422 silicon check), by the link-health baseline (RadioHoudini).
   return res;
+}
+
+/// What the check after the LAST setupStream found (the MTS sync runs inside
+/// each mts=true setup, so the group's state is final here, before activate).
+struct PostSetup {
+  std::vector<std::string> log;
+  std::string preflight;              ///< the verdict's first line
+  std::vector<std::string> failures;  ///< FAIL items outside the known part
+  std::string irq_count;
+};
+
+/// After the setups, before activate: every opened channel MTS-synced (the
+/// device also refuses to activate an unsynced group; this names it first),
+/// its latency T1 recorded; each RX channel's calibration mode as the tile
+/// started it (SH-420: `cal=` is valid right after the setups); the preflight
+/// verdict and the interrupt count. Throws on an unsynced channel or a wrong
+/// calibration mode.
+inline PostSetup postSetupCheck(SoapySDR::Device& dev, const Plan& p, const Result& r) {
+  PostSetup ps;
+  auto chan = [&](int dir, size_t ch, const char* tag) {
+    const auto info = dev.getChannelInfo(dir, ch);
+    auto get = [&info](const char* k) { const auto it = info.find(k); return it == info.end() ? std::string() : it->second; };
+    const std::string synced = get("rfdc_mts_synced"), t1 = get("rfdc_mts_latency");
+    ps.log.push_back(std::string(tag) + " ch" + std::to_string(ch) + ": " + get("rfdc_label") + " mts_synced=" +
+                     (synced.empty() ? "?" : synced) + " T1=" + (t1.empty() ? "-" : t1));
+    if (synced != "1")
+      throw std::runtime_error("mode V: " + std::string(tag) + " ch" + std::to_string(ch) +
+                               " is not MTS-synced after the setups (rfdc_mts_synced=" + synced + ")");
+    return info;
+  };
+  for (const auto& t : r.tx) chan(SOAPY_SDR_TX, t.channel, "TX");
+  const std::string cal = dev.readSetting("RFDC_ADC_CAL");
+  ps.log.push_back("RFDC_ADC_CAL after the setups -> " + cal);
+  for (const auto& x : r.rx) {
+    const auto info = chan(SOAPY_SDR_RX, x.channel, "RX");
+    const auto ti = info.find("rfdc_tile_index"), bl = info.find("rfdc_block");
+    if (ti == info.end() || bl == info.end()) continue;
+    const std::string addr = ti->second + "." + bl->second;
+    const std::string mode = detail::blockField(cal, addr, "cal");
+    if (mode.empty()) {
+      ps.log.push_back("WARNING: RFDC_ADC_CAL has no entry for " + addr + " (RX ch" + std::to_string(x.channel) + "); calibration mode not verified");
+    } else if (mode != "mode" + std::to_string(x.cal_mode)) {
+      throw std::runtime_error("mode V: RX ch" + std::to_string(x.channel) + " (ADC " + addr + ") runs cal=" + mode +
+                               ", wanted mode" + std::to_string(x.cal_mode));
+    }
+  }
+  (void)p;
+  const std::string pf = dev.readSetting("RFDC_PREFLIGHT");
+  ps.preflight = pf.substr(0, pf.find('\n'));
+  if (ps.preflight.rfind("FAIL ", 0) == 0) {
+    std::string body = ps.preflight.substr(5);
+    const size_t k = body.find(" known ");
+    if (k != std::string::npos) body = body.substr(0, k);
+    size_t q = 0;
+    while (q <= body.size()) {
+      const size_t e = std::min(body.find(';', q), body.size());
+      if (e > q) ps.failures.push_back(body.substr(q, e - q));
+      q = e + 1;
+    }
+  }
+  ps.irq_count = dev.readSetting("RFDC_INTR_FIRE_COUNT");
+  ps.log.push_back("RFDC_PREFLIGHT after the setups -> " + ps.preflight);
+  ps.log.push_back("RFDC_INTR_FIRE_COUNT -> " + ps.irq_count);
+  // Informational at this point: the bring-up latches benign flags (SH-372
+  // class) that read FAIL until cleared after activate. The judged verdict is
+  // the link-health baseline, taken after that clear.
+  if (!ps.failures.empty())
+    ps.log.push_back("preflight items latched by the bring-up (cleared after activate, then judged): " +
+                     std::to_string(ps.failures.size()));
+  return ps;
 }
 
 }  // namespace modev

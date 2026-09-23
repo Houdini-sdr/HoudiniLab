@@ -48,6 +48,7 @@
  */
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <limits>
@@ -101,8 +102,17 @@ struct BeaconConfig {
 struct ThresholdPolicy {
   double corr_scale = 10.0;       ///< resync bar = 1 / corr_scale
   double corr_scale_init = 10.0;  ///< acquisition bar = 1 / corr_scale_init
+  /// The lowest bar the retry relaxation may reach; 0 = no limit (the ladder
+  /// as it always ran). The +1-per-retry ladder was sized for corr_scale 100,
+  /// where it moves the bar 1% a retry; at a small corr_scale (5, the
+  /// band-limited beacon's) it moves it 20% a retry and walks into the noise
+  /// within ~15 retries (AP-79 review), so such a config sets this.
+  double min_bar = 0.0;
   /// The scale to apply at resync attempt `attempt` (0 = first look).
-  double relaxed(int attempt) const { return corr_scale + static_cast<double>(attempt); }
+  double relaxed(int attempt) const {
+    const double s = corr_scale + static_cast<double>(attempt);
+    return (min_bar > 0.0) ? std::min(s, 1.0 / min_bar) : s;
+  }
   /// The bar for the coherence form at `replica_len` taps and a per-window
   /// false-alarm probability over `window_samples` (8.163): a pure-noise
   /// window's coherence against an L-tap replica is Beta(1, L-1), so

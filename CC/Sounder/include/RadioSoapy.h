@@ -56,7 +56,8 @@ class RadioSoapy : public Radio {
              const SoapySDR::Kwargs& rxStreamArgs, const SoapySDR::Kwargs& txStreamArgs,
              double preStreamRxRate, double preStreamTxRate, double preStreamFreq,
              bool houdini_streams,
-             const std::function<void(SoapySDR::Device&)>& preStream = nullptr);
+             const std::function<void(SoapySDR::Device&)>& preStream = nullptr,
+             const std::function<void(SoapySDR::Device&)>& postStream = nullptr);
   bool isUhd() const { return type_ == Type::kSoapyUhd; }
   Type type_;
 

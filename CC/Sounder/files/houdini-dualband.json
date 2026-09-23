@@ -50,7 +50,8 @@
    "tx_full_scale": 0.34
   },
   "detector": {
-   "pick": "argmax"
+   "pick": "argmax",
+   "min_bar": 0.1
   },
   "confirm": {
    "snr_floor_db": 25.0
@@ -58,7 +59,7 @@
  },
  "max_frame": 2000,
  "beamsweep": false,
- "_carried_note": "tx_advance 247 is carried from the 122.88/NCO-500 bench and must be RE-MEASURED at mode V. The detection thresholds are DERIVED for nr_pss_bl on a simulated link (tests/comms-func/detection_calibration_test.cc): corr_scale 5 (coherence bar 0.2; noise-only max 0.080 of 400 windows, a beacon 30 dB under bench level 0.90), snr_floor_db 25 (legacy's 30 shifted by the measured -5.2 dB for this beacon at 0.34 peak on the filtered lane, 16.6 dB margin). ue_pilot_horizon counts FRAMES.",
+ "_carried_note": "tx_advance 247 is carried from the 122.88/NCO-500 bench and must be RE-MEASURED at mode V. The detection thresholds are DERIVED for nr_pss_bl on a simulated link (tests/comms-func/detection_calibration_test.cc): corr_scale 5 (coherence bar 0.2; noise-only max 0.080 of 400 windows, a beacon 30 dB under bench level 0.90), snr_floor_db 25 (legacy's 30 shifted by the measured -5.2 dB for this beacon at 0.34 peak on the filtered lane, 16.6 dB margin). detector.min_bar 0.1 stops the resync retry relaxation (+1 on corr_scale per retry) from walking the bar into the noise (at corr_scale 5 it moves it 20% a retry). ue_pilot_horizon counts FRAMES.",
  "tx_advance": [
   247
  ],

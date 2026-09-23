@@ -277,13 +277,11 @@ class ChannelFilter {
       for (long i = lo; i <= hi; ++i) acc += taps_[static_cast<size_t>(i - k + h)] * in[i];
       out[k - k0] = acc;
     };
+    // The two loops cover every output outside [i0, i1). When the signal is
+    // shorter than the support (i0 >= i1) they can overlap; an output computed
+    // twice is written with the same value, so that is harmless.
     for (long k = k0; k < std::min(k1, i0); ++k) edge(k);
     for (long k = std::max(k0, i1); k < k1; ++k) edge(k);
-    // (when the range is shorter than the support, i0 >= i1 and every output
-    // is an edge; the two loops then cover [k0, k1) without overlap)
-    if (i0 >= i1) {
-      for (long k = std::max(k0, std::min(k1, i0)); k < std::min(k1, std::max(k0, i1)); ++k) edge(k);
-    }
   }
 
  private:

@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <functional>
 #include <map>
 #include <string>
 #include <vector>
@@ -45,6 +46,13 @@ class FakeDevice : public SoapySDR::Device {
   Lines calls;
   double nco_error_hz = 0.0;   ///< added to every NCO readback
   bool drop_gain = false;      ///< gain readback stays at the make() default
+  // Mutants of the device's behaviour, to prove each readback check fires.
+  bool discard_adc_fs = false;   ///< ADC Fs reads the make() default 1228.8
+  bool revert_rx_zone = false;   ///< RX zones read back all 1
+  bool invsinc_off = false;      ///< inverse sinc reads off
+  bool unsynced = false;         ///< channels report rfdc_mts_synced=0
+  bool wrong_cal = false;        ///< every ADC block reads cal=mode2
+  std::string preflight = "ok known DAC0.0:FIFO_OVR(HS-207)";
 
   size_t getNumChannels(const int dir) const override { return dir == SOAPY_SDR_TX ? 2 : 4; }
   void setSampleRate(const int dir, const size_t ch, const double rate) override {
@@ -68,10 +76,67 @@ class FakeDevice : public SoapySDR::Device {
   void writeSetting(const std::string& key, const std::string& value) override {
     calls.push_back(value.empty() ? key : key + "=" + value);
     set_[key] = value;
+    if (key == "RFDC_TX_NYQUIST_ZONE" || key == "RFDC_RX_NYQUIST_ZONE" || key == "RFDC_TX_INVSINC" || key == "RFDC_ADC_CAL")
+      for (const auto& kv : houdini::modev::detail::chanList(value)) lists_[key][kv.first] = kv.second;
   }
+  // The device's readback FORMATS, as the software lane captured them at mode
+  // V (2026-09-22): Fs per tile in MHz with more fields; zones and inverse sinc
+  // per channel over every channel; inverse sinc resolved to 'zone<k>'; ADC_CAL
+  // per '<tile>.<block>' with cal= the mode the tile started with.
   std::string readSetting(const std::string& key) const override {
+    auto val = [this](const char* k) { const auto it = set_.find(k); return it == set_.end() ? std::string() : it->second; };
+    if (key == "RFDC_DAC_FS") {
+      const std::string f = val("RFDC_DAC_FS").empty() ? "1966.080" : fmt3(val("RFDC_DAC_FS"));
+      return "0:fs=" + f + ",max=7000.000,queried_max=7000.000,mode=DUC(0->Fs/2) IQ-in 2:fs=" + f +
+             ",max=7000.000,queried_max=7000.000,mode=DUC(0->Fs/2) IQ-in";
+    }
+    if (key == "RFDC_ADC_FS") {
+      const std::string f = (discard_adc_fs || val("RFDC_ADC_FS").empty()) ? "1228.800" : fmt3(val("RFDC_ADC_FS"));
+      return "0:fs=" + f + ",max=5000.000,dither_thresh=3750.000 2:fs=" + f + ",max=5000.000,dither_thresh=3750.000";
+    }
+    if (key == "RFDC_RX_NYQUIST_ZONE") return list(key, 4, "1", revert_rx_zone ? "1" : "");
+    if (key == "RFDC_TX_NYQUIST_ZONE") return list(key, 2, "1", "");
+    if (key == "RFDC_TX_INVSINC") {
+      std::string s;
+      for (size_t c = 0; c < 2; ++c) {
+        std::string v = "off";
+        const auto zt = lists_.find("RFDC_TX_NYQUIST_ZONE");
+        const auto it = lists_.find("RFDC_TX_INVSINC");
+        if (!invsinc_off && it != lists_.end() && it->second.count(c) && it->second.at(c) == "zone") {
+          const std::string z = (zt != lists_.end() && zt->second.count(c)) ? zt->second.at(c) : "1";
+          v = "zone" + z;
+        }
+        s += (s.empty() ? "" : ";") + ("ch" + std::to_string(c) + ":" + v);
+      }
+      return s;
+    }
+    if (key == "RFDC_ADC_CAL") {
+      // RX ch0 = 0.0, ch1 = 0.1, ch2 = 2.0, ch3 = 2.1; default Mode 2.
+      std::string s;
+      const size_t chs[4] = {0, 1, 2, 3};
+      const char* addr[4] = {"0.0", "0.1", "2.0", "2.1"};
+      const auto it = lists_.find("RFDC_ADC_CAL");
+      for (size_t i = 0; i < 4; ++i) {
+        std::string m = "mode2";
+        if (!wrong_cal && it != lists_.end() && it->second.count(chs[i])) m = it->second.at(chs[i]).substr(4);  // "cal=modeK"
+        s += (s.empty() ? "" : " ") + std::string(addr[i]) + ":dither=on,cal=" + m + ",cal_intent=" + m + ",dither_intent=policy";
+      }
+      return s;
+    }
+    if (key == "RFDC_PREFLIGHT") return preflight + "\ndetail";
+    if (key == "RFDC_INTR_FIRE_COUNT") return "14032361";
     const auto it = set_.find(key);
     return it == set_.end() ? std::string("ok") : it->second;
+  }
+  SoapySDR::Kwargs getChannelInfo(const int dir, const size_t ch) const override {
+    SoapySDR::Kwargs kw;
+    const bool rx = dir == SOAPY_SDR_RX;
+    kw["rfdc_tile_index"] = rx ? (ch < 2 ? "0" : "2") : (ch == 0 ? "0" : "2");
+    kw["rfdc_block"] = rx ? ((ch % 2) == 0 ? "0" : "1") : "0";
+    kw["rfdc_label"] = std::string(rx ? "ADC" : "DAC") + kw["rfdc_tile_index"] + "." + kw["rfdc_block"];
+    kw["rfdc_mts_synced"] = unsynced ? "0" : "1";
+    if (!unsynced) kw["rfdc_mts_latency"] = rx ? "310" : "512";
+    return kw;
   }
   SoapySDR::Stream* setupStream(const int, const std::string&, const std::vector<size_t>&,
                                 const SoapySDR::Kwargs&) override {
@@ -80,6 +145,22 @@ class FakeDevice : public SoapySDR::Device {
   }
 
  private:
+  static std::string fmt3(const std::string& mhz) {
+    char b[32];
+    std::snprintf(b, sizeof b, "%.3f", std::atof(mhz.c_str()));
+    return b;
+  }
+  std::string list(const std::string& key, size_t n, const std::string& dflt, const std::string& force) const {
+    std::string s;
+    const auto it = lists_.find(key);
+    for (size_t c = 0; c < n; ++c) {
+      std::string v = dflt;
+      if (force.empty() && it != lists_.end() && it->second.count(c)) v = it->second.at(c);
+      s += (s.empty() ? "" : ";") + ("ch" + std::to_string(c) + ":" + v);
+    }
+    return s;
+  }
+  std::map<std::string, std::map<size_t, std::string>> lists_;
   using Key = std::pair<int, size_t>;
   static const char* d(int dir) { return dir == SOAPY_SDR_TX ? "TX" : "RX"; }
   static double at(const std::map<Key, double>& m, int dir, size_t ch) {
@@ -204,6 +285,40 @@ int main() {
     try { houdini::modev::bringUp(g, uePlan()); } catch (const std::runtime_error&) { threw = true; }
     check(threw, "a gain that does not land (make() default -6.13 dB kept) throws");
   }
+
+  // ---- the post-setup check on the healthy fake ----------------------------
+  {
+    FakeDevice f;
+    const auto r = houdini::modev::bringUp(f, bsPlan());
+    const auto ps = houdini::modev::postSetupCheck(f, bsPlan(), r);
+    for (const auto& l : ps.log) std::printf("  post: %s\n", l.c_str());
+    check(ps.failures.empty() && ps.preflight.rfind("ok", 0) == 0,
+          "post-setup: every channel synced, cal as derived, the preflight's known HS-207 item is not a failure");
+    check(!has(f.calls, "RFDC_PREFLIGHT=clear"),
+          "the bring-up does NOT clear the preflight (its own latches are cleared after activate, by the health baseline)");
+    FakeDevice g;
+    g.preflight = "FAIL ADC0.1:FIFOUSRDAT_OF,FIFOUSRDAT_UF known DAC0.0:FIFO_OVR(HS-207)";
+    const auto rg = houdini::modev::bringUp(g, bsPlan());
+    const auto pg = houdini::modev::postSetupCheck(g, bsPlan(), rg);
+    check(pg.failures.size() == 1 && pg.failures[0] == "ADC0.1:FIFOUSRDAT_OF,FIFOUSRDAT_UF",
+          "post-setup: a FAIL outside the known part is collected (informational until the post-activate clear)");
+  }
+  auto throwsRt = [](const std::function<void()>& fn) {
+    try { fn(); } catch (const std::runtime_error&) { return true; }
+    return false;
+  };
+  check(throwsRt([] { FakeDevice f; f.discard_adc_fs = true; houdini::modev::bringUp(f, bsPlan()); }),
+        "an ADC Fs that reads back the make() default 1228.8 stops the bring-up [readback enforced]");
+  check(throwsRt([] { FakeDevice f; f.revert_rx_zone = true; houdini::modev::bringUp(f, bsPlan()); }),
+        "an RX zone that reads back 1 on the X-IF channel stops the bring-up");
+  check(throwsRt([] { FakeDevice f; f.invsinc_off = true; houdini::modev::bringUp(f, uePlan()); }),
+        "an inverse sinc that does not follow the zone stops the bring-up");
+  check(throwsRt([] { FakeDevice f; const auto r = houdini::modev::bringUp(f, bsPlan()); f.unsynced = true;
+                      houdini::modev::postSetupCheck(f, bsPlan(), r); }),
+        "an unsynced channel after the setups refuses activation");
+  check(throwsRt([] { FakeDevice f; f.wrong_cal = true; const auto r = houdini::modev::bringUp(f, bsPlan());
+                      houdini::modev::postSetupCheck(f, bsPlan(), r); }),
+        "sub-6 RX running cal Mode 2 after the setups (wanted Mode 1) is refused");
 
   std::printf("-- mutation matrix (each line must read PASS: the mutant was caught) --\n");
   check(!orderOk(moved(ue.calls, "RFDC_DAC_FS=", "rate TX ")), "mutant RFDC_DAC_FS before the TX rates is rejected");

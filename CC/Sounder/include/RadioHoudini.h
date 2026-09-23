@@ -76,6 +76,9 @@ class RadioHoudini : public RadioSoapy {
   RadioHoudini(const RadioParams& params, std::shared_ptr<houdini::modev::Result> mv);
   /// The mode-V plan for this node, from its params.
   static houdini::modev::Plan modeVPlan(const RadioParams& p);
+  static void logModeV(const std::string& label, const std::vector<std::string>& lines);
+  static void writeModeVRecord(const std::string& label, SoapySDR::Device& dev,
+                               const houdini::modev::Result& r, const houdini::modev::PostSetup& ps);
 
   std::shared_ptr<houdini::modev::Result> mode_v_;  // null unless mode V
   std::unique_ptr<houdini::boundary::TxBurstInterpolator> tx_interp_;  // TX = 2 x rate

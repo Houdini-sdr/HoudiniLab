@@ -129,7 +129,8 @@ RadioSoapy::RadioSoapy(const RadioParams& params, Type type, const SoapySDR::Kwa
                        const SoapySDR::Kwargs& txStreamArgs, double preStreamRxRate,
                        double preStreamTxRate, double preStreamFreq,
                        bool houdini_streams,
-                       const std::function<void(SoapySDR::Device&)>& preStream)
+                       const std::function<void(SoapySDR::Device&)>& preStream,
+                       const std::function<void(SoapySDR::Device&)>& postStream)
     : Radio(params), type_(type) {
   const char* soapyFmt = SOAPY_SDR_CS16;
   // TX and RX may use different channel sets (see RadioParams). Rate/NCO are set
@@ -279,6 +280,10 @@ RadioSoapy::RadioSoapy(const RadioParams& params, Type type, const SoapySDR::Kwa
       // per channel, sample-aligned with one timestamp -- the same shape Iris
       // uses. RX channels may differ from TX (e.g. an RX-only converter).
       rxs_ = dev_->setupStream(SOAPY_SDR_RX, soapyFmt, rx_channels, rxStreamArgs);
+      // After the LAST setup of the group and before any activate (Houdini
+      // mode V: the MTS / calibration / preflight check). A throw here closes
+      // the streams and releases the device like any setup failure.
+      if (postStream) postStream(*dev_);
     } catch (...) {
       for (auto* s : tx_streams_)
         if (s != nullptr) dev_->closeStream(s);

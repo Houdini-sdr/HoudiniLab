@@ -37,6 +37,7 @@
  *
  * Build: CMake target detection_calibration_test. Run: ./detection_calibration_test.
  */
+#include <algorithm>
 #include <cmath>
 #include <random>
 #include <complex>
@@ -106,7 +107,10 @@ std::vector<std::complex<int16_t>> window(const BeaconShape& s, double scale, do
     for (auto& v : w) {
       const double a = std::sqrt(-2.0 * std::log(u01())) * std::cos(2.0 * M_PI * u01());
       const double b = std::sqrt(-2.0 * std::log(u01())) * std::cos(2.0 * M_PI * u01());
-      v = std::complex<int16_t>(static_cast<int16_t>(std::lround(sd * a)), static_cast<int16_t>(std::lround(sd * b)));
+      // Truncated toward zero, as sim::Channel::receive quantizes (review: a
+      // rounding here made noise-only windows 0.45 dB louder than the
+      // beacon windows' noise).
+      v = std::complex<int16_t>(static_cast<int16_t>(sd * a), static_cast<int16_t>(sd * b));
     }
   }
   if (filter) {
@@ -147,7 +151,9 @@ int main() {
   std::printf("in-window SNR: legacy %.1f dB (bench-calibrated), nr_pss_bl %.1f dB (0.34 peak, filtered lane)\n",
               snr_legacy, snr_bl);
   std::printf("=> confirm.snr_floor_db for nr_pss_bl: %.0f dB (legacy's 30 dB shifted by %+.1f dB)\n", floor_bl, shift);
-  check(std::fabs(snr_legacy - kBenchLegacySnr) < 0.5, "the noise reproduces the bench's legacy in-window SNR (46.5 dB)");
+  // A harness figure, not an assertion: the noise was CHOSEN from 46.5 dB, so
+  // this only shows the sim's estimator agrees with that choice (review).
+  std::printf("harness: legacy reads %.1f dB against the 46.5 dB the noise was set from\n", snr_legacy);
 
   // ---- the detector, configured as the dual-band configs are --------------
   auto cfg = SyncConfig::loadFromText(R"({"sync": {"detector": {"pick": "argmax"}}})");
@@ -187,6 +193,51 @@ int main() {
   }
   std::printf("noise-only windows: %d/400 crossed the 0.2 bar, %d accepted by the floor\n", bar_cross, accepted);
   check(bar_cross == 0 && accepted == 0, "no noise-only window crosses the 0.2 bar (0 of 400), none is accepted");
+
+  // The header's figures, asserted (review). The noise-only maximum
+  // coherence, probed with a vanishing bar so every window reports its max.
+  {
+    std::vector<double> nmax;
+    for (unsigned seed = 1; seed <= 400; ++seed) {
+      const auto w = window(bl, kBlScale, noise_p, 0.0, 9000 + seed, false, true);
+      nmax.push_back(det.run(w.data(), w.size(), 1e6f).statistic);
+    }
+    std::sort(nmax.begin(), nmax.end());
+    std::printf("noise-only max coherence over 400 windows: median %.4f, p99 %.4f, worst %.4f\n", nmax[200], nmax[396],
+                nmax.back());
+    check(nmax.back() < 0.1, "every noise-only window's max coherence is under 0.1 (so under the 0.2 bar and the 0.1 floor bar)");
+    int low_found = 0;
+    for (unsigned seed = 1; seed <= 20; ++seed) {
+      const auto w = window(bl, kBlScale * std::pow(10.0, -30.0 / 20.0), noise_p, 20.7e3, 300 + seed, true, true);
+      const auto d = det.run(w.data(), w.size(), kScale);
+      if (d.end_index + 1 == static_cast<ssize_t>(kPlace + bl.coreLen())) ++low_found;
+    }
+    check(low_found == 20, "20/20 beacons 30 dB under bench level still detected at their exact end with the 0.2 bar");
+  }
+  // The resync ladder: +1 on corr_scale per retry, stopped at min_bar 0.1.
+  {
+    ThresholdPolicy b;
+    b.corr_scale = kScale;
+    b.min_bar = 0.1;
+    const float worst = static_cast<float>(b.relaxed(100));  // the default retry_max
+    int crosses = 0;
+    for (unsigned seed = 1; seed <= 400; ++seed) {
+      const auto w = window(bl, kBlScale, noise_p, 0.0, 5000 + seed, false, true);
+      if (det.run(w.data(), w.size(), worst).found()) ++crosses;
+    }
+    std::printf("resync retry 100 with min_bar 0.1: corr_scale %.1f (bar %.3f), %d/400 noise-only windows cross\n", worst,
+                1.0 / worst, crosses);
+    check(crosses == 0, "at retry 100 the relaxed bar (held at 0.1 by min_bar) is crossed by no noise-only window");
+    ThresholdPolicy u;
+    u.corr_scale = kScale;
+    int ucross = 0;
+    for (unsigned seed = 1; seed <= 200; ++seed) {
+      const auto w = window(bl, kBlScale, noise_p, 0.0, 5000 + seed, false, true);
+      if (det.run(w.data(), w.size(), static_cast<float>(u.relaxed(20))).found()) ++ucross;
+    }
+    std::printf("mutant: no min_bar, retry 20 -> bar %.3f: %d/200 cross\n", 1.0 / u.relaxed(20), ucross);
+    check(ucross > 20, "mutant: without min_bar the +1-per-retry ladder walks the bar into the noise by retry 20");
+  }
 
   std::printf("-- mutation matrix --\n");
   auto noiseCrossings = [&](const Detector& d, float scale) {
