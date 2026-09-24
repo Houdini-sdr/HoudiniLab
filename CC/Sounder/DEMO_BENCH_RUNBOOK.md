@@ -85,9 +85,21 @@ On the rig:
 ```sh
 source ~/houdini_test/bin/activate
 cd ~/repos/HoudiniLab-ap80/CC/Sounder
+export HOUDINI_TX_CPU_AFFINITY=10,11   # the UE's TX pacer workers, off the data NIC's IRQ cores
 python3 csi_gui/check_setup.py --conf files/houdini-dualband.json   # must print Ready.
 python3 csi_gui/csi_server.py --control --conf files/houdini-dualband.json
 ```
+
+**Why the pinning.** Left to the kernel, the host plugin's two UE TX pacer
+workers land on the cores that take the 100G data NIC's interrupts (about 61k
+completion IRQs a second on one core, 1-3k on several others), where receive
+softirq work preempts them for milliseconds and whole bursts go out late
+(`DEMO_VERIFICATION.md` 9.36). Cores 10 and 11 took no NIC interrupts on this
+host; pinned there, the late bursts all but stop (9.37-9.39). The dashboard
+passes the variable to the sounder it launches. Before trusting the choice
+on another day, check the cores are still quiet:
+`grep mlx5 /proc/interrupts` (the per-CPU columns for 10 and 11 should not
+move between two reads a few seconds apart).
 
 The check's full form reads both radios' stacks and FAILs if they differ.
 Read the stack there, not from this file: it changes with every deploy. The
@@ -131,17 +143,27 @@ steering:
 
 ## A7. Known limits today
 
-- **UE transmit plugin (SH-427, the software lane's).** The released host
-  plugin drops UE transmit samples at R3a; the SH-427 candidate fixes that but
-  sends late bursts at R3, which shows as constellation damage (the low count).
-  Read the installed host plugin's build id in the setup check before judging
-  a run.
+- **UE transmit plugin (SH-427, the software lane's).** The demo plugin is the
+  software lane's B build with an on-core spin and a 200 us sleep cap (host build
+  `e2a004d3` in the demo-length run D7, `DEMO_VERIFICATION.md` 9.39), run with the
+  pinning above. Earlier plugins send late bursts at R3 over a long run. Read the
+  installed host plugin's build id in the setup check before judging a run.
+- **The rig host's management NIC (r8127, `enP7s7`).** During D7 its driver hung
+  in its ESD checker: new ssh sessions timed out until the sounder exited, the
+  control link to the nodes stalled, and host timing suffered (9.39). This NIC
+  carries ssh and every control call to the radios. Until the driver is fixed,
+  expect that ssh may be unreachable during a long run; check
+  `journalctl -k | grep -E "rtl8127|blocked for more than"` after one.
 - **Radio opens that time out (SH-442).** A launch sometimes cannot open the BS
   within the device timeout (`SoapyRPCUnpacker::recv() TIMEOUT` in the log).
   The sounder retries the open itself ("Radios Not Found. Will attempt a
   retry..."); if every try fails, press Start again.
-- **Clock steering** is off by default and is being rolled back in on its own
-  branch; with it, R3's MER should rise by several dB.
+- **Clock steering** is off by default and lives on its own branch
+  (`feat/clock-steer-rollin`), reviewed, not yet validated on the rig. Without it
+  R3's MER depends on the day: the two boards' offset drifted to 0.6-0.9 ppm in
+  two of three long runs and MER fell from about 30 to 14-18 dB (sub-6) and 9-12
+  dB (X-IF) (9.33, 9.34); in the third it stayed near 0.1 ppm and MER held
+  (9.39).
 
 ## A8. Stopping and recovery
 
