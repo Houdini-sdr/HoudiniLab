@@ -210,8 +210,11 @@ inline const std::vector<std::string>& txAlarmFields() {
 /// after an epoch change the values ARE the counts since the clear. A bank
 /// without the field (a pre-HS-220 node) keeps the plain rule.
 inline bool txWrapsMod16(const std::string& field) {
+  // All nine HS-220 wrapping counters, so a field added to txAlarmFields later
+  // is read right; zerofill stays saturating (48-bit), efault/smiss/clkerr are
+  // sticky flags, and both keep the plain rule.
   return field == "drops" || field == "late" || field == "under" || field == "seqerr" || field == "aclose" ||
-         field == "malformed";
+         field == "malformed" || field == "gated" || field == "acked" || field == "played";
 }
 /// The usable epoch of an "epoch=<before>:<after>" value, or -1 when the poll
 /// fails the read protocol (reads differ, clear_busy set, malformed).
