@@ -892,13 +892,20 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
           std::fclose(f);
         }
       }
-    } else if (tot % 512 == 0) {
+    }
+    // The periodic summary prints on every 512th datagram WHATEVER it scored:
+    // gated on a good score (as it was), the 512th datagram always fell on the
+    // same antenna, and once that antenna's datagrams scored low (the X-IF at
+    // 9-10 dB MER, DEMO_VERIFICATION 9.34) the summary stopped for the rest of
+    // the run, exactly when the total mattered. The rotation below is only
+    // meaningful on a good datagram, so it is printed only then.
+    if (tot % 512 == 0) {
       // AP-37: the CONSTELLATION ROTATION, which the score deliberately throws
       // away. score = |mean(u^4)| is rotation-invariant by construction, so it
       // reports a tight constellation whether or not it is correctly oriented.
       // arg(mean(u^4))/4 is that missing orientation, modulo 90 deg for QPSK.
       //
-      // CORRECTION [Opus review]: an earlier version of this comment claimed
+      // CORRECTION [review]: an earlier version of this comment claimed
       // "nothing in this pipeline removes it". That was WRONG, and it is wrong
       // about code 80 lines above: the blind global 4th-power de-rotation
       // already rotates `pts` to the ideal constellation before this runs. So
@@ -936,11 +943,16 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
       const double dt = (pslot >= 0 && uslot >= 0)
                             ? (uslot - pslot) * slot / cfg_->rate()
                             : 0.0;
-      MLPD_INFO(
-          "CNS score %.3f rot %+.1f deg at frame %u (%u datagrams, %u low); "
-          "P->U %.1f us, so %+.1f deg per kHz of uncorrected CFO\n",
-          score, rot_deg, pkt->frame_id, tot, cns_low.load(), dt * 1e6,
-          360.0 * 1000.0 * dt);
+      if (score >= 0.7) {
+        MLPD_INFO(
+            "CNS score %.3f rot %+.1f deg at frame %u (%u datagrams, %u low); "
+            "P->U %.1f us, so %+.1f deg per kHz of uncorrected CFO\n",
+            score, rot_deg, pkt->frame_id, tot, cns_low.load(), dt * 1e6,
+            360.0 * 1000.0 * dt);
+      } else {
+        MLPD_INFO("CNS score %.3f (low, no rotation) at frame %u (%u datagrams, %u low)\n", score,
+                  pkt->frame_id, tot, cns_low.load());
+      }
     }
   }
   double psum = 0.0;
