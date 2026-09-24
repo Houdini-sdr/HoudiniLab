@@ -175,6 +175,77 @@ steering:
   run or `kill <pid>`. `tools/rig_release_holders.py` also works but stops EVERY
   sounder and dashboard on the host, including a running `--control` backend.
 
+## A9. The CPU isolation experiment (checklist)
+
+Goal: put the timing-critical threads on isolated performance cores and find
+which setting buys the most. Cores 0-4 and 10-14 of this host are efficiency
+cores (Cortex-A725, down to 338 MHz); 5-9 and 15-19 are performance cores
+(Cortex-X925). The plan isolates 15-19: the sounder's dispatch thread on 15,
+the UE's two TX pacer workers on 16 and 17, and 18 and 19 kept free for moving
+threads around. Steps marked (sudo) are the owner's.
+
+**Stage 1: the kernel command line (sudo, then one reboot).**
+
+1. Find where the command line is set (a file in `/etc/default/grub.d/` wins
+   over `/etc/default/grub`):
+   `grep -rn "GRUB_CMDLINE_LINUX" /etc/default/grub /etc/default/grub.d/ 2>/dev/null; cat /proc/cmdline`
+2. Append to `GRUB_CMDLINE_LINUX_DEFAULT` in that file, keeping what is there:
+   ```
+   isolcpus=domain,managed_irq,15-19 irqaffinity=0-14 rcu_nocbs=15-19 rcu_nocb_poll nowatchdog skew_tick=1
+   ```
+3. `sudo update-grub`, then `grep -c "isolcpus=domain,managed_irq,15-19" /boot/grub/grub.cfg` (1 or more).
+4. Reboot only when no comparison run still needs the old kernel.
+5. Verify after the reboot: `cat /sys/devices/system/cpu/isolated` prints
+   `15-19`; `cat /proc/cmdline` shows the arguments.
+6. Before the first run: `grep CONFIG_NO_HZ_FULL /boot/config-$(uname -r)`
+   (stage 2 needs it), and `sudo apt install rt-tests` for cyclictest.
+7. Undo: remove the arguments, `sudo update-grub`, reboot.
+
+**The measurement, the same for every arm.**
+
+- Instrument check first: `sudo cyclictest -a 16 -t1 -p0 -i 200 -D 120 -q -h 2000`
+  (and on 17): the wake-up latency on the TX cores, before any sounder run. Repeat
+  it after each runtime setting that should change it.
+- One run per arm, all the same length (600 s is enough to show the late rate),
+  R3 `files/houdini-dualband.json`, with the sounder's threads placed by:
+  ```sh
+  export HOUDINI_CORE_MAP=main=15 HOUDINI_TX_CPU_AFFINITY=16,17
+  ```
+  plus `tests/demo-verify/irq_sampler.py <out> 10 <secs> 15,16,17` and
+  `mer_sampler.py` in the background (pids recorded; nothing copied off the host
+  during a run). Compare the UE late / underflow totals, the late-release lines,
+  and the pacer's wake-jitter close lines (`demo_report.py`).
+
+**Stage 2: the runtime settings, one arm at a time (sudo; no reboot; each undoable).**
+
+- Arm 0, the baseline: stage 1 only.
+- Arm 1, frequency: `for c in 15 16 17 18 19; do echo performance | sudo tee /sys/devices/system/cpu/cpu$c/cpufreq/scaling_governor; done`
+  (check `scaling_available_governors` first; if `performance` is missing, set
+  `scaling_min_freq` to `cpuinfo_max_freq` on those cores). Undo: the old governor.
+- Arm 2, idle states: `ls /sys/devices/system/cpu/cpu16/cpuidle/`, then
+  `echo 1 | sudo tee /sys/devices/system/cpu/cpu1[5-9]/cpuidle/state[1-9]/disable`
+  (state0, the shallow wait, stays enabled). Undo: `echo 0` to the same files.
+- Arm 3, kernel housekeeping: `echo 7fff | sudo tee /sys/devices/virtual/workqueue/cpumask`
+  (unbound kernel workers on 0-14), and
+  `cat /sys/kernel/mm/transparent_hugepage/enabled` (set `madvise` if it reads
+  `always`). Undo: the old values.
+- Arm 4, NIC queues (the software lane signs off first: its plugin may assume
+  queue numbers): keep the data NICs' receive flows and the pinned threads' transmit
+  completions off 15-19, either by `sudo ethtool -X <data-iface> equal 15` plus
+  `xps_cpus` maps that send CPUs 15-19 to queues 0-14, or by
+  `sudo ethtool -L <data-iface> combined 15`. Undo: the old channel count and
+  `ethtool -X <data-iface> default`.
+- Arm 5, real-time priority: `sudo sysctl kernel.sched_rt_runtime_us=-1` (without
+  it a spinning FIFO thread is forced off its core about 50 ms a second), grant
+  CAP_SYS_NICE to `build/sounder` (a `setcap` is lost on every rebuild), and add the
+  plugin's rt_priority to `HOUDINI_TX_STREAM_ARGS`, always with the workers pinned.
+- Stage 2b, if the arms leave oversleeps: add `nohz_full=15-19` to the command line
+  (one more reboot) and compare against the best arm: it removes the tick from a
+  core running one thread, but makes every syscall dearer, and the TX workers make
+  many.
+
+Record each arm as a `DEMO_VERIFICATION.md` section 9 row with its settings.
+
 # Part B: the single-band CSI demo on rig B
 
 ## B1. The machines
