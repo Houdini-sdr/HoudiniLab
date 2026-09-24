@@ -75,6 +75,7 @@ import argparse
 import collections
 import json
 import glob
+import ipaddress
 import math
 import os
 import queue
@@ -86,6 +87,9 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from check_setup import plugin_env  # noqa: E402  one plugin environment, not two
 
 MAGIC_CSI = 0x43534931   # "CSI1" -- pilot channel estimate (legacy, no quality)
 MAGIC_CSI2 = 0x43534932  # "CSI2" -- as CSI1 plus per-subcarrier raw phase
@@ -196,14 +200,6 @@ def _parse_adc(payload, v2):
                       "full_scale": 32767}
 
 
-def _ideal(mod):
-    """The square-QAM alphabet at unit average power, as the page draws it."""
-    lvl = int(round(math.sqrt(2 ** mod)))
-    lv = [-(lvl - 1) + 2 * i for i in range(lvl)]
-    nrm = math.sqrt(sum(a * a + b * b for a in lv for b in lv) / (lvl * lvl))
-    return [(a / nrm, b / nrm) for a in lv for b in lv]
-
-
 def _slice_err2(x, lvl):
     """Squared distance of one unit-power coordinate to the nearest of the
     alphabet's per-axis levels (odd integers / norm): O(1), not a search."""
@@ -224,17 +220,14 @@ def _mer_err(pts, mod):
     return err / len(pts), len(pts)
 
 
-def _mer(pts, mod):
-    """One record's (EVM rms %, MER dB). MER in the TR 101 290 sense (hard
-    decisions, not an SNR): it includes the equalizer's H error, carrier-offset
-    leakage and phase noise, over the sounder's point sample. Unbiased above
-    ~15 dB, reads high below (a decision error lands on the wrong point)."""
-    r = _mer_err(pts, mod)
-    if r is None:
-        return None
-    e = r[0]
-    if e <= 0.0:
-        return 0.0, 99.0
+def _evm_mer(e):
+    """A mean error power of unit-power points as (EVM rms %, MER dB). MER in
+    the TR 101 290 sense (hard decisions, not an SNR): it includes the
+    equalizer's H error, carrier-offset leakage and phase noise, over the
+    sounder's point sample. Unbiased above ~15 dB, reads high below (a
+    decision error lands on the wrong point). Floored at an error power of
+    1e-10, so a perfect constellation reads 100 dB."""
+    e = max(e, 1e-10)
     return 100.0 * math.sqrt(e), -10.0 * math.log10(e)
 
 
@@ -266,22 +259,23 @@ def _parse_cns(payload):
     r = _mer_err(pts, int(mod))
     if r is not None:
         e, n = _mer_avg(int(ant), r[0], r[1], time.monotonic())
-        e = max(e, 1e-10)
-        rec["evm_pct"] = round(100.0 * math.sqrt(e), 2)
-        rec["mer_db"] = round(-10.0 * math.log10(e), 1)
+        evm, mer = _evm_mer(e)
+        rec["evm_pct"] = round(evm, 2)
+        rec["mer_db"] = round(mer, 1)
         rec["mer_pts"] = int(n)
     return int(ant), rec
 
 
-def _delay_stats(db, pre, tap_ns):
+def _delay_stats(db, tap_ns):
     """The power delay profile's standard figures (ITU-R P.1407 section 2; TR
     38.901 section 7.5): RMS delay spread, mean excess delay and maximum excess
-    delay (the last tap above the threshold), all relative to the strongest
-    tap at index `pre`. The threshold is 20 dB below the peak or 6 dB above the
-    noise floor (the median of the window's outer quarter), whichever is
-    higher, and is reported. A single path is NOT 0 ns: the Hann-windowed
-    CIR's mainlobe (about 2/B wide) gives a lone path an RMS spread of about
-    0.5/B, so values near that are unresolved."""
+    delay, the excess delays measured from the FIRST tap above the threshold
+    (the first arrival, which need not be the strongest tap). The
+    threshold is 20 dB below the peak or 6 dB above the noise floor (the
+    median of the window's outer quarter), whichever is higher, and is
+    reported. A single path is NOT 0 ns: the Hann-windowed CIR's mainlobe
+    (about 2/B wide) gives a lone path an RMS spread of about 0.5/B, so values
+    near that are unresolved."""
     q = max(1, len(db) // 8)
     tail = sorted(db[:q] + db[-q:])
     floor = tail[len(tail) // 2] if tail else -60.0
@@ -292,10 +286,10 @@ def _delay_stats(db, pre, tap_ns):
         return {"rms_ns": 0.0, "mean_ns": 0.0, "max_ns": 0.0, "thr_db": round(thr, 1)}
     mu = sum(i * wi for i, wi in enumerate(w)) / tot
     var = sum(wi * (i - mu) ** 2 for i, wi in enumerate(w)) / tot
-    last = max(i for i, wi in enumerate(w) if wi > 0.0)
+    above = [i for i, wi in enumerate(w) if wi > 0.0]
     return {"rms_ns": round(math.sqrt(var) * tap_ns, 1),
-            "mean_ns": round((mu - pre) * tap_ns, 1),
-            "max_ns": round((last - pre) * tap_ns, 1),
+            "mean_ns": round((mu - above[0]) * tap_ns, 1),
+            "max_ns": round((above[-1] - above[0]) * tap_ns, 1),
             "thr_db": round(thr, 1)}
 
 
@@ -310,7 +304,7 @@ def _parse_cir(payload):
         return None
     rec = {"frame": int(frame), "db": [round(v, 2) for v in db],
            "pre": int(pre), "peak": int(peak), "n": int(n), "tap_ns": float(tap_ns)}
-    rec.update(_delay_stats(db, int(pre), float(tap_ns)))
+    rec.update(_delay_stats(db, float(tap_ns)))
     return int(ant), rec
 
 
@@ -440,6 +434,26 @@ def _snapshot():
 
 
 # ---- HTTP / SSE ------------------------------------------------------------
+def _host_is_address(host):
+    """A Host header that names this server by address or as localhost (any
+    port). DNS rebinding points an attacker's NAME at 127.0.0.1: the browser
+    then sends that name as Host, and an Origin equal to it, so the Origin
+    check alone lets the page in. A name other than localhost is refused;
+    an IP literal cannot be rebound."""
+    h = host.strip().lower()
+    if h.startswith("["):
+        name = h[1:h.find("]")] if "]" in h else ""
+    else:
+        name = h.split(":", 1)[0]
+    if name == "localhost":
+        return True
+    try:
+        ipaddress.ip_address(name)
+        return True
+    except ValueError:
+        return False
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -448,11 +462,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/" or self.path.startswith("/index"):
+            pre, post = self.server.guard_seats()
             body = (PAGE.replace("__STALE_MS__", str(self.server.stale_ms))
                         .replace("__MAG_TOP__", str(self.server.mag_top))
                         .replace("__MAG_SPAN__", str(self.server.mag_span))
-                        .replace("__GUARD_PRE__", str(self.server.guard_pre))
-                        .replace("__GUARD_POST__", str(self.server.guard_post))
+                        .replace("__GUARD_PRE__", str(pre))
+                        .replace("__GUARD_POST__", str(post))
                         .encode("utf-8"))
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -482,8 +497,12 @@ class Handler(BaseHTTPRequestHandler):
         if sup is None:
             self._json(200, {"enabled": False})
             return
+        if not _host_is_address(self.headers.get("Host", "")):
+            self._json(403, {"error": "forbidden"})
+            return
         st = sup.snapshot()
-        st.update({"enabled": True, "configs": sup.configs(), "desc": sup.descriptions()})
+        st.update({"enabled": True, "configs": sup.configs(), "desc": sup.descriptions(),
+                   "guard": list(_guard_seats(sup.sd, st["conf"]))})
         self._json(200, st)
 
     def do_POST(self):
@@ -496,11 +515,13 @@ class Handler(BaseHTTPRequestHandler):
             return
         # A page on any other site can POST to localhost too. Requiring JSON
         # forces the browser's CORS preflight, which this server never answers,
-        # and a foreign Origin is refused outright.
+        # a foreign Origin is refused outright, and so is a Host that is a name
+        # (DNS rebinding, _host_is_address).
         origin = self.headers.get("Origin")
         host = self.headers.get("Host", "")
         if (self.headers.get("Content-Type", "").split(";")[0].strip() != "application/json"
-                or (origin is not None and origin.split("://", 1)[-1] != host)):
+                or (origin is not None and origin.split("://", 1)[-1] != host)
+                or not _host_is_address(host)):
             self._json(403, {"error": "forbidden"})
             return
         try:
@@ -610,18 +631,35 @@ class Handler(BaseHTTPRequestHandler):
 
 
 # ---- sounder launcher ------------------------------------------------------
+def _load_conf(sounder_dir, conf):
+    """A config as the sounder reads it (relative to its checkout), or None."""
+    try:
+        path = conf if os.path.isabs(conf) else os.path.join(sounder_dir, conf)
+        with open(path, encoding="utf-8") as f:
+            cj = json.load(f)
+        return cj if isinstance(cj, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
 def _topology_of(sounder_dir, conf):
     """The topology file a config names, or None if it cannot be determined.
 
     Falling back to None is fine: teardown_framer.py then uses its own default,
     which is the same file every shipped config points at.
     """
+    return (_load_conf(sounder_dir, conf) or {}).get("serial_file") or None
+
+
+def _guard_seats(sounder_dir, conf):
+    """The config's nominal guard seats (zero prefix, postfix) for the ADC
+    panel's dashed markers; 128 each when the config cannot be read (the
+    markers are cosmetic)."""
+    cj = _load_conf(sounder_dir, conf) or {}
     try:
-        path = conf if os.path.isabs(conf) else os.path.join(sounder_dir, conf)
-        with open(path, encoding="utf-8") as f:
-            return json.load(f).get("serial_file") or None
-    except (OSError, ValueError):
-        return None
+        return int(cj.get("ofdm_tx_zero_prefix", 128)), int(cj.get("ofdm_tx_zero_postfix", 128))
+    except (TypeError, ValueError):
+        return 128, 128
 
 
 _PR_SET_PDEATHSIG = 1  # linux/prctl.h
@@ -674,17 +712,16 @@ class SounderSupervisor:
     def __init__(self, args, udp_dest):
         self.args = args
         self.sd = args.sounder_dir
-        self.env = os.environ.copy()
+        # The plugin's environment (the setup check's), plus what `source
+        # venv/bin/activate` would set.
+        venv = args.venv
+        self.env = plugin_env(venv)
+        self.env["VIRTUAL_ENV"] = venv
+        self.env["PATH"] = os.path.join(venv, "bin") + os.pathsep + self.env.get("PATH", "")
         self.env["HOUDINI_CSI_UDP"] = udp_dest
         self.env["HOUDINI_MAX_FRAME"] = str(args.max_frame)
         if args.csi_fps:
             self.env["HOUDINI_CSI_FPS"] = str(args.csi_fps)
-        # What `source venv/bin/activate` would set, plus the plugin path.
-        venv = args.venv
-        self.env["VIRTUAL_ENV"] = venv
-        self.env["PATH"] = os.path.join(venv, "bin") + os.pathsep + self.env.get("PATH", "")
-        self.env["LD_LIBRARY_PATH"] = os.path.join(venv, "lib")
-        self.env["SOAPY_SDR_PLUGIN_PATH"] = os.path.join(venv, "lib", "SoapySDR", "modules0.8-3")
         self.proc = None
         self.stopping = False
         # Dashboard control (--control): the HTTP threads only QUEUE commands;
@@ -1006,18 +1043,11 @@ def main():
     srv.stale_ms = args.stale_ms
     srv.mag_top = args.mag_top
     srv.mag_span = args.mag_span
-    # Nominal guard seats for the ADC panel's dashed markers, read from the
-    # config when one is given (Opus review M16: 128 was hardcoded but eight
-    # shipped configs use 160); harmless default otherwise.
-    srv.guard_pre, srv.guard_post = 128, 128
-    if getattr(args, "conf", None):
-        try:
-            with open(args.conf) as cf:
-                cj = json.load(cf)
-            srv.guard_pre = int(cj.get("ofdm_tx_zero_prefix", 128))
-            srv.guard_post = int(cj.get("ofdm_tx_zero_postfix", 128))
-        except Exception as exc:  # noqa: BLE001 -- markers are cosmetic
-            print("[csi] conf parse for guard markers failed: %s" % exc)
+    # Nominal guard seats for the ADC panel's dashed markers (Opus review M16:
+    # 128 was hardcoded but eight shipped configs use 160), from the config the
+    # sounder runs, resolved against its checkout as the sounder resolves it;
+    # the page refreshes them from /control when a config switch restarts it.
+    srv.guard_seats = lambda: _guard_seats(args.sounder_dir, sup.conf if sup else args.conf)
     srv.daemon_threads = True
     srv.control = sup if args.control else None
     # Serve in a daemon thread so the main thread can wait for Ctrl+C. (Calling
@@ -1155,7 +1185,7 @@ PAGE = r"""<!doctype html>
 // reads the record. The ADC2 wire does not carry it, so a sounder-side
 // change still means editing the parser constant (second review 2.6).
 const ADC_FS=32767;
-const GUARD_PRE=__GUARD_PRE__, GUARD_POST=__GUARD_POST__;
+let GUARD_PRE=__GUARD_PRE__, GUARD_POST=__GUARD_POST__;  // pollCtl follows a config switch
 const STALE_MS=__STALE_MS__;         // no update for this long -> dim + badge
 // Both top panels are FIXED frame to frame. An axis that re-ranges per frame makes
 // a static channel look alive and hides real drift, so nothing here auto-scales.
@@ -1537,7 +1567,7 @@ function idealPts(mod){
 }
 // CIR: Hann-windowed |h|^2 on a fixed 0..-60 dB axis, the strongest tap in the
 // middle (the centre line and the "peak" label), the x axis in ns from it.
-// A clean cable reads as ONE mainlobe about 1/B wide, not a single tap.
+// A clean cable reads as ONE mainlobe about 2/B wide (Hann), not a single tap.
 function drawCir(card,r){
   card.cirRec=r;
   const d=card.dim.cir;
@@ -1557,7 +1587,7 @@ function drawCir(card,r){
 // bandwidth is the TRANSMISSION bandwidth (N_RB x 12 x SCS when the tones
 // make whole resource blocks), MER is decision-directed (TR 101 290), averaged
 // over ~1 s as error power, and the delay figures carry their threshold and
-// the resolution (about 1/B).
+// the resolution (about 2/B, the Hann mainlobe).
 function drawQuality(card){
   const m=card.metRec, q=[];
   if(m){
@@ -1924,6 +1954,7 @@ async function pollCtl(){
       sel.value=st.conf;
     }
     drawCheck(st.check);
+    if(st.guard){ GUARD_PRE=st.guard[0]; GUARD_POST=st.guard[1]; }
     let t=st.state;
     if(st.state==='running') t+=' (pid '+st.pid+')';
     else if(st.state==='exited') t+=' rc '+st.rc;

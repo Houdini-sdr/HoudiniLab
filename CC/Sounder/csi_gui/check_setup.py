@@ -39,7 +39,7 @@ import sys
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SOUNDER = os.path.dirname(_HERE)
 sys.path.insert(0, _HERE)
-from teardown_framer import roles_from_topology  # noqa: E402  one reader, not two
+from teardown_framer import _EXAMPLES, roles_from_topology  # noqa: E402  one reader, not two
 
 # The keys every node in one run must agree on: the sounder's own list
 # (include/node_version.h, kMustMatch), so the two cannot disagree about a bench.
@@ -126,14 +126,18 @@ def check_build(rep, sd):
         rep.add("PASS", "build", "build/sounder present and up to date")
 
 
+def plugin_dir(venv):
+    """Where the venv's SoapySDR looks for modules (its ABI version, 0.8-3)."""
+    return os.path.join(venv, "lib", "SoapySDR", "modules0.8-3")
+
+
 def plugin_env(venv):
-    """The environment that loads the Houdini plugin: the sounder's (csi_server.py)."""
-    return dict(os.environ, LD_LIBRARY_PATH=os.path.join(venv, "lib"),
-                SOAPY_SDR_PLUGIN_PATH=os.path.join(venv, "lib", "SoapySDR", "modules0.8-3"))
+    """The environment that loads the Houdini plugin; csi_server.py runs the sounder in it."""
+    return dict(os.environ, LD_LIBRARY_PATH=os.path.join(venv, "lib"), SOAPY_SDR_PLUGIN_PATH=plugin_dir(venv))
 
 
 def check_plugin(rep, venv):
-    moddir = os.path.join(venv, "lib", "SoapySDR", "modules0.8-3")
+    moddir = plugin_dir(venv)
     if not os.path.isdir(venv):
         rep.add("FAIL", "plugin", "venv %s not found" % venv,
                 "Install the SoapyHoudiniSDR host (walkthrough section 2.4) and pass its prefix as --venv.")
@@ -162,7 +166,7 @@ def check_plugin(rep, venv):
 
 
 def check_examples(rep):
-    ex = os.environ.get("HOUDINI_EXAMPLES", os.path.expanduser("~/repos/SoapyHoudiniSDR/host/examples"))
+    ex = _EXAMPLES  # where the teardown will look
     if os.path.isfile(os.path.join(ex, "houdini_setup.py")):
         rep.add("PASS", "teardown", "houdini_setup found in %s" % ex)
     else:
