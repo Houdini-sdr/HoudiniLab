@@ -30,6 +30,7 @@
 #include "include/rx_gap_sink.h"       // RxGapSink (UDP gap -> /Data/Gaps bridge)
 #include "include/rx_recorder_grid.h"  // TimeGridTracker
 #include "include/utils.h"
+#include "include/houdini/stream_args.h"
 
 SoapySDR::Kwargs RadioHoudini::deviceArgs(const RadioParams& p) {
   // SoapyHoudiniSDR node: the id is the board IP. Address the remote node
@@ -75,6 +76,18 @@ SoapySDR::Kwargs RadioHoudini::txStreamArgs(const RadioParams& p) {
   // window grid (SH-248/SH-301) instead of whole milliseconds.
   if (p.tdd) tx["tdd"] = "1";
   if (p.mts) tx["mts"] = "true";
+  // HOUDINI_TX_STREAM_ARGS: the host plugin's own TX knobs on the live
+  // streams, passed through without a rebuild (houdini/stream_args.h).
+  if (p.tx_mode == "stream") {
+    std::string err;
+    const auto extra = houdini::extraStreamArgs(std::getenv("HOUDINI_TX_STREAM_ARGS"), &err);
+    if (!err.empty()) throw std::invalid_argument("HOUDINI_TX_STREAM_ARGS: " + err);
+    for (const auto& kv : extra) {
+      tx[kv.first] = kv.second;
+      MLPD_WARN("%s: TX stream arg %s=%s from HOUDINI_TX_STREAM_ARGS\n", p.label.c_str(), kv.first.c_str(),
+                kv.second.c_str());
+    }
+  }
   return tx;
 }
 
