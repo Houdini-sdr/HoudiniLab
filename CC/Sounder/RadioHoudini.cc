@@ -89,13 +89,13 @@ void RadioHoudini::logModeV(const std::string& label, const std::vector<std::str
 }
 
 namespace {
-// A per-node record file under HOUDINI_DUMP_DIR (Utils::dumpPath), named
-// <kind>_<label>_<stamp>.txt with the label made file-safe; f is empty when it
-// cannot be opened, and closes itself on every exit.
 // The end-of-run state record's stage: the one that skips its reads when the
 // node does not answer (writeStateRecord).
 const char* const kEndOfRunStage = "end";
 
+// A per-node record file under HOUDINI_DUMP_DIR (Utils::dumpPath), named
+// <kind>_<label>_<stamp>.txt with the label made file-safe; f is empty when it
+// cannot be opened, and closes itself on every exit.
 struct RecordFile {
   std::unique_ptr<FILE, int (*)(FILE*)> f{nullptr, &std::fclose};
   std::string path, stamp;

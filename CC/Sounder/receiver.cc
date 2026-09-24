@@ -571,7 +571,7 @@ void Receiver::loopRecv(int tid, int core_id, SampleBuffer* rx_buffer) {
       }
       size_t radio_id = it - config_->n_bs_sdrs_agg().at(cell);
       bs_sync_ret = -1;
-      while (bs_sync_ret < 0) {
+      while (bs_sync_ret < 0 && config_->running()) {  // a stopped run ends the wait (its join needs it)
         bs_sync_ret =
             this->base_radio_set_->radioRx(radio_id, cell, samp_buffer.data(),
                                            config_->samps_per_slot(), rxTimeBs);
