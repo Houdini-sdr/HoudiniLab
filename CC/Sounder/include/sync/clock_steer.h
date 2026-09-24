@@ -232,6 +232,15 @@ class ClockSteerSession {
       return;
     }
     const int code = cal_ + steer_.offset() + push;
+    if (code < 0 || code > 1023) {
+      // The device reads a leading '-' as a RELATIVE push and clamps above
+      // 1023, so a code outside 0..1023 is not the absolute code it looks like.
+      if (!range_warned_) {
+        range_warned_ = true;
+        say(true, "a push to CLOCK_ADJ code %d is outside 0..1023: that decision is dropped", code);
+      }
+      return;
+    }
     Write wr = write_;
     const bool started = launch([rd, wr, code] {
       bool wrote = false;
@@ -378,6 +387,7 @@ class ClockSteerSession {
   bool dirty_ = false;        ///< the node may be off its calibration point
   bool feed_forward_ = true;  ///< the job in flight may feed its step forward
   bool released_ = false;
+  bool range_warned_ = false;
   bool launch_warned_ = false;
   int pending_ = 0;           ///< the push in flight
   int writes_ = 0;            ///< pushes written

@@ -838,7 +838,7 @@ Example, in `files/houdini-ul.json`:
 | `sync.steer.gain` | 0.7 |  | 0.05 to 1 |  | Fraction of the averaged offset removed at each push. |
 | `sync.steer.deadband_ppm` | 0.06 |  | 0 to 10 |  | Offsets smaller than this are left alone: half the actuator quantum is the floor of what a push can fix. |
 | `sync.steer.max_offset` | 30 |  | 0 to 400 |  | Bounded authority: never steer further than this many counts from the calibration point. |
-| `sync.steer.max_push` | 2 |  | 1 to 4 |  | Most counts one push may move, so no single frequency step is large. At most 4: the step is fed forward when the push lands, 0.2 to 0.4 s after the DAC moves, so 4 counts (0.5 ppm) leave 12 to 25 samples of grid error, well inside the 246-sample re-sync gate; 50 would leave 150 to 300. |
+| `sync.steer.max_push` | 2 |  | 1 to 4 |  | Most counts one push may move, so no single frequency step is large. At most 4: the step is fed forward when the push lands, about 0.2 s after the DAC moves (up to 0.4 s when a failed write is read back), so 4 counts (0.5 ppm) leave 12 to 25 samples of grid error, well inside the 246-sample re-sync gate; 50 would leave 150 to 300. |
 | `sync.steer.ppm_per_count` | 0.1251 |  | 0.001 to 10 |  | Actuator gain, ppm per CLOCK_ADJ count (magnitude; +1 count raises the UE clock). Measured 0.1251 (AP-48). |
 | `sync.steer.keep` | false |  |  |  | Leave the steered code in place when the sounder exits instead of releasing to the calibrated hold. |
 | `sync.resync.residual_ppm` | 0.1 | `HOUDINI_SYNC_RESIDUAL_PPM` | 0.0001 to 1000 | clamped | Assumed worst-case clock error after tracking; with sync_tol_samples it sets how often the beacon is looked at. |

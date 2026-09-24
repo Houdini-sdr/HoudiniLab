@@ -148,9 +148,23 @@ static void sessionTests() {
       // Fails under: arm() ignoring steer.enable (it reads the node and arms).
       check(!s.arm() && b.node.reads == 0, "steering off: arm() reads nothing and stays off");
     }
-    // Two guards cover this (release() returns when not armed, and nothing
-    // was moved), so no single mutation breaks it: it pins the pair.
-    check(b.node.written().empty(), "steering off: nothing written at exit");
+    // The writes: two guards cover them (release() returns when not armed,
+    // and nothing was moved), so no single mutation breaks that half; it pins
+    // the pair. The reads fail under: release() reading the node before its
+    // armed() guard.
+    check(b.node.written().empty() && b.node.reads == 0, "steering off: nothing written or read at exit");
+  }
+  {
+    // A node calibrated at code 1: a push of -2 would be code -1, which the
+    // device reads as a RELATIVE push. Fails under: dropping the 0..1023 check
+    // in onUpdate (then "-1" is written and trusted as an absolute code).
+    Bench b;
+    b.node.cal = b.node.dac = 1;
+    auto s = b.make();
+    s.arm();
+    b.decide(s, -0.36);
+    landed(s);
+    check(b.node.written().empty(), "a push to a code outside 0..1023 is dropped, not written");
   }
   {
     Bench b;
@@ -280,6 +294,7 @@ static void sessionTests() {
       b.node.fail_reads = 1;  // and its readback fails: the offset is unknown
       b.decide(s, 0.36);
       landed(s);
+      // Fails under: poll() not clearing known_ when the readback fails.
       check(!s.known(), "a failed push whose readback fails leaves the offset unknown");
     }
     // Fails under: skipping the release while the offset is unknown (the node

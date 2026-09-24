@@ -308,7 +308,7 @@ const std::vector<SyncConfig::Spec>& SyncConfig::schema() {
        "Bounded authority: never steer further than this many counts from the calibration point.",
        KNOB_ACCESS(int, steer.max_offset), nullptr, EP::kClamp},
       {"steer.max_push", nullptr, 1, 4,
-       "Most counts one push may move, so no single frequency step is large. At most 4: the step is fed forward when the push lands, 0.2 to 0.4 s after the DAC moves, so 4 counts (0.5 ppm) leave 12 to 25 samples of grid error, well inside the 246-sample re-sync gate; 50 would leave 150 to 300.",
+       "Most counts one push may move, so no single frequency step is large. At most 4: the step is fed forward when the push lands, about 0.2 s after the DAC moves (up to 0.4 s when a failed write is read back), so 4 counts (0.5 ppm) leave 12 to 25 samples of grid error, well inside the 246-sample re-sync gate; 50 would leave 150 to 300.",
        KNOB_ACCESS(int, steer.max_push), nullptr, EP::kClamp},
       {"steer.ppm_per_count", nullptr, 0.001, 10.0,
        "Actuator gain, ppm per CLOCK_ADJ count (magnitude; +1 count raises the UE clock). Measured 0.1251 (AP-48).",
