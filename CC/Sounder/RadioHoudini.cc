@@ -424,6 +424,17 @@ void RadioHoudini::healthLoop(double period_s) {
       } else if (n % 12 == 0) {
         MLPD_INFO("%s link health: %s%s\n", label.c_str(), rep.line().c_str(), app);
       }
+      // SH-427 diagnostic (HOUDINI_TX_HOST_STATUS): the host pacer's per-channel
+      // state and the bank counters, every period, stamped. Its own try: a plugin
+      // without the key throws, and that must not stop the health thread.
+      if (std::getenv("HOUDINI_TX_HOST_STATUS") != nullptr) {
+        try {
+          MLPD_INFO("%s TX_HOST_STATUS: %s\n", label.c_str(), dev_->readSetting("TX_HOST_STATUS").c_str());
+          MLPD_INFO("%s TX_BANK_STATUS: %s\n", label.c_str(), dev_->readSetting("TX_BANK_STATUS").c_str());
+        } catch (const std::exception& e) {
+          MLPD_WARN("%s TX_HOST_STATUS read failed: %s\n", label.c_str(), e.what());
+        }
+      }
     }
   } catch (const std::exception& e) {
     MLPD_WARN("%s link health stopped: %s (a key this device does not report?)\n", label.c_str(), e.what());
