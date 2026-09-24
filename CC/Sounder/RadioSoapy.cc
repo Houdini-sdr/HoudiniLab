@@ -16,6 +16,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <sstream>
 #include <vector>
 
 #include "SoapySDR/Errors.hpp"
@@ -271,9 +272,24 @@ RadioSoapy::RadioSoapy(const RadioParams& params, Type type, const SoapySDR::Kwa
       // SH-235: the Houdini driver rejects a multi-channel TX stream on both
       // modes (replay beacon and live pilot). Open one single-channel TX stream
       // per channel; xmit routes each channel's buffer to its own stream.
+      // SH-427 diagnostic (HOUDINI_TX_CPU_AFFINITY="c0,c1,..."): the i-th live
+      // (tx_mode=stream, the UE) TX stream gets the plugin's cpu_affinity = ci,
+      // to test whether its pacer worker's stalls are contention for a core.
+      std::vector<std::string> tx_cpus;
+      if (const char* e = std::getenv("HOUDINI_TX_CPU_AFFINITY")) {
+        std::string list(e), item;
+        for (std::istringstream in(list); std::getline(in, item, ',');) tx_cpus.push_back(item);
+      }
+      size_t tx_i = 0;
       for (auto ch : tx_channels) {
-        tx_streams_.push_back(
-            dev_->setupStream(SOAPY_SDR_TX, soapyFmt, {ch}, txStreamArgs));
+        SoapySDR::Kwargs a = txStreamArgs;
+        const auto mode = a.find("tx_mode");
+        if (tx_i < tx_cpus.size() && mode != a.end() && mode->second == "stream") {
+          a["cpu_affinity"] = tx_cpus[tx_i];
+          MLPD_INFO("TX ch%zu stream: cpu_affinity=%s (HOUDINI_TX_CPU_AFFINITY)\n", ch, tx_cpus[tx_i].c_str());
+        }
+        ++tx_i;
+        tx_streams_.push_back(dev_->setupStream(SOAPY_SDR_TX, soapyFmt, {ch}, a));
       }
       // One combined RX stream over the RX channels. Since SH-142/SH-159 landed
       // the driver activates a >1-channel RX stream and readStream fills buffs[i]
