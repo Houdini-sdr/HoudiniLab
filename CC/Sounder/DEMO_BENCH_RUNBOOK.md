@@ -229,16 +229,25 @@ threads around. Steps marked (sudo) are the owner's.
   (unbound kernel workers on 0-14), and
   `cat /sys/kernel/mm/transparent_hugepage/enabled` (set `madvise` if it reads
   `always`). Undo: the old values.
-- Arm 4, NIC queues (the software lane signs off first: its plugin may assume
-  queue numbers): keep the data NICs' receive flows and the pinned threads' transmit
-  completions off 15-19, either by `sudo ethtool -X <data-iface> equal 15` plus
-  `xps_cpus` maps that send CPUs 15-19 to queues 0-14, or by
-  `sudo ethtool -L <data-iface> combined 15`. Undo: the old channel count and
-  `ethtool -X <data-iface> default`.
+- Arm 4, NIC queues: keep the data NICs' receive flows and the pinned threads'
+  transmit completions off 15-19, either by `sudo ethtool -X <data-iface> equal 15`
+  plus `xps_cpus` maps that send CPUs 15-19 to queues 0-14, or by
+  `sudo ethtool -L <data-iface> combined 15`. Change them ONLY with no stream open.
+  The host plugin assumes no queue numbers except its zero-copy RX path (AF_XDP,
+  `rx_xsk=auto`): check a run's log for `xsk` lines first. If it engaged, it binds
+  the highest free queue at setup and steers its flow there with an ntuple rule;
+  after `combined 15` that is queue 14, on housekeeping cpu 14. `rx_xsk=off`
+  rules it out. Undo: the old channel count and `ethtool -X <data-iface> default`.
 - Arm 5, real-time priority: `sudo sysctl kernel.sched_rt_runtime_us=-1` (without
   it a spinning FIFO thread is forced off its core about 50 ms a second), grant
-  CAP_SYS_NICE to `build/sounder` (a `setcap` is lost on every rebuild), and add the
-  plugin's rt_priority to `HOUDINI_TX_STREAM_ARGS`, always with the workers pinned.
+  CAP_SYS_NICE to `build/sounder` (`sudo setcap cap_sys_nice+ep build/sounder`, lost
+  on every rebuild), and `export HOUDINI_TX_STREAM_ARGS=rt_priority=40` (SCHED_FIFO;
+  40 stays under the kernel's threaded-IRQ and RCU priorities, which default to 50),
+  always with the workers pinned. Without the capability the plugin warns and runs at
+  normal priority: read the log for that warning.
+- The plugin's receive workers take the same `cpu_affinity=<cpu>` argument per RX
+  stream (the sounder has no RX pass-through knob yet; add one if an arm needs them
+  on 18 and 19).
 - Stage 2b, if the arms leave oversleeps: add `nohz_full=15-19` to the command line
   (one more reboot) and compare against the best arm: it removes the tick from a
   core running one thread, but makes every syscall dearer, and the TX workers make
