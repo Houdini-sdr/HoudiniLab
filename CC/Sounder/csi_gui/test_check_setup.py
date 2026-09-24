@@ -44,14 +44,20 @@ open(os.path.join(fake, "SoapySDR.py"), "w").write(
     "        self.ip = a['remote'].split('//')[1].split(':')[0]\n"
     "    def getHardwareInfo(self): return json.load(open(%r))[self.ip]\n"
     "    def readSetting(self, k):\n"
+    "        if k == 'CLOCK_ADJ': return json.load(open(%r))[self.ip]\n"
     "        assert k == 'EGRESS_STATUS', k\n"
     "        v = json.load(open(%r)).get(self.ip)\n"
     "        if v is None: raise RuntimeError('unknown key')\n"
     "        return v\n"
     "    @staticmethod\n"
-    "    def unmake(d): open(%r, 'a').write(d.ip + '\\n')\n" % (info_file, egress_file, os.path.join(root, "unmade")))
+    "    def unmake(d): open(%r, 'a').write(d.ip + '\\n')\n"
+    % (info_file, os.path.join(root, "clock.json"), egress_file, os.path.join(root, "unmade")))
 HEALTHY = "drop=p0:0,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marked=p0:0,p1:0,p2:0,p3:0"
 json.dump({"127.0.0.1": HEALTHY, "127.0.0.2": HEALTHY}, open(egress_file, "w"))
+clock_file = os.path.join(root, "clock.json")
+def clock_adj(dac, cal=408):
+    return "holdover=1 man_dac=%d rb_dac=%d pll1_locked=1 ref=calibrated cal_dac=%d offset=%d" % (dac, dac, cal, dac - cal)
+json.dump({"127.0.0.1": clock_adj(404, 404), "127.0.0.2": clock_adj(408)}, open(clock_file, "w"))
 same = {k: "v1" for k in ("fpga_version", "fpga_commit", "fpga_board", "device_version",
                           "device_build", "host_version", "host_build", "proto_version")}
 json.dump({"127.0.0.1": same, "127.0.0.2": same}, open(info_file, "w"))
@@ -77,8 +83,22 @@ check(sorted(open(os.path.join(root, "unmade")).read().split()) == ["127.0.0.1",
 # A real sounder on this host (a rig host mid-run) runs on other radios than the
 # fake 127.0.0.x ones, so it may add a note or, for another user's process, a WARN.
 check(all(l != "WARN" for w, l in lv.items() if w != "radios free"), "no warnings on a ready host: %s" % lv)
+check(lv.get("clock 127.0.0.1") == "INFO" and lv.get("clock 127.0.0.2") == "INFO",
+      "full form: each radio's clock steering offset is read and reported (0 on both)")
 rc, rep, lv = run("--quick")
 check(rc == 0 and "stack match" not in lv, "--quick does not open the radios")
+# A node left steered: a WARN naming it, with the release as the fix; the run
+# can still go (rc 0). Fails under: dropping the offset check (an INFO).
+json.dump({"127.0.0.1": clock_adj(404, 404), "127.0.0.2": clock_adj(411)}, open(clock_file, "w"))
+rc, rep, lv = run()
+fix = [r for r in rep["results"] if r["what"] == "clock 127.0.0.2"][0]
+check(rc == 0 and lv.get("clock 127.0.0.2") == "WARN" and "+3" in fix["detail"] and "release" in fix["fix"]
+      and lv.get("clock 127.0.0.1") == "INFO", "a node left steered +3 counts is a WARN naming it, with the release")
+json.dump({"127.0.0.1": clock_adj(404, 404), "127.0.0.2": "holdover=0 man_dac=0 rb_dac=0 pll1_locked=1 ref=internal "
+           "cal_dac=none offset=none"}, open(clock_file, "w"))
+rc, rep, lv = run()
+check(rc == 0 and lv.get("clock 127.0.0.2") == "INFO", "a node on ref=internal has no offset to report (INFO)")
+json.dump({"127.0.0.1": clock_adj(404, 404), "127.0.0.2": clock_adj(408)}, open(clock_file, "w"))
 
 # Each broken piece, one at a time, is a FAIL (or the stated WARN) under its own name.
 json.dump({"127.0.0.1": same, "127.0.0.2": dict(same, fpga_commit="v2")}, open(info_file, "w"))

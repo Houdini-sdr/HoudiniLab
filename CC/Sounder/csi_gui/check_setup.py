@@ -19,11 +19,13 @@ What it checks, in order:
   5. no other sounder is running on this host (it would hold the radios);
   6. each radio's server answers on the config's remote port;
   7. (full form only) each radio's stack: gateware, firmware, plugin and protocol
-     versions, which must agree between the nodes; and each radio's data egress,
-     which must not have stalled (EGRESS_STATUS stall_seen).
+     versions, which must agree between the nodes; each radio's data egress,
+     which must not have stalled (EGRESS_STATUS stall_seen); and each radio's
+     clock steering offset (CLOCK_ADJ), which should be 0.
 
 Checks 1 to 6 touch no radio. Check 7 opens each radio and reads its hardware
-info and EGRESS_STATUS, as the sounder does at startup, and changes nothing. Do not run the full
+info, EGRESS_STATUS and CLOCK_ADJ, as the sounder does at startup, and changes
+nothing. Do not run the full
 form against radios someone else is using.
 
 Run it with the venv's python (or with the venv activated): check 7 imports
@@ -275,6 +277,10 @@ def hwinfo(ip, port):
             info["egress_status"] = sdr.readSetting("EGRESS_STATUS")
         except Exception as e:  # an older plugin: check_egress says so
             info["egress_status"] = "unreadable: %s" % e
+        try:
+            info["_clock_adj"] = str(sdr.readSetting("CLOCK_ADJ"))
+        except Exception:  # a plugin without the setting
+            info["_clock_adj"] = ""
         return info
     finally:
         # A clean close: a connection dropped at process exit leaves a
@@ -298,6 +304,29 @@ def check_egress(rep, ip, raw):
         rep.add("PASS", "egress %s" % ip, "no data-path stall recorded")
 
 
+def check_clock(rep, ip, port, st):
+    """A radio's CLOCK_ADJ state. A node left steered (a steering run that did
+    not release, or clock_steer_loop.py) runs every later run off its
+    calibration point, and a run with steering off never reads it."""
+    f = dict(kv.split("=", 1) for kv in st.split() if "=" in kv)
+    off = f.get("offset", "")
+    if not st:
+        rep.add("INFO", "clock %s" % ip, "CLOCK_ADJ not readable (a plugin without the setting)")
+    elif not off.lstrip("-").isdigit():
+        rep.add("INFO", "clock %s" % ip, "ref=%s: not held at a calibration code, no steering offset"
+                % f.get("ref", "?"))
+    elif int(off) != 0:
+        rep.add("WARN", "clock %s" % ip, "left steered %+d counts from its calibration code (CLOCK_ADJ %s)"
+                % (int(off), st),
+                "Release it before the run: python3 -c \"import SoapySDR as S; d = S.Device({'driver': "
+                "'houdinisdr', 'remote': 'tcp://%s:%s', 'remote:driver': 'houdinisdr-device', 'remote:type': "
+                "'houdinisdr', 'timeout': '3000000'}); d.writeSetting('CLOCK_ADJ', 'release'); "
+                "S.Device.unmake(d)\"" % (ip, port))
+    else:
+        rep.add("INFO", "clock %s" % ip, "ref=%s, at its calibration code %s (offset 0)"
+                % (f.get("ref", "?"), f.get("cal_dac", "?")))
+
+
 def check_versions(rep, sd, nodes, port, env):
     infos = {}
     for ip in nodes:
@@ -318,6 +347,7 @@ def check_versions(rep, sd, nodes, port, env):
     for ip, info in infos.items():
         rep.add("INFO", "stack %s" % ip, " ".join("%s=%s" % (k, info.get(k, "<absent>")) for k in MUST_MATCH))
         check_egress(rep, ip, info.get("egress_status"))
+        check_clock(rep, ip, port, info.get("_clock_adj", ""))
     if len(infos) < 2:
         return
     diff = [k for k in MUST_MATCH if len({i.get(k, "<absent>") for i in infos.values()}) > 1]
