@@ -55,15 +55,17 @@ static Run simulate(ClockSteerConfig c, double e0, double ramp_ppm_per_s, double
 }
 
 // A UE's CLOCK_ADJ as the device reports it, with the faults a session must
-// survive: a slow write, a write that reports failure yet lands, a DAC that
-// lands short of the request, and reads that fail.
+// survive: a slow write, a write that reports failure yet lands (a link
+// timeout), one that lands short of the request (which the device reports as
+// a failure: it verifies the landed code), and reads that fail.
 struct FakeNode {
   std::mutex m;
   int cal = 408, dac = 408;
   std::string ref = "calibrated";
+  bool held = true;  // holdover=1: the calibrated hold is in force
   int write_delay_ms = 0;
   bool write_result = true;
-  int land_short = 0;
+  int land_short = 0;  // pair with write_result = false, as the device reports it
   int fail_reads = 0;  // the next this-many reads return ""
   int reads = 0;
   std::vector<std::string> writes;
@@ -74,11 +76,13 @@ struct FakeNode {
       --fail_reads;
       return "";
     }
-    return "holdover=1 man_dac=" + std::to_string(dac) + " rb_dac=" + std::to_string(dac) +
+    return std::string("holdover=") + (held ? "1" : "0") + " man_dac=" + std::to_string(dac) + " rb_dac=" + std::to_string(dac) +
            " pll1_locked=1 ref=" + ref + " cal_dac=" + std::to_string(cal) + " offset=" + std::to_string(dac - cal);
   }
   bool write(const std::string& v) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(write_delay_ms));
+    // Only the push is slow: a slow release would let a push still in flight
+    // win the lock anyway, and hide a release that does not wait for it.
+    if (v != "release") std::this_thread::sleep_for(std::chrono::milliseconds(write_delay_ms));
     std::lock_guard<std::mutex> lk(m);
     writes.push_back(v);
     dac = (v == "release") ? cal : std::stoi(v) - land_short;
@@ -144,6 +148,8 @@ static void sessionTests() {
       // Fails under: arm() ignoring steer.enable (it reads the node and arms).
       check(!s.arm() && b.node.reads == 0, "steering off: arm() reads nothing and stays off");
     }
+    // Two guards cover this (release() returns when not armed, and nothing
+    // was moved), so no single mutation breaks it: it pins the pair.
     check(b.node.written().empty(), "steering off: nothing written at exit");
   }
   {
@@ -152,6 +158,13 @@ static void sessionTests() {
     auto s = b.make();
     // Fails under: arming on any ref (the actuator exists only under calibrated).
     check(!s.arm(), "a node not on ref=calibrated is not armed");
+  }
+  {
+    Bench b;
+    b.node.held = false;  // calibrated, but PLL1 tracking: rb_dac is no offset
+    auto s = b.make();
+    // Fails under: dropping the holdover=1 requirement from arm().
+    check(!s.arm(), "a calibrated node whose hold is not in force is not armed");
   }
   {
     Bench b;
@@ -179,12 +192,18 @@ static void sessionTests() {
     s.arm();
     b.decide(s, 0.36);
     const double sc = landed(s);
+    // Fails under: flipping the push's sign (writes 406) or the feed-forward's
+    // (periodScale(-2)).
     check(b.node.written() == std::vector<std::string>{"410"} && s.offset() == 2 && std::fabs(sc - k2) < 1e-15,
-          "a push of +2 writes cal+2, reads it back, and feeds forward exactly periodScale(2)");
+          "a push of +2 writes cal+2 and feeds forward exactly periodScale(2)");
+    // Fails under: reading CLOCK_ADJ back after a write the device took (one
+    // more RPC under the stream lock per push; only arm() reads here).
+    check(b.node.reads == 1, "a write the device took is not read back");
   }
   {
     Bench b;
-    b.node.land_short = 1;  // the DAC lands one count short of the request
+    b.node.land_short = 1;  // the DAC lands one count short of the request,
+    b.node.write_result = false;  // which the device reports as a failed write
     auto s = b.make();
     s.arm();
     b.decide(s, 0.36);
@@ -204,8 +223,10 @@ static void sessionTests() {
     check(s.offset() == 2, "a write that reports failure but lands still moves the offset");
   }
   {
-    // The review's case: the write lands (+2) and its readback fails.
+    // The review's case: the write reports failure yet lands (+2), and its
+    // readback fails.
     Bench b;
+    b.node.write_result = false;
     auto s = b.make();
     s.arm();
     b.node.fail_reads = 1;
@@ -244,6 +265,27 @@ static void sessionTests() {
     const double sc = landed(s);
     // Fails under: periodReplaced() doing nothing (the step is counted twice).
     check(sc == 1.0 && s.offset() == 2, "a push in flight when the period is replaced lands without feed-forward");
+    b.decide(s, 0.18);
+    const double sc2 = landed(s);
+    // Fails under: onUpdate not re-arming the feed-forward (every push after
+    // one replacement would land unfed).
+    check(std::fabs(sc2 - k1) < 1e-15 && s.offset() == 3, "the next push is fed forward again");
+  }
+  {
+    Bench b;
+    b.node.write_result = false;  // the write reports failure yet lands,
+    {
+      auto s = b.make();
+      s.arm();
+      b.node.fail_reads = 1;  // and its readback fails: the offset is unknown
+      b.decide(s, 0.36);
+      landed(s);
+      check(!s.known(), "a failed push whose readback fails leaves the offset unknown");
+    }
+    // Fails under: skipping the release while the offset is unknown (the node
+    // stays at +2 for every later run).
+    check(b.node.written() == std::vector<std::string>{"410", "release"} && b.node.dac == b.node.cal,
+          "a session that ends with the offset unknown still releases the node");
   }
   {
     Bench b;

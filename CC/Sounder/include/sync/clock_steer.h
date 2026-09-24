@@ -21,7 +21,7 @@
  * owns the tracked period, so they need no lock. The ACTUATOR write is not: a
  * CLOCK_ADJ write holds the device's stream lock about 200 ms, longer than the
  * pilot horizon, so ClockSteerSession runs it as a job the sync thread polls
- * once a frame (an Opus review, M2). The same lock is what every other RPC on
+ * once a frame. The same lock is what every other RPC on
  * that handle waits behind (the host pacer's time polls among them), and each
  * push is a rate step the pacer re-learns: steering stays off by default.
  *
@@ -45,11 +45,13 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
 #include <future>
 #include <string>
+#include <system_error>
 
 #include "sync/sync_config.h"
 
@@ -72,9 +74,10 @@ class ClockSteer {
 
   /// One accepted tracker observation of eps (ppm) at time `t_s`. Returns the
   /// push to apply now, in counts (0: none). The caller writes the actuator
-  /// and, only if that is confirmed, calls applied(). The window closes at
-  /// every decision, so a failed write is retried at the next one, a period
-  /// later, with fresh data.
+  /// and calls applied() with the move the node actually made (the landed
+  /// code, or a readback), which can differ from the push or be none. The
+  /// window closes at every decision, so a push that did not land is retried
+  /// at the next one, a period later, with fresh data.
   int observe(double eps_ppm, double t_s) {
     if (!started_ || !std::isfinite(eps_ppm)) return 0;
     sum_ += eps_ppm;
@@ -160,11 +163,15 @@ inline long clockAdjCode(const std::string& v) {
 /// and the release at the end. The caller's thread owns the tracked period: it
 /// calls poll() once a frame and scales the period by what poll() returns.
 ///
-/// The offset is always the node's own, read back after each write: a write
-/// that fails yet lands, or lands one count off, still moves the offset and
-/// the feed-forward by what the DAC did. When a readback fails the offset is
-/// unknown, and the next decision reads the node instead of pushing from a
-/// guess (the step already happened, and the tracker has been following it).
+/// The offset is always the node's own. A write the device takes landed
+/// exactly at its code: the device refuses a write whose hold did not verify
+/// at that code (SoapyHoudiniSDR, WriteClockAdj and lmk::HoldLanded), and the
+/// remote link returns only after the device does. A write that reports
+/// failure may still have landed, or elsewhere (a link timeout, a refused
+/// verify), so only that one is read back, and the offset and feed-forward
+/// follow what the DAC did. When that readback fails the offset is unknown,
+/// and the next decision reads the node instead of pushing from a guess (the
+/// step already happened, and the tracker has been following it).
 class ClockSteerSession {
  public:
   using Read = std::function<std::string()>;              ///< CLOCK_ADJ read, "" when it fails
@@ -180,15 +187,18 @@ class ClockSteerSession {
   ClockSteerSession& operator=(const ClockSteerSession&) = delete;
 
   /// Arm when steering is enabled and the node's CLOCK_ADJ reads
-  /// ref=calibrated with its codes (the actuator exists only then). A node
-  /// left steered by an earlier session is taken over, and released at the
-  /// end like our own. Returns armed().
+  /// ref=calibrated, in its hold (holdover=1), with its codes: the actuator
+  /// exists only then. A calibrated node whose hold is not in force has PLL1
+  /// tracking and rb_dac wandering with it, which is no offset to steer from.
+  /// A node left steered by an earlier session is taken over, and released at
+  /// the end like our own. Returns armed().
   bool arm() {
     if (!cfg_.enable || armed()) return armed();
     const std::string st = safeRead();
     const long cal = clockAdjCode(clockAdjField(st, "cal_dac")), rb = clockAdjCode(clockAdjField(st, "rb_dac"));
-    if (clockAdjField(st, "ref") != "calibrated" || cal < 0 || rb < 0) {
-      say(true, "requested but OFF: CLOCK_ADJ reads '%s' (needs ref=calibrated with cal_dac and rb_dac)", st.c_str());
+    if (clockAdjField(st, "ref") != "calibrated" || clockAdjField(st, "holdover") != "1" || cal < 0 || rb < 0) {
+      say(true, "requested but OFF: CLOCK_ADJ reads '%s' (needs ref=calibrated in its hold, holdover=1, with "
+                "cal_dac and rb_dac)", st.c_str());
       return false;
     }
     cal_ = static_cast<int>(cal);
@@ -218,21 +228,24 @@ class ClockSteerSession {
     Read rd = read_;
     if (!known_) {
       // Learn where the node is before moving it again.
-      job_ = std::async(std::launch::async, [rd] { return Job{false, readCode(rd)}; });
+      launch([rd] { return Job{false, readCode(rd)}; });
       return;
     }
-    pending_ = push;
-    dirty_ = true;  // from here the node may have moved
     const int code = cal_ + steer_.offset() + push;
     Write wr = write_;
-    job_ = std::async(std::launch::async, [rd, wr, code] {
+    const bool started = launch([rd, wr, code] {
       bool wrote = false;
       try {
         wrote = wr(std::to_string(code));
       } catch (...) {
       }
-      return Job{true, readCode(rd), wrote};
+      // A write the device took landed at `code`; only a failed one is read.
+      return Job{true, wrote ? static_cast<long>(code) : readCode(rd), wrote};
     });
+    if (!started) return;
+    pending_ = push;
+    ++writes_;
+    dirty_ = true;  // from here the node may have moved
   }
 
   /// Once a frame: land a finished job. Returns the factor to scale the
@@ -243,7 +256,7 @@ class ClockSteerSession {
     if (j.rb < 0) {
       known_ = false;
       say(true, "CLOCK_ADJ readback failed after %s: the offset is unknown until the next decision reads it",
-          j.pushed ? (j.wrote ? "a push" : "a failed push") : "a read");
+          j.pushed ? "a failed push" : "a read");
       return 1.0;
     }
     const int now_offset = static_cast<int>(j.rb - cal_);
@@ -258,9 +271,10 @@ class ClockSteerSession {
     if (moved != 0) steer_.applied(moved);
     const bool ff = feed_forward_ && moved != 0;
     const double scale = ff ? steer_.periodScale(moved) : 1.0;
-    say(moved != pending_, "tracked eps %+.4f ppm averaged over %.0f s -> push %+d (write %s), CLOCK_ADJ reads "
-                           "back %ld: offset %+d; period scaled by %.9f%s",
-        steer_.lastMeanPpm(), cfg_.period_s, pending_, j.wrote ? "ok" : "FAILED", j.rb, steer_.offset(), scale,
+    say(moved != pending_, "tracked eps %+.4f ppm averaged over %.0f s -> push %+d: %s %ld, offset %+d; period "
+                           "scaled by %.9f%s",
+        steer_.lastMeanPpm(), cfg_.period_s, pending_,
+        j.wrote ? "landed at" : "the write FAILED, CLOCK_ADJ reads back", j.rb, steer_.offset(), scale,
         (moved != 0 && !feed_forward_) ? " (not fed forward: the period was replaced while it was in flight)" : "");
     return scale;
   }
@@ -283,8 +297,9 @@ class ClockSteerSession {
       poll();
     }
     if (!dirty_) return;
+    const std::string where = known_ ? std::to_string(steer_.offset()) + " counts" : "unknown (a readback failed)";
     if (cfg_.keep) {
-      say(false, "keeping offset %+d counts at exit", steer_.offset());
+      say(false, "keeping the offset at exit: %s", where.c_str());
       return;
     }
     bool ok = false;
@@ -292,12 +307,16 @@ class ClockSteerSession {
       ok = write_("release");
     } catch (...) {
     }
-    say(!ok, "%s to the calibrated hold after %d push(es), offset was %+d",
-        ok ? "released" : "RELEASE FAILED, node left steered", steer_.pushes(), steer_.offset());
+    say(!ok, "%s to the calibrated hold after %d push(es), offset was %s",
+        ok ? "released" : "RELEASE FAILED, node left steered", writes_, where.c_str());
   }
 
+  /// The offset as last known (see known()).
   int offset() const { return steer_.offset(); }
-  int pushes() const { return steer_.pushes(); }
+  /// False from a failed readback until the next decision reads the node.
+  bool known() const { return known_; }
+  /// CLOCK_ADJ pushes written, whether or not they landed or were read back.
+  int pushes() const { return writes_; }
 
   static double steadySeconds() {
     return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -323,11 +342,28 @@ class ClockSteerSession {
       return "";
     }
   }
-  template <class... A>
-  void say(bool warn, const char* fmt, A... a) {
+  /// Start a job; false (the decision is dropped, the next window retries)
+  /// when no thread can be started.
+  bool launch(std::function<Job()> f) {
+    try {
+      job_ = std::async(std::launch::async, std::move(f));
+      return true;
+    } catch (const std::system_error& e) {
+      if (!launch_warned_) {
+        launch_warned_ = true;
+        say(true, "could not start the CLOCK_ADJ job (%s): decision dropped", e.what());
+      }
+      return false;
+    }
+  }
+  // printf-checked at every call (argument 1 is `this`).
+  __attribute__((format(printf, 3, 4))) void say(bool warn, const char* fmt, ...) {
     if (!log_) return;
     char buf[512];
-    std::snprintf(buf, sizeof buf, fmt, a...);
+    va_list ap;
+    va_start(ap, fmt);
+    std::vsnprintf(buf, sizeof buf, fmt, ap);
+    va_end(ap);
     log_(warn, buf);
   }
 
@@ -342,7 +378,9 @@ class ClockSteerSession {
   bool dirty_ = false;        ///< the node may be off its calibration point
   bool feed_forward_ = true;  ///< the job in flight may feed its step forward
   bool released_ = false;
+  bool launch_warned_ = false;
   int pending_ = 0;           ///< the push in flight
+  int writes_ = 0;            ///< pushes written
   std::future<Job> job_;
 };
 
