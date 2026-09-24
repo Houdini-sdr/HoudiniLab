@@ -312,6 +312,14 @@ def check_clock(rep, ip, port, st):
     off = f.get("offset", "")
     if not st:
         rep.add("INFO", "clock %s" % ip, "CLOCK_ADJ not readable (a plugin without the setting)")
+    elif f.get("ref") == "calibrated" and not off.lstrip("-").isdigit():
+        # Calibrated but out of its hold: PLL1 is tracking, so the tick is not at
+        # the calibrated frequency (the device warns at make() too).
+        rep.add("WARN", "clock %s" % ip, "ref=calibrated but the hold is not in force (CLOCK_ADJ %s)" % st,
+                "Release it back into the calibrated hold before the run: python3 -c \"import SoapySDR as S; "
+                "d = S.Device({'driver': 'houdinisdr', 'remote': 'tcp://%s:%s', 'remote:driver': "
+                "'houdinisdr-device', 'remote:type': 'houdinisdr', 'timeout': '3000000'}); "
+                "d.writeSetting('CLOCK_ADJ', 'release'); S.Device.unmake(d)\"" % (ip, port))
     elif not off.lstrip("-").isdigit():
         rep.add("INFO", "clock %s" % ip, "ref=%s: not held at a calibration code, no steering offset"
                 % f.get("ref", "?"))

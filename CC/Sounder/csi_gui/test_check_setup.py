@@ -83,7 +83,10 @@ check(sorted(open(os.path.join(root, "unmade")).read().split()) == ["127.0.0.1",
 # A real sounder on this host (a rig host mid-run) runs on other radios than the
 # fake 127.0.0.x ones, so it may add a note or, for another user's process, a WARN.
 check(all(l != "WARN" for w, l in lv.items() if w != "radios free"), "no warnings on a ready host: %s" % lv)
-check(lv.get("clock 127.0.0.1") == "INFO" and lv.get("clock 127.0.0.2") == "INFO",
+# Fails under: never reading CLOCK_ADJ (both then report INFO 'not readable').
+check(all(r["level"] == "INFO" and "offset 0" in r["detail"] for r in rep["results"]
+          if r["what"] in ("clock 127.0.0.1", "clock 127.0.0.2"))
+      and lv.get("clock 127.0.0.1") == "INFO" and lv.get("clock 127.0.0.2") == "INFO",
       "full form: each radio's clock steering offset is read and reported (0 on both)")
 rc, rep, lv = run("--quick")
 check(rc == 0 and "stack match" not in lv, "--quick does not open the radios")
@@ -98,6 +101,13 @@ json.dump({"127.0.0.1": clock_adj(404, 404), "127.0.0.2": "holdover=0 man_dac=0 
            "cal_dac=none offset=none"}, open(clock_file, "w"))
 rc, rep, lv = run()
 check(rc == 0 and lv.get("clock 127.0.0.2") == "INFO", "a node on ref=internal has no offset to report (INFO)")
+# Fails under: reporting a calibrated node out of its hold as INFO (the old rule).
+json.dump({"127.0.0.1": clock_adj(404, 404), "127.0.0.2": "holdover=0 man_dac=408 rb_dac=433 pll1_locked=1 "
+           "ref=calibrated cal_dac=408 offset=none"}, open(clock_file, "w"))
+rc, rep, lv = run()
+fix = [r for r in rep["results"] if r["what"] == "clock 127.0.0.2"][0]
+check(rc == 0 and lv.get("clock 127.0.0.2") == "WARN" and "release" in fix["fix"],
+      "a calibrated node whose hold is not in force is a WARN, with the release")
 json.dump({"127.0.0.1": clock_adj(404, 404), "127.0.0.2": clock_adj(408)}, open(clock_file, "w"))
 
 # Each broken piece, one at a time, is a FAIL (or the stated WARN) under its own name.
