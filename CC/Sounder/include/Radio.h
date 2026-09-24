@@ -59,12 +59,12 @@ struct RadioParams {
   std::string tx_mode = "stream";  ///< "replay" (the BS beacon RAM) or "stream" (the UE)
   bool tdd = false;           ///< the driver's TDD tick anchor for the UE pilot
   bool mts = true;            ///< multi-tile sync on every stream (AP-23)
-  // The device RPC timeout, us. Not 1 s: an open sometimes stalls about 1 s on
-  // the host before its first connection (measured 2026-09-24: a make()
-  // connection that never reached .22 within 1 s, and on .21 first opens of
-  // 1.35 s whose node side took 0.34 s; where the second goes is unmeasured,
-  // a lost SYN is not established), and at 1 s that stall loses the node
-  // ("Radios Not Found"). 3 s rides it out; a dead node now takes 3 s to report.
+  // The device RPC timeout, us. Not 1 s: on the rig (2026-09-24, SH-442) 2 of 7
+  // sounder launches lost the BS open on every attempt; the node saw each
+  // attempt's first connection accepted and then NO request for the whole 1 s,
+  // so the wait is inside this process (cause unmeasured). 3 s rides it out; a
+  // dead node now takes 3 s to report, and a fresh process's first discovery
+  // sleeps the full 3 s by SoapyRemote's design.
   std::string timeout = "3000000";
   // AP-79 mode V (Houdini). adc_fs_hz > 0 selects the mode-V converter
   // bring-up (houdini/mode_v_bringup.h) in place of the one-rate, one-NCO path.
