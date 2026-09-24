@@ -274,8 +274,10 @@ def _delay_stats(db, tap_ns):
     threshold is 20 dB below the peak or 6 dB above the noise floor (the
     median of the window's outer quarter), whichever is higher, and is
     reported. A single path is NOT 0 ns: the Hann-windowed CIR's mainlobe
-    (about 2/B wide) gives a lone path an RMS spread of about 0.5/B, so values
-    near that are unresolved."""
+    (about 2/B wide) gives a lone path an RMS spread of about 0.5/B, a mean
+    excess of about 1.5/B and a max excess of about 3/B (measured from the
+    mainlobe's first tap above the threshold), so values near those are
+    unresolved, not multipath."""
     q = max(1, len(db) // 8)
     tail = sorted(db[:q] + db[-q:])
     floor = tail[len(tail) // 2] if tail else -60.0
@@ -498,7 +500,13 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, {"enabled": False})
             return
         if not _host_is_address(self.headers.get("Host", "")):
-            self._json(403, {"error": "forbidden"})
+            # Said on the page and once in the log, so a refused operator is
+            # not left with controls that silently vanish.
+            why = "controls answer only by address: open the dashboard at localhost or its IP"
+            if not getattr(self.server, "host_refusal_logged", False):
+                self.server.host_refusal_logged = True
+                print("[csi] /control refused for Host %r: %s" % (self.headers.get("Host", ""), why), flush=True)
+            self._json(403, {"enabled": False, "error": why})
             return
         st = sup.snapshot()
         st.update({"enabled": True, "configs": sup.configs(), "desc": sup.descriptions(),
@@ -1605,9 +1613,10 @@ function drawQuality(card){
   if(c){
     let t='RMS delay spread '+c.rms_ns.toFixed(1)+' ns · mean excess '+c.mean_ns.toFixed(1)
          +' ns · max excess '+c.max_ns.toFixed(1)+' ns (thr '+c.thr_db.toFixed(0)+' dB re peak';
-    // Hann mainlobe ~2/B; a lone path's RMS spread floor ~0.5/B.
-    if(m && m.bw_mhz>0) t+=', resolution ≈ '+(2e3/m.bw_mhz).toFixed(0)+' ns, single-path floor ≈ '
-                           +(0.5e3/m.bw_mhz).toFixed(0)+' ns';
+    // Hann mainlobe ~2/B; a lone path reads rms ~0.5/B, mean ~1.5/B, max ~3/B.
+    if(m && m.bw_mhz>0) t+=', resolution ≈ '+(2e3/m.bw_mhz).toFixed(0)+' ns; a single path reads rms '
+                           +(0.5e3/m.bw_mhz).toFixed(0)+', mean '+(1.5e3/m.bw_mhz).toFixed(0)
+                           +', max '+(3e3/m.bw_mhz).toFixed(0)+' ns';
     q.push(t+')');
   }
   card.quality.textContent=q.join('\n');
@@ -1940,7 +1949,14 @@ async function pollCtl(){
   try{
     const st=await (await fetch('/control',{cache:'no-store'})).json();
     const box=document.getElementById('ctl');
-    if(!st.enabled){ box.hidden=true; return; }
+    if(!st.enabled){
+      box.hidden=!st.error;  // no --control: no box; refused: say why
+      if(st.error){
+        box.querySelectorAll('button,select').forEach(e=>{ e.disabled=true; });
+        document.getElementById('ctl-state').textContent=st.error;
+      }
+      return;
+    }
     box.hidden=false;
     const sel=document.getElementById('ctl-conf');
     const key=st.configs.join('|');

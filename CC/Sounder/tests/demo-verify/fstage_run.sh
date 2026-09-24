@@ -16,7 +16,10 @@ export HOUDINI_CSI_DUMP=60 HOUDINI_BS_RX_DEBUG=1 HOUDINI_DUMP_BEACON=1 HOUDINI_D
 # before connecting (cause unmeasured; a lost SYN is one candidate) races the
 # A/B build's 1 s device timeout and reads as "Radios Not Found".
 SYN0=$(nstat -az TcpExtTCPSynRetrans 2>/dev/null | awk '/SynRetrans/{print $2}')
-bash "$HERE/run_rung.sh" "$TAG" "$CONF" "$SECS" "${HEALTH_S:-5}"  # HEALTH_S: the link-health period, s
+# HEALTH_S: the link-health period, s. A launch that failed wrote no record:
+# stop here rather than file into the previous run's directory.
+bash "$HERE/run_rung.sh" "$TAG" "$CONF" "$SECS" "${HEALTH_S:-5}" || { rmdir "$RW"; echo "run_rung.sh failed; nothing filed"; exit 1; }
+[ -s "$D/$TAG.current" ] || { rmdir "$RW"; echo "no run record for $TAG; nothing filed"; exit 1; }
 # Wait for THIS run's sounder (run_rung.sh recorded its pid), not any sounder on the host.
 SP=$(cat "$D/$TAG.pid")
 while [ -n "$SP" ] && [ "$(cat "/proc/$SP/comm" 2>/dev/null)" = sounder ]; do sleep 5; done; sleep 3

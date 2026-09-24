@@ -86,6 +86,27 @@ check(abs(d["mean_ns"] - 53.3) < 0.051 and abs(d["max_ns"] - 80.0) < 1e-9,
 db = [-15.0] * 128; db[pre] = 0.0; db[pre + 20] = -12.0
 d = cs._delay_stats(db, 8.0)
 check(d["thr_db"] == -9.0 and d["max_ns"] == 0.0, "a -15 dB floor lifts the threshold to -9 dB, so a -12 dB tap is not counted (mutation: fixed -20 dB)")
+# A lone path through the Hann window houdini/cir.h applies (R2's 96 of 256 tones
+# at 122.88 MSPS, B = 46.08 MHz): the excess delays read the mainlobe itself,
+# about 1.5/B mean and 3/B max, which is what the page states as the floors.
+N, lo, hi = 256, 80, 175
+span = hi - lo + 1
+X = [0j] * N
+for k in range(N):
+    kc = (k + N // 2) % N
+    if lo <= kc <= hi:
+        X[k] = 0.5 - 0.5 * math.cos(2 * math.pi * (kc - lo + 0.5) / span)
+p = [abs(sum(X[k] * complex(math.cos(2 * math.pi * k * t / N), math.sin(2 * math.pi * k * t / N))
+             for k in range(N))) ** 2 for t in range(N)]
+pk = max(range(N), key=lambda t: p[t])
+db = [max(-60.0, 10 * math.log10(max(p[(pk - pre + i) % N], 1e-30) / p[pk])) for i in range(128)]
+b_mhz = span * 122.88 / N
+d = cs._delay_stats(db, 1e3 / 122.88)
+# Fails under: the excess delays measured from the strongest tap (a lone path
+# then reads a mean of about 0 and a max of about 1.5/B).
+check(1.2e3 / b_mhz < d["mean_ns"] < 1.8e3 / b_mhz and 2.5e3 / b_mhz < d["max_ns"] < 3.5e3 / b_mhz,
+      "a lone Hann-windowed path reads mean %.1f and max %.1f ns excess: the page's 1.5/B and 3/B floors at B %.2f MHz"
+      % (d["mean_ns"], d["max_ns"], b_mhz))
 # Wire round trips
 cir = struct.pack("<IIIIIIIf", cs.MAGIC_CIR, 7, 1, 4, 1, 99, 4096, 8.138) + struct.pack("<4f", -30, 0, -6, -40)
 a, rec = cs._parse_cir(cir)

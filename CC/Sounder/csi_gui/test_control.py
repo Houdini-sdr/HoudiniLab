@@ -40,10 +40,19 @@ check(cs.SounderSupervisor(types.SimpleNamespace(**dict(vars(args), conf="files/
                            "x").configs()[-1] == "files/other.json", "the --conf config is always in the list")
 sup = cs.SounderSupervisor(args, "127.0.0.1:1")
 sup.SETTLE_AFTER_TEARDOWN_S = 0.2; sup.RETRY_DELAY_S = 0.2; sup.STOP_GRACE_S = 2.0
-# Fails under: the supervisor building its own environment without the setup check's plugin_env.
+# Fails under: LD_LIBRARY_PATH or the plugin's ABI directory dropped or changed.
 check(sup.env.get("SOAPY_SDR_PLUGIN_PATH") == os.path.join(sd, "lib", "SoapySDR", "modules0.8-3")
       and sup.env.get("LD_LIBRARY_PATH") == os.path.join(sd, "lib") and sup.env.get("VIRTUAL_ENV") == sd,
-      "the sounder runs in the setup check's plugin environment")
+      "the sounder runs in the plugin environment")
+# Fails under: the supervisor building its own environment instead of calling
+# the setup check's plugin_env (the same values would pass the check above).
+real_env = cs.plugin_env
+cs.plugin_env = lambda venv: {"PLUGIN_ENV_SENTINEL": venv}
+try:
+    probe = cs.SounderSupervisor(args, "127.0.0.1:1")
+finally:
+    cs.plugin_env = real_env
+check(probe.env.get("PLUGIN_ENV_SENTINEL") == sd, "the supervisor takes its environment from the setup check's plugin_env")
 
 # The gap before the main thread picks a Start up (a supervisor not yet serving):
 # a Check or a second Start then is refused, not queued behind it and dropped.
@@ -125,6 +134,14 @@ def driver():
         check(post({"cmd": "start"}, rebound)[0] == 403, "a rebound name (Host and Origin both evil.example) is refused")
         # Fails under: dropping the _host_is_address test from _control_state.
         check(get_code(rebound) == 403, "GET /control from a rebound name is refused")
+        # Fails under: a refusal body without its reason (the page then hides
+        # the controls with no word why).
+        try:
+            urllib.request.urlopen(urllib.request.Request(url, headers=rebound)); body = {}
+        except urllib.error.HTTPError as e:
+            body = json.loads(e.read().decode())
+        check(body.get("enabled") is False and "address" in body.get("error", ""),
+              "the refusal says why: %r" % body.get("error"))
         # Fails under: _host_is_address refusing localhost or a bracketed IPv6 literal.
         check(post({"cmd": "reboot"}, {"Host": "localhost:%d" % port})[0] == 400
               and post({"cmd": "reboot"}, {"Host": "[::1]:%d" % port})[0] == 400,
