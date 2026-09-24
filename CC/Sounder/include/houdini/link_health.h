@@ -195,9 +195,33 @@ inline std::vector<std::string> configDrift(const std::map<std::string, std::str
 // The alarm fields (link_health.py): the TX clean-burst set plus the TDD/stream
 // set; RX gated windows and timed-start aborts; the host drop and re-close totals.
 inline const std::vector<std::string>& txAlarmFields() {
-  static const std::vector<std::string> f = {"drops", "late", "under", "seqerr", "zerofill",
-                                             "efault", "smiss", "clkerr", "aclose"};
+  static const std::vector<std::string> f = {"drops", "late",  "under",  "seqerr", "zerofill",
+                                             "efault", "smiss", "clkerr", "aclose", "malformed"};
   return f;
+}
+
+/// HS-220: the TX event counters WRAP mod 2^16 (they saturated before), and
+/// the CLEAR_EPOCH register, read before and after them
+/// (TX_BANK_STATUS "epoch=<before>:<after>", [16] clear_busy, [15:0] clears
+/// since the PL load), says whether a clear came between two polls. The
+/// TX_STREAM_CONTRACT section 2 rule, as the host plugin's
+/// shared/houdini_tx_counter_delta.h applies it: a poll is usable only if both
+/// reads match with bit 16 clear; within one epoch a delta is taken mod 2^16;
+/// after an epoch change the values ARE the counts since the clear. A bank
+/// without the field (a pre-HS-220 node) keeps the plain rule.
+inline bool txWrapsMod16(const std::string& field) {
+  return field == "drops" || field == "late" || field == "under" || field == "seqerr" || field == "aclose" ||
+         field == "malformed";
+}
+/// The usable epoch of an "epoch=<before>:<after>" value, or -1 when the poll
+/// fails the read protocol (reads differ, clear_busy set, malformed).
+inline long long txUsableEpoch(const std::string& v) {
+  const auto c = v.find(':');
+  if (c == std::string::npos) return -1;
+  const std::string b = v.substr(0, c), a = v.substr(c + 1);
+  if (!detail::isDigits(b) || !detail::isDigits(a) || b.size() > 10 || a.size() > 10) return -1;
+  const long long eb = std::stoll(b), ea = std::stoll(a);
+  return (eb == ea && eb >= 0 && eb <= 0xFFFF) ? eb : -1;
 }
 inline const std::vector<std::string>& rxAlarmFields() {
   static const std::vector<std::string> f = {"gated", "aborts"};
@@ -214,12 +238,20 @@ constexpr long long kEgressSaturated = 0xFF;
 inline Counters collectCounters(const Read& read) {
   Counters out;
   auto bank = [&out](const std::string& raw, const std::string& pre, const std::vector<std::string>& fields) {
-    for (const auto& ch : parseBankStatus(raw))
+    for (const auto& ch : parseBankStatus(raw)) {
+      const std::string key = pre + std::to_string(ch.first) + ".";
+      // HS-220 (txWrapsMod16): the usable epoch rides along as "<key>epoch";
+      // an unusable poll drops its wrapping counters, so the previous
+      // baseline stands until a usable one (the interval just widens).
+      const auto ep = ch.second.find("epoch");
+      const long long epoch = (pre == "tx" && ep != ch.second.end()) ? txUsableEpoch(ep->second) : -2;
+      if (epoch >= 0) out[key + "epoch"] = epoch;
       for (const auto& f : fields) {
+        if (epoch == -1 && txWrapsMod16(f)) continue;
         const auto it = ch.second.find(f);
-        if (it != ch.second.end() && detail::isInt(it->second))
-          out[pre + std::to_string(ch.first) + "." + f] = std::stoll(it->second);
+        if (it != ch.second.end() && detail::isInt(it->second)) out[key + f] = std::stoll(it->second);
       }
+    }
   };
   bank(read("TX_BANK_STATUS"), "tx", txAlarmFields());
   bank(read("RX_BANK_STATUS"), "rx", rxAlarmFields());
@@ -253,9 +285,21 @@ inline std::vector<std::string> blindCounters(const Counters& cur) {
 inline Counters counterIncreases(const Counters& prev, const Counters& cur) {
   Counters out;
   for (const auto& kv : cur) {
-    const auto it = prev.find(kv.first);
+    const std::string& k = kv.first;
+    const auto dot = k.rfind('.');
+    const std::string field = dot == std::string::npos ? k : k.substr(dot + 1);
+    if (field == "epoch") continue;  // the clear count, not an event
+    const auto it = prev.find(k);
     const long long p = it == prev.end() ? 0 : it->second;
-    if (kv.second > p) out[kv.first] = kv.second - p;
+    const auto ec = cur.find(k.substr(0, dot + 1) + "epoch");
+    if (k.rfind("tx", 0) == 0 && txWrapsMod16(field) && ec != cur.end()) {
+      const auto ep = prev.find(k.substr(0, dot + 1) + "epoch");
+      if (ep == prev.end()) continue;  // no usable baseline yet: this poll becomes it
+      const long long d = ep->second == ec->second ? ((kv.second - p) % 65536 + 65536) % 65536 : kv.second;
+      if (d > 0) out[k] = d;
+      continue;
+    }
+    if (kv.second > p) out[k] = kv.second - p;
   }
   return out;
 }

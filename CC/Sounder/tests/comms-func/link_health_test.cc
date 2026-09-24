@@ -151,6 +151,46 @@ int main(int argc, char** argv) {
               !g.count("host.rxq_ovfl_ch0") && g.at("egress.stall_evt") == 0,
           "collect takes only the alarm fields");
   }
+  {  // HS-220: the TX event counters wrap mod 2^16 under the CLEAR_EPOCH read protocol
+    // Fails under: the plain rule for a wrapping counter (65530 -> 4 reads as no rise).
+    check(counterIncreases({{"tx0.epoch", 3}, {"tx0.late", 65530}}, {{"tx0.epoch", 3}, {"tx0.late", 4}}) ==
+              Counters{{"tx0.late", 10}},
+          "HS-220: within one epoch a wrap is a mod-2^16 delta (65530 -> 4 is +10)");
+    // Fails under: differencing across an epoch change (7 - 500 mod 2^16 = 65043).
+    check(counterIncreases({{"tx0.epoch", 3}, {"tx0.late", 500}}, {{"tx0.epoch", 4}, {"tx0.late", 7}}) ==
+              Counters{{"tx0.late", 7}},
+          "HS-220: after a clear (a new epoch) the values ARE the counts since it");
+    // Fails under: dropping the epoch skip (the clear count reads as an alarm, tx0.epoch +1).
+    check(counterIncreases({{"tx0.epoch", 3}, {"tx0.late", 0}}, {{"tx0.epoch", 4}, {"tx0.late", 0}}).empty(),
+          "HS-220: the epoch itself is never an alarm");
+    // Fails under: differencing against a baseline that had no usable epoch.
+    check(counterIncreases({{"tx0.late", 9}}, {{"tx0.epoch", 2}, {"tx0.late", 12}}).empty(),
+          "HS-220: the first usable poll after none is a baseline, not an alarm");
+    // Fails under: accepting a poll whose two epoch reads differ, or clear_busy (bit 16) set.
+    std::map<std::string, std::string> k;
+    Read rd = [&k](const std::string& key) { return k.count(key) != 0u ? k.at(key) : std::string(); };
+    k["TX_BANK_STATUS"] = "ch0:late=3,zerofill=5,epoch=7:8";
+    const auto torn = collectCounters(rd);
+    k["TX_BANK_STATUS"] = "ch0:late=3,zerofill=5,epoch=65543:65543";
+    const auto busy = collectCounters(rd);
+    check(!torn.count("tx0.late") && !torn.count("tx0.epoch") && torn.at("tx0.zerofill") == 5 &&
+              !busy.count("tx0.late") && !busy.count("tx0.epoch"),
+          "HS-220: an unusable poll drops its wrapping counters (zerofill, which does not wrap, stays)");
+    // Fails under: resetting the baseline on an unusable poll (carry keeps it, so the
+    // next usable poll in the same epoch is differenced across both intervals).
+    double t = 0.0;
+    k.clear();
+    k["TX_BANK_STATUS"] = "ch0:late=65530,zerofill=0,epoch=7:7";
+    LinkHealth h(rd, "ue", [&t] { return t += 5.0; });
+    k["TX_BANK_STATUS"] = "ch0:late=2,zerofill=0,epoch=7:8";  // torn: skipped
+    const bool quiet = h.check().alarms().empty();
+    k["TX_BANK_STATUS"] = "ch0:late=4,zerofill=0,epoch=7:7";
+    const auto a = h.check().alarms();
+    k["TX_BANK_STATUS"] = "ch0:late=2,zerofill=0,epoch=8:8";  // a clear, 2 since
+    const auto b = h.check().alarms();
+    check(quiet && a == std::vector<std::string>{"tx0.late +10"} && b == std::vector<std::string>{"tx0.late +2"},
+          "HS-220 end to end: a torn poll is skipped, a wrap counts +10, a clear then counts from zero");
+  }
   {  // test_link_health_clean_then_each_alarm_class
     FakeNode n;
     LinkHealth h(n.read(), "bs", n.clock());
