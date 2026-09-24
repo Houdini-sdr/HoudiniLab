@@ -16,7 +16,7 @@ export HOUDINI_CSI_DUMP=60 HOUDINI_BS_RX_DEBUG=1 HOUDINI_DUMP_BEACON=1 HOUDINI_D
 # before connecting (cause unmeasured; a lost SYN is one candidate) races the
 # A/B build's 1 s device timeout and reads as "Radios Not Found".
 SYN0=$(nstat -az TcpExtTCPSynRetrans 2>/dev/null | awk '/SynRetrans/{print $2}')
-bash "$HERE/run_rung.sh" $TAG $CONF $SECS 5
+bash "$HERE/run_rung.sh" $TAG $CONF $SECS ${HEALTH_S:-5}  # HEALTH_S: the link-health period, s
 while pgrep -x sounder >/dev/null; do sleep 5; done; sleep 3
 R=$(cat $D/$TAG.current); T=${R#${TAG}_}
 O=$D/$ST/$R; mkdir -p $O
