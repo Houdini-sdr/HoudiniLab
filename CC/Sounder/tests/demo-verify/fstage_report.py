@@ -24,9 +24,13 @@ Per run:
   From the log: acquisition coherence (median over the detections), pilot seat
   (mean, sd), beacon SNR (median over the re-syncs), CNS low, and the device
   [WARNING] and IntrStatus line counts (these reach only the client, SH-438).
+
+Per stage, one block per rung tag (the run dir's <tag>_<HHMMSS>): a stage dir
+holds R2 and R3 runs, and a mean over both would mix numerologies.
 """
 import glob, json, math, os, re, statistics as st, sys
 import numpy as np
+import rig_dumps as rd
 
 FS = 32767.0
 
@@ -54,13 +58,7 @@ def chan_band(N, di):
 
 
 def ul(path):
-    b = open(path, "rb").read()
-    N, cp, es, nsym, nd = (int(v) for v in np.frombuffer(b[:20], np.int32))
-    o = 20
-    H = np.frombuffer(b[o:o + 8 * N], np.float32).reshape(-1, 2); H = H[:, 0] + 1j * H[:, 1]; o += 8 * N
-    di = np.frombuffer(b[o:o + 4 * nd], np.int32); o += 4 * nd
-    s = np.frombuffer(b[o:], np.int16).reshape(-1, 2).astype(np.float64)
-    x = s[:, 0] - 1j * s[:, 1]  # conj RX, as the recorder
+    N, cp, es, nsym, H, di, x = rd.read_cns(path)
     hd = 20 * np.log10(np.abs(H[di]))
     mer = []
     for k in range(nsym):
@@ -93,26 +91,20 @@ def ul(path):
             "mer": float(np.median(mer)) if mer else float("nan"), "nsym": len(mer), "N": N}
 
 
-def dl(run):
-    rb = os.path.join(run, "beacon_ram.bin")
-    wins = sorted(glob.glob(os.path.join(run, "resync", "resyncwin_*.bin")))
-    if not os.path.exists(rb) or not wins:
+def dl(run, band=None):
+    """The DL figures from the UE's re-sync windows; the in-band floor only when
+    the run's own uplink dump gave the channel band (the same numerology on both)."""
+    bw = rd.beacon_and_windows(run)
+    if bw is None:
         return None
-    r = np.fromfile(rb, np.int16).astype(float).reshape(-1, 2); r = r[:, 0] + 1j * r[:, 1]
-    nz = np.flatnonzero(np.abs(r) > 0)
-    ref = r[nz[0]:nz[-1] + 1]; L = len(ref)
+    ref, wins = bw
+    L = len(ref)
     n2 = 1 << int(np.ceil(np.log2(L + 64)))
     f = np.fft.fftfreq(n2)
     gs, floors, segs, xs = [], [], [], []
     for w in wins:
-        x = np.fromfile(w, np.int16).astype(float).reshape(-1, 2); x = x[:, 0] + 1j * x[:, 1]
-        best = None
-        for rr in (ref, np.conj(ref)):
-            c = np.abs(np.correlate(x, rr, "valid"))
-            k = int(np.argmax(c))
-            if best is None or c[k] > best[0]:
-                best = (c[k], k, rr)
-        _, k, rr = best
+        x = rd.read_iq(w)
+        k, rr = rd.locate(x, (ref, np.conj(ref)))
         R = np.fft.fft(np.concatenate([rr, np.zeros(n2 - L)]))
         seg = x[k:k + L]
         bres = None
@@ -123,25 +115,24 @@ def dl(run):
             if bres is None or res < bres[0]:
                 bres = (res, g)
         gs.append(abs(bres[1]))
-        out = np.concatenate([x[:max(0, k - 64)], x[k + L + 64:]])
+        free = rd.beacon_free(len(x), k, L)
+        out = np.concatenate([x[a:b] for a, b in free])
         if len(out):
             floors.append(float(np.sqrt(np.mean(np.abs(out) ** 2))))
         xs.append(np.conj(x))  # conj RX, the UE's sense as the recorder's
-        segs.append([a0 for a0 in range(0, max(0, k - 64 - 256) + 1, 128)] +
-                    [a0 for a0 in range(k + L + 64, len(x) - 256 + 1, 128)])
+        segs.append(rd.segments(free, 256, 128))
     gdb = [db20(g) for g in gs]
     out = {"lvl": float(np.median(gdb)), "lvl_sd": float(np.std(gdb)), "nwin": len(gs),
            "floor": db20(float(np.median(floors)) / FS) if floors else float("nan")}
-    if DL_BAND is not None:  # in the uplink's channel band (the same numerology on both)
-        out["floor_in"] = float(np.median([inband(x, sg, 256, DL_BAND) for x, sg in zip(xs, segs) if sg]))
+    fl = [inband(x, sg, 256, band) for x, sg in zip(xs, segs) if sg] if band is not None else []
+    if fl:
+        out["floor_in"] = float(np.median(fl))
     return out
 
 
-DL_BAND = None
-
-
 def logfig(run):
-    logs = [p for p in glob.glob(os.path.join(run, "*.log")) if not re.search(r"_(csi|cpu|threads)_", p)]
+    logs = [p for p in glob.glob(os.path.join(run, "*.log"))
+            if not re.search(r"_(csi|cpu|threads)_", os.path.basename(p))]
     if not logs:
         return {}
     L = open(logs[0], errors="replace").read()
@@ -161,18 +152,18 @@ def logfig(run):
 
 
 def run_row(run):
-    global DL_BAND
     row = {"run": os.path.basename(run)}
+    band = None
     p0 = os.path.join(run, "cns_dump.bin")
     if os.path.exists(p0):
-        b = open(p0, "rb").read(); N, _, _, _, nd = (int(v) for v in np.frombuffer(b[:20], np.int32))
-        DL_BAND = chan_band(N, np.frombuffer(b[20 + 8 * N:20 + 8 * N + 4 * nd], np.int32))
+        d0 = rd.read_cns(p0)
+        band = chan_band(d0.N, d0.di)
     for k, name in ((0, "cns_dump.bin"), (1, "cns_dump_ant1.bin")):
         p = os.path.join(run, name)
         if os.path.exists(p):
             for m, v in ul(p).items():
                 row["ul%d_%s" % (k, m)] = v
-    d = dl(run)
+    d = dl(run, band)
     if d:
         for m, v in d.items():
             row["dl_" + m] = v
@@ -189,33 +180,72 @@ def fmt(v):
     return "%7.3f" % v if isinstance(v, float) and not math.isnan(v) else "%7s" % ("-" if not isinstance(v, (int, float)) else v)
 
 
-stages = []
-for sd in sys.argv[1:]:
-    runs = sorted(d for d in glob.glob(os.path.join(sd, "*")) if os.path.isdir(d))
-    rows = [run_row(r) for r in runs]
-    stages.append((os.path.basename(sd.rstrip("/")), rows))
-    print("== %s (%d runs)" % (sd, len(rows)))
-    for r in rows:
-        print("  %-16s " % r["run"] + " ".join("%s=%s" % (k, fmt(r.get(k, float("nan"))).strip()) for k in KEYS if k in r)
-              + " cns_low=%s bad=%s warn=%s intr=%s" % (r.get("cns_low"), r.get("bad"), r.get("warn"), r.get("intr")))
-print()
-print("%-10s" % "metric" + "".join("%26s" % s for s, _ in stages))
-ref = None
-for k in KEYS:
-    line = "%-10s" % k
-    base = None
-    for i, (s, rows) in enumerate(stages):
-        v = [r[k] for r in rows if k in r and not math.isnan(r[k])]
-        if not v:
-            line += "%26s" % "-"
-            continue
-        m = st.mean(v)
-        cell = "%7.2f [%5.3f]" % (m, max(v) - min(v))
-        if i == 0:
-            base = m
-        elif base is not None:
-            cell += " d%+6.2f" % (m - base)
-        line += "%26s" % cell
-    print(line)
-print("\n[x] = run-to-run range (max - min); dN = change of the stage mean against the first stage.")
-json.dump({s: rows for s, rows in stages}, open("/tmp/fstage_report_last.json", "w"), indent=1)
+def tag_of(run_name):
+    """The rung tag fstage_run.sh names a run dir with: <tag>_<HHMMSS>."""
+    return run_name.rsplit("_", 1)[0]
+
+
+def stage_stats(stages):
+    """{tag: {key: [(mean, range, change against the first stage) or None, per stage]}}.
+    Runs of one tag share a config, so no mean mixes numerologies; a tag whose
+    dumps disagree on N (one tag reused for two configs) is refused."""
+    tags = []
+    for _, rows in stages:
+        for r in rows:
+            if tag_of(r["run"]) not in tags:
+                tags.append(tag_of(r["run"]))
+    out = {}
+    for t in tags:
+        ns = {r["ul0_N"] for _, rows in stages for r in rows if tag_of(r["run"]) == t and "ul0_N" in r}
+        if len(ns) > 1:
+            raise ValueError("runs tagged %s differ in numerology (N %s)" % (t, sorted(ns)))
+        out[t] = {}
+        for k in KEYS:
+            cells, base = [], None
+            for i, (_, rows) in enumerate(stages):
+                v = [r[k] for r in rows if tag_of(r["run"]) == t and k in r and not math.isnan(r[k])]
+                if not v:
+                    cells.append(None)
+                    continue
+                m = st.mean(v)
+                if i == 0:
+                    base = m
+                cells.append((m, max(v) - min(v), None if i == 0 or base is None else m - base))
+            out[t][k] = cells
+    return out
+
+
+def main():
+    stages = []
+    for sd in sys.argv[1:]:
+        runs = sorted(d for d in glob.glob(os.path.join(sd, "*")) if os.path.isdir(d))
+        rows = [run_row(r) for r in runs]
+        stages.append((os.path.basename(sd.rstrip("/")), rows))
+        print("== %s (%d runs)" % (sd, len(rows)))
+        for r in rows:
+            print("  %-16s " % r["run"] + " ".join("%s=%s" % (k, fmt(r.get(k, float("nan"))).strip()) for k in KEYS if k in r)
+                  + " cns_low=%s bad=%s warn=%s intr=%s" % (r.get("cns_low"), r.get("bad"), r.get("warn"), r.get("intr")))
+    try:
+        stats = stage_stats(stages)
+    except ValueError as e:
+        sys.exit(str(e))
+    for t, keys in stats.items():
+        print("\n-- rung tag %s" % t)
+        print("%-10s" % "metric" + "".join("%26s" % s for s, _ in stages))
+        for k in KEYS:
+            line = "%-10s" % k
+            for c in keys[k]:
+                if c is None:
+                    line += "%26s" % "-"
+                    continue
+                cell = "%7.2f [%5.3f]" % (c[0], c[1])
+                if c[2] is not None:
+                    cell += " d%+6.2f" % c[2]
+                line += "%26s" % cell
+            print(line)
+    print("\n[x] = run-to-run range (max - min); dN = change of the stage mean against the first stage, same tag.")
+    json.dump({s: rows for s, rows in stages}, open("/tmp/fstage_report_last.json", "w"), indent=1)
+
+
+if __name__ == "__main__":
+    main()

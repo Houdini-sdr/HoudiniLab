@@ -18,17 +18,17 @@ change turns inside the band (F1: a ripple, DEMO_VERIFICATION 9.18).
 """
 import glob, os, sys
 import numpy as np
+import rig_dumps as rd
 
+# The R2 rung's NCOs and receive rate (files/houdini-dualband-r2.json: channel_nco_frequency,
+# nco_frequency, sample_rate)
 LINKS = (("cns_dump_ant1.bin", "xif", 4380.0), ("cns_dump.bin", "sub6", 2425.0))
 FS_MHZ = 122.88
 
 
 def hdb(run, name):
-    b = open(os.path.join(run, name), "rb").read()
-    N, _, _, _, nd = (int(v) for v in np.frombuffer(b[:20], np.int32))
-    H = np.frombuffer(b[20:20 + 8 * N], np.float32).reshape(-1, 2); H = H[:, 0] + 1j * H[:, 1]
-    di = np.frombuffer(b[20 + 8 * N:20 + 8 * N + 4 * nd], np.int32)
-    return N, di, 20 * np.log10(np.abs(H[di]))
+    d = rd.read_cns(os.path.join(run, name))
+    return d.N, d.di, 20 * np.log10(np.abs(d.H[d.di]))
 
 
 def stage(d, name):

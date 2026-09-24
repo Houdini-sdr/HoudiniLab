@@ -17,16 +17,9 @@ Per leg:
   quality  CNS low of all datagrams; MER per BS antenna from the CSI dumps
   warn     device [WARNING] lines by class, and IntrStatus lines (SH-438)
 """
-import collections, contextlib, glob, importlib.util, io, os, re, sys
+import collections, os, re, sys
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-_argv = sys.argv
-sys.argv = ["x"]
-spec = importlib.util.spec_from_file_location("fr", os.path.join(HERE, "fstage_report.py"))
-fr = importlib.util.module_from_spec(spec)
-with contextlib.redirect_stdout(io.StringIO()):
-    spec.loader.exec_module(fr)
-sys.argv = _argv
+import fstage_report as fr
 
 
 def clean(t):
