@@ -85,8 +85,9 @@ On the rig:
 ```sh
 source ~/houdini_test/bin/activate
 cd ~/repos/HoudiniLab-ap80/CC/Sounder
-export HOUDINI_TX_CPU_AFFINITY=10,11   # the UE's TX pacer workers, off the data NIC's IRQ cores
-python3 csi_gui/check_setup.py --conf files/houdini-dualband.json   # must print Ready.
+cat /sys/devices/system/cpu/isolated   # 15-19 when A9 stage 1 is in force
+export HOUDINI_CORE_MAP=main=15 HOUDINI_TX_CPU_AFFINITY=16,17   # isolated (A9); without it: HOUDINI_TX_CPU_AFFINITY=10,11 only
+python3 csi_gui/check_setup.py --conf files/houdini-dualband.json   # must print Ready, egress PASS on both nodes.
 python3 csi_gui/csi_server.py --control --conf files/houdini-dualband.json
 ```
 
@@ -100,6 +101,13 @@ passes the variable to the sounder it launches. Before trusting the choice
 on another day, check the cores are still quiet:
 `grep mlx5 /proc/interrupts` (the per-CPU columns for 10 and 11 should not
 move between two reads a few seconds apart).
+
+**With CPU isolation (A9 stage 1) in force**, the sounder's main thread takes
+isolated core 15 and the TX workers 16 and 17, which are performance cores;
+10 and 11 are efficiency cores. There the pacer's worst wake over a 35 min
+run was about 0.28 ms, against 10.5 ms on 10 and 11 (9.41, 9.44). Each TX
+worker still takes its own NIC completion interrupts on its core (about 1,100
+a second), which did not delay it.
 
 The check's full form reads both radios' stacks and FAILs if they differ.
 Read the stack there, not from this file: it changes with every deploy. The
