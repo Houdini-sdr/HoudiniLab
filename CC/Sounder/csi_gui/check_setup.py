@@ -19,10 +19,11 @@ What it checks, in order:
   5. no other sounder is running on this host (it would hold the radios);
   6. each radio's server answers on the config's remote port;
   7. (full form only) each radio's stack: gateware, firmware, plugin and protocol
-     versions, which must agree between the nodes.
+     versions, which must agree between the nodes; and each radio's data egress,
+     which must not have stalled (EGRESS_STATUS stall_seen).
 
 Checks 1 to 6 touch no radio. Check 7 opens each radio and reads its hardware
-info, as the sounder does at startup, and changes nothing. Do not run the full
+info and EGRESS_STATUS, as the sounder does at startup, and changes nothing. Do not run the full
 form against radios someone else is using.
 
 Run it with the venv's python (or with the venv activated): check 7 imports
@@ -32,6 +33,7 @@ import argparse
 import glob
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -268,11 +270,32 @@ def hwinfo(ip, port):
                            "remote:driver": "houdinisdr-device", "remote:type": "houdinisdr",
                            "timeout": "3000000"})
     try:
-        return dict(sdr.getHardwareInfo())
+        info = dict(sdr.getHardwareInfo())
+        try:
+            info["egress_status"] = sdr.readSetting("EGRESS_STATUS")
+        except Exception as e:  # an older plugin: check_egress says so
+            info["egress_status"] = "unreadable: %s" % e
+        return info
     finally:
         # A clean close: a connection dropped at process exit leaves a
         # "handlerLoop() FAIL: recv(header)" in each radio's server journal.
         SoapySDR.Device.unmake(sdr)
+
+
+def check_egress(rep, ip, raw):
+    # The stall bit is sticky (REGISTERS.md, EGRESS_STALL_WD): once the egress
+    # merge sat in a frame without progress, as when the host's data port went
+    # down under it, the radio sends nothing more over a link that is up, until
+    # its gateware is reloaded. The per-port drop counts alone are not that.
+    m = re.search(r"stall_seen=(\d+)", raw or "")
+    if m is None:
+        rep.add("WARN", "egress %s" % ip, "EGRESS_STATUS not readable (%s)" % (raw or "empty")[:120],
+                "Update the radio's firmware and this host's plugin; until then a stalled data path shows only as a run with no samples.")
+    elif int(m.group(1)):
+        rep.add("FAIL", "egress %s" % ip, "the radio's data egress has stalled (%s); it will send no samples although its link is up" % raw,
+                "Reload the radio's gateware (PL) or reboot the radio. A bounce of this host's data port (a host reboot, a cable pull) causes it.")
+    else:
+        rep.add("PASS", "egress %s" % ip, "no data-path stall recorded")
 
 
 def check_versions(rep, sd, nodes, port, env):
@@ -294,6 +317,7 @@ def check_versions(rep, sd, nodes, port, env):
         return
     for ip, info in infos.items():
         rep.add("INFO", "stack %s" % ip, " ".join("%s=%s" % (k, info.get(k, "<absent>")) for k in MUST_MATCH))
+        check_egress(rep, ip, info.get("egress_status"))
     if len(infos) < 2:
         return
     diff = [k for k in MUST_MATCH if len({i.get(k, "<absent>") for i in infos.values()}) > 1]

@@ -34,7 +34,7 @@ open(os.path.join(venv, "lib", "SoapySDR", "modules0.8-3", "libHoudiniSDRSupport
 util = os.path.join(venv, "bin", "SoapySDRUtil")
 open(util, "w").write("#!/bin/sh\necho 'Available factories... houdinisdr, remote'\n"); os.chmod(util, 0o755)
 # Stand-in SoapySDR: hardware info per radio from a JSON file keyed by address.
-info_file = os.path.join(root, "info.json")
+info_file = os.path.join(root, "info.json"); egress_file = os.path.join(root, "egress.json")
 open(os.path.join(fake, "SoapySDR.py"), "w").write(
     "import json\nclass Device:\n"
     "    def __init__(self, a):\n"
@@ -43,8 +43,15 @@ open(os.path.join(fake, "SoapySDR.py"), "w").write(
     "        assert int(a.get('timeout', '0')) >= 1000000, 'no timeout: the plugin default is 300 ms'\n"
     "        self.ip = a['remote'].split('//')[1].split(':')[0]\n"
     "    def getHardwareInfo(self): return json.load(open(%r))[self.ip]\n"
+    "    def readSetting(self, k):\n"
+    "        assert k == 'EGRESS_STATUS', k\n"
+    "        v = json.load(open(%r)).get(self.ip)\n"
+    "        if v is None: raise RuntimeError('unknown key')\n"
+    "        return v\n"
     "    @staticmethod\n"
-    "    def unmake(d): open(%r, 'a').write(d.ip + '\\n')\n" % (info_file, os.path.join(root, "unmade")))
+    "    def unmake(d): open(%r, 'a').write(d.ip + '\\n')\n" % (info_file, egress_file, os.path.join(root, "unmade")))
+HEALTHY = "drop=p0:0,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marked=p0:0,p1:0,p2:0,p3:0"
+json.dump({"127.0.0.1": HEALTHY, "127.0.0.2": HEALTHY}, open(egress_file, "w"))
 same = {k: "v1" for k in ("fpga_version", "fpga_commit", "fpga_board", "device_version",
                           "device_build", "host_version", "host_build", "proto_version")}
 json.dump({"127.0.0.1": same, "127.0.0.2": same}, open(info_file, "w"))
@@ -78,6 +85,24 @@ json.dump({"127.0.0.1": same, "127.0.0.2": dict(same, fpga_commit="v2")}, open(i
 rc, rep, lv = run(); check(rc == 1 and lv["stack match"] == "FAIL", "a node on a different gateware fails 'stack match'")
 check("fpga_commit" in [r for r in rep["results"] if r["what"] == "stack match"][0]["detail"], "and names the differing key")
 json.dump({"127.0.0.1": same, "127.0.0.2": same}, open(info_file, "w"))
+# The egress stall (a node wedged when the host's data port bounced). Each
+# assertion names the mutation that breaks it.
+rc, rep, lv = run()
+check(lv.get("egress 127.0.0.1") == "PASS" and lv.get("egress 127.0.0.2") == "PASS",
+      "healthy egress passes on each node (breaks if check_egress is not called)")
+json.dump({"127.0.0.1": HEALTHY, "127.0.0.2": "drop=p0:255,p1:0,p2:0,p3:0;stall_seen=1,stall_evt=255;marked=p0:0,p1:0,p2:0,p3:0"},
+          open(egress_file, "w"))
+rc, rep, lv = run()
+check(rc == 1 and lv["egress 127.0.0.2"] == "FAIL" and lv["egress 127.0.0.1"] == "PASS",
+      "a sticky stall fails that node only (breaks if the stall branch is a WARN or keyed to the wrong node)")
+json.dump({"127.0.0.1": HEALTHY, "127.0.0.2": "drop=p0:255,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marked=p0:0,p1:0,p2:0,p3:0"},
+          open(egress_file, "w"))
+rc, rep, lv = run()
+check(rc == 0 and lv["egress 127.0.0.2"] == "PASS", "drops without the stall bit pass (breaks if any nonzero count fails)")
+json.dump({"127.0.0.1": HEALTHY}, open(egress_file, "w"))
+rc, rep, lv = run()
+check(rc == 0 and lv["egress 127.0.0.2"] == "WARN", "an unreadable EGRESS_STATUS is a WARN (breaks if it passes silently or fails the run)")
+json.dump({"127.0.0.1": HEALTHY, "127.0.0.2": HEALTHY}, open(egress_file, "w"))
 rc, rep, lv = run(conf="files/houdini-bad.json"); check(rc == 1 and lv["config"] == "FAIL", "a config that is not JSON fails 'config'")
 rc, rep, lv = run(conf="files/none.json"); check(rc == 1 and lv["config"] == "FAIL", "a missing config fails 'config'")
 os.utime(os.path.join(sd, "a.cc"), None); os.utime(exe, (time.time() - 60, time.time() - 60))
