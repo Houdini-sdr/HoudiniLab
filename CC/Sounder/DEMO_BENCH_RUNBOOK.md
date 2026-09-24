@@ -158,7 +158,8 @@ steering:
   above: the pacer's worst wake over a 35 min run is about 0.3 ms (9.43-9.46).
   Read the installed host plugin's build id in the setup check before judging a
   run.
-- **The UE's TX playout can freeze (HS-227, open with the fpga lane).** In two of
+- **The UE's TX playout can freeze (HS-227; the fpga lane has found a race in
+  the TX pump present since HS-146 and is fixing it).** In two of
   three demo-length runs on the HS-220 bitstream (9.44, 9.45) the UE's FPGA
   stopped playing its TX bank at a random time (767 s, 1,979 s) and judged every
   later packet late. The BS then loses the UE's pilots and the dashboard's cards
