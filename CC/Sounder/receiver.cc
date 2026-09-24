@@ -262,7 +262,6 @@ std::vector<pthread_t> Receiver::startClientThreads(SampleBuffer* rx_buffer,
   cl_tx_buffer_ = tx_buffer;
   std::vector<pthread_t> client_threads;
   if (config_->client_present() == true) {
-    client_threads.resize(config_->num_cl_sdrs());
     for (unsigned int i = 0; i < config_->num_cl_sdrs(); i++) {
       pthread_t cl_thread_;
       // record the thread id
@@ -274,14 +273,19 @@ std::vector<pthread_t> Receiver::startClientThreads(SampleBuffer* rx_buffer,
       // start socket thread
       if (pthread_create(&cl_thread_, NULL, Receiver::clientTxRx_launch,
                          context) != 0) {
+        delete context;
         MLPD_ERROR(
             "Socket client thread create failed in start client "
             "threads");
+        // The UE threads already running are stopped and joined before the
+        // caller can tear down their radios.
+        config_->running(false);
+        completeRecvThreads(client_threads);
         throw std::runtime_error(
             "Socket client thread create failed "
             "in start client threads");
       }
-      client_threads[i] = cl_thread_;
+      client_threads.push_back(cl_thread_);
     }
   }
   return client_threads;
@@ -295,7 +299,6 @@ std::vector<pthread_t> Receiver::startRecvThreads(SampleBuffer* rx_buffer,
   thread_num_ = n_rx_threads;
   bs_tx_buffer_ = tx_buffer;
   std::vector<pthread_t> created_threads;
-  created_threads.resize(this->thread_num_);
   for (size_t i = 0; i < this->thread_num_; i++) {
     // record the thread id
     ReceiverContext* context = new ReceiverContext;
@@ -304,15 +307,25 @@ std::vector<pthread_t> Receiver::startRecvThreads(SampleBuffer* rx_buffer,
     context->tid = i;
     context->buffer = rx_buffer;
     // start socket thread
-    if (pthread_create(&created_threads.at(i), NULL, Receiver::loopRecv_launch,
-                       context) != 0) {
+    pthread_t t;
+    if (pthread_create(&t, NULL, Receiver::loopRecv_launch, context) != 0) {
+      delete context;
       MLPD_ERROR("Socket recv thread create failed");
+      // The threads already created wait on `cond`: stop them, release them
+      // the way the normal path does, and join them before the caller can
+      // tear down what they use.
+      config_->running(false);
+      sleep(1);
+      pthread_cond_broadcast(&cond);
+      completeRecvThreads(created_threads);
       throw std::runtime_error("Socket recv thread create failed");
     }
+    created_threads.push_back(t);
   }
   sleep(1);
   pthread_cond_broadcast(&cond);
-  go();
+  // The caller starts the radios (go()) once it holds these threads, so a
+  // throw from the start still joins them.
   return created_threads;
 }
 

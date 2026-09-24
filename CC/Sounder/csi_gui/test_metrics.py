@@ -1,6 +1,6 @@
 # Known-answer checks for the dashboard's new parsers (MER/EVM, delay spread, CIR1, MET1).
 # Stdlib only; run from csi_gui/ (ctest does). AP-79.
-import math, random, struct, sys
+import math, random, re, struct, sys
 sys.argv = ["x"]
 import importlib.util
 spec = importlib.util.spec_from_file_location("cs", "csi_server.py"); cs = importlib.util.module_from_spec(spec); spec.loader.exec_module(cs)
@@ -103,14 +103,17 @@ db = [max(-60.0, 10 * math.log10(max(p[(pk - pre + i) % N], 1e-30) / p[pk])) for
 b_mhz = span * 122.88 / N
 d = cs._delay_stats(db, 1e3 / 122.88)
 # Fails under: the excess delays measured from the strongest tap (a lone path
-# then reads a mean of about 0 and a max of about 1.5/B).
+# then reads a mean of about 0 and a max of about 1.5/B), or the spread's sqrt
+# dropped (rms then reads about 0.87/B).
 check(0.4e3 / b_mhz < d["rms_ns"] < 0.7e3 / b_mhz and 1.2e3 / b_mhz < d["mean_ns"] < 1.8e3 / b_mhz
       and 2.5e3 / b_mhz < d["max_ns"] < 3.5e3 / b_mhz,
       "a lone Hann-windowed path reads rms %.1f, mean %.1f and max %.1f ns: the page's 0.5/B, 1.5/B and 3/B at B %.2f MHz"
       % (d["rms_ns"], d["mean_ns"], d["max_ns"], b_mhz))
-# Fails under: the page's hint stating other floors than the ones measured above.
-check(all(e in cs.PAGE for e in ("(0.5e3/m.bw_mhz)", "(1.5e3/m.bw_mhz)", "(3e3/m.bw_mhz)")),
-      "the page states the measured floors (0.5/B, 1.5/B, 3/B)")
+# Fails under: the page's hint stating other floors than the ones measured
+# above, or pairing a floor with the wrong label (rms and mean swapped).
+check(all(re.search(r"%s '\s*\+\(%s/m\.bw_mhz\)" % (lab, val), cs.PAGE)
+          for lab, val in (("rms", r"0\.5e3"), ("mean", r"1\.5e3"), ("max", r"3e3"))),
+      "the page states the measured floors, each under its own label (rms 0.5/B, mean 1.5/B, max 3/B)")
 # Wire round trips
 cir = struct.pack("<IIIIIIIf", cs.MAGIC_CIR, 7, 1, 4, 1, 99, 4096, 8.138) + struct.pack("<4f", -30, 0, -6, -40)
 a, rec = cs._parse_cir(cir)

@@ -92,6 +92,10 @@ namespace {
 // A per-node record file under HOUDINI_DUMP_DIR (Utils::dumpPath), named
 // <kind>_<label>_<stamp>.txt with the label made file-safe; f is empty when it
 // cannot be opened, and closes itself on every exit.
+// The end-of-run state record's stage: the one that skips its reads when the
+// node does not answer (writeStateRecord).
+const char* const kEndOfRunStage = "end";
+
 struct RecordFile {
   std::unique_ptr<FILE, int (*)(FILE*)> f{nullptr, &std::fclose};
   std::string path, stamp;
@@ -179,7 +183,7 @@ void RadioHoudini::writeStateRecord(const std::string& label, SoapySDR::Device& 
       for (const auto& kv : dev.getHardwareInfo()) s += kv.first + "=" + kv.second + "\n";
       return s;
     });
-    if (!answered && stage == "end") {
+    if (!answered && stage == kEndOfRunStage) {
       std::fprintf(f, "(the node did not answer: the remaining reads are skipped)\n");
       MLPD_WARN("%s: RFDC state record (%s) %s is partial: the node did not answer\n", label.c_str(),
                 stage.c_str(), rec.path.c_str());
@@ -326,7 +330,7 @@ RadioHoudini::~RadioHoudini() {
   if (health_thread_.joinable()) health_thread_.join();
   // The end-of-run state, while the streams are still open (the base class
   // closes them after this), so drift across the run is visible.
-  if (dev_ != nullptr) writeStateRecord(params_.label, *dev_, "end", params_.rx_channels, params_.tx_channels);
+  if (dev_ != nullptr) writeStateRecord(params_.label, *dev_, kEndOfRunStage, params_.rx_channels, params_.tx_channels);
 }
 
 void RadioHoudini::maybeStartHealth() {

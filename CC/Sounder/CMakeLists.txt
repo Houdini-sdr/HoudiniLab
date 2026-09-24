@@ -333,6 +333,8 @@ if (SOUNDER_HAVE_ASAN)
       -O1 -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer)
   target_link_libraries(tx_rx_boundary_asan_test PRIVATE -fsanitize=address,undefined)
   add_test(NAME tx_rx_boundary_asan COMMAND tx_rx_boundary_asan_test)
+else()
+  message(WARNING "no AddressSanitizer: tx_rx_boundary_asan is not built, so the TX interpolator's cache over-read case is uncovered")
 endif()
 
 # AP-79: the band-limited beacon: its band, its fit, and the real detector

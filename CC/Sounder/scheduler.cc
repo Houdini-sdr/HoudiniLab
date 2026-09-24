@@ -227,6 +227,7 @@ void Scheduler::do_it() {
       recv_threads = this->receiver_->startRecvThreads(
           this->rx_buffer_, cfg_->bs_rx_thread_num(), this->bs_tx_buffer_,
           kRecvCore);
+      this->receiver_->go();  // after the threads are held: a throw here joins them
     }
   } else
     this->receiver_->go();  // only beamsweeping
