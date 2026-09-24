@@ -196,16 +196,27 @@ threads around. Steps marked (sudo) are the owner's.
 3. `sudo update-grub`, then `grep -c "isolcpus=domain,managed_irq,15-19" /boot/grub/grub.cfg` (1 or more).
 4. Reboot only when no comparison run still needs the old kernel.
 5. Verify after the reboot: `cat /sys/devices/system/cpu/isolated` prints
-   `15-19`; `cat /proc/cmdline` shows the arguments.
+   `15-19`; `cat /proc/cmdline` shows the arguments. Then run `check_setup.py`
+   (A4) before anything else: a host reboot bounces the data ports, and a
+   bounce can wedge a node's FPGA egress even with no run active (HS-225; the
+   node's ARP replies and control ACKs share the egress path). A wedged node
+   fails the `egress` line, and its run would get no samples at all. Recover by
+   reloading that node's PL or rebooting it; bouncing the host's data port once
+   more (`ip link set <port> down`, then `up`) cleared it once, not proven.
 6. Before the first run: `grep CONFIG_NO_HZ_FULL /boot/config-$(uname -r)`
    (stage 2 needs it), and `sudo apt install rt-tests` for cyclictest.
 7. Undo: remove the arguments, `sudo update-grub`, reboot.
 
 **The measurement, the same for every arm.**
 
-- Instrument check first: `sudo cyclictest -a 16 -t1 -p0 -i 200 -D 120 -q -h 2000`
-  (and on 17): the wake-up latency on the TX cores, before any sounder run. Repeat
-  it after each runtime setting that should change it.
+- Instrument check first: `sudo cyclictest -q -m --laptop -a 16,17 -t 2 --policy=other -i 200 -D 60`,
+  the wake-up latency on the TX cores at the TX workers' own priority, before
+  any sounder run; the same on 10,11 for comparison. Each thread's line must
+  read `P: 0`: a `-p` in any form switches cyclictest to SCHED_FIFO (it then
+  says "defaulting realtime priority"). `--laptop` stops it holding
+  `/dev/cpu_dma_latency` at 0, which keeps the cores out of deep idle and would
+  measure arm 2 instead of the baseline. Repeat it after each runtime setting
+  that should change it (for arm 5, `-p 40` in place of `--policy=other`).
 - One run per arm, all the same length (600 s is enough to show the late rate),
   R3 `files/houdini-dualband.json`, with the sounder's threads placed by:
   ```sh
