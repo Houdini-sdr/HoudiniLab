@@ -45,7 +45,18 @@ def leg(run):
             tx["%s %s" % (m.group(1), k)] += int(v)
     out["tx"] = dict(tx)
     out["trim"] = sorted(set(re.findall(r"(trim final bias [^\n(]*)", L)))
-    out["clock"] = [l.strip()[:220] for l in L.splitlines() if re.search(r"DeviceClock|TX_HOST_STATUS|TIME_ERROR|arrival offset", l)]
+    lines = L.splitlines()
+    out["clock"] = [l.strip()[:220] for l in lines if re.search(r"DeviceClock|TX_HOST_STATUS|TIME_ERROR|arrival offset", l)]
+    # The plugin's lines carry no timestamp: place each by its line number and
+    # the nearest sounder (MLPD) stamps around it, seconds within the minute.
+    stamp = re.compile(r"^(\d+:\d{6}) (INFOR|WARNG|ERROR)")
+    detail = []
+    for i, l in enumerate(lines):
+        if re.search(r"DeviceClock|TX_HOST_STATUS|TIME_ERROR|arrival offset", l):
+            before = next((stamp.match(lines[j]).group(1) for j in range(i - 1, -1, -1) if stamp.match(lines[j])), "-")
+            after = next((stamp.match(lines[j]).group(1) for j in range(i + 1, len(lines)) if stamp.match(lines[j])), "-")
+            detail.append("line %d [%s .. %s] %s" % (i + 1, before, after, l.strip()[:150]))
+    out["clock_detail"] = detail
     fr_ = [int(v) for v in re.findall(r"Re-sync frame (\d+): beacon alive", L)]
     out["resyncs"] = len(fr_)
     out["maxgap"] = max((b - a for a, b in zip(fr_, fr_[1:])), default=0)
@@ -73,7 +84,9 @@ def main():
         print("   stack   %s" % r["stack"])
         print("   tx      %s" % (", ".join("%s +%d" % kv for kv in sorted(r["tx"].items())) or "no increments"))
         print("   trim    %s" % ("; ".join(r["trim"]) or "-"))
-        print("   clock   %d lines%s" % (len(r["clock"]), (": " + " | ".join(r["clock"][-2:])) if r["clock"] else ""))
+        print("   clock   %d lines" % len(r["clock"]))
+        for d in r["clock_detail"]:
+            print("           %s" % d)
         print("   resync  %d, max gap %d UE frames; seat max |%s|, >30 in %d frames" % (r["resyncs"], r["maxgap"], r["seatmax"], r["seat_over30"]))
         print("   quality CNS low %s; MER ant0 %s ant1 %s" % (r["cns_low"], r.get("mer0", "-"), r.get("mer1", "-")))
         print("   warn    %d; IntrStatus %d%s" % (r["warn"], len(r["intr"]), (": " + " | ".join(r["intr"])) if r["intr"] else ""))
