@@ -87,6 +87,7 @@ source ~/houdini_test/bin/activate
 cd ~/repos/HoudiniLab-ap80/CC/Sounder
 cat /sys/devices/system/cpu/isolated   # 15-19 when A9 stage 1 is in force
 export HOUDINI_CORE_MAP=main=15 HOUDINI_TX_CPU_AFFINITY=16,17   # isolated (A9); without it: HOUDINI_TX_CPU_AFFINITY=10,11 only
+export HOUDINI_TX_HOST_STATUS=1   # logs the host pacer's state every health period (free; wanted while HS-227 is open)
 python3 csi_gui/check_setup.py --conf files/houdini-dualband.json   # must print Ready, egress PASS on both nodes.
 python3 csi_gui/csi_server.py --control --conf files/houdini-dualband.json
 ```
@@ -153,32 +154,42 @@ steering:
 
 ## A7. Known limits today
 
-- **UE transmit plugin (SH-427, the software lane's).** The demo plugin is the
-  software lane's B build with an on-core spin and a 200 us sleep cap (host build
-  `e2a004d3` in the demo-length run D7, `DEMO_VERIFICATION.md` 9.39), run with the
-  pinning above. Earlier plugins send late bursts at R3 over a long run. Read the
-  installed host plugin's build id in the setup check before judging a run.
+- **UE transmit timing on the host (SH-427) is solved** with the isolated layout
+  above: the pacer's worst wake over a 35 min run is about 0.3 ms (9.43-9.46).
+  Read the installed host plugin's build id in the setup check before judging a
+  run.
+- **The UE's TX playout can freeze (HS-227, open with the fpga lane).** In two of
+  three demo-length runs on the HS-220 bitstream (9.44, 9.45) the UE's FPGA
+  stopped playing its TX bank at a random time (767 s, 1,979 s) and judged every
+  later packet late. The BS then loses the UE's pilots and the dashboard's cards
+  go stale. It does not recover within the run; a Stop and Start of the run
+  cleared it both times it was seen (no node reboot was needed).
 - **The rig host's management NIC (r8127, `enP7s7`).** During D7 its driver hung
   in its ESD checker: new ssh sessions timed out until the sounder exited, the
   control link to the nodes stalled, and host timing suffered (9.39). This NIC
-  carries ssh and every control call to the radios. Until the driver is fixed,
-  expect that ssh may be unreachable during a long run; check
-  `journalctl -k | grep -E "rtl8127|blocked for more than"` after one.
+  carries ssh and every control call to the radios. It has not hung since, but
+  the driver is unchanged; check
+  `journalctl -k | grep -E "rtl8127|blocked for more than"` after a long run.
+  Never copy large files off the host during a run: they share this NIC.
 - **Radio opens that time out (SH-442).** A launch sometimes cannot open the BS
   within the device timeout (`SoapyRPCUnpacker::recv() TIMEOUT` in the log).
   The sounder retries the open itself ("Radios Not Found. Will attempt a
   retry..."); if every try fails, press Start again.
 - **Clock steering** is off by default and lives on its own branch
-  (`feat/clock-steer-rollin`), reviewed, not yet validated on the rig. Without it
-  R3's MER depends on the day: the two boards' offset drifted to 0.6-0.9 ppm in
-  two of three long runs and MER fell from about 30 to 14-18 dB (sub-6) and 9-12
-  dB (X-IF) (9.33, 9.34); in the third it stayed near 0.1 ppm and MER held
-  (9.39).
+  (`feat/clock-steer-rollin`), reviewed and built on the rig, not yet validated
+  there. Without it R3's MER depends on the day: the two boards' offset reached
+  0.6-0.9 ppm in four of seven long runs and MER fell from about 30 to 12-18 dB
+  (sub-6) and 9-12 dB (X-IF) (9.33, 9.34, 9.44, 9.45); where it stayed within
+  about 0.4 ppm MER held 26-30 dB (9.39, 9.41, 9.46).
 
 ## A8. Stopping and recovery
 
 - Stop from the dashboard, or Ctrl+C on the backend (it stops the sounder's
   whole process group).
+- A TX playout freeze (A7): Stop, then Start. The new run's stream setup clears it.
+- After a rig-host reboot, run the setup check before anything else: a bounce of
+  the host's data ports can wedge a node's FPGA egress (HS-225), which fails the
+  check's `egress` line; recover by reloading that node's PL or rebooting it.
 - A radio still held by an old sounder: the setup check names its pid; stop that
   run or `kill <pid>`. `tools/rig_release_holders.py` also works but stops EVERY
   sounder and dashboard on the host, including a running `--control` backend.
