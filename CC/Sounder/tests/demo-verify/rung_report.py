@@ -53,8 +53,8 @@ def main(path):
         if m: fr = 122880.0 if len(m.group(1)) == 30 else 1228800.0 if len(m.group(1)) == 20 else fr
         span = (ev[-1][1] - ev[0][1]) / fr
         print("UE pilot coverage %.1f%%" % (100.0 * (sum(a for a, _ in ev) - ev[0][0]) / span))
-    pu = grab(r"pu_spacing_err=([-\d]+)", int); seat = grab(r"pilot_grid_off=([-\d]+)", int)
-    if pu: print("pu_spacing_err: %s" % dict(collections.Counter(pu).most_common(4)))
+    clamped = grab(r"clamped=(\d+)", int); seat = grab(r"pilot_grid_off=([-\d]+)", int)
+    if clamped: print("BS slots clamped past the capture edge: %d of %d sampled frames" % (sum(c > 0 for c in clamped), len(clamped)))
     if seat: print("pilot seat: mean %.1f, sd %.1f, range %d..%d (n %d)" % (st.mean(seat), st.pstdev(seat), min(seat), max(seat), len(seat)))
     cfo = [l for l in L if "Beacon CFO frame" in l]
     if cfo: print("clock:", re.sub(r"^.*?Beacon CFO", "Beacon CFO", cfo[-1])[:160])
