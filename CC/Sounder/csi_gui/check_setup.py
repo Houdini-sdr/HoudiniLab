@@ -256,8 +256,12 @@ def check_servers(rep, nodes, port):
 def hwinfo(ip, port):
     """Read one radio's hardware info exactly as the sounder opens it (RadioHoudini.cc)."""
     import SoapySDR
+    # The timeout as the sounder passes it (include/Radio.h). Without one the
+    # plugin's default is 300 ms, and the host's ~1 s first-call stall (SH-442)
+    # then fails this read although the radio is fine.
     sdr = SoapySDR.Device({"driver": "houdinisdr", "remote": "tcp://%s:%s" % (ip, port),
-                           "remote:driver": "houdinisdr-device", "remote:type": "houdinisdr"})
+                           "remote:driver": "houdinisdr-device", "remote:type": "houdinisdr",
+                           "timeout": "3000000"})
     try:
         return dict(sdr.getHardwareInfo())
     finally:

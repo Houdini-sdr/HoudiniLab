@@ -40,6 +40,7 @@ open(os.path.join(fake, "SoapySDR.py"), "w").write(
     "    def __init__(self, a):\n"
     "        import os\n"
     "        assert os.environ.get('SOAPY_SDR_PLUGIN_PATH', '').endswith('modules0.8-3'), 'no plugin path'\n"
+    "        assert int(a.get('timeout', '0')) >= 1000000, 'no timeout: the plugin default is 300 ms'\n"
     "        self.ip = a['remote'].split('//')[1].split(':')[0]\n"
     "    def getHardwareInfo(self): return json.load(open(%r))[self.ip]\n"
     "    @staticmethod\n"
