@@ -12,8 +12,9 @@ D=ap79_runs
 rm -f $D/cns_dump*.bin $D/beacon_ram.bin $D/gold.bin
 RW=$(mktemp -d /tmp/rw_XXXX)
 export HOUDINI_CSI_DUMP=60 HOUDINI_BS_RX_DEBUG=1 HOUDINI_DUMP_BEACON=1 HOUDINI_DUMP_RESYNC_WIN=$RW
-# SYN retransmits on this host around the run: a lost SYN on the control path
-# races the sounder's 1 s device timeout and reads as "Radios Not Found".
+# SYN retransmits on this host around the run: an open that stalls about 1 s
+# before connecting (cause unmeasured; a lost SYN is one candidate) races the
+# A/B build's 1 s device timeout and reads as "Radios Not Found".
 SYN0=$(nstat -az TcpExtTCPSynRetrans 2>/dev/null | awk '/SynRetrans/{print $2}')
 bash "$HERE/run_rung.sh" $TAG $CONF $SECS 5
 while pgrep -x sounder >/dev/null; do sleep 5; done; sleep 3
