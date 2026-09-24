@@ -42,4 +42,12 @@ check(abs(u["snr_rx"] - snr_true) < 1.0, "SNR_rx %.2f dB, truth %.2f" % (u["snr_
 check(abs(u["mer"] - snr_true) < 1.0, "MER %.2f dB matches the in-band SNR %.2f (receive-noise-limited by construction)" % (u["mer"], snr_true))
 check(u["nidle"] >= 3, "idle segments found on both sides of the burst")
 check(abs(u["tilt"] - tilt_true) < 0.01, "|H| tilt %.3f dB, truth %.2f (lowest to highest tone)" % (u["tilt"], tilt_true))
+# A slot cut short inside its last symbol (R3's symbols run to the slot's end):
+# the report must still read it, from the whole symbols it has.
+cut = tempfile.NamedTemporaryFile(delete=False, suffix=".bin")
+cut.write(open(f.name, "rb").read()[:-4 * (4096 - (es + nsym * (cp + N) - 100))])
+cut.close()
+uc = fr.ul(cut.name)
+check(abs(uc["sig_in"] - sig_db) < 0.3 and uc["nsym"] == nsym - 1,
+      "a slot cut inside its last symbol reads from its %d whole symbols (signal %.2f dBFS)" % (uc["nsym"], uc["sig_in"]))
 print("%d failure(s)" % fails); sys.exit(1 if fails else 0)

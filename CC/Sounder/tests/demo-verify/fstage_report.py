@@ -41,6 +41,7 @@ def inband(x, starts, M, band):
     White noise of variance s2 reads s2 x (bins in band)/M, a tone its own power."""
     w = np.hanning(M); f = (np.arange(M) - M // 2) / M
     sel = (f >= band[0]) & (f <= band[1])
+    starts = [a for a in starts if a >= 0 and a + M <= len(x)]  # R3's symbols can run to the slot's end
     P = [np.abs(np.fft.fftshift(np.fft.fft(x[a:a + M] * w))) ** 2 / np.sum(w ** 2) for a in starts]
     if not P:
         return float("nan")
