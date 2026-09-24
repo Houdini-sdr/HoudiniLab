@@ -18,8 +18,8 @@ export HOUDINI_CSI_DUMP=60 HOUDINI_BS_RX_DEBUG=1 HOUDINI_DUMP_BEACON=1 HOUDINI_D
 SYN0=$(nstat -az TcpExtTCPSynRetrans 2>/dev/null | awk '/SynRetrans/{print $2}')
 # HEALTH_S: the link-health period, s. A launch that failed wrote no record:
 # stop here rather than file into the previous run's directory.
-bash "$HERE/run_rung.sh" "$TAG" "$CONF" "$SECS" "${HEALTH_S:-5}" || { rmdir "$RW"; echo "run_rung.sh failed; nothing filed"; exit 1; }
-[ -s "$D/$TAG.current" ] || { rmdir "$RW"; echo "no run record for $TAG; nothing filed"; exit 1; }
+# SOUNDER_DIR is passed as the absolute path already entered (run_rung.sh cds again).
+SOUNDER_DIR="$PWD" bash "$HERE/run_rung.sh" "$TAG" "$CONF" "$SECS" "${HEALTH_S:-5}" || { rmdir "$RW"; echo "run_rung.sh failed; nothing filed"; exit 1; }
 # Wait for THIS run's sounder (run_rung.sh recorded its pid), not any sounder on the host.
 SP=$(cat "$D/$TAG.pid")
 while [ -n "$SP" ] && [ "$(cat "/proc/$SP/comm" 2>/dev/null)" = sounder ]; do sleep 5; done; sleep 3

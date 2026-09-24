@@ -274,10 +274,11 @@ def _delay_stats(db, tap_ns):
     threshold is 20 dB below the peak or 6 dB above the noise floor (the
     median of the window's outer quarter), whichever is higher, and is
     reported. A single path is NOT 0 ns: the Hann-windowed CIR's mainlobe
-    (about 2/B wide) gives a lone path an RMS spread of about 0.5/B, a mean
-    excess of about 1.5/B and a max excess of about 3/B (measured from the
-    mainlobe's first tap above the threshold), so values near those are
-    unresolved, not multipath."""
+    (about 2/B wide at -6 dB, 4/B null to null) gives a lone path, at the -20 dB
+    threshold, an RMS spread of about 0.5/B, a mean excess of about 1.5/B and a
+    max excess of about 3/B (from the mainlobe's first tap above the
+    threshold), so values near those are unresolved, not multipath. A noise
+    floor that lifts the threshold narrows them."""
     q = max(1, len(db) // 8)
     tail = sorted(db[:q] + db[-q:])
     floor = tail[len(tail) // 2] if tail else -60.0
@@ -1613,8 +1614,9 @@ function drawQuality(card){
   if(c){
     let t='RMS delay spread '+c.rms_ns.toFixed(1)+' ns · mean excess '+c.mean_ns.toFixed(1)
          +' ns · max excess '+c.max_ns.toFixed(1)+' ns (thr '+c.thr_db.toFixed(0)+' dB re peak';
-    // Hann mainlobe ~2/B; a lone path reads rms ~0.5/B, mean ~1.5/B, max ~3/B.
-    if(m && m.bw_mhz>0) t+=', resolution ≈ '+(2e3/m.bw_mhz).toFixed(0)+' ns; a single path reads rms '
+    // Hann mainlobe ~2/B at -6 dB; at the -20 dB threshold a lone path reads
+    // rms ~0.5/B, mean ~1.5/B, max ~3/B (test_metrics pins both).
+    if(m && m.bw_mhz>0) t+=', resolution ≈ '+(2e3/m.bw_mhz).toFixed(0)+' ns; at -20 dB a single path reads rms '
                            +(0.5e3/m.bw_mhz).toFixed(0)+', mean '+(1.5e3/m.bw_mhz).toFixed(0)
                            +', max '+(3e3/m.bw_mhz).toFixed(0)+' ns';
     q.push(t+')');
@@ -1958,6 +1960,7 @@ async function pollCtl(){
       return;
     }
     box.hidden=false;
+    box.querySelectorAll('button,select').forEach(e=>{ e.disabled=false; });
     const sel=document.getElementById('ctl-conf');
     const key=st.configs.join('|');
     if(key!==ctlConfs){

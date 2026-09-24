@@ -46,12 +46,14 @@ check(sup.env.get("SOAPY_SDR_PLUGIN_PATH") == os.path.join(sd, "lib", "SoapySDR"
       "the sounder runs in the plugin environment")
 # Fails under: the supervisor building its own environment instead of calling
 # the setup check's plugin_env (the same values would pass the check above).
+# Both names are patched, so reaching the function as check_setup.plugin_env passes too.
 real_env = cs.plugin_env
-cs.plugin_env = lambda venv: {"PLUGIN_ENV_SENTINEL": venv}
+sentinel = lambda venv: {"PLUGIN_ENV_SENTINEL": venv}
+cs.plugin_env = sys.modules["check_setup"].plugin_env = sentinel
 try:
     probe = cs.SounderSupervisor(args, "127.0.0.1:1")
 finally:
-    cs.plugin_env = real_env
+    cs.plugin_env = sys.modules["check_setup"].plugin_env = real_env
 check(probe.env.get("PLUGIN_ENV_SENTINEL") == sd, "the supervisor takes its environment from the setup check's plugin_env")
 
 # The gap before the main thread picks a Start up (a supervisor not yet serving):
