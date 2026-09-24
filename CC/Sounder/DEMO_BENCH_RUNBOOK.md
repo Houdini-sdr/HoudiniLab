@@ -108,8 +108,10 @@ last validated stack is in the newest `DEMO_VERIFICATION.md` section 9 row.
 The configs, from the ladder (walkthrough section 3): `houdini-r0.json`
 (control), `houdini-dualband-r1.json`, `-r2.json`, `-r3a.json`,
 `houdini-dualband.json` (R3, the demo) and `houdini-dualband-40.json` (the
-40 MHz fallback). On a freshly deployed stack, climb R0 to R3 before running the
-demo.
+40 MHz fallback). On a freshly deployed stack, climb R1 to R3 before running the
+demo. R0 (NCO 500 MHz) cannot run while the F3b chain is fitted: the VBF-2450+
+bandpasses on the sub-6 DAC paths block its beacon, so the UE never acquires
+(`DEMO_VERIFICATION.md` 9.40). It is the control only with the filters out.
 
 For evidence runs without the dashboard, `tests/demo-verify/run_rung.sh` and
 `fstage_run.sh` launch one sounder run with the logs and dumps that
