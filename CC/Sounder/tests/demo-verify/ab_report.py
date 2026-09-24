@@ -9,7 +9,8 @@ Per leg:
   tx       the per-stream TX counter increments summed over the link-health lines
            (UE and BS; the lines print only when a counter moves), e.g. UE tx1.drops
   trim     the host pacer's close-of-stream lines ("trim final bias", SH-427's A symptom)
-  clock    B's plugin log lines naming DeviceClock / TX_HOST_STATUS / TIME_ERROR
+  clock    the plugin's log lines naming DeviceClock / TX_HOST_STATUS / TIME_ERROR /
+           arrival offset (B logs its per-stream arrival offset and clock re-sets)
            (the A/B build never reads TX_HOST_STATUS itself: only what the plugin logs)
   resync   targeted re-syncs, the longest gap in UE frames, the BS pilot seat's
            largest |value| (the AP-80 separator: a walk is AP-80, not the pacer)
@@ -44,7 +45,7 @@ def leg(run):
             tx["%s %s" % (m.group(1), k)] += int(v)
     out["tx"] = dict(tx)
     out["trim"] = sorted(set(re.findall(r"(trim final bias [^\n(]*)", L)))
-    out["clock"] = [l.strip()[:220] for l in L.splitlines() if re.search(r"DeviceClock|TX_HOST_STATUS|TIME_ERROR", l)]
+    out["clock"] = [l.strip()[:220] for l in L.splitlines() if re.search(r"DeviceClock|TX_HOST_STATUS|TIME_ERROR|arrival offset", l)]
     fr_ = [int(v) for v in re.findall(r"Re-sync frame (\d+): beacon alive", L)]
     out["resyncs"] = len(fr_)
     out["maxgap"] = max((b - a for a, b in zip(fr_, fr_[1:])), default=0)
