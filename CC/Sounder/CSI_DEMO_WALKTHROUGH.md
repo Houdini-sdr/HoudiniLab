@@ -833,6 +833,14 @@ Example, in `files/houdini-ul.json`:
 | `sync.tracker.kalman.meas_var` | 0.5 | `HOUDINI_KF_MEAS_VAR` | 1e-06 to 1e+06 | clamped | Kalman only: assumed detector scatter variance, samples squared. |
 | `sync.tracker.kalman.rate_rw` | 1e-09 | `HOUDINI_KF_RATE_RW` | 0 to 1 | clamped | Kalman only: how fast the frame period wanders, samples squared per frame cubed. |
 | `sync.tracker.kalman.innov_gate` | 4 | `HOUDINI_KF_INNOV_GATE` | 0 to 100 | clamped | Kalman only: sigmas an observation may sit from the prediction before it is ignored. 0 disables. |
+| `sync.steer.enable` | false | `HOUDINI_CLOCK_STEER` |  | refused | Steer the UE's clock onto the beacon's with CLOCK_ADJ, from the tracked grid rate, inside the sounder. Needs the UE's clock_ref to be calibrated. Off by default. |
+| `sync.steer.period_s` | 20 | `HOUDINI_CLOCK_STEER_PERIOD_S` | 2 to 3600 | clamped | Seconds between steering decisions; the tracked rate is averaged over each. A held oscillator drifts slowly, so this need not be short. |
+| `sync.steer.gain` | 0.7 |  | 0.05 to 1 |  | Fraction of the averaged offset removed at each push. |
+| `sync.steer.deadband_ppm` | 0.06 |  | 0 to 10 |  | Offsets smaller than this are left alone: half the actuator quantum is the floor of what a push can fix. |
+| `sync.steer.max_offset` | 30 |  | 0 to 400 |  | Bounded authority: never steer further than this many counts from the calibration point. |
+| `sync.steer.max_push` | 2 |  | 1 to 50 |  | Most counts one push may move, so no single frequency step is large. |
+| `sync.steer.ppm_per_count` | 0.1251 |  | 0.001 to 10 |  | Actuator gain, ppm per CLOCK_ADJ count (magnitude; +1 count raises the UE clock). Measured 0.1251 (AP-48). |
+| `sync.steer.keep` | false |  |  |  | Leave the steered code in place when the sounder exits instead of releasing to the calibrated hold. |
 | `sync.resync.residual_ppm` | 0.1 | `HOUDINI_SYNC_RESIDUAL_PPM` | 0.0001 to 1000 | clamped | Assumed worst-case clock error after tracking; with sync_tol_samples it sets how often the beacon is looked at. |
 | `sync.resync.scatter_tol_us` | 2 | `HOUDINI_SCATTER_TOL_US` | 0.01 to 1000 | clamped | How far a detection may land from the tracked grid and still count as the same beacon, microseconds. |
 | `sync.resync.confirm_tol_us` | 5.2083 | `HOUDINI_CONFIRM_TOL_US` | 0.01 to 1000 | clamped | The same tolerance during acquisition. Never applied looser than the tracking gate. |

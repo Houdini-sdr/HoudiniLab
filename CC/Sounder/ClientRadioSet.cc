@@ -339,6 +339,27 @@ void ClientRadioSet::setRxFilter(size_t radio_id, bool on) {
   if (auto* h = dynamic_cast<RadioHoudini*>(radios.at(radio_id).get())) h->setRecvFilter(on);
 }
 
+std::string ClientRadioSet::readRadioSetting(size_t radio_id, const std::string& key) {
+  if (radio_id >= radios.size() || radios.at(radio_id) == nullptr) return "";
+  try {
+    return radios.at(radio_id)->RawDev()->readSetting(key);
+  } catch (const std::exception& e) {
+    MLPD_WARN("UE %zu: readSetting(%s) failed: %s\n", radio_id, key.c_str(), e.what());
+    return "";
+  }
+}
+
+bool ClientRadioSet::writeRadioSetting(size_t radio_id, const std::string& key, const std::string& value) {
+  if (radio_id >= radios.size() || radios.at(radio_id) == nullptr) return false;
+  try {
+    radios.at(radio_id)->RawDev()->writeSetting(key, value);
+    return true;
+  } catch (const std::exception& e) {
+    MLPD_WARN("UE %zu: writeSetting(%s=%s) failed: %s\n", radio_id, key.c_str(), value.c_str(), e.what());
+    return false;
+  }
+}
+
 int ClientRadioSet::radioRx(size_t radio_id, void* const* buffs, int numSamps,
                             long long& frameTime) {
   if (radio_id < radios.size()) {

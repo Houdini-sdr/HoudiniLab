@@ -17,6 +17,7 @@
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <string>
 
 class Config;
 
@@ -58,6 +59,13 @@ class IClientRadioSet {
   /// due re-sync sees the predicted beacon whatever the loop's period. A no-op
   /// on sets that cannot, which keep their random-phase windows.
   virtual void placeNextRx(size_t /*radio_id*/, std::function<long long(long long)> /*start_for_head*/) {}
+  /// A device setting on one client radio: the clock-steering actuator
+  /// (AP-79, CLOCK_ADJ). Empty / false on sets that have none, or when the
+  /// device refuses; never throws.
+  virtual std::string readRadioSetting(size_t /*radio_id*/, const std::string& /*key*/) { return ""; }
+  virtual bool writeRadioSetting(size_t /*radio_id*/, const std::string& /*key*/, const std::string& /*value*/) {
+    return false;
+  }
 };
 
 /// The sets this build provides for this configuration: the native-UHD sets

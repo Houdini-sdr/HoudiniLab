@@ -392,6 +392,9 @@ add_test(NAME core_map COMMAND core_map_test)
 add_executable(pilot_slope_fit_test tests/comms-func/pilot_slope_fit_test.cc)
 target_include_directories(pilot_slope_fit_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 add_test(NAME pilot_slope_fit COMMAND pilot_slope_fit_test)
+add_executable(clock_steer_test tests/comms-func/clock_steer_test.cc)
+target_include_directories(clock_steer_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_test(NAME clock_steer COMMAND clock_steer_test)
 
 # AP-79: nr_pss_bl's acquisition thresholds derived on a simulated link.
 add_executable(detection_calibration_test tests/comms-func/detection_calibration_test.cc)
