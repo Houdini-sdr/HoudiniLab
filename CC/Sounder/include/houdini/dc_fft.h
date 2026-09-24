@@ -21,51 +21,33 @@
 #pragma once
 
 #include <complex>
-#include <cstddef>
-#include <stdexcept>
 #include <vector>
 
-extern "C" {
-#include "fft.h"  // muFFT
-}
+#include "houdini/mufft_c2c.h"
 
 namespace houdini {
 
 class DcCenteredFft {
  public:
-  explicit DcCenteredFft(int n) : n_(n) {
-    if (n <= 0 || (n & (n - 1)) != 0) throw std::invalid_argument("DcCenteredFft: n must be a power of two");
-    in_ = static_cast<std::complex<float>*>(mufft_alloc(static_cast<size_t>(n) * sizeof(std::complex<float>)));
-    out_ = static_cast<std::complex<float>*>(mufft_alloc(static_cast<size_t>(n) * sizeof(std::complex<float>)));
-    plan_ = mufft_create_plan_1d_c2c(static_cast<unsigned>(n), MUFFT_FORWARD, MUFFT_FLAG_CPU_ANY);
-    if (in_ == nullptr || out_ == nullptr || plan_ == nullptr) throw std::runtime_error("DcCenteredFft: muFFT allocation failed");
-  }
-  ~DcCenteredFft() {
-    mufft_free_plan_1d(plan_);
-    mufft_free(in_);
-    mufft_free(out_);
-  }
-  DcCenteredFft(const DcCenteredFft&) = delete;
-  DcCenteredFft& operator=(const DcCenteredFft&) = delete;
+  explicit DcCenteredFft(int n) : fft_(n, MUFFT_FORWARD, "DcCenteredFft") {}
 
-  int size() const { return n_; }
+  int size() const { return fft_.size(); }
 
   /// The DC-centred spectrum of the n CS16 samples at d[2*base ..].
   std::vector<std::complex<float>> run(const short* d, int base, bool conj) {
+    const int n = fft_.size();
     const float qs = conj ? -1.0f : 1.0f;
-    for (int i = 0; i < n_; ++i)
-      in_[i] = {static_cast<float>(d[2 * (base + i)]), qs * static_cast<float>(d[2 * (base + i) + 1])};
-    mufft_execute_plan_1d(plan_, out_, in_);
-    std::vector<std::complex<float>> xs(static_cast<size_t>(n_));
-    for (int k = 0; k < n_; ++k) xs[static_cast<size_t>(k)] = out_[(k + n_ / 2) % n_];
+    std::complex<float>* in = fft_.in();
+    for (int i = 0; i < n; ++i)
+      in[i] = {static_cast<float>(d[2 * (base + i)]), qs * static_cast<float>(d[2 * (base + i) + 1])};
+    fft_.execute();
+    std::vector<std::complex<float>> xs(static_cast<size_t>(n));
+    for (int k = 0; k < n; ++k) xs[static_cast<size_t>(k)] = fft_.out()[(k + n / 2) % n];
     return xs;
   }
 
  private:
-  int n_;
-  std::complex<float>* in_ = nullptr;
-  std::complex<float>* out_ = nullptr;
-  mufft_plan_1d* plan_ = nullptr;
+  MufftC2C fft_;
 };
 
 }  // namespace houdini

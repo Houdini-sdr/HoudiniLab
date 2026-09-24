@@ -43,8 +43,10 @@ constexpr double kHb50 = 1596 * kScs30 / 2.0;     // R3, 133 RB: +-23.94 MHz
 constexpr double kHb40 = 1272 * kScs30 / 2.0;     // rollback, 106 RB: +-19.08 MHz
 constexpr double kHbR1 = 96 * 480e3 / 2.0;        // R1, fft 256: +-23.04 MHz
 
-bool throws(const std::function<void()>& f) {
-  try { f(); } catch (const std::invalid_argument&) { return true; }
+// Refused, and (when `says` is given) for the reason named: two rules can
+// refuse the same input, so the message tells which one did.
+bool throws(const std::function<void()>& f, const char* says = "") {
+  try { f(); } catch (const std::invalid_argument& e) { return std::string(e.what()).find(says) != std::string::npos; }
   return false;
 }
 
@@ -94,11 +96,13 @@ int main() {
   check(sub6Rx(real, 2425e6, kHbR1, 42.16), "R1 RX (2425, fft 256 / 96 sc): zone 1, Mode 1, filter on, mirror from 42.16 MHz");
 
   // ---- refusals --------------------------------------------------------------
-  check(throws([] { planRx(2440e6, kHb50, kModeV); }), "refuses a channel straddling the 2457.6 MHz zone edge");
-  check(throws([] { planRx(2435e6, 10e6, kModeV); }), "refuses a mirror inside the filter's 40.2 MHz stop edge (NCO 2435)");
-  check(throws([] { planRx(2420e6, 30e6, kModeV); }), "refuses a filtered channel wider than the +-24 MHz passband");
-  check(throws([] { planRx(5500e6, 10e6, kModeV); }), "refuses ADC zone 3 (the device accepts 1 and 2)");
-  check(throws([] { planRx(1966.08e6, 10e6, kModeV); }), "refuses a channel aliasing across 0.4 Fs (the cal-mode split)");
+  // Fails under: the straddle rule disabled (the mirror rule then refuses the
+  // same channel, for another reason).
+  check(throws([] { planRx(2440e6, kHb50, kModeV); }, "straddles"), "refuses a channel straddling the 2457.6 MHz zone edge");
+  check(throws([] { planRx(2435e6, 10e6, kModeV); }, "stop edge"), "refuses a mirror inside the filter's 40.2 MHz stop edge (NCO 2435)");
+  check(throws([] { planRx(2420e6, 30e6, kModeV); }, "exceeds the channel filter passband"), "refuses a filtered channel wider than the +-24 MHz passband");
+  check(throws([] { planRx(5500e6, 10e6, kModeV); }, "ADC zone"), "refuses ADC zone 3 (the device accepts 1 and 2)");
+  check(throws([] { planRx(1966.08e6, 10e6, kModeV); }, "aliases across"), "refuses a channel aliasing across 0.4 Fs (the cal-mode split)");
   check(throws([] { planTx(2700e6, kHb50, kModeV); }), "refuses TX above the NRZ band (0.45 Fs = 2654 MHz)");
   check(throws([] { planTx(3000e6, kHb50, kModeV); }), "refuses TX in the gap between NRZ and mix-mode");
   check(throws([] { planRx(2425e6, kHb50, ConverterPoint{}); }), "refuses an unset converter point");

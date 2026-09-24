@@ -26,28 +26,6 @@
 namespace houdini {
 namespace slotalign {
 
-/// Mean index of the samples whose 128-sample energy (from the cumulative
-/// energy `cse`, cse[i] = sum of |x|^2 over [0, i)) exceeds 15 % of the
-/// window's peak, over [w0, w1). Returns false when nothing qualifies.
-inline bool countCentroid(const std::vector<double>& cse, long long w0, long long w1, double* centroid) {
-  const long long cg = static_cast<long long>(cse.size()) - 1;
-  w0 = std::max(0LL, w0);
-  w1 = std::min(cg, w1);
-  double peak = 0.0;
-  for (long long i = w0 + 64; i + 64 <= w1; ++i) peak = std::max(peak, cse[i + 64] - cse[i - 64]);
-  const double thr = 0.15 * peak;
-  long long cnt = 0;
-  double isum = 0.0;
-  for (long long i = w0 + 64; i + 64 <= w1; ++i)
-    if (cse[i + 64] - cse[i - 64] > thr) {
-      ++cnt;
-      isum += static_cast<double>(i);
-    }
-  if (cnt == 0) return false;
-  *centroid = isum / static_cast<double>(cnt);
-  return true;
-}
-
 /// The pilot slot's start in the capture, from the pilot's LEADING EDGE.
 ///
 /// A centroid over the whole burst (the first fix tried) is level-sensitive:

@@ -585,6 +585,10 @@ void SyncConfig::validate() {
               ? "; it is the Iris/UHD default, the form that framer has always run"
               : "; diagnostic only on Houdini"));
   }
+  if (detector.bar.min_bar > 0.0 && 1.0 / detector.bar.corr_scale < detector.bar.min_bar) {
+    note("detector.min_bar is above the resync bar 1 / corr_scale: the bar stays as configured "
+         "and the retry relaxation is off");
+  }
   if (detector.first_path_window > 512) {
     note("detector.first_path_window above 512 reaches past any preamble plateau and widens "
          "the SNR guard to most of a slot; the correlator caps it at twice the replica length");

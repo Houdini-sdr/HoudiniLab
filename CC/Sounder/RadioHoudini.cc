@@ -87,90 +87,107 @@ void RadioHoudini::logModeV(const std::string& label, const std::vector<std::str
   }
 }
 
-void RadioHoudini::writeModeVRecord(const std::string& label, SoapySDR::Device& dev,
-                                    const houdini::modev::Result& r,
-                                    const houdini::modev::PostSetup& ps, const std::string& failure) {
- try {
-  // The converter state this session ran with, beside the run (plan rule 5:
-  // a capture carries its state). One file per node per bring-up, under
-  // HOUDINI_DUMP_DIR (Utils::dumpPath). Best effort: a record that cannot be
-  // written is warned about, never fatal.
+namespace {
+// A per-node record file under HOUDINI_DUMP_DIR (Utils::dumpPath), named
+// <kind>_<label>_<stamp>.txt with the label made file-safe; f is nullptr when
+// it cannot be opened.
+struct RecordFile {
+  FILE* f = nullptr;
+  std::string path, stamp;
+};
+RecordFile openRecord(const std::string& kind, const std::string& label) {
   std::string tag = label;
   for (auto& ch : tag)
     if (ch == ' ' || ch == '.' || ch == '/') ch = '_';
   const std::time_t now = std::time(nullptr);
   char stamp[32];
   std::tm tmv{};
-    localtime_r(&now, &tmv);  // localtime is not thread-safe; the BS radios start in parallel
-    std::strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", &tmv);
-  const std::string name = "modev_" + tag + "_" + stamp + ".txt";
-  const std::string path = Utils::dumpPath(name.c_str());
-  FILE* f = std::fopen(path.c_str(), "w");
-  if (f == nullptr) {
-    MLPD_WARN("%s mode V: cannot write the session record %s (%s)\n", label.c_str(), path.c_str(),
-              std::strerror(errno));
-    return;
-  }
-  std::fprintf(f, "# %s mode-V session record\n", label.c_str());
-  if (!failure.empty()) std::fprintf(f, "RESULT: %s\n", failure.c_str());
+  localtime_r(&now, &tmv);  // localtime is not thread-safe; the BS radios start in parallel
+  std::strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", &tmv);
+  RecordFile r;
+  r.stamp = stamp;
+  r.path = Utils::dumpPath((kind + "_" + tag + "_" + stamp + ".txt").c_str());
+  r.f = std::fopen(r.path.c_str(), "w");
+  return r;
+}
+}  // namespace
+
+void RadioHoudini::writeModeVRecord(const std::string& label, SoapySDR::Device& dev,
+                                    const houdini::modev::Result& r,
+                                    const houdini::modev::PostSetup& ps, const std::string& failure) {
   try {
-    for (const auto& kv : dev.getHardwareInfo()) std::fprintf(f, "hw %s=%s\n", kv.first.c_str(), kv.second.c_str());
+    // The converter state this session ran with, beside the run (plan rule 5:
+    // a capture carries its state). One file per node per bring-up. Best
+    // effort: a record that cannot be written is warned about, never fatal.
+    const RecordFile rec = openRecord("modev", label);
+    FILE* f = rec.f;
+    if (f == nullptr) {
+      MLPD_WARN("%s mode V: cannot write the session record %s (%s)\n", label.c_str(), rec.path.c_str(),
+                std::strerror(errno));
+      return;
+    }
+    std::fprintf(f, "# %s mode-V session record\n", label.c_str());
+    if (!failure.empty()) std::fprintf(f, "RESULT: %s\n", failure.c_str());
+    try {
+      for (const auto& kv : dev.getHardwareInfo()) std::fprintf(f, "hw %s=%s\n", kv.first.c_str(), kv.second.c_str());
+    } catch (const std::exception& e) {
+      std::fprintf(f, "hw: getHardwareInfo failed: %s\n", e.what());
+    }
+    std::fprintf(f, "## bring-up\n");
+    for (const auto& l : r.log) std::fprintf(f, "%s\n", l.c_str());
+    std::fprintf(f, "## after the setups\n");
+    for (const auto& l : ps.log) std::fprintf(f, "%s\n", l.c_str());
+    std::fprintf(f, "## RFDC_SNAPSHOT (before the setups)\n%s\n", r.snapshot.c_str());
+    std::fclose(f);
+    MLPD_INFO("%s mode V: session record %s\n", label.c_str(), rec.path.c_str());
   } catch (const std::exception& e) {
-    std::fprintf(f, "hw: getHardwareInfo failed: %s\n", e.what());
+    // Best effort, never fatal: a record that cannot be written must not
+    // refuse a healthy radio (review).
+    MLPD_WARN("%s mode V: the session record could not be written: %s\n", label.c_str(), e.what());
   }
-  std::fprintf(f, "## bring-up\n");
-  for (const auto& l : r.log) std::fprintf(f, "%s\n", l.c_str());
-  std::fprintf(f, "## after the setups\n");
-  for (const auto& l : ps.log) std::fprintf(f, "%s\n", l.c_str());
-  std::fprintf(f, "## RFDC_SNAPSHOT (before the setups)\n%s\n", r.snapshot.c_str());
-  std::fclose(f);
-  MLPD_INFO("%s mode V: session record %s\n", label.c_str(), path.c_str());
- } catch (const std::exception& e) {
-  // Best effort, never fatal: a record that cannot be written must not
-  // refuse a healthy radio (review).
-  MLPD_WARN("%s mode V: the session record could not be written: %s\n", label.c_str(), e.what());
- }
 }
 
 void RadioHoudini::writeStateRecord(const std::string& label, SoapySDR::Device& dev, const std::string& stage,
                                     const std::vector<size_t>& rx_channels,
                                     const std::vector<size_t>& tx_channels) {
   try {
-    std::string tag = label;
-    for (auto& ch : tag)
-      if (ch == ' ' || ch == '.' || ch == '/') ch = '_';
-    const std::time_t now = std::time(nullptr);
-    char stamp[32];
-    std::tm tmv{};
-    localtime_r(&now, &tmv);  // localtime is not thread-safe; the BS radios start in parallel
-    std::strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", &tmv);
-    const std::string name = "rfdc_" + tag + "_" + stage + "_" + stamp + ".txt";
-    const std::string path = Utils::dumpPath(name.c_str());
-    FILE* f = std::fopen(path.c_str(), "w");
+    const RecordFile rec = openRecord("rfdc", label + "_" + stage);
+    FILE* f = rec.f;
     if (f == nullptr) {
-      MLPD_WARN("%s: cannot write the RFDC state record %s (%s)\n", label.c_str(), path.c_str(),
+      MLPD_WARN("%s: cannot write the RFDC state record %s (%s)\n", label.c_str(), rec.path.c_str(),
                 std::strerror(errno));
       return;
     }
-    std::fprintf(f, "# %s RFDC state, %s, %s\n", label.c_str(), stage.c_str(), stamp);
+    std::fprintf(f, "# %s RFDC state, %s, %s\n", label.c_str(), stage.c_str(), rec.stamp.c_str());
     // Each read on its own: one that fails is noted and the rest still land.
     auto section = [&](const char* title, const std::function<std::string()>& read) {
       std::fprintf(f, "## %s\n", title);
       try {
         std::fprintf(f, "%s\n", read().c_str());
+        return true;
       } catch (const std::exception& e) {
         std::fprintf(f, "(read failed: %s)\n", e.what());
+        return false;
       }
     };
-    section("hardware", [&] {
-      std::string s;
-      for (const auto& kv : dev.getHardwareInfo()) s += kv.first + "=" + kv.second + "\n";
-      return s;
-    });
+    // The first read is the probe: a node that does not answer it (a dead
+    // node at the end of a run) would cost every further read the whole
+    // device timeout, so the rest are skipped.
+    if (!section("hardware", [&] {
+          std::string s;
+          for (const auto& kv : dev.getHardwareInfo()) s += kv.first + "=" + kv.second + "\n";
+          return s;
+        })) {
+      std::fprintf(f, "(the node did not answer: the remaining reads are skipped)\n");
+      std::fclose(f);
+      MLPD_WARN("%s: RFDC state record (%s) %s is partial: the node did not answer\n", label.c_str(),
+                stage.c_str(), rec.path.c_str());
+      return;
+    }
     section("RFDC_PREFLIGHT", [&] { return dev.readSetting("RFDC_PREFLIGHT"); });
-    auto info = [&](int dir, const char* name, const std::vector<size_t>& chans) {
+    auto info = [&](int dir, const char* dir_name, const std::vector<size_t>& chans) {
       for (auto ch : chans) {
-        const std::string title = std::string("getChannelInfo ") + name + " ch" + std::to_string(ch);
+        const std::string title = std::string("getChannelInfo ") + dir_name + " ch" + std::to_string(ch);
         section(title.c_str(), [&] {
           std::string s;
           for (const auto& kv : dev.getChannelInfo(dir, ch)) s += kv.first + "=" + kv.second + "\n";
@@ -182,7 +199,7 @@ void RadioHoudini::writeStateRecord(const std::string& label, SoapySDR::Device& 
     info(SOAPY_SDR_TX, "TX", tx_channels);
     section("RFDC_SNAPSHOT", [&] { return dev.readSetting("RFDC_SNAPSHOT"); });
     std::fclose(f);
-    MLPD_INFO("%s: RFDC state record (%s) %s\n", label.c_str(), stage.c_str(), path.c_str());
+    MLPD_INFO("%s: RFDC state record (%s) %s\n", label.c_str(), stage.c_str(), rec.path.c_str());
   } catch (const std::exception& e) {
     MLPD_WARN("%s: the RFDC state record (%s) could not be written: %s\n", label.c_str(), stage.c_str(),
               e.what());
@@ -244,11 +261,11 @@ RadioHoudini::RadioHoudini(const RadioParams& params,
                             tx = params.tx_channels](SoapySDR::Device& dev) {
                              writeStateRecord(label, dev, "pre-activate", rx, tx);
                            })
-                     : [mv, plan = modeVPlan(params), label = params.label, rx = params.rx_channels,
+                     : [mv, label = params.label, rx = params.rx_channels,
                         tx = params.tx_channels](SoapySDR::Device& dev) {
                          houdini::modev::PostSetup ps;
                          try {
-                           ps = houdini::modev::postSetupCheck(dev, plan, *mv);
+                           ps = houdini::modev::postSetupCheck(dev, *mv);
                          } catch (const std::exception& e) {
                            writeModeVRecord(label, dev, *mv, ps, std::string("post-setup check FAILED: ") + e.what());
                            throw;
@@ -422,7 +439,7 @@ int RadioHoudini::xmit(const void* const* buffs, int samples, int flags,
   if (!params_.tx_channels.empty() && r < static_cast<int>(o.samples))
     app_tx_short_.fetch_add(1, std::memory_order_relaxed);
   if (r < 0) return r;
-  return r >= static_cast<int>(o.samples) ? samples : r / 2;
+  return houdini::boundary::inputSamplesWritten(r, samples);
 }
 
 long long RadioHoudini::txTimeNs(long long frame_ticks, double rate_hz, bool tdd_pilot,
@@ -608,7 +625,7 @@ int RadioHoudini::recv(void* const* buffs, int samples, long long& frameTime) {
     }
   }
   // AP-79: the lanes whose channel's mirror lands in the output get the
-  // +-25 MHz channel filter before any consumer (detector, CFO, framer, CSI)
+  // +-24 MHz channel filter before any consumer (detector, CFO, framer, CSI)
   // sees them. On the UE every read is filtered here and the window dump below
   // shows the filtered samples, the ones the detector sees. On the BS the
   // framer turns this off and filters the slots it extracts instead

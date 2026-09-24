@@ -90,7 +90,7 @@ struct Result {
   std::vector<std::string> log;  ///< one line per step, with the device's readbacks
   std::string snapshot;          ///< RFDC_SNAPSHOT after the writes
 
-  /// Whether RX `ch` needs the +-25 MHz channel filter.
+  /// Whether RX `ch` needs the +-24 MHz channel filter.
   bool rxFilter(size_t ch) const {
     for (const auto& r : rx)
       if (r.channel == ch) return r.channel_filter;
@@ -293,7 +293,7 @@ inline Result bringUp(SoapySDR::Device& dev, const Plan& p) {
   for (const auto& r : res.rx)
     logLine("RX ch" + std::to_string(r.channel) + fmt(": NCO %.3f MHz", r.nco_hz / 1e6) + ", zone " +
             std::to_string(r.zone) + ", cal Mode " + std::to_string(r.cal_mode) +
-            (r.channel_filter ? ", +-25 MHz channel filter ON" : ", no channel filter"));
+            (r.channel_filter ? ", +-24 MHz channel filter ON" : ", no channel filter"));
   // 8
   res.snapshot = dev.readSetting("RFDC_SNAPSHOT");
   // NOT cleared here: the bring-up itself latches benign over-voltage and
@@ -319,7 +319,7 @@ struct PostSetup {
 /// started it (SH-420: `cal=` is valid right after the setups); the preflight
 /// verdict and the interrupt count. Throws on an unsynced channel or a wrong
 /// calibration mode.
-inline PostSetup postSetupCheck(SoapySDR::Device& dev, const Plan& p, const Result& r) {
+inline PostSetup postSetupCheck(SoapySDR::Device& dev, const Result& r) {
   PostSetup ps;
   auto chan = [&](int dir, size_t ch, const char* tag) {
     const auto info = dev.getChannelInfo(dir, ch);
@@ -369,18 +369,10 @@ inline PostSetup postSetupCheck(SoapySDR::Device& dev, const Plan& p, const Resu
                                ", wanted mode" + std::to_string(x.cal_mode));
     }
   }
-  (void)p;
   const std::string pf = dev.readSetting("RFDC_PREFLIGHT");
   ps.preflight = pf.substr(0, pf.find('\n'));
-  if (ps.preflight.rfind("FAIL ", 0) == 0) {
-    const std::string body = houdini::health::preflightFailBody(ps.preflight);
-    size_t q = 0;
-    while (q <= body.size()) {
-      const size_t e = std::min(body.find(';', q), body.size());
-      if (e > q) ps.failures.push_back(body.substr(q, e - q));
-      q = e + 1;
-    }
-  }
+  const auto items = houdini::health::preflightItems(ps.preflight);
+  ps.failures.assign(items.begin(), items.end());
   ps.irq_count = dev.readSetting("RFDC_INTR_FIRE_COUNT");
   ps.log.push_back("RFDC_PREFLIGHT after the setups -> " + ps.preflight);
   ps.log.push_back("RFDC_INTR_FIRE_COUNT -> " + ps.irq_count);

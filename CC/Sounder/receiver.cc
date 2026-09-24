@@ -448,7 +448,10 @@ void* Receiver::loopRecv_launch(void* in_context) {
   try {
     me->loopRecv(tid, core_id, buffer);
   } catch (const std::exception& e) {
-    MLPD_ERROR("BS receive thread %d stopped by an exception: %s\n", tid, e.what());
+    MLPD_ERROR("BS receive thread %zu stopped by an exception: %s\n", static_cast<size_t>(tid), e.what());
+    me->config_->running(false);
+  } catch (...) {
+    MLPD_ERROR("BS receive thread %zu stopped by an exception of unknown type\n", static_cast<size_t>(tid));
     me->config_->running(false);
   }
   return 0;
@@ -821,7 +824,10 @@ void* Receiver::clientTxRx_launch(void* in_context) {
     else
       me->clientSyncTxRx(tid, core_id, buffer);
   } catch (const std::exception& e) {
-    MLPD_ERROR("UE thread %d stopped by an exception: %s\n", tid, e.what());
+    MLPD_ERROR("UE thread %zu stopped by an exception: %s\n", static_cast<size_t>(tid), e.what());
+    me->config_->running(false);
+  } catch (...) {
+    MLPD_ERROR("UE thread %zu stopped by an exception of unknown type\n", static_cast<size_t>(tid));
     me->config_->running(false);
   }
   return 0;
@@ -972,9 +978,8 @@ void Receiver::clientTxPilots(size_t user_id, long long base_time,
       if (off >= num_samps) {
         ul_offs.push_back(off);
       } else {
-        static bool warned = false;
-        if (!warned) {
-          warned = true;
+        static std::atomic<bool> warned{false};  // every UE client thread runs this
+        if (!warned.exchange(true)) {
           MLPD_WARN("UE uplink: U slot %zu precedes the first pilot slot %lld and is not sent; "
                     "put the U slots after the P slot\n", static_cast<size_t>(u), p0);
         }
@@ -2034,13 +2039,8 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
         // within a second and the tracker then never gets another observation.
         const long long beacon_end =
             static_cast<long long>(config_->shape().expectedEndOffset());
-        const double n_due =
-            std::ceil(static_cast<double>(rx_beacon_time - houdini_pilot_ref -
-                                          beacon_end) /
-                      houdini_frame_period);
-        const long long off =
-            houdiniGridStart(static_cast<long long>(n_due)) + beacon_end -
-            rx_beacon_time;
+        const long long off = houdini::sync::beaconEndOffset(
+            rx_beacon_time, houdini_pilot_ref, houdini_frame_period, beacon_end);
         // The slice must be able to PRESENT every residual the liveness
         // gate can accept (+-kScatterTol = 1024) plus ~256 samples of
         // gold context for the correlator; a 700-sample lead left

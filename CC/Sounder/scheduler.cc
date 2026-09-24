@@ -126,6 +126,7 @@ void Scheduler::do_it() {
       cfg_->bs_rx_thread_num() + cfg_->cl_rx_thread_num();
   size_t thread_antennas = 0;
   std::vector<pthread_t> recv_threads;
+  std::vector<pthread_t> client_threads;
 
   if (this->cfg_->core_alloc() == true) {
     if (pin_to_core(kMainDispatchCore) != 0) {
@@ -140,7 +141,7 @@ void Scheduler::do_it() {
   }
 
   if (this->cfg_->client_present() == true) {
-    auto client_threads = this->receiver_->startClientThreads(
+    client_threads = this->receiver_->startClientThreads(
         this->rx_buffer_, this->cl_tx_buffer_,
         kRecvCore + cfg_->bs_rx_thread_num());
   }
@@ -304,6 +305,10 @@ void Scheduler::do_it() {
       this->max_frame_number_);
   this->cfg_->running(false);
   this->receiver_->completeRecvThreads(recv_threads);
+  // The UE threads too: each leaves its loop on running() false, and one may
+  // still be finishing a device call. Resetting the receiver unmakes the radios
+  // under it otherwise.
+  this->receiver_->completeRecvThreads(client_threads);
   this->receiver_.reset();
 
   /* Force the recorders to process all of the data they have left and exit cleanly

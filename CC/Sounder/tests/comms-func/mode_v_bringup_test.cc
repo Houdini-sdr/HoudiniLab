@@ -290,7 +290,7 @@ int main() {
   {
     FakeDevice f;
     const auto r = houdini::modev::bringUp(f, bsPlan());
-    const auto ps = houdini::modev::postSetupCheck(f, bsPlan(), r);
+    const auto ps = houdini::modev::postSetupCheck(f, r);
     for (const auto& l : ps.log) std::printf("  post: %s\n", l.c_str());
     check(ps.failures.empty() && ps.preflight.rfind("ok", 0) == 0,
           "post-setup: every channel synced, cal as derived, the preflight's known HS-207 item is not a failure");
@@ -299,13 +299,13 @@ int main() {
     FakeDevice g;
     g.preflight = "FAIL ADC0.1:FIFOUSRDAT_OF,FIFOUSRDAT_UF known DAC0.0:FIFO_OVR(HS-207)";
     const auto rg = houdini::modev::bringUp(g, bsPlan());
-    const auto pg = houdini::modev::postSetupCheck(g, bsPlan(), rg);
+    const auto pg = houdini::modev::postSetupCheck(g, rg);
     check(pg.failures.size() == 1 && pg.failures[0] == "ADC0.1:FIFOUSRDAT_OF,FIFOUSRDAT_UF",
           "post-setup: a FAIL outside the known part is collected (informational until the post-activate clear)");
     FakeDevice h;  // SH-423: a ' suppressed ' tail with no known part (mutation: cut at ' known ' alone)
     h.preflight = "FAIL ADC0.1:FIFOUSRDAT_OF suppressed DAC0.0:FIFO_OVR(46600/s,backoff=8s)";
     const auto rh = houdini::modev::bringUp(h, bsPlan());
-    const auto ph = houdini::modev::postSetupCheck(h, bsPlan(), rh);
+    const auto ph = houdini::modev::postSetupCheck(h, rh);
     check(ph.failures.size() == 1 && ph.failures[0] == "ADC0.1:FIFOUSRDAT_OF",
           "post-setup: the suppressed tail is not glued onto the last FAIL item");
   }
@@ -330,10 +330,10 @@ int main() {
   check(throwsRt([] { FakeDevice f; f.invsinc_off = true; houdini::modev::bringUp(f, uePlan()); }),
         "an inverse sinc that does not follow the zone stops the bring-up");
   check(throwsRt([] { FakeDevice f; const auto r = houdini::modev::bringUp(f, bsPlan()); f.unsynced = true;
-                      houdini::modev::postSetupCheck(f, bsPlan(), r); }),
+                      houdini::modev::postSetupCheck(f, r); }),
         "an unsynced channel after the setups refuses activation");
   check(throwsRt([] { FakeDevice f; f.wrong_cal = true; const auto r = houdini::modev::bringUp(f, bsPlan());
-                      houdini::modev::postSetupCheck(f, bsPlan(), r); }),
+                      houdini::modev::postSetupCheck(f, r); }),
         "sub-6 RX running cal Mode 2 after the setups (wanted Mode 1) is refused");
 
   std::printf("-- mutation matrix (each line must read PASS: the mutant was caught) --\n");

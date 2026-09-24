@@ -69,6 +69,12 @@ using cs16 = std::complex<int16_t>;
 /// Samples at the input rate, rounded up to a whole 8-sample TX beat after x2.
 inline size_t beatPaddedInput(size_t n) { return (n + 3) / 4 * 4; }
 
+/// The caller's samples a write of `samples` delivered, from the TX samples
+/// the radio took of its interpolated, beat-padded burst (`written` >= 0):
+/// every input sample is two TX samples, and the beat padding is not the
+/// caller's.
+inline int inputSamplesWritten(int written, int samples) { return std::min(samples, written / 2); }
+
 class TxBurstInterpolator {
  public:
   enum class CacheKey { kContent, kAddress };  // kAddress exists only as the test's mutant
@@ -109,29 +115,18 @@ class TxBurstInterpolator {
       Lane& L = lanes_[c];
       const auto* in = static_cast<const cs16*>(buffs[c]);
       if (place_ && placeOne(L, in, n, np, o)) continue;
-      L.placed = false;
-      const bool same = L.valid && L.n == n &&
+      // A placed lane's `in` is the placement key (shorter than n), not a
+      // copy of the last burst: it never serves this path's comparison.
+      const bool same = L.valid && !L.placed && L.n == n &&
                         (key_ == CacheKey::kAddress ? L.addr == buffs[c]
                                                     : std::memcmp(L.in.data(), in, n * sizeof(cs16)) == 0);
+      L.placed = false;
       if (same) {
         ++hits_;
       } else {
         ++misses_;
-        L.in.assign(in, in + n);
-        L.in.resize(np, cs16(0, 0));
         L.out.resize(2 * np);
-        if (prefilter_) {
-          fin_.resize(np);
-          fmid_.resize(np);
-          fout_.resize(2 * np);
-          for (size_t k = 0; k < np; ++k)
-            fin_[k] = {static_cast<float>(L.in[k].real()), static_cast<float>(L.in[k].imag())};
-          chan_.run(fin_.data(), np, fmid_.data());
-          hb_.run(fmid_.data(), np, fout_.data());
-          o.saturated += dsp::HalfbandInterp2::quantize(fout_.data(), 2 * np, L.out.data());
-        } else {
-          o.saturated += hb_.runCs16(L.in.data(), np, L.out.data());
-        }
+        o.saturated += interpolate(in, n, np, L.in, L.out.data());
         L.in.resize(n);  // the comparison copy is the caller's n samples
         L.n = n;
         L.addr = buffs[c];
@@ -229,6 +224,11 @@ class TxBurstInterpolator {
   std::vector<Lane> lanes_;
   size_t hits_ = 0, misses_ = 0;
 };
+
+/// The beacon replay image's lead, in ticks: the prefiltered interpolator's
+/// lead rounded up to the 4-tick grid, so the strobe offset 384 - lead stays
+/// on it.
+inline size_t beaconReplayLead() { return (TxBurstInterpolator::prefilterLead() + 3) / 4 * 4; }
 
 /// Which lanes of a combined RX stream get the channel filter: lane i is
 /// rx_channels[i], and needs_filter(ch) says whether channel ch does.

@@ -328,6 +328,18 @@ int main(int argc, char** argv) {
       b.min_bar = 0.1;
       check(b.relaxed(0) == 5.0 && b.relaxed(3) == 8.0 && b.relaxed(5) == 10.0 && b.relaxed(100) == 10.0,
             "min_bar 0.1 stops the retry relaxation at corr_scale 10 (bar 0.1); unset, the ladder is unchanged");
+      // Fails under: relaxed() without the max against corr_scale (the first
+      // look would then run at bar 0.1, twice the configured 0.05).
+      b.corr_scale = 20.0;
+      check(b.relaxed(0) == 20.0 && b.relaxed(5) == 20.0,
+            "min_bar above the configured bar never raises it: corr_scale 20 stays 20 on every retry");
+    }
+    {
+      // Fails under: dropping validate()'s min_bar note.
+      const auto m = SyncConfig::loadFromText(R"({"sync": {"detector": {"corr_scale": 20, "min_bar": 0.1}}})");
+      bool noted = false;
+      for (const auto& w : m.warnings()) noted |= (w.find("relaxation is off") != std::string::npos);
+      check(noted, "validate: a min_bar above 1 / corr_scale is noted (the relaxation is off)");
     }
     // The sounder's fallback for an ABSENT corr_scale is 1, and it is
     // recorded as derived, not left at the library's 10 (round 4, HIGH 4).

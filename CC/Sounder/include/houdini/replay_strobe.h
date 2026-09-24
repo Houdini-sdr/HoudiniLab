@@ -57,8 +57,8 @@ inline ReplayStrobe replayStrobe(const ReplayStrobeInputs& in) {
   const size_t k = static_cast<size_t>(k_tx);
   const size_t image_units = k * n_load_ticks / 2;
   const size_t span_units = static_cast<size_t>(symbol_ticks - s.offs) * k / 2;
-  size_t len = std::max<size_t>((k * static_cast<size_t>(lead_ticks + beacon_ticks) + 1) / 2,
-                                std::min(image_units, span_units));
+  // The replay plays every whole beat between the strobe and the slot end (or
+  // the whole image, when shorter); the lead, the core and the tail must fit.
   const size_t cap = std::min(image_units, span_units) / 8 * 8;
   const size_t need = (k * static_cast<size_t>(lead_ticks + beacon_ticks + tail_ticks) + 1) / 2;
   if (need > cap) {
@@ -66,7 +66,7 @@ inline ReplayStrobe replayStrobe(const ReplayStrobeInputs& in) {
                                 " replay units do not fit the window (" + std::to_string(cap) +
                                 " whole-beat units between the strobe offset and the slot end)");
   }
-  s.len_units = std::min(((len + 7) / 8) * 8, cap);
+  s.len_units = cap;
   return s;
 }
 

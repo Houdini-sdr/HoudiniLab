@@ -237,12 +237,19 @@ int main() {
     for (size_t k = 0; k < kN; ++k) two[k] = 0.5f * (a[k] + b[k]);
     std::vector<std::complex<int16_t>> out(2 * kN);
     float pk = 0.0f;
+    // The radio's CS16 path (interpolate, then quantize) on the looped signal.
+    auto cs16Circular = [&](const std::vector<std::complex<int16_t>>& in, float* peak) {
+      std::vector<cf> fin(in.size()), fout(2 * in.size());
+      for (size_t k = 0; k < in.size(); ++k) fin[k] = cf(in[k].real(), in[k].imag());
+      hbq.runCircular(fin.data(), fin.size(), fout.data());
+      return HalfbandInterp2::quantize(fout.data(), fout.size(), out.data(), peak);
+    };
     const auto in_lo = to16(two, 0.4 * 32767.0);
-    const size_t sat_lo = hbq.runCs16(in_lo.data(), kN, out.data(), true, &pk);
+    const size_t sat_lo = cs16Circular(in_lo, &pk);
     std::printf("interp CS16 at 0.4 FS: peak %.0f (%.3f FS), saturated %zu\n", pk, pk / 32767.0, sat_lo);
     check(sat_lo == 0, "interp CS16 at 0.4 FS peak: no saturation");
     const auto in_hi = to16(two, 1.0 * 32767.0);
-    const size_t sat_hi = hbq.runCs16(in_hi.data(), kN, out.data(), true, &pk);
+    const size_t sat_hi = cs16Circular(in_hi, &pk);
     check(sat_hi > 0, "interp CS16 saturation counter fires at full scale "
                       "[mutation: a counter that never increments would pass the check above]");
   }

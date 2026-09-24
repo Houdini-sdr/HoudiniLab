@@ -20,28 +20,13 @@
 #include <stdexcept>
 #include <vector>
 
-extern "C" {
-#include "fft.h"  // muFFT
-}
+#include "houdini/mufft_c2c.h"
 
 namespace houdini {
 
 class CirFromH {
  public:
-  explicit CirFromH(int n) : n_(n) {
-    if (n <= 0 || (n & (n - 1)) != 0) throw std::invalid_argument("CirFromH: n must be a power of two");
-    in_ = static_cast<std::complex<float>*>(mufft_alloc(static_cast<size_t>(n) * sizeof(std::complex<float>)));
-    out_ = static_cast<std::complex<float>*>(mufft_alloc(static_cast<size_t>(n) * sizeof(std::complex<float>)));
-    plan_ = mufft_create_plan_1d_c2c(static_cast<unsigned>(n), MUFFT_INVERSE, MUFFT_FLAG_CPU_ANY);
-    if (in_ == nullptr || out_ == nullptr || plan_ == nullptr) throw std::runtime_error("CirFromH: muFFT allocation failed");
-  }
-  ~CirFromH() {
-    mufft_free_plan_1d(plan_);
-    mufft_free(in_);
-    mufft_free(out_);
-  }
-  CirFromH(const CirFromH&) = delete;
-  CirFromH& operator=(const CirFromH&) = delete;
+  explicit CirFromH(int n) : fft_(n, MUFFT_INVERSE, "CirFromH"), n_(n) {}
 
   /// Power per tap, |h[t]|^2, t = 0..N-1, from the DC-centred H (index N/2 is
   /// DC). H is Hann-windowed over its occupied span (the tones where it is
@@ -64,19 +49,17 @@ class CirFromH {
                                 : (kc < lo || kc > hi)
                                       ? 0.0f
                                       : static_cast<float>(0.5 - 0.5 * std::cos(2.0 * M_PI * (kc - lo + 0.5) / span));
-      in_[k] = h_dc[static_cast<size_t>(kc)] * w;
+      fft_.in()[k] = h_dc[static_cast<size_t>(kc)] * w;
     }
-    mufft_execute_plan_1d(plan_, out_, in_);
+    fft_.execute();
     std::vector<float> p(static_cast<size_t>(n_));
-    for (int t = 0; t < n_; ++t) p[static_cast<size_t>(t)] = std::norm(out_[t]);
+    for (int t = 0; t < n_; ++t) p[static_cast<size_t>(t)] = std::norm(fft_.out()[t]);
     return p;
   }
 
  private:
+  MufftC2C fft_;
   int n_;
-  std::complex<float>* in_ = nullptr;
-  std::complex<float>* out_ = nullptr;
-  mufft_plan_1d* plan_ = nullptr;
 };
 
 /// `len` taps starting `pre` taps before the strongest one (circularly), in dB

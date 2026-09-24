@@ -218,9 +218,8 @@ checked the sense with tones, not through this path).
 
 - **The BS framer's decisions run on the RAW sub-6 lane** (energy search,
   presence gate, P/U tagging, LTS check, pilot edge); the extracted slots are
-  channel-filtered exactly. Verified at every rung on 2026-09-23 (`pu_spacing_err`
-  0 on every frame). `HOUDINI_BS_FILTER_WHOLE=1` remains the A/B if it ever
-  looks wrong.
+  channel-filtered exactly. Verified by the uplink decode at every rung R1 to R3
+  (`DEMO_VERIFICATION.md` 9.3, 9.6).
 - **A deliberate detune** (AP-33) puts `mts_phase_stale(RFDC_NCO_REARM)` in
   the preflight's FAIL list, which the monitor reports as new: expected then.
 - **Driver messages that are expected** (device `e002dead`, the final

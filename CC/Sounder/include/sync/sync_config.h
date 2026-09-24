@@ -107,11 +107,13 @@ struct ThresholdPolicy {
   /// where it moves the bar 1% a retry; at a small corr_scale (5, the
   /// band-limited beacon's) it moves it 20% a retry and walks into the noise
   /// within ~15 retries (AP-79 review), so such a config sets this.
+  /// It only stops the relaxation: a configured bar already below it stays
+  /// as configured and is not relaxed (SyncConfig::validate notes that).
   double min_bar = 0.0;
   /// The scale to apply at resync attempt `attempt` (0 = first look).
   double relaxed(int attempt) const {
     const double s = corr_scale + static_cast<double>(attempt);
-    return (min_bar > 0.0) ? std::min(s, 1.0 / min_bar) : s;
+    return (min_bar > 0.0) ? std::max(corr_scale, std::min(s, 1.0 / min_bar)) : s;
   }
   /// The bar for the coherence form at `replica_len` taps and a per-window
   /// false-alarm probability over `window_samples` (8.163): a pure-noise

@@ -43,12 +43,8 @@ static int txPerTick(const Config* cfg) {
   return (cfg->tx_rate() > 1.5 * cfg->rate()) ? 2 : 1;
 }
 static int beaconLeadTicks(const Config* cfg) {
-  // The prefiltered interpolator's lead (TxBurstInterpolator::prefilterLead,
-  // 23 today) rounded up to the 4-tick grid (24), so the strobe offset
-  // 384 - lead stays on it (360).
-  if (txPerTick(cfg) != 2) return 0;
-  const int need = static_cast<int>(houdini::boundary::TxBurstInterpolator::prefilterLead());
-  return (need + 3) / 4 * 4;
+  // 24 today (a lead of 23 on the 4-tick grid): the strobe offset is 360.
+  return txPerTick(cfg) == 2 ? static_cast<int>(houdini::boundary::beaconReplayLead()) : 0;
 }
 static int beaconTailTicks(const Config* cfg) {
   return txPerTick(cfg) == 2
@@ -503,16 +499,14 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
     cb[c] = htdd_cap_buf_.data() + c * static_cast<size_t>(fn) * 2;
   long long ft = 0;
   // AP-79: this capture is continuous and only its P/U slots are used, so the
-  // channel filter runs on the extracted slots below, not on the whole read.
-  // NB the framer's own decisions below (the energy search, the presence gate,
-  // the P/U tagging, the LTS check, the pilot edge) therefore run on the RAW lane,
-  // which in mode V carries the channel's 0 dBc real-sampling mirror (AP-79
-  // review): untested at mode V, to be watched on the first run.
-  // HOUDINI_BS_FILTER_WHOLE=1 filters the whole capture again (the pre-change
-  // behaviour, about 1.3x real time at R1) for an A/B if frames are rejected.
-  static const bool filter_whole = std::getenv("HOUDINI_BS_FILTER_WHOLE") != nullptr;
+  // channel filter runs on the extracted slots below, not on the whole read
+  // (filtering the whole read ran at about 1.3x real time at R1). The framer's
+  // own decisions below (the energy search, the presence gate, the P/U
+  // tagging, the LTS check, the pilot edge) therefore run on the RAW lane,
+  // which in mode V carries the channel's 0 dBc real-sampling mirror; the
+  // uplink decodes at every rung R1 to R3 on them (DEMO_VERIFICATION 9.3, 9.6).
   auto* hr = dynamic_cast<RadioHoudini*>(r);
-  if (hr != nullptr) hr->setRecvFilter(filter_whole);
+  if (hr != nullptr) hr->setRecvFilter(false);
   const int cg = r->recv(cb.data(), fn, ft);
   // This one read backs every rx slot of the frame, so its padding applies to all of
   // them; latch it before any later recv on this radio overwrites the radio's copy.
@@ -669,18 +663,23 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
   const long long p_start =
       houdini::slotalign::burstPilotStart(cse, p_at, static_cast<long long>(n), cfg_->prefix());
   htdd_slot_cache_.resize(K * C * static_cast<size_t>(n) * 2);
-  long long u_start = -1;  // aligned start of the uplink-data slot, if present
+  // Slots whose placed start fell outside the capture and were clamped into
+  // it: they hold the wrong samples. (Every other slot is exactly p_start plus
+  // its whole-slot offset by construction, so this is what is left to check.)
+  size_t clamped = 0;
+  long long u_start = -1;  // placed start of the uplink-data slot, if present (the landing-map dump)
   for (size_t k = 0; k < K; ++k) {
     const long long guess = p_start + rel_slots.at(k) * n;
     const long long st = std::max(0LL, std::min(guess, static_cast<long long>(cg) - static_cast<long long>(n)));
+    clamped += (st != guess) ? 1 : 0;
     if (htdd_rx_slots_.at(k) != htdd_pilot_slot_) u_start = st;
-    // The centroid start is derived from lane 0 but applies to every lane (the
+    // The slot's start is derived from lane 0 but applies to every lane (the
     // combined stream is sample-aligned), so extract slot k from each lane's own
     // capture block at the same offset.
     for (size_t c = 0; c < C; ++c) {
       const int16_t* sc = htdd_cap_buf_.data() + c * static_cast<size_t>(fn) * 2;
       int16_t* dst = htdd_slot_cache_.data() + (k * C + c) * static_cast<size_t>(n) * 2;
-      if (hr != nullptr && !filter_whole && hr->rxLaneFiltered(c)) {
+      if (hr != nullptr && hr->rxLaneFiltered(c)) {
         // The slot through the channel filter, with the capture around it as
         // context: exactly what filtering the whole capture would give here.
         hr->filterRxSlice(sc, static_cast<size_t>(cg), static_cast<size_t>(st), static_cast<size_t>(n), dst);
@@ -722,22 +721,15 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
           static_cast<long long>(htdd_pilot_slot_) * n;
       if (rel_pilot > fr / 2) rel_pilot -= fr;
       if (rel_pilot < -fr / 2) rel_pilot += fr;
-      long long pu_err = -99999;
-      if (u_start >= 0) {
-        const long long slots_gap =
-            static_cast<long long>(htdd_rx_slots_.back()) -
-            static_cast<long long>(htdd_pilot_slot_);
-        pu_err = (u_start - p_start) - slots_gap * n;
-      }
       // stamp_ticks is carried explicitly: `pilot_grid_off` is an offset and
       // AP-51 needs its SLOPE against time, which the frame counter cannot
       // give (it counts PROCESSED frames, and the BS drops none only when it
       // keeps up). Both numbers on one line so an offline fit needs no join.
       MLPD_INFO("HOUDINI_BS_RX: frame=%lld stamp_ticks=%lld cg=%d "
                 "pilot-rms=%.0f selfsim=%.2f p_start=%lld rx_slots=%zu "
-                "pilot_grid_off=%lld pu_spacing_err=%lld\n",
+                "pilot_grid_off=%lld clamped=%zu\n",
                 htdd_frame_counter_, stamp_ticks, cg, pilot_rms, selfsim(at),
-                p_start, K, rel_pilot, pu_err);
+                p_start, K, rel_pilot, clamped);
     }
   }
   // Landing-map instrument (phase 5-7 walk): dump the raw continuous read plus

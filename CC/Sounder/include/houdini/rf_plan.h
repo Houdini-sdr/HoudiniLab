@@ -2,7 +2,7 @@
  * @file houdini/rf_plan.h
  * @brief Per-channel RF-DC settings DERIVED from a channel's NCO and the
  *        converter rates (AP-79): the Nyquist zone of each direction, the ADC
- *        calibration mode, and whether the RX lane needs the +-25 MHz channel
+ *        calibration mode, and whether the RX lane needs the +-24 MHz channel
  *        filter. Pure arithmetic, no radio.
  *
  * WHY DERIVED, NOT CONFIGURED. [user]: keep the config common and split only
@@ -68,7 +68,7 @@ struct Rules {
 struct RxPlan {
   int zone = 0;
   int cal_mode = 0;                   ///< 1 or 2 (RFDC_ADC_CAL ch<n>:cal=mode<k>)
-  bool channel_filter = false;        ///< this lane needs the +-25 MHz filter
+  bool channel_filter = false;        ///< this lane needs the +-24 MHz filter
   double mirror_offset_hz = std::numeric_limits<double>::infinity();  ///< nearest mirror, from the NCO
 };
 

@@ -128,9 +128,8 @@ int main() {
   check(bl.replicaLen() == 512 && bl.singleCopy(), "the replica is the one 512-point PSS, matched once");
   check(bl.coreLen() == 36 + 512 + 16 + 2 * 256, "core = CP 36 + PSS 512 + guard 16 + 2 x TRS 256 = 1076 samples");
   // Replay RAM at TX 245.76: 4096 TX samples = 2048 ticks, less the lead and
-  // tail the prefiltered interpolator needs, derived the way HoudiniFramer
-  // derives them (lead rounded up to the 4-tick grid).
-  const size_t lead = (houdini::boundary::TxBurstInterpolator::prefilterLead() + 3) / 4 * 4;
+  // tail the prefiltered interpolator needs, as HoudiniFramer takes them.
+  const size_t lead = houdini::boundary::beaconReplayLead();
   const size_t tail = houdini::boundary::TxBurstInterpolator::prefilterTail();
   std::printf("replay image: lead %zu + core %zu + tail %zu = %zu of 2048 ticks\n", lead, bl.coreLen(), tail,
               lead + bl.coreLen() + tail);

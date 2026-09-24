@@ -100,6 +100,14 @@ int main() {
               std::string(f) + ": the generator's power-of-two symbol (" + std::to_string(zc.at(0).size()) +
                   ") is NOT fft_size, the old bug's shape");
       }
+      if (c.sync().beacon.type == "nr_pss_bl") {
+        // The thresholds detection_calibration_test derives for this beacon.
+        // Fails under: any one reverted in a config (corr_scale 100 was the
+        // legacy beacon's value).
+        const auto& sy = c.sync();
+        check(sy.detector.bar.corr_scale == 5.0 && sy.confirm.snr_floor_db == 25.0 && sy.detector.bar.min_bar == 0.1,
+              std::string(f) + ": nr_pss_bl runs the derived corr_scale 5, snr_floor_db 25, min_bar 0.1");
+      }
     } catch (const std::exception& e) {
       check(false, std::string(f) + ": Config threw: " + e.what());
     }

@@ -23,6 +23,15 @@
 namespace houdini {
 namespace sync {
 
+/// Where the grid's next predicted beacon END lands in a window stamped at
+/// `rx`: the first frame n whose beacon ends at or after rx, as an offset into
+/// the window. The loop's targeted re-sync attempts only when it is inside the
+/// search slice (receiver.cc); frame n starts at pilot_ref + llround(n * period).
+inline long long beaconEndOffset(long long rx, long long pilot_ref, double period, long long beacon_end) {
+  const double n = std::ceil(static_cast<double>(rx - pilot_ref - beacon_end) / period);
+  return pilot_ref + std::llround(n * period) + beacon_end - rx;
+}
+
 /// The window start tick at or after `head` that puts the next predicted beacon
 /// END `want` samples into the window. The grid is the loop's own:
 /// frame n starts at pilot_ref + llround(n * period), and the beacon end sits

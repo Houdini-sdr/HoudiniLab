@@ -719,7 +719,7 @@ same shell that launches it.
 | `HOUDINI_CSI_DUMP` | unset | One shot raw slot and H dump for offline analysis. |
 | `HOUDINI_SYNC_SNR_DB` | 30 | Sync SNR floor in dB. Detections below it are rejected during acquisition and re-sync. The metric reads true link SNR; a cabled bench measures the mid 40s. |
 | `HOUDINI_PILOT_HORIZON` | from config `ue_pilot_horizon` (96) | How many frames of client bursts are queued ahead of real time. Larger survives slower host loops; every extra frame delays a timing correction reaching the wire. |
-| `HOUDINI_BS_RX_DEBUG` | unset | Base station prints its rederivation of the client schedule (`pilot_grid_off`, `pu_spacing_err`). Both should sit within one sample of zero. |
+| `HOUDINI_BS_RX_DEBUG` | unset | Base station prints its rederivation of the client schedule: `pilot_grid_off` should sit within one sample of zero, and `clamped` (slots placed past the capture's edge) should read 0. |
 | `HOUDINI_UE_TX_DEBUG` | unset | Client prints its burst scheduling (frames queued, pad). |
 | `HOUDINI_CSI_R_DEBUG` | unset | Recorder prints the per frame pilot re-alignment it chose (`r`, and the blind score behind it), one line per 30 corrections. |
 | `HOUDINI_CFO_LOG_EVERY` | 10 | How many beacon detections pass per `Beacon CFO` line. The default logs one in ten, so a quiet run is expected. Set it to 1 for a calibration run where you want every estimate. |

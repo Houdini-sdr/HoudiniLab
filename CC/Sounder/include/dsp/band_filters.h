@@ -2,7 +2,7 @@
  * @file dsp/band_filters.h
  * @brief The two fixed filters the dual-band mode-V point needs (AP-79): the
  *        x2 TX interpolator (122.88 -> 245.76 MSPS) and the sub-6 RX channel
- *        filter (+-25 MHz of the 122.88 output).
+ *        filter (+-24 MHz of the 122.88 output).
  *
  * WHY THEY EXIST. Mode V runs the DAC at 5898.24 with interpolation 24, so the
  * TX stream is 245.76 MSPS while the RX stream, and the device's timestamp
@@ -32,8 +32,8 @@
  * The price is the edge contract: samples outside the buffer are taken as
  * ZERO, so the buffer must carry at least contextBefore()/contextAfter()
  * samples of zeros, or real neighbouring content, at each end. The TDD slots
- * carry 128-tick zero prefixes and postfixes, far more than either needs.
- * runCircular() is the variant for a looped buffer (the beacon replay RAM).
+ * carry zero prefixes and postfixes (32 ticks in the mode-V configs), more
+ * than either needs.
  * Neither filter runs in place (the output overwrites input it still needs);
  * both refuse it.
  *
@@ -153,7 +153,8 @@ class HalfbandInterp2 {
     }
   }
 
-  /// The buffer is one period of a looped signal (the replay RAM).
+  /// The buffer is one period of a looped signal. The tests measure the
+  /// response through this path: a looped tone has no edges.
   void runCircular(const std::complex<float>* in, size_t n, std::complex<float>* out) const {
     if (n == 0) return;
     if (static_cast<const void*>(in) == static_cast<const void*>(out)) throw std::invalid_argument("HalfbandInterp2: in-place is not supported");
@@ -175,13 +176,11 @@ class HalfbandInterp2 {
   /// saturated; the caller treats any non-zero count as a level fault (the
   /// software lane: never let a sample reach full scale). Scale BEFORE this
   /// call with the halfband's overshoot in mind, or check `peak` after.
-  size_t runCs16(const std::complex<int16_t>* in, size_t n, std::complex<int16_t>* out,
-                 bool circular = false, float* peak = nullptr) const {
+  size_t runCs16(const std::complex<int16_t>* in, size_t n, std::complex<int16_t>* out) const {
     std::vector<std::complex<float>> fin(n), fout(2 * n);
     for (size_t k = 0; k < n; ++k) fin[k] = {static_cast<float>(in[k].real()), static_cast<float>(in[k].imag())};
-    if (circular) runCircular(fin.data(), n, fout.data());
-    else run(fin.data(), n, fout.data());
-    return quantize(fout.data(), 2 * n, out, peak);
+    run(fin.data(), n, fout.data());
+    return quantize(fout.data(), 2 * n, out);
   }
 
   static size_t quantize(const std::complex<float>* in, size_t n, std::complex<int16_t>* out,

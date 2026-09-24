@@ -2,8 +2,8 @@
 """AP-15 correlation campaign: restart the demo N times; per run, collect the
 sounder's own equalized-constellation datagrams (CNS1), score them with the
 4th-power concentration metric (~1 clean QPSK, ~0 ring), and pair the verdict
-with that run's per-restart timing draws (pilot_grid_off, pu_spacing_err from
-the BS-side rederivation). No csi_server, no dashboard.
+with that run's per-restart timing draw (pilot_grid_off, and clamped, the slots placed
+past the capture's edge, from the BS-side rederivation). No csi_server, no dashboard.
 
 Run on the rig from the HoudiniLab-rx/CC/Sounder directory.
 """
@@ -76,7 +76,7 @@ def one_run(i, args):
     # settle boundary (the very first line of a run is pre-settle and can
     # differ, Opus review), and checked constant across the run.
     draws = re.findall(r"HOUDINI_BS_RX: frame=(\d+) .*?pilot_grid_off=(-?\d+) "
-                       r"pu_spacing_err=(-?\d+)", log)
+                       r"clamped=(\d+)", log)
     settled = [(int(f), g, u) for f, g, u in draws if int(f) >= args.settle]
     pgo, pu = (settled[0][1], settled[0][2]) if settled else ("?", "?")
     drift_note = ""
@@ -85,7 +85,7 @@ def one_run(i, args):
         if pgos[-1] - pgos[0] > 8:
             drift_note = " PGO-DRIFTED(%d..%d)" % (pgos[0], pgos[-1])
     if not pts:
-        return "run %2d: NO CNS POINTS (rc=%s) pgo=%s pu=%s" % (
+        return "run %2d: NO CNS POINTS (rc=%s) pgo=%s clamped=%s" % (
             i, p.returncode, pgo, pu)
     # PER-DATAGRAM phase-only 4th-power scores (Opus review H8: one score
     # over the whole run's pooled points cannot see a rare bad-frame class --
@@ -103,7 +103,7 @@ def one_run(i, args):
     z = z[np.abs(z) > 1e-9]
     np.save("logs/ap15_run%d_cns.npy" % i, z)
     if not dscores:
-        return "run %2d: no scorable datagrams pgo=%s pu=%s" % (i, pgo, pu)
+        return "run %2d: no scorable datagrams pgo=%s clamped=%s" % (i, pgo, pu)
     med = float(np.median(dscores))
     worst = float(np.min(dscores))
     low = sum(1 for v in dscores if v < 0.7)
@@ -118,7 +118,7 @@ def one_run(i, args):
     else:
         verdict = "partial"
     return ("run %2d: med=%.3f worst=%.3f low=%d/%d %-8s pts=%d "
-            "pgo=%s pu=%s%s") % (i, med, worst, low, len(dscores), verdict,
+            "pgo=%s clamped=%s%s") % (i, med, worst, low, len(dscores), verdict,
                                  z.size, pgo, pu, drift_note)
 
 

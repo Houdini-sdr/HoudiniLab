@@ -314,6 +314,48 @@ int main() {
     }
   }
 
+  {
+    // The UE's burst buffer keeps its length while the pad moves the content
+    // inside it, so a placed burst can be followed by one with too few leading
+    // zeros at the SAME length: the full path's cache check must not compare
+    // against the placed lane's key, which is shorter than the burst (mutation:
+    // drop `!L.placed` from that check; the output stays right, the Debug
+    // build's AddressSanitizer reports the heap over-read).
+    const size_t n = 6000 + 384;
+    std::vector<cs16> content(5936);
+    for (size_t k = 0; k < content.size(); ++k)
+      content[k] = cs16(static_cast<int16_t>((k * 37) % 9001 - 4500), static_cast<int16_t>((k * 53) % 7001 - 3500));
+    for (bool pre : {true, false}) {
+      TxBurstInterpolator placed(pre);
+      TxBurstInterpolator full(pre, TxBurstInterpolator::CacheKey::kContent, false);
+      bool exact = true;
+      for (size_t z : {size_t{200}, size_t{0}}) {  // placed, then the full path
+        std::vector<cs16> in(n, cs16(0, 0));
+        std::copy(content.begin(), content.end(), in.begin() + z);
+        const void* ib[1] = {in.data()};
+        const auto po = placed.run(ib, 1, n);
+        const auto ro = full.run(ib, 1, n);
+        if (z == 0) {
+          const std::vector<cs16> ref(static_cast<const cs16*>(ro.buffs[0]),
+                                      static_cast<const cs16*>(ro.buffs[0]) + ro.samples);
+          exact = exact && po.samples == ro.samples && equal(po.buffs[0], ref);
+        }
+      }
+      check(exact, std::string("a burst too close to its start after a placed one takes the full path, exact (") +
+                       (pre ? "prefilter" : "halfband only") + ")");
+    }
+  }
+
+  {
+    // A write of 1001 samples is 2 x 1004 TX samples (beat-padded). Fails
+    // under: dropping the min (a write that took the real samples and part of
+    // the beat padding, 2006 of 2008, would report 1003 of the caller's 1001).
+    using houdini::boundary::inputSamplesWritten;
+    check(inputSamplesWritten(2008, 1001) == 1001 && inputSamplesWritten(2006, 1001) == 1001 &&
+              inputSamplesWritten(2001, 1001) == 1000 && inputSamplesWritten(0, 1001) == 0,
+          "a TX write reports the caller's samples delivered, never more than it asked for");
+  }
+
   std::printf("-- mutation matrix (each line must read PASS: the mutant was caught) --\n");
   check(!rewriteInPlaceIsFresh(TxBurstInterpolator::CacheKey::kAddress),
         "mutant address-keyed cache transmits the STALE burst after an in-place rewrite");

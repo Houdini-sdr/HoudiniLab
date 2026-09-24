@@ -12,14 +12,8 @@ static void check(bool ok, const char* what) {
   if (!ok) ++failures;
 }
 
-// The loop's own arithmetic (receiver.cc, the targeted re-sync): where the
-// grid's next predicted beacon END lands in a window stamped at rx.
-static long long loopOff(long long rx, long long pilot_ref, double period, long long beacon_end) {
-  const double n_due = std::ceil(static_cast<double>(rx - pilot_ref - beacon_end) / period);
-  return pilot_ref + std::llround(n_due * period) + beacon_end - rx;
-}
-
 int main() {
+  using houdini::sync::beaconEndOffset;  // the loop's own check (receiver.cc calls it)
   using houdini::sync::placedWant;
   using houdini::sync::placedWindowStart;
 
@@ -46,7 +40,7 @@ int main() {
       const long long pilot_ref = big(g);
       const long long head = pilot_ref + std::uniform_int_distribution<long long>(-5000000, 50000000)(g);
       const long long w = placedWindowStart(head, pilot_ref, period, geo.beacon_end, want);
-      const long long off = loopOff(w, pilot_ref, period, geo.beacon_end);
+      const long long off = beaconEndOffset(w, pilot_ref, period, geo.beacon_end);
       off_ok += (off == want);
       ahead += (w >= head);
       within += (w - head < static_cast<long long>(std::ceil(period)));

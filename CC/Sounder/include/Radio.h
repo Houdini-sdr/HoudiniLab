@@ -59,7 +59,7 @@ struct RadioParams {
   std::string tx_mode = "stream";  ///< "replay" (the BS beacon RAM) or "stream" (the UE)
   bool tdd = false;           ///< the driver's TDD tick anchor for the UE pilot
   bool mts = true;            ///< multi-tile sync on every stream (AP-23)
-  // The device RPC timeout, us. Not 1 s: on the rig (2026-09-24, SH-442) 2 of 7
+  // The device RPC timeout, us. Not 1 s: on the rig (SH-442) 2 of 7
   // sounder launches lost the BS open on every attempt; the node saw each
   // attempt's first connection accepted and then NO request for the whole 1 s,
   // so the wait is inside this process (cause unmeasured). 3 s rides it out; a

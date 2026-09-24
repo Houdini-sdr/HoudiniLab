@@ -317,19 +317,16 @@ void RecorderWorker::sendCsi(Packet* pkt) {
   const int es = symStart(d, slot);  // symbol-0 start (fixed prefix by default; sym_start knob)
   int s0 = nsym / 8, s1 = nsym - nsym / 8;
   if (s1 <= s0) { s0 = 0; s1 = nsym; }
-  std::vector<std::vector<std::complex<float>>> gs;
+  std::vector<std::complex<float>> hacc_avg(N, {0.0f, 0.0f});
+  int used = 0;
   for (int sym = s0; sym < s1; ++sym) {
     const int base = es + sym * (cp + N) + cp;
     if (base < 0) continue;  // a symbol whose body starts before the slot (AP-79 guard)
     if (base + N > slot) break;
-    auto F = symbolFft(d, base);
-    for (int k = 0; k < N; ++k) F[k] *= std::conj(pilot_ref_[k]);
-    gs.push_back(std::move(F));
+    const auto F = symbolFft(d, base);
+    for (int k = 0; k < N; ++k) hacc_avg[k] += F[k] * std::conj(pilot_ref_[k]);
+    ++used;
   }
-  const int used = static_cast<int>(gs.size());
-  std::vector<std::complex<float>> hacc_avg(N, {0.0f, 0.0f});
-  for (const auto& g : gs)
-    for (int k = 0; k < N; ++k) hacc_avg[k] += g[k];
   for (auto& v : hacc_avg) v /= static_cast<float>(std::max(1, used));
   // Cache H per antenna (always -- keeps it fresh for equalizing this ant's data).
   auto& H = csi_h_[pkt->ant_id];
@@ -663,8 +660,8 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
         kks.push_back(static_cast<double>(k) - N / 2.0);
         accs.push_back(acc);
       }
-      // The line through the tones' phases, taken relative to their common
-      // phase so a pilot-to-data rotation near +-180 degrees cannot wrap it
+      // The line through the tones' phases, unwrapped along frequency so a
+      // pilot-to-data rotation near +-180 degrees cannot wrap it
       // (houdini/pilot_slope_fit.h).
       const houdini::csi::SlopeFit fit = houdini::csi::pilotSlopeFit(kks, accs);
       {
