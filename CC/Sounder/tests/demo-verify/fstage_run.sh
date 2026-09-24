@@ -23,6 +23,10 @@ SOUNDER_DIR="$PWD" bash "$HERE/run_rung.sh" "$TAG" "$CONF" "$SECS" "${HEALTH_S:-
 # Wait for THIS run's sounder (run_rung.sh recorded its pid), not any sounder on the host.
 SP=$(cat "$D/$TAG.pid")
 while [ -n "$SP" ] && [ "$(cat "/proc/$SP/comm" 2>/dev/null)" = sounder ]; do sleep 5; done; sleep 3
+# A sounder that exits early (a radio that would not open) leaves this run's
+# dashboard up until its own timeout, holding the ports the next run needs.
+CP=$(cat "$D/$TAG.csipid" 2>/dev/null)
+[ -n "$CP" ] && [ "$(cat "/proc/$CP/comm" 2>/dev/null)" = timeout ] && kill -INT "$CP" 2>/dev/null
 R=$(cat "$D/$TAG.current"); T=${R#"${TAG}"_}
 O=$D/$ST/$R; mkdir -p "$O"
 mv "$D/$R.log" "$D/${TAG}_csi_$T.log" "$D/${TAG}_cpu_$T.log" "$D/${TAG}_threads_$T.log" "$O/" 2>/dev/null
