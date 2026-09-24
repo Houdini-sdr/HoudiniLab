@@ -1,14 +1,20 @@
 // AP-79: the in-sounder clock steering loop (sync/clock_steer.h), closed
 // against a simulated UE clock. Each assertion names the mutation that breaks it.
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <mutex>
 #include <random>
+#include <string>
+#include <thread>
+#include <vector>
 
 #include "sync/clock_steer.h"
 
 using houdini::sync::ClockSteer;
 using houdini::sync::ClockSteerConfig;
+using houdini::sync::ClockSteerSession;
 
 static int failures = 0;
 static void check(bool ok, const char* what) {
@@ -48,7 +54,227 @@ static Run simulate(ClockSteerConfig c, double e0, double ramp_ppm_per_s, double
   return r;
 }
 
+// A UE's CLOCK_ADJ as the device reports it, with the faults a session must
+// survive: a slow write, a write that reports failure yet lands, a DAC that
+// lands short of the request, and reads that fail.
+struct FakeNode {
+  std::mutex m;
+  int cal = 408, dac = 408;
+  std::string ref = "calibrated";
+  int write_delay_ms = 0;
+  bool write_result = true;
+  int land_short = 0;
+  int fail_reads = 0;  // the next this-many reads return ""
+  int reads = 0;
+  std::vector<std::string> writes;
+  std::string read() {
+    std::lock_guard<std::mutex> lk(m);
+    ++reads;
+    if (fail_reads > 0) {
+      --fail_reads;
+      return "";
+    }
+    return "holdover=1 man_dac=" + std::to_string(dac) + " rb_dac=" + std::to_string(dac) +
+           " pll1_locked=1 ref=" + ref + " cal_dac=" + std::to_string(cal) + " offset=" + std::to_string(dac - cal);
+  }
+  bool write(const std::string& v) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(write_delay_ms));
+    std::lock_guard<std::mutex> lk(m);
+    writes.push_back(v);
+    dac = (v == "release") ? cal : std::stoi(v) - land_short;
+    return write_result;
+  }
+  std::vector<std::string> written() {
+    std::lock_guard<std::mutex> lk(m);
+    return writes;
+  }
+};
+
+struct Bench {
+  FakeNode node;
+  double t = 0.0;
+  std::vector<std::string> log;
+  ClockSteerConfig cfg;
+  Bench() {
+    cfg.enable = true;
+    cfg.period_s = 10.0;
+  }
+  ClockSteerSession make() {
+    return ClockSteerSession(
+        cfg, [this] { return node.read(); }, [this](const std::string& v) { return node.write(v); },
+        [this](bool, const std::string& msg) { log.push_back(msg); }, [this] { return t; });
+  }
+  // One decision window: four observations 3 s apart close a 10 s window.
+  void decide(ClockSteerSession& s, double eps_ppm) {
+    for (int i = 0; i < 4; ++i) {
+      t += 3.0;
+      s.onUpdate(eps_ppm);
+    }
+  }
+};
+
+// Wait for the job in flight and return what its landing fed forward.
+static double landed(ClockSteerSession& s) {
+  double scale = 1.0;
+  while (s.busy()) {
+    scale = s.poll();
+    if (s.busy()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  return scale;
+}
+
+// eps 0.36 ppm asks for +2 counts at gain 0.7 and 0.1251 ppm/count; 0.18 for +1.
+static void sessionTests() {
+  using houdini::sync::clockAdjCode;
+  using houdini::sync::clockAdjField;
+  const std::string st = "holdover=1 man_dac=410 rb_dac=410 pll1_locked=1 ref=calibrated cal_dac=408 offset=2";
+  // Fails under: matching the key anywhere (every "dac=" here is the tail of a longer name).
+  check(clockAdjField(st, "rb_dac") == "410" && clockAdjField(st, "dac").empty(),
+        "CLOCK_ADJ fields are read by their whole name (mutation: no word boundary, 'dac' reads 410)");
+  // Fails under: dropping the end-of-string check (408x reads 408) or the sign check (-3 reads -3).
+  check(clockAdjCode("408") == 408 && clockAdjCode("408x") == -1 && clockAdjCode("-3") == -1 &&
+            clockAdjCode("none") == -1 && clockAdjCode("") == -1,
+        "a CLOCK_ADJ code is a whole non-negative decimal (mutation: accept trailing text or a sign)");
+  const double k1 = 1.0 + 1 * 0.1251e-6, k2 = 1.0 + 2 * 0.1251e-6;
+  {
+    Bench b;
+    b.cfg.enable = false;
+    {
+      auto s = b.make();
+      // Fails under: arm() ignoring steer.enable (it reads the node and arms).
+      check(!s.arm() && b.node.reads == 0, "steering off: arm() reads nothing and stays off");
+    }
+    check(b.node.written().empty(), "steering off: nothing written at exit");
+  }
+  {
+    Bench b;
+    b.node.ref = "internal";
+    auto s = b.make();
+    // Fails under: arming on any ref (the actuator exists only under calibrated).
+    check(!s.arm(), "a node not on ref=calibrated is not armed");
+  }
+  {
+    Bench b;
+    {
+      auto s = b.make();
+      s.arm();
+      b.decide(s, 0.01);  // inside the deadband: no push
+    }
+    // Fails under: releasing whenever armed (a clean node gets a needless write).
+    check(b.node.written().empty(), "a clean session that never pushed writes nothing at exit");
+  }
+  {
+    Bench b;
+    b.node.dac = 412;  // left steered +4 by an earlier session
+    {
+      auto s = b.make();
+      check(s.arm() && s.offset() == 4, "an inherited offset is taken over at arm");
+    }
+    // Fails under: not marking an inherited offset for release.
+    check(b.node.written() == std::vector<std::string>{"release"}, "an inherited offset is released at exit");
+  }
+  {
+    Bench b;
+    auto s = b.make();
+    s.arm();
+    b.decide(s, 0.36);
+    const double sc = landed(s);
+    check(b.node.written() == std::vector<std::string>{"410"} && s.offset() == 2 && std::fabs(sc - k2) < 1e-15,
+          "a push of +2 writes cal+2, reads it back, and feeds forward exactly periodScale(2)");
+  }
+  {
+    Bench b;
+    b.node.land_short = 1;  // the DAC lands one count short of the request
+    auto s = b.make();
+    s.arm();
+    b.decide(s, 0.36);
+    const double sc = landed(s);
+    // Fails under: taking the requested push (+2) instead of the read-back move (+1).
+    check(s.offset() == 1 && std::fabs(sc - k1) < 1e-15,
+          "the offset and the feed-forward follow the readback, not the request (mutation: offset += push)");
+  }
+  {
+    Bench b;
+    b.node.write_result = false;  // the write reports failure, yet the DAC moved
+    auto s = b.make();
+    s.arm();
+    b.decide(s, 0.36);
+    landed(s);
+    // Fails under: applying a push only when its write reported success.
+    check(s.offset() == 2, "a write that reports failure but lands still moves the offset");
+  }
+  {
+    // The review's case: the write lands (+2) and its readback fails.
+    Bench b;
+    auto s = b.make();
+    s.arm();
+    b.node.fail_reads = 1;
+    b.decide(s, 0.36);
+    const double sc1 = landed(s);
+    b.decide(s, 0.18);  // this decision reads the node instead of pushing
+    const double sc2 = landed(s);
+    const int after_read = s.offset();
+    b.decide(s, 0.18);  // and this one pushes from where the node really is
+    landed(s);
+    // Fails under: pushing on from the stale offset after a failed readback (the
+    // second write is then 409, a step DOWN from the real 410, fed forward UP).
+    check(b.node.written() == std::vector<std::string>{"410", "411"} && after_read == 2 && s.offset() == 3,
+          "after a failed readback the next decision reads the node, then pushes from there (writes 410, 411)");
+    // Fails under: feeding forward the move the read found (it happened a window ago).
+    check(sc1 == 1.0 && sc2 == 1.0, "neither the unconfirmed push nor the read that found it is fed forward");
+  }
+  {
+    Bench b;
+    b.node.write_delay_ms = 150;
+    auto s = b.make();
+    s.arm();
+    b.decide(s, 0.36);
+    b.decide(s, 0.36);  // decided while the first write is still in flight
+    landed(s);
+    // Fails under: launching a job while one is pending (two writes).
+    check(b.node.written().size() == 1, "one push in flight: a decision taken while one is pending is dropped");
+  }
+  {
+    Bench b;
+    b.node.write_delay_ms = 100;
+    auto s = b.make();
+    s.arm();
+    b.decide(s, 0.36);
+    s.periodReplaced();  // an escalation took a fresh confirm meanwhile
+    const double sc = landed(s);
+    // Fails under: periodReplaced() doing nothing (the step is counted twice).
+    check(sc == 1.0 && s.offset() == 2, "a push in flight when the period is replaced lands without feed-forward");
+  }
+  {
+    Bench b;
+    b.cfg.keep = true;
+    {
+      auto s = b.make();
+      s.arm();
+      b.decide(s, 0.36);
+      landed(s);
+    }
+    // Fails under: ignoring steer.keep at exit.
+    check(b.node.written() == std::vector<std::string>{"410"}, "steer.keep leaves the steered code at exit");
+  }
+  {
+    Bench b;
+    b.node.write_delay_ms = 100;
+    {
+      auto s = b.make();
+      s.arm();
+      b.decide(s, 0.36);
+      s.release();  // the job is still writing
+    }
+    // Fails under: releasing without waiting for the job (release lands first,
+    // then the push re-steers the node), or a second release from the destructor.
+    check(b.node.written() == std::vector<std::string>{"410", "release"} && b.node.dac == b.node.cal,
+          "a job still running at exit lands first, then one release (the node ends at its calibration code)");
+  }
+}
+
 int main() {
+  sessionTests();
   const ClockSteerConfig c;  // the shipped defaults
   // The AP-79 case: 0.4 ppm at bring-up, then the thermal ramp measured in
   // R2 (about 0.3 ppm over 300 s), sensor noise 0.01 ppm.
