@@ -315,12 +315,13 @@ int main() {
   }
 
   {
-    // The UE's burst buffer keeps its length while the pad moves the content
-    // inside it, so a placed burst can be followed by one with too few leading
-    // zeros at the SAME length: the full path's cache check must not compare
-    // against the placed lane's key, which is shorter than the burst (mutation:
-    // drop `!L.placed` from that check; the output stays right, the Debug
-    // build's AddressSanitizer reports the heap over-read).
+    // clientTxPilots sizes a burst as pad + span rounded up to even, so two
+    // pads one apart can give the same length (R3: pads 1 and 2 around
+    // placeLead), and a placed burst can be followed by one with too few
+    // leading zeros at the SAME length: the full path's cache check must not
+    // compare against the placed lane's key, which is shorter than the burst
+    // (mutation: drop `!L.placed` from that check; the output stays right, and
+    // the tx_rx_boundary_asan build reports the heap over-read).
     const size_t n = 6000 + 384;
     std::vector<cs16> content(5936);
     for (size_t k = 0; k < content.size(); ++k)

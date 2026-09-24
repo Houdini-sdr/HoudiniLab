@@ -32,7 +32,7 @@
  * The price is the edge contract: samples outside the buffer are taken as
  * ZERO, so the buffer must carry at least contextBefore()/contextAfter()
  * samples of zeros, or real neighbouring content, at each end. The TDD slots
- * carry zero prefixes and postfixes (32 ticks in the mode-V configs), more
+ * carry zero prefixes and postfixes (32 ticks in the R3 configs, 128 in R1 and R2), more
  * than either needs.
  * Neither filter runs in place (the output overwrites input it still needs);
  * both refuse it.
@@ -175,7 +175,7 @@ class HalfbandInterp2 {
   /// with saturation. Returns the number of I or Q components that had to be
   /// saturated; the caller treats any non-zero count as a level fault (the
   /// software lane: never let a sample reach full scale). Scale BEFORE this
-  /// call with the halfband's overshoot in mind, or check `peak` after.
+  /// call with the halfband's overshoot in mind.
   size_t runCs16(const std::complex<int16_t>* in, size_t n, std::complex<int16_t>* out) const {
     std::vector<std::complex<float>> fin(n), fout(2 * n);
     for (size_t k = 0; k < n; ++k) fin[k] = {static_cast<float>(in[k].real()), static_cast<float>(in[k].imag())};

@@ -17,6 +17,7 @@
 #include <ctime>
 #include <cstring>
 #include <functional>
+#include <memory>
 #include <iostream>
 #include <set>
 #include <vector>
@@ -89,10 +90,10 @@ void RadioHoudini::logModeV(const std::string& label, const std::vector<std::str
 
 namespace {
 // A per-node record file under HOUDINI_DUMP_DIR (Utils::dumpPath), named
-// <kind>_<label>_<stamp>.txt with the label made file-safe; f is nullptr when
-// it cannot be opened.
+// <kind>_<label>_<stamp>.txt with the label made file-safe; f is empty when it
+// cannot be opened, and closes itself on every exit.
 struct RecordFile {
-  FILE* f = nullptr;
+  std::unique_ptr<FILE, int (*)(FILE*)> f{nullptr, &std::fclose};
   std::string path, stamp;
 };
 RecordFile openRecord(const std::string& kind, const std::string& label) {
@@ -107,7 +108,7 @@ RecordFile openRecord(const std::string& kind, const std::string& label) {
   RecordFile r;
   r.stamp = stamp;
   r.path = Utils::dumpPath((kind + "_" + tag + "_" + stamp + ".txt").c_str());
-  r.f = std::fopen(r.path.c_str(), "w");
+  r.f.reset(std::fopen(r.path.c_str(), "w"));
   return r;
 }
 }  // namespace
@@ -120,7 +121,7 @@ void RadioHoudini::writeModeVRecord(const std::string& label, SoapySDR::Device& 
     // a capture carries its state). One file per node per bring-up. Best
     // effort: a record that cannot be written is warned about, never fatal.
     const RecordFile rec = openRecord("modev", label);
-    FILE* f = rec.f;
+    FILE* f = rec.f.get();
     if (f == nullptr) {
       MLPD_WARN("%s mode V: cannot write the session record %s (%s)\n", label.c_str(), rec.path.c_str(),
                 std::strerror(errno));
@@ -138,7 +139,6 @@ void RadioHoudini::writeModeVRecord(const std::string& label, SoapySDR::Device& 
     std::fprintf(f, "## after the setups\n");
     for (const auto& l : ps.log) std::fprintf(f, "%s\n", l.c_str());
     std::fprintf(f, "## RFDC_SNAPSHOT (before the setups)\n%s\n", r.snapshot.c_str());
-    std::fclose(f);
     MLPD_INFO("%s mode V: session record %s\n", label.c_str(), rec.path.c_str());
   } catch (const std::exception& e) {
     // Best effort, never fatal: a record that cannot be written must not
@@ -152,7 +152,7 @@ void RadioHoudini::writeStateRecord(const std::string& label, SoapySDR::Device& 
                                     const std::vector<size_t>& tx_channels) {
   try {
     const RecordFile rec = openRecord("rfdc", label + "_" + stage);
-    FILE* f = rec.f;
+    FILE* f = rec.f.get();
     if (f == nullptr) {
       MLPD_WARN("%s: cannot write the RFDC state record %s (%s)\n", label.c_str(), rec.path.c_str(),
                 std::strerror(errno));
@@ -170,16 +170,17 @@ void RadioHoudini::writeStateRecord(const std::string& label, SoapySDR::Device& 
         return false;
       }
     };
-    // The first read is the probe: a node that does not answer it (a dead
-    // node at the end of a run) would cost every further read the whole
-    // device timeout, so the rest are skipped.
-    if (!section("hardware", [&] {
-          std::string s;
-          for (const auto& kv : dev.getHardwareInfo()) s += kv.first + "=" + kv.second + "\n";
-          return s;
-        })) {
+    // At the end of a run the first read is the probe: a node that died would
+    // cost every further read the whole device timeout, so the rest are
+    // skipped. At setup a failed read is more likely a transient stall (SH-442)
+    // and the other sections are the record's point, so they are still read.
+    const bool answered = section("hardware", [&] {
+      std::string s;
+      for (const auto& kv : dev.getHardwareInfo()) s += kv.first + "=" + kv.second + "\n";
+      return s;
+    });
+    if (!answered && stage == "end") {
       std::fprintf(f, "(the node did not answer: the remaining reads are skipped)\n");
-      std::fclose(f);
       MLPD_WARN("%s: RFDC state record (%s) %s is partial: the node did not answer\n", label.c_str(),
                 stage.c_str(), rec.path.c_str());
       return;
@@ -198,7 +199,6 @@ void RadioHoudini::writeStateRecord(const std::string& label, SoapySDR::Device& 
     info(SOAPY_SDR_RX, "RX", rx_channels);
     info(SOAPY_SDR_TX, "TX", tx_channels);
     section("RFDC_SNAPSHOT", [&] { return dev.readSetting("RFDC_SNAPSHOT"); });
-    std::fclose(f);
     MLPD_INFO("%s: RFDC state record (%s) %s\n", label.c_str(), stage.c_str(), rec.path.c_str());
   } catch (const std::exception& e) {
     MLPD_WARN("%s: the RFDC state record (%s) could not be written: %s\n", label.c_str(), stage.c_str(),

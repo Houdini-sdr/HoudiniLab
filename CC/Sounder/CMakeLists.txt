@@ -318,6 +318,22 @@ add_test(NAME mode_v_bringup COMMAND mode_v_bringup_test)
 add_executable(tx_rx_boundary_test tests/comms-func/tx_rx_boundary_test.cc)
 target_include_directories(tx_rx_boundary_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 add_test(NAME tx_rx_boundary COMMAND tx_rx_boundary_test)
+# The same test under AddressSanitizer whatever the build type: its cache
+# over-read case keeps the output right, so only the sanitizer can fail it.
+include(CheckCXXSourceCompiles)
+set(CMAKE_REQUIRED_FLAGS "-fsanitize=address,undefined")
+set(CMAKE_REQUIRED_LIBRARIES "-fsanitize=address,undefined")  # the link, on CMake 3.10
+check_cxx_source_compiles("int main() { return 0; }" SOUNDER_HAVE_ASAN)
+unset(CMAKE_REQUIRED_FLAGS)
+unset(CMAKE_REQUIRED_LIBRARIES)
+if (SOUNDER_HAVE_ASAN)
+  add_executable(tx_rx_boundary_asan_test tests/comms-func/tx_rx_boundary_test.cc)
+  target_include_directories(tx_rx_boundary_asan_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  target_compile_options(tx_rx_boundary_asan_test PRIVATE
+      -O1 -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer)
+  target_link_libraries(tx_rx_boundary_asan_test PRIVATE -fsanitize=address,undefined)
+  add_test(NAME tx_rx_boundary_asan COMMAND tx_rx_boundary_asan_test)
+endif()
 
 # AP-79: the band-limited beacon: its band, its fit, and the real detector
 # through the channel-filtered lane.

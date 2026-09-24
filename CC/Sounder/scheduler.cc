@@ -127,6 +127,24 @@ void Scheduler::do_it() {
   size_t thread_antennas = 0;
   std::vector<pthread_t> recv_threads;
   std::vector<pthread_t> client_threads;
+  // Every exit stops and joins the BS and UE threads before the receiver can
+  // go: a throw out of the dispatch loop otherwise unwinds into ~Scheduler,
+  // which unmakes the radios under live threads. The normal exit calls it
+  // explicitly, the destructor covers a throw; it runs once.
+  struct JoinOnExit {
+    Scheduler* s;
+    std::vector<pthread_t>& recv;
+    std::vector<pthread_t>& client;
+    bool done = false;
+    void operator()() {
+      if (done) return;
+      done = true;
+      s->cfg_->running(false);
+      s->receiver_->completeRecvThreads(recv);
+      s->receiver_->completeRecvThreads(client);
+    }
+    ~JoinOnExit() { (*this)(); }
+  } join_threads{this, recv_threads, client_threads};
 
   if (this->cfg_->core_alloc() == true) {
     if (pin_to_core(kMainDispatchCore) != 0) {
@@ -303,12 +321,9 @@ void Scheduler::do_it() {
       static_cast<int>(this->cfg_->running()),
       static_cast<int>(SignalHandler::gotExitSignal()),
       this->max_frame_number_);
-  this->cfg_->running(false);
-  this->receiver_->completeRecvThreads(recv_threads);
   // The UE threads too: each leaves its loop on running() false, and one may
-  // still be finishing a device call. Resetting the receiver unmakes the radios
-  // under it otherwise.
-  this->receiver_->completeRecvThreads(client_threads);
+  // still be finishing a device call.
+  join_threads();
   this->receiver_.reset();
 
   /* Force the recorders to process all of the data they have left and exit cleanly

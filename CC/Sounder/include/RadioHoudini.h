@@ -29,7 +29,7 @@ class RadioHoudini : public RadioSoapy {
 
   /// AP-79 mode V: the per-channel plan the bring-up derived and applied,
   /// null on the one-rate path. rxChannelFilter(ch) says whether RX `ch`
-  /// needs the +-25 MHz channel filter (its mirror lands in the output).
+  /// needs the +-24 MHz channel filter (its mirror lands in the output).
   const houdini::modev::Result* modeV() const { return mode_v_.get(); }
   bool rxChannelFilter(size_t ch) const { return mode_v_ != nullptr && mode_v_->rxFilter(ch); }
   /// The BS framer captures CONTINUOUSLY and uses only its P/U slots, so it

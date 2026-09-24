@@ -123,7 +123,7 @@ At bring-up, per node:
 - `<label> mode V: ...`, one line per step of the converter bring-up, with the
   device's readbacks: `RFDC_DAC_FS -> 5898.24..`, `RFDC_ADC_FS -> 4915.2..`,
   the zone lists, `RFDC_ADC_CAL ... -> ...`, then per channel
-  `RX ch0: NCO 2425.000 MHz, zone 1, cal Mode 1, +-25 MHz channel filter ON`.
+  `RX ch0: NCO 2425.000 MHz, zone 1, cal Mode 1, +-24 MHz channel filter ON`.
   A readback that disagrees stops the bring-up with the channel and the value.
 - The stack per node, and `VERSION SKEW:` if the nodes differ.
 - `Beacon: type nr_pss_bl, core 1076 samples, matched field 1 x 512 at offset 36 ...`.

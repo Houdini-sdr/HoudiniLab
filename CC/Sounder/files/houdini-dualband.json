@@ -13,7 +13,7 @@
  "tx_sample_rate": 245760000.0,
  "rfdc_adc_fs_mhz": 4915.2,
  "rfdc_dac_fs_mhz": 5898.24,
- "_frequency_note": "Common NCO is the sub-6 2425 MHz; only the X-band channels override it (TX ch1 = B, RX ch2 = C). Zone, ADC calibration mode, inverse sinc and the +-25 MHz RX channel filter are DERIVED per channel from the NCO and the converter rates (PG269 rules), not configured: sub-6 -> zone 1, cal mode 1, filter on; X-IF -> zone 2, cal mode 2, filter off. frequency is the carrier the CFO ppm is quoted against (the sub-6 beacon link).",
+ "_frequency_note": "Common NCO is the sub-6 2425 MHz; only the X-band channels override it (TX ch1 = B, RX ch2 = C). Zone, ADC calibration mode, inverse sinc and the +-24 MHz RX channel filter are DERIVED per channel from the NCO and the converter rates (PG269 rules), not configured: sub-6 -> zone 1, cal mode 1, filter on; X-IF -> zone 2, cal mode 2, filter off. frequency is the carrier the CFO ppm is quoted against (the sub-6 beacon link).",
  "frequency": 2425000000.0,
  "nco_frequency": 2425000000.0,
  "channel_nco_frequency": {

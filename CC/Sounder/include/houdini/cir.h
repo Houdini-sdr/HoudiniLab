@@ -26,7 +26,7 @@ namespace houdini {
 
 class CirFromH {
  public:
-  explicit CirFromH(int n) : fft_(n, MUFFT_INVERSE, "CirFromH"), n_(n) {}
+  explicit CirFromH(int n) : fft_(n, MUFFT_INVERSE, "CirFromH") {}
 
   /// Power per tap, |h[t]|^2, t = 0..N-1, from the DC-centred H (index N/2 is
   /// DC). H is Hann-windowed over its occupied span (the tones where it is
@@ -35,16 +35,17 @@ class CirFromH {
   /// under the RMS delay spread; the Hann's first sidelobe is -31 dB, at the
   /// cost of a mainlobe twice as wide (sounder practice; ITU-R P.1407).
   std::vector<float> power(const std::vector<std::complex<float>>& h_dc) {
-    if (static_cast<int>(h_dc.size()) != n_) throw std::invalid_argument("CirFromH: H is not N points");
-    int lo = n_, hi = -1;
-    for (int k = 0; k < n_; ++k)
+    const int n = fft_.size();
+    if (static_cast<int>(h_dc.size()) != n) throw std::invalid_argument("CirFromH: H is not N points");
+    int lo = n, hi = -1;
+    for (int k = 0; k < n; ++k)
       if (std::norm(h_dc[static_cast<size_t>(k)]) > 0.0f) {
         lo = std::min(lo, k);
         hi = std::max(hi, k);
       }
     const double span = static_cast<double>(hi - lo + 1);
-    for (int k = 0; k < n_; ++k) {
-      const int kc = (k + n_ / 2) % n_;  // natural bin k is DC-centred index kc
+    for (int k = 0; k < n; ++k) {
+      const int kc = (k + n / 2) % n;  // natural bin k is DC-centred index kc
       const float w = (hi < lo) ? 0.0f
                                 : (kc < lo || kc > hi)
                                       ? 0.0f
@@ -52,14 +53,13 @@ class CirFromH {
       fft_.in()[k] = h_dc[static_cast<size_t>(kc)] * w;
     }
     fft_.execute();
-    std::vector<float> p(static_cast<size_t>(n_));
-    for (int t = 0; t < n_; ++t) p[static_cast<size_t>(t)] = std::norm(fft_.out()[t]);
+    std::vector<float> p(static_cast<size_t>(n));
+    for (int t = 0; t < n; ++t) p[static_cast<size_t>(t)] = std::norm(fft_.out()[t]);
     return p;
   }
 
  private:
   MufftC2C fft_;
-  int n_;
 };
 
 /// `len` taps starting `pre` taps before the strongest one (circularly), in dB
