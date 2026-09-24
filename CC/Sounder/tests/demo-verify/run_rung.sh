@@ -3,7 +3,7 @@
 # Rig tool (AP-79): one sounder run in view mode with the receive-only
 # dashboard, CPU and thread sampling. Paths are the AP-79 rig host's: the
 # worktree ~/repos/HoudiniLab-ap79 and the venv ~/houdini_test.
-cd ~/repos/HoudiniLab-ap79/CC/Sounder || exit 1
+cd "${SOUNDER_DIR:-$HOME/repos/HoudiniLab-ap79/CC/Sounder}" || exit 1  # SOUNDER_DIR: another worktree's build
 source ~/houdini_test/bin/activate
 export LD_LIBRARY_PATH=$VIRTUAL_ENV/lib SOAPY_SDR_PLUGIN_PATH=$VIRTUAL_ENV/lib/SoapySDR/modules0.8-3
 export HOUDINI_MAX_FRAME=2000000000 HOUDINI_UE_TX_DEBUG=1

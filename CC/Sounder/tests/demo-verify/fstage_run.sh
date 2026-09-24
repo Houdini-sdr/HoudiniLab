@@ -7,7 +7,7 @@
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 ST=$1; TAG=$2; CONF=$3; SECS=$4
-cd ~/repos/HoudiniLab-ap79/CC/Sounder || exit 1
+cd "${SOUNDER_DIR:-$HOME/repos/HoudiniLab-ap79/CC/Sounder}" || exit 1  # SOUNDER_DIR: another worktree's build
 D=ap79_runs
 rm -f $D/cns_dump*.bin $D/beacon_ram.bin $D/gold.bin
 RW=$(mktemp -d /tmp/rw_XXXX)
