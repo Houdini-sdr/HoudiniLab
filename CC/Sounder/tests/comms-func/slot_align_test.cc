@@ -161,14 +161,25 @@ int main() {
     check(q.first >= 0 && q.second < 0.001 * wbest,
           "UE silent: the scheduled window holds only noise, so the presence gate skips the frame "
           "(mutation: the whole read, which finds the beacon)");
-    // The framer takes the next frame's copy when the pilot sits at the head of
-    // the read (expect < n/2): there the whole P+U fits and the slot before P
-    // is the silent guard burstPilotStart needs.
-    const auto head = capture(CG, 10 + FR, N, {-2, 0, 1}, {1500.0, 400.0, 400.0}, 128, 128, 13);
-    const long long e_head = 10 < N / 2 ? 10 + FR : 10;
-    const auto hn = sa::densestNear(head, e_head, N / 4, N, 128);
-    check(hn.first >= 0 && std::llabs(sa::burstPilotStart(head, hn.first, N, 128) - (10 + FR)) <= 32,
-          "the next frame's copy, which the framer takes when the pilot sits at the head of the read, places within 32 samples (premise check; the clamp failure itself is framer-level)");
+    // chooseExpect, at the demo's prefix (32), where a pilot at the read's head
+    // is mis-placed: the head copy and its next-frame copy both in the read.
+    {
+      const int PF = 32;
+      const long long s0 = 10, span_n = 3 * N;
+      const auto rd = capture(CG, s0, N, {0, 1, 20, 21}, {400.0, 400.0, 400.0, 400.0}, PF, 128, 14);
+      const auto head = sa::densestNear(rd, s0, N / 4, N, 128);
+      const long long e_head = sa::burstPilotStart(rd, head.first, N, PF) - s0;
+      const long long pick = sa::chooseExpect(s0, N, FR, span_n, CG);
+      const auto nx = sa::densestNear(rd, pick, N / 4, N, 128);
+      const long long e_pick = sa::burstPilotStart(rd, nx.first, N, PF) - (s0 + FR);
+      std::printf("      head copy error %lld samples, chosen copy error %lld\n", e_head, e_pick);
+      check(pick == s0 + FR && std::llabs(e_pick) <= 4 && std::llabs(e_head) > std::llabs(e_pick),
+            "a pilot at the read's head takes the next frame's copy, placed within 4 samples where the head copy "
+            "is not (mutation: chooseExpect returns expect)");
+      check(sa::chooseExpect(s0, N, FR, span_n, FR) == s0 && sa::chooseExpect(N, N, FR, span_n, CG) == N,
+            "a short read (the next copy does not fit) keeps the head copy, and a pilot past n/2 is left alone "
+            "(mutation: the fit check dropped, the SH-347 fallback to the whole read on gaps)");
+    }
     check(sa::densestNear(air, 0, N / 4, N, 128).first >= 0 && sa::densestNear(air, 0, N / 4, N, 128).first <= N / 4 &&
               sa::densestNear(air, CG, N / 4, N, 128).first <= CG - N &&
               sa::densestNear(std::vector<double>(N / 2, 0.0), 0, N / 4, N, 128).first == -1,

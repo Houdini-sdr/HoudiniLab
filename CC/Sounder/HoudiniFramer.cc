@@ -549,13 +549,14 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
   long long sched_expect = -1;
   if (ft > 0) {
     const long long stamp_ticks = llround(static_cast<double>(ft) * htdd_tick_rate_ / 1e9);
-    long long expect = houdini::slotalign::expectedPilotStart(
-        stamp_ticks, htdd_epoch_, static_cast<long long>(htdd_pilot_slot_), n, htdd_frame_ticks_);
-    // A pilot at the very head of the read may start before sample 0: the
-    // window clamps there and the edge search finds no silent guard before
-    // it. Take the next frame's copy, which the read (a frame plus the rx
-    // span and three slots) always holds with its data slot.
-    if (expect < n / 2) expect += htdd_frame_ticks_;
+    const long long span_n = (static_cast<long long>(htdd_rx_slots_.back()) -
+                              static_cast<long long>(htdd_rx_slots_.front()) + 2) * n;
+    // A pilot at the head of the read takes the next frame's copy when the
+    // read holds it (slot_align.h chooseExpect).
+    const long long expect = houdini::slotalign::chooseExpect(
+        houdini::slotalign::expectedPilotStart(stamp_ticks, htdd_epoch_,
+                                               static_cast<long long>(htdd_pilot_slot_), n, htdd_frame_ticks_),
+        n, htdd_frame_ticks_, span_n, cg);
     sched_expect = expect;
     const auto near = houdini::slotalign::densestNear(cse, expect, n / 4, n, 128);
     if (near.first >= 0) {
@@ -626,16 +627,17 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
       // Where the read's loudest slot was, against the schedule: a UE burst
       // more than n/4 off its scheduled slot (an anchoring error) is skipped
       // here every frame, and this names where it went.
-      long long off = 0;
+      char where[96] = "no read stamp";
       if (sched_expect >= 0) {
         const long long fr = htdd_frame_ticks_;
-        off = ((static_cast<long long>(whole_at) - sched_expect) % fr + fr) % fr;
+        long long off = ((static_cast<long long>(whole_at) - sched_expect) % fr + fr) % fr;
         if (off > fr / 2) off -= fr;
+        std::snprintf(where, sizeof where, "at %+lld samples from the scheduled pilot", off);
       }
       MLPD_WARN(
           "BS: no UE burst in frame read (rms %.0f vs floor %.0f, occurrence "
-          "%u; the read's loudest slot rms %.0f at %+lld samples from the scheduled pilot) -- frame skipped\n",
-          pilot_rms, floor_rms, qc, std::sqrt(whole_best / n), off);
+          "%u; the read's loudest slot rms %.0f, %s) -- frame skipped\n",
+          pilot_rms, floor_rms, qc, std::sqrt(whole_best / n), where);
     }
     return 0;
   }

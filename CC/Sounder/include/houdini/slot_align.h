@@ -97,6 +97,17 @@ inline long long expectedPilotStart(long long stamp_ticks, long long epoch, long
   return (((epoch + pilot_slot * n - stamp_ticks) % fr) + fr) % fr;
 }
 
+/// Which copy of the scheduled pilot to search around. The next frame's copy
+/// when the pilot sits in the read's first n/2 samples (it may start before
+/// sample 0, where the edge search finds no silent guard before it) AND that
+/// copy fits the read with the window and the rx span (`span_n`, as the framer
+/// counts it); otherwise `expect`. A short read (a gap) keeps the head copy:
+/// shifting there left the window empty and fell back to the whole read.
+inline long long chooseExpect(long long expect, long long n, long long fr, long long span_n, long long cg) {
+  if (expect < n / 2 && expect + fr + n / 4 + span_n <= cg) return expect + fr;
+  return expect;
+}
+
 /// The densest n-sample window whose start lies within +-tol of `expect`,
 /// stepping `step`, over the cumulative energy cse: {start, energy}, or
 /// {-1, 0} when no window fits the capture. The host half of the user's
