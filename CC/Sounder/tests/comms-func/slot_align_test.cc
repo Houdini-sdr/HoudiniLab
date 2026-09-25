@@ -185,6 +185,22 @@ int main() {
               sa::densestNear(std::vector<double>(N / 2, 0.0), 0, N / 4, N, 128).first == -1,
           "densestNear clamps to the capture and returns -1 when no window fits (mutation: no clamp)");
   }
+  {
+    namespace sa = houdini::slotalign;
+    check(!sa::lanePresent(119.0, 0.0) && sa::lanePresent(121.0, 0.0) && !sa::lanePresent(200.0, 51.0) &&
+              sa::lanePresent(200.0, 49.0),
+          "the presence gate needs rms 120 and 4x the floor (mutation: either bar dropped, or the floor factor "
+          "changed)");
+    check(!sa::laneTakesCut(false, 0.99, true, 0.50),
+          "a lane that fails the gate never takes the cut, however clean (mutation: the pre-review rule on "
+          "self-similarity alone, where a weak clean X-band won and then skipped a frame the sub-6 carried)");
+    check(sa::laneTakesCut(true, 0.60, false, 0.90),
+          "a passing lane takes the cut from a failing reference (mutation: the reference kept, so a weak sub-6 "
+          "skipped the frame and the wired X-band was lost with it)");
+    check(!sa::laneTakesCut(true, 0.93, true, 0.90) && sa::laneTakesCut(true, 0.96, true, 0.90),
+          "between passing lanes the reference keeps the cut unless beaten by more than 0.05 (mutation: the "
+          "margin dropped, so noise in self-similarity flips the cut lane frame to frame)");
+  }
   if (failures) std::printf("FAILED: %d failure(s)\n", failures);
   return failures ? 1 : 0;
 }

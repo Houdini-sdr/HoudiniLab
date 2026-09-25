@@ -647,7 +647,22 @@ int RadioHoudini::recv(void* const* buffs, int samples, long long& frameTime) {
   int got = 0;
   size_t padded = 0;  // zeros inserted into THIS window (see lastPadSamples)
   last_pad_samples_ = 0;  // cleared up front so an early return can't leave a stale count
+  bool first_stamped = false;  // the window's first read carried a time (frameTime is its start)
   while (got < samples) {
+    // AP-87: in slots mode nothing is delivered outside the rx slots, so once
+    // the rest of the window lies wholly in guards or the beacon slot, a read
+    // would block until the next frame's pilot and keep none of it (about 8 ms
+    // per framer read, review). The rest is the schedule's own gap: zero it.
+    if (first_stamped &&
+        houdini::bsslots::restIsCut(std::llround(static_cast<double>(frameTime) * rx_rate_ / 1e9), got, samples,
+                                    slot_epoch_, slot_n_, slot_fr_, slot_rx_)) {
+      for (size_t c = 0; c < num_rx_ch_; c++)
+        std::memset(static_cast<uint8_t*>(buffs[c]) + static_cast<size_t>(got) * kBytesPerSamp, 0,
+                    static_cast<size_t>(samples - got) * kBytesPerSamp);
+      rd_gap_sched_ += static_cast<long long>(samples - got);
+      got = samples;
+      break;
+    }
     for (size_t c = 0; c < num_rx_ch_; c++)
       cur[c] = static_cast<uint8_t*>(buffs[c]) +
                static_cast<size_t>(got) * kBytesPerSamp;
@@ -668,7 +683,10 @@ int RadioHoudini::recv(void* const* buffs, int samples, long long& frameTime) {
     }
       break;
     }
-    if (got == 0) frameTime = t;  // first (grid-anchoring) read stamps the window
+    if (got == 0) {  // first (grid-anchoring) read stamps the window
+      frameTime = t;
+      first_stamped = rx_rate_ > 0.0 && (flags & SOAPY_SDR_HAS_TIME) != 0;
+    }
     // AP-87: with the device's slots mode every delivered sample must be stamped
     // inside an rx slot; the host cut guarantees it, and this checks it on every
     // read rather than trusting it (stray samples would land in the timeline

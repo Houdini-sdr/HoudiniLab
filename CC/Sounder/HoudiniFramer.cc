@@ -611,13 +611,21 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
     long long sched_expect = -1;
     int p_at = 0;
     double ss = 0.0;
+    double pilot_rms = 0.0, floor_rms = 0.0;
+    bool present = false;
   };
   auto searchLane = [&](const int16_t* ls) -> LaneSearch {
     LaneSearch L;
     L.cse.assign(static_cast<size_t>(cg) + 1, 0.0);
+    // Accumulated as integers: every partial sum is an integer below 2^53 (a
+    // read under 4.19 M samples), so the double copy is exact and identical to
+    // a double accumulation, and the integer chain costs about a third less on
+    // the rig (2.5 -> 1.6 ms per lane per frame, measured).
+    int64_t acc = 0;
     for (int i = 0; i < cg; ++i) {
-      const double re = ls[2 * i], im = ls[2 * i + 1];
-      L.cse[i + 1] = L.cse[i] + re * re + im * im;
+      const int64_t re = ls[2 * i], im = ls[2 * i + 1];
+      acc += re * re + im * im;
+      L.cse[i + 1] = static_cast<double>(acc);
     }
     for (int t = 0; t + n <= cg; t += 128) {
       const double e = L.cse[t + n] - L.cse[t];
@@ -677,14 +685,20 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
       else if (laneSelfsim(ls, L.at + gap) >= 0.4) L.p_at = L.at + gap;
     }
     L.ss = laneSelfsim(ls, L.p_at);
+    L.pilot_rms = std::sqrt(L.best / n);
+    L.floor_rms = std::sqrt(std::max(L.worst, 0.0) / n);
+    L.present = houdini::slotalign::lanePresent(L.pilot_rms, L.floor_rms);
     return L;
   };
+  // Each lane is gated on its own, and the cut goes to the cleanest lane among
+  // those with a UE burst (slot_align.h laneTakesCut): gating on the chosen
+  // lane alone let a weak lane skip a frame the other lane carried (review).
   const int16_t* s0 = htdd_cap_buf_.data();
   LaneSearch ref = searchLane(s0);
   size_t ref_lane = 0;
   for (size_t c = 1; c < C; ++c) {
     LaneSearch L = searchLane(s0 + c * static_cast<size_t>(fn) * 2);
-    if (L.ss > ref.ss + 0.05) {
+    if (houdini::slotalign::laneTakesCut(L.present, L.ss, ref.present, ref.ss)) {
       ref = std::move(L);
       ref_lane = c;
     }
@@ -693,18 +707,17 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
     static std::atomic<bool> said{false};
     if (!said.exchange(true)) {  // braces: MLPD_INFO is three statements (logger.h)
       MLPD_INFO("BS: the UE burst is searched only within +-%d samples of the scheduled pilot slot (SH-347 host half); "
-                "the lane with the cleanest pilot places the cut\n",
+                "each lane is gated on its own and the cleanest lane with a UE burst places the cut\n",
                 n / 4);
     }
   }
   const int16_t* s = s0 + ref_lane * static_cast<size_t>(fn) * 2;
   const std::vector<double>& cse = ref.cse;
   const int at = ref.at;
-  const double best = ref.best, worst = ref.worst;
   const int whole_at = ref.whole_at;
   const double whole_best = ref.whole_best;
   const long long sched_expect = ref.sched_expect;
-  const double pilot_rms = std::sqrt(best / n);
+  const double pilot_rms = ref.pilot_rms;
   // Noise floor from the QUIETEST slot-length window of the same read (27 of
   // 30 slots are guard, so it measures the true floor, ~6 rms on this bench).
   // The old gate compared against 4x the WHOLE-read mean, but that mean
@@ -713,14 +726,16 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
   // the gate flapped on ~half of all healthy frames, and the quiet path's
   // delivery painted the 1-2 s garbage blips on the dashboard
   // [user 2026-08-30]. Densest-vs-quietest separates by ~47 dB instead.
-  const double floor_rms = std::sqrt(std::max(worst, 0.0) / n);
+  const double floor_rms = ref.floor_rms;
   // Presence gate: skip frames where no UE signal is on-air (don't advance the
   // frame counter -> the first real frame lands at recorder frame 0). A LOSS
   // of pilots mid-run is reported loudly [user 2026-08-30]: the UE pausing
   // its schedule (e.g. the AP-18 resync escalation hunting for a lost beacon)
   // shows up here as a quiet streak, and the BS should say so rather than
   // skip silently.
-  if (pilot_rms < 120.0 || pilot_rms < 4.0 * floor_rms) {
+  // With every lane failing, the reference is still lane 0, so the quiet
+  // path's numbers are lane 0's as before.
+  if (!ref.present) {
     ++htdd_quiet_streak_;
     constexpr size_t kQuietWarnFrames = 200;  // ~0.2 s at 1 kHz frames
     if (htdd_frame_counter_ > 0 &&
@@ -809,9 +824,9 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
     const long long st = std::max(0LL, std::min(guess, static_cast<long long>(cg) - static_cast<long long>(n)));
     clamped += (st != guess) ? 1 : 0;
     if (htdd_rx_slots_.at(k) != htdd_pilot_slot_) u_start = st;
-    // The slot's start is derived from lane 0 but applies to every lane (the
-    // combined stream is sample-aligned), so extract slot k from each lane's own
-    // capture block at the same offset.
+    // The slot's start is derived from the reference lane but applies to every
+    // lane (the combined stream is sample-aligned), so extract slot k from each
+    // lane's own capture block at the same offset.
     for (size_t c = 0; c < C; ++c) {
       const int16_t* sc = htdd_cap_buf_.data() + c * static_cast<size_t>(fn) * 2;
       int16_t* dst = htdd_slot_cache_.data() + (k * C + c) * static_cast<size_t>(n) * 2;
@@ -892,12 +907,12 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
         fprintf(fg,
                 "ft_ns %lld\ncg %d\nepoch %lld\ntick_rate %.1f\n"
                 "frame_ticks %lld\npilot_slot %lld\nn %d\np_start %lld\n"
-                "u_start %lld\npad %lld\nframe %lld\nrx_slots",
+                "u_start %lld\npad %lld\nframe %lld\nref_lane %zu\nrx_slots",
                 ft, cg, static_cast<long long>(htdd_epoch_), htdd_tick_rate_,
                 static_cast<long long>(htdd_frame_ticks_),
                 static_cast<long long>(htdd_pilot_slot_), n, p_start, u_start,
                 static_cast<long long>(htdd_frame_pad_),
-                static_cast<long long>(htdd_frame_counter_));
+                static_cast<long long>(htdd_frame_counter_), ref_lane);
         for (size_t rk = 0; rk < K; ++rk)
           fprintf(fg, " %lld", static_cast<long long>(htdd_rx_slots_.at(rk)));
         fprintf(fg, "\n");

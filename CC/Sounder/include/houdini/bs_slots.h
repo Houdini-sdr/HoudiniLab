@@ -84,5 +84,16 @@ inline long long rxOverlap(long long tick, long long len, long long epoch, long 
   return got;
 }
 
+/// Whether the rest of a read window (`samples - got` samples on from tick
+/// `start + got`) lies wholly outside the rx slots. In slots mode nothing more
+/// is delivered for it, so a reader that waited would block until the next rx
+/// slot (the next frame's pilot) and then keep none of it. False without a slot
+/// map, so a reader outside slots mode never stops early.
+inline bool restIsCut(long long start, long long got, long long samples, long long epoch, long long n, long long fr,
+                      const std::string& rx) {
+  if (rx.empty() || got >= samples) return false;
+  return rxOverlap(start + got, samples - got, epoch, n, fr, rx) == 0;
+}
+
 }  // namespace bsslots
 }  // namespace houdini

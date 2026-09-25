@@ -39,6 +39,19 @@ int main() {
         "a gap across the frame wrap counts the next frame's P and U (mutation: the slot not folded per frame)");
   check(bs::rxOverlap(E + 2 * n + 7, 100, E, n, fr, rx) == 100 && bs::rxOverlap(E, 0, E, n, fr, rx) == 0,
         "a loss inside P counts whole, an empty gap nothing (mutation: an off-by-one at the run's start)");
+
+  // The framer's read is fr + 4n from its first delivered sample (P here), so
+  // it ends in the next frame's guards: complete once that frame's U is in.
+  const long long win = fr + 4 * n, p0 = E + 2 * n;
+  check(bs::restIsCut(p0, 22 * n, win, E, n, fr, rx) && bs::restIsCut(p0, 22 * n + 5, win, E, n, fr, rx),
+        "a read from P is complete once the next frame's U is in, its tail all guard (mutation: restIsCut "
+        "always false, the reader blocks about 8 ms for the frame after and keeps none of it)");
+  check(!bs::restIsCut(p0, 21 * n + 1000, win, E, n, fr, rx) && !bs::restIsCut(p0, 2 * n, win, E, n, fr, rx),
+        "a read still owed part of an rx slot is not cut short (mutation: the overlap test inverted, or a "
+        "whole-slot rounding that drops the rest of U)");
+  check(!bs::restIsCut(p0, 22 * n, win, E, n, fr, "") && !bs::restIsCut(p0, win, win, E, n, fr, rx),
+        "without a slot map, or with the window full, nothing is cut (mutation: the empty-map guard dropped, "
+        "rxOverlap of an empty map is 0, so every read outside slots mode would stop after its first packet)");
   if (failures) std::printf("FAILED: %d failure(s)\n", failures);
   else std::printf("ALL PASS\n");
   return failures ? 1 : 0;
