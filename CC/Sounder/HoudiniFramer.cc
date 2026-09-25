@@ -581,70 +581,129 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
     htdd_frame_pad_ += static_cast<size_t>(fn - cg);
   }
   if (cg < n) return (cg < 0) ? cg : 0;
-  const int16_t* s = htdd_cap_buf_.data();
-  std::vector<double> cse(static_cast<size_t>(cg) + 1, 0.0);
-  for (int i = 0; i < cg; ++i) {
-    const double re = s[2 * i], im = s[2 * i + 1];
-    cse[i + 1] = cse[i] + re * re + im * im;
-  }
-  double best = 0.0;
-  double worst = -1.0;
-  int at = 0;
-  for (int t = 0; t + n <= cg; t += 128) {
-    const double e = cse[t + n] - cse[t];
-    if (e > best) { best = e; at = t; }
-    if (worst < 0.0 || e < worst) worst = e;
-  }
-  // The UE burst is searched for only where the schedule puts the pilot
-  // (SH-347, the host half of "a TDD node receives only its RX slots"): the
-  // rx gate is open all frame, so over the air the BS's own beacon slot and
-  // the guards carry whatever is on the air, and the whole-read search above
-  // took the loudest of it (its own beacon through the adjacent antennas) for
-  // the UE, cutting every lane there (O1a/O1b). The window is +-n/4 around
-  // the scheduled start: wired, the pilot sits 4 samples from it
-  // (pilot_grid_off); a slot away is the guard or the data slot. Without a
-  // read stamp, the whole-read search stands. The floor keeps the whole read.
-  const int whole_at = at;         // the whole read's loudest slot, kept for the
-  const double whole_best = best;  // presence-gate diagnostic below
-  long long sched_expect = -1;
-  if (ft > 0) {
-    const long long stamp_ticks = llround(static_cast<double>(ft) * htdd_tick_rate_ / 1e9);
-    const long long span_n = (static_cast<long long>(htdd_rx_slots_.back()) -
-                              static_cast<long long>(htdd_rx_slots_.front()) + 2) * n;
-    // A pilot at the head of the read takes the next frame's copy when the
-    // read holds it (slot_align.h chooseExpect).
-    const long long expect = houdini::slotalign::chooseExpect(
-        houdini::slotalign::expectedPilotStart(stamp_ticks, htdd_epoch_,
-                                               static_cast<long long>(htdd_pilot_slot_), n, htdd_frame_ticks_),
-        n, htdd_frame_ticks_, span_n, cg);
-    sched_expect = expect;
-    const auto near = houdini::slotalign::densestNear(cse, expect, n / 4, n, 128);
-    if (near.first >= 0) {
-      at = static_cast<int>(near.first);
-      best = near.second;
+  // Every lane is searched the same way, and the lane whose pilot is cleanest
+  // places the cut for all of them: the lanes are sample-aligned (one combined
+  // stream). Lane 0 keeps the job unless another lane's pilot is clearly
+  // cleaner [user: over the air the weak sub-6 pilot, placing the cut alone,
+  // dragged the wired X-band lane down with it].
+  const int lag = static_cast<int>(cfg_->cp_size() + cfg_->fft_size());
+  const int gap = static_cast<int>(htdd_rx_slots_.back() - htdd_pilot_slot_) * n;
+  // The pilot is identical repeated LTS symbols (high self-similarity at lag
+  // cp+fft); data is distinct symbols (low).
+  auto laneSelfsim = [&](const int16_t* ls, int off) -> double {
+    if (off < 0 || off + n > cg) return 0.0;
+    double sr = 0, si = 0, sp = 0;
+    for (int m = 0; m + lag < n; ++m) {
+      const double a = ls[2 * (off + m)], b = ls[2 * (off + m) + 1];
+      const double c = ls[2 * (off + m + lag)], d = ls[2 * (off + m + lag) + 1];
+      sr += a * c + b * d;
+      si += b * c - a * d;
+      sp += a * a + b * b;
     }
+    return sp > 0 ? std::sqrt(sr * sr + si * si) / sp : 0.0;
+  };
+  struct LaneSearch {
+    std::vector<double> cse;
+    int at = 0;
+    double best = 0.0, worst = -1.0;
+    int whole_at = 0;
+    double whole_best = 0.0;
+    long long sched_expect = -1;
+    int p_at = 0;
+    double ss = 0.0;
+  };
+  auto searchLane = [&](const int16_t* ls) -> LaneSearch {
+    LaneSearch L;
+    L.cse.assign(static_cast<size_t>(cg) + 1, 0.0);
+    for (int i = 0; i < cg; ++i) {
+      const double re = ls[2 * i], im = ls[2 * i + 1];
+      L.cse[i + 1] = L.cse[i] + re * re + im * im;
+    }
+    for (int t = 0; t + n <= cg; t += 128) {
+      const double e = L.cse[t + n] - L.cse[t];
+      if (e > L.best) { L.best = e; L.at = t; }
+      if (L.worst < 0.0 || e < L.worst) L.worst = e;
+    }
+    // The UE burst is searched for only where the schedule puts the pilot
+    // (SH-347, the host half of "a TDD node receives only its RX slots"): the
+    // rx gate is open all frame, so over the air the BS's own beacon slot and
+    // the guards carry whatever is on the air, and the whole-read search above
+    // took the loudest of it (its own beacon through the adjacent antennas) for
+    // the UE, cutting every lane there (O1a/O1b). The window is +-n/4 around
+    // the scheduled start: wired, the pilot sits 4 samples from it
+    // (pilot_grid_off); a slot away is the guard or the data slot. Without a
+    // read stamp, the whole-read search stands. The floor keeps the whole read.
+    L.whole_at = L.at;  // the whole read's loudest slot, kept for the
+    L.whole_best = L.best;  // presence-gate diagnostic below
+    if (ft > 0) {
+      const long long stamp_ticks = llround(static_cast<double>(ft) * htdd_tick_rate_ / 1e9);
+      const long long span_n = (static_cast<long long>(htdd_rx_slots_.back()) -
+                                static_cast<long long>(htdd_rx_slots_.front()) + 2) * n;
+      // A pilot at the head of the read takes the next frame's copy when the
+      // read holds it (slot_align.h chooseExpect).
+      const long long expect = houdini::slotalign::chooseExpect(
+          houdini::slotalign::expectedPilotStart(stamp_ticks, htdd_epoch_,
+                                                 static_cast<long long>(htdd_pilot_slot_), n, htdd_frame_ticks_),
+          n, htdd_frame_ticks_, span_n, cg);
+      L.sched_expect = expect;
+      const auto near = houdini::slotalign::densestNear(L.cse, expect, n / 4, n, 128);
+      if (near.first >= 0) {
+        L.at = static_cast<int>(near.first);
+        L.best = near.second;
+      }
+    }
+    // The read spans ~1.17 frames, so when the pilot lands in the first few
+    // slots of the buffer a SECOND copy (next frame) is also fully contained
+    // near the tail -- and the densest-window search picks between two
+    // equal-energy copies by noise. The tail copy leaves no room for the
+    // frame's later rx slots: u_start ran past cg and the placement clamp
+    // served tail junk (noise, partial bursts, or the pilot itself) as the
+    // data slot -- the ~2% garbage-constellation class (measured: frame 5220
+    // p_start=139160 pu_spacing_err=-8088 with the pilot burst in the "U"
+    // dump). Re-map to the earlier copy, which always fits with its whole
+    // rx-slot span.
+    {
+      const int fr_t = static_cast<int>(htdd_frame_ticks_);
+      const int span_n = (static_cast<int>(htdd_rx_slots_.back()) -
+                          static_cast<int>(htdd_rx_slots_.front()) + 2) * n;
+      while (L.at + span_n > cg && L.at >= fr_t) L.at -= fr_t;
+    }
+    // The densest slot `at` is a UE slot -- pilot OR data. Identify it by the
+    // self-similarity, which keeps P/U tagged correctly so CSI comes from the
+    // pilot and equalization from the data.
+    L.p_at = L.at;
+    if (laneSelfsim(ls, L.at) < 0.5) {  // `at` is a data slot -> the pilot is `gap` earlier
+      if (laneSelfsim(ls, L.at - gap) >= 0.4) L.p_at = L.at - gap;
+      else if (laneSelfsim(ls, L.at + gap) >= 0.4) L.p_at = L.at + gap;
+    }
+    L.ss = laneSelfsim(ls, L.p_at);
+    return L;
+  };
+  const int16_t* s0 = htdd_cap_buf_.data();
+  LaneSearch ref = searchLane(s0);
+  size_t ref_lane = 0;
+  for (size_t c = 1; c < C; ++c) {
+    LaneSearch L = searchLane(s0 + c * static_cast<size_t>(fn) * 2);
+    if (L.ss > ref.ss + 0.05) {
+      ref = std::move(L);
+      ref_lane = c;
+    }
+  }
+  if (ft > 0) {
     static std::atomic<bool> said{false};
     if (!said.exchange(true)) {  // braces: MLPD_INFO is three statements (logger.h)
-      MLPD_INFO("BS: the UE burst is searched only within +-%d samples of the scheduled pilot slot (SH-347 host half)\n",
+      MLPD_INFO("BS: the UE burst is searched only within +-%d samples of the scheduled pilot slot (SH-347 host half); "
+                "the lane with the cleanest pilot places the cut\n",
                 n / 4);
     }
   }
-  // The read spans ~1.17 frames, so when the pilot lands in the first few
-  // slots of the buffer a SECOND copy (next frame) is also fully contained
-  // near the tail -- and the densest-window search picks between two
-  // equal-energy copies by noise. The tail copy leaves no room for the
-  // frame's later rx slots: u_start ran past cg and the placement clamp
-  // served tail junk (noise, partial bursts, or the pilot itself) as the
-  // data slot -- the ~2% garbage-constellation class (measured: frame 5220
-  // p_start=139160 pu_spacing_err=-8088 with the pilot burst in the "U"
-  // dump). Re-map to the earlier copy, which always fits with its whole
-  // rx-slot span.
-  {
-    const int fr_t = static_cast<int>(htdd_frame_ticks_);
-    const int span_n = (static_cast<int>(htdd_rx_slots_.back()) -
-                        static_cast<int>(htdd_rx_slots_.front()) + 2) * n;
-    while (at + span_n > cg && at >= fr_t) at -= fr_t;
-  }
+  const int16_t* s = s0 + ref_lane * static_cast<size_t>(fn) * 2;
+  const std::vector<double>& cse = ref.cse;
+  const int at = ref.at;
+  const double best = ref.best, worst = ref.worst;
+  const int whole_at = ref.whole_at;
+  const double whole_best = ref.whole_best;
+  const long long sched_expect = ref.sched_expect;
   const double pilot_rms = std::sqrt(best / n);
   // Noise floor from the QUIETEST slot-length window of the same read (27 of
   // 30 slots are guard, so it measures the true floor, ~6 rms on this bench).
@@ -707,37 +766,10 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
     htdd_quiet_warned_ = false;
   }
   htdd_quiet_streak_ = 0;
-  // The densest slot `at` is a UE slot -- pilot OR data. Identify it: the pilot is
-  // identical repeated LTS symbols (high self-similarity at lag cp+fft); data is
-  // distinct symbols (low). This keeps P/U tagged correctly so CSI comes from the
-  // pilot and equalization from the data.
-  auto selfsim = [&](int off) -> double {
-    const int lag = static_cast<int>(cfg_->cp_size() + cfg_->fft_size());
-    if (off < 0 || off + n > cg) return 0.0;
-    double sr = 0, si = 0, sp = 0;
-    for (int m = 0; m + lag < n; ++m) {
-      const double a = s[2 * (off + m)], b = s[2 * (off + m) + 1];
-      const double c = s[2 * (off + m + lag)], d = s[2 * (off + m + lag) + 1];
-      sr += a * c + b * d;
-      si += b * c - a * d;
-      sp += a * a + b * b;
-    }
-    return sp > 0 ? std::sqrt(sr * sr + si * si) / sp : 0.0;
-  };
-  const int gap =
-      static_cast<int>(htdd_rx_slots_.back() - htdd_pilot_slot_) * n;
-  int p_at = at;
-  if (selfsim(at) < 0.5) {  // `at` is a data slot -> the pilot is `gap` earlier
-    if (selfsim(at - gap) >= 0.4) p_at = at - gap;
-    else if (selfsim(at + gap) >= 0.4) p_at = at + gap;
-  }
-  // The chosen candidate must actually look like repeated LTS symbols. When
-  // the pilot is damaged and every candidate fails, the old code kept its
-  // best guess and delivered the DATA slot (or worse) as the pilot -- a
-  // poison H rendered as a whole-panel garbage blip [user 2026-08-30]. Keep
-  // the caller's P/U lockstep but mark the frame fully padded so view mode
-  // refuses it, and count occurrences for the mechanism hunt.
-  const double pilot_ss = selfsim(p_at);
+  // The reference lane's pilot, found and identified in searchLane above.
+  auto selfsim = [&](int off) -> double { return laneSelfsim(s, off); };
+  const int p_at = ref.p_at;
+  const double pilot_ss = ref.ss;
   if (pilot_ss < 0.4) {
     htdd_frame_pad_ += static_cast<size_t>(n);
     // Recording mode ignores rx_pad (only the view refuses on it), so also
@@ -831,9 +863,9 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
       // keeps up). Both numbers on one line so an offline fit needs no join.
       MLPD_INFO("HOUDINI_BS_RX: frame=%lld stamp_ticks=%lld cg=%d "
                 "pilot-rms=%.0f selfsim=%.2f p_start=%lld rx_slots=%zu "
-                "pilot_grid_off=%lld clamped=%zu\n",
+                "pilot_grid_off=%lld clamped=%zu ref_lane=%zu\n",
                 htdd_frame_counter_, stamp_ticks, cg, pilot_rms, selfsim(at),
-                p_start, K, rel_pilot, clamped);
+                p_start, K, rel_pilot, clamped, ref_lane);
     }
   }
   // Landing-map instrument (phase 5-7 walk): dump the raw continuous read plus
@@ -851,7 +883,7 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
       snprintf(pb, sizeof(pb), "%s/bsframe_%02d.bin", lm_dir, dk);
       FILE* fb = fopen(pb, "wb");
       if (fb != nullptr) {
-        fwrite(s, sizeof(int16_t), static_cast<size_t>(cg) * 2, fb);
+        fwrite(s0, sizeof(int16_t), static_cast<size_t>(cg) * 2, fb);  // lane 0, raw
         fclose(fb);
       }
       snprintf(pb, sizeof(pb), "%s/bsframe_%02d.txt", lm_dir, dk);

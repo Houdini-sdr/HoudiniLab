@@ -9,6 +9,7 @@
  "remote_port": "55132",
  "bs_hw_framer": true,
  "bs_rx_slots": true,
+ "bs_cfo_pre_fft": true,
  "ue_tdd_pilot": true,
  "ue_tx_advance_ticks": 0,
  "_rates_note": "sample_rate stays 122.88e6: it is the RX rate AND the device tick, and every slot/frame count below is in those ticks. The TX stream runs at tx_sample_rate; every TX waveform is generated at 122.88 and x2 interpolated at the radio boundary (include/dsp/band_filters.h). DAC 5898.24 / interpolation 24, ADC 4915.2 / decimation 40.",

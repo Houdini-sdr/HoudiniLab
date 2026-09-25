@@ -344,6 +344,9 @@ Config::Config(const std::string& jsonfile, const std::string& directory,
   // AP-87: the BS receives only its rx slots (the real TDD pattern and the
   // device's SH-347 slots mode); checked below once the slot size is known.
   bs_rx_slots_ = tddConf.value("bs_rx_slots", false);
+  // The BS removes each lane's pilot-measured carrier offset before the FFT
+  // (houdini/pre_cfo.h), not only per symbol after it.
+  bs_cfo_pre_fft_ = tddConf.value("bs_cfo_pre_fft", false);
 
   // Load/Build BS and Client SDRs' Schedules
   bs_array_frames_.resize(num_cells_);

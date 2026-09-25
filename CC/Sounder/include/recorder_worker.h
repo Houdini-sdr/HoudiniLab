@@ -57,6 +57,15 @@ class RecorderWorker {
   // TX beacon to cancel). Sync uses raw samples, but CSI/constellation must undo it,
   // else H[k] lands on the mirror subcarrier (N-k) and the constellation scrambles.
   bool rx_conj_ = false;
+  bool pre_fft_cfo_ = false;  // bs_cfo_pre_fft: the pilot-measured carrier offset removed before the FFT
+  struct PreCfo {
+    uint32_t frame = 0;
+    uint32_t slot = 0;
+    double hz = 0.0;
+    double coherence = 0.0;
+    bool use = false;
+  };
+  std::unordered_map<uint32_t, PreCfo> pre_cfo_;  // per antenna, from its latest pilot
   int csi_sock_ = -1;
   // DC-centered freq-domain pilot per RX lane (lane = ant % bs_rx_ch): each
   // antenna's own channel's band (AP-85).

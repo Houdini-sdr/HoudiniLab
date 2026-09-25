@@ -118,6 +118,8 @@ int main() {
       check(sl.bs_rx_slots() && sl.bs_hw_framer(), "houdini-dualband-xw-steer-slots.json: bs_rx_slots on [mutation: the key not parsed]");
       Config demo("files/houdini-dualband-xw-steer.json", "/tmp", false, false, false);
       check(!demo.bs_rx_slots(), "the demo config leaves bs_rx_slots off [mutation: the default flipped]");
+      check(sl.bs_cfo_pre_fft() && !demo.bs_cfo_pre_fft(),
+            "the slots config removes the carrier offset before the FFT, the demo config does not [mutation: the key not parsed]");
     } catch (const std::exception& e) {
       check(false, std::string("AP-87 configs: Config threw: ") + e.what());
     }
