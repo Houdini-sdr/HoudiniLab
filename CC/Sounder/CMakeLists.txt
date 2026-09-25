@@ -358,12 +358,18 @@ add_executable(cir_test tests/comms-func/cir_test.cc)
 target_include_directories(cir_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/mufft)
 target_link_libraries(cir_test ${MUFFT_LIBRARIES})
 add_test(NAME cir COMMAND cir_test)
+# The Spectrum tab's Welch average of the pilot slot (SPC1): dBFS known answers.
+add_executable(spectrum_test tests/comms-func/spectrum_test.cc)
+target_include_directories(spectrum_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/mufft)
+target_link_libraries(spectrum_test ${MUFFT_LIBRARIES})
+add_test(NAME spectrum COMMAND spectrum_test)
 add_test(NAME csi_gui_metrics COMMAND python3 test_metrics.py WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/csi_gui)
 add_test(NAME csi_gui_control COMMAND python3 test_control.py WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/csi_gui)
 add_test(NAME csi_gui_check_setup COMMAND python3 test_check_setup.py WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/csi_gui)
 add_test(NAME csi_gui_record_replay COMMAND python3 test_record_replay.py WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/csi_gui)
 add_test(NAME rung_report COMMAND python3 rung_report_test.py WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/tests/demo-verify)
 add_test(NAME freeze_watch COMMAND python3 freeze_watch_test.py WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/tests/demo-verify)
+add_test(NAME pacer_core_check COMMAND python3 pacer_core_check_test.py WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/tests/demo-verify)
 
 # AP-79: the link-health monitor port, pinned to the software lane's T0 cases
 # and to real captures from a streaming mode-V node.

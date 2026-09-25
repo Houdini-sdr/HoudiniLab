@@ -1,4 +1,4 @@
-# Known-answer checks for the dashboard's new parsers (MER/EVM, delay spread, CIR1, MET1).
+# Known-answer checks for the dashboard's new parsers (MER/EVM, delay spread, CIR1, MET1, SPC1).
 # Stdlib only; run from csi_gui/ (ctest does). AP-79.
 import math, random, re, struct, sys
 sys.argv = ["x"]
@@ -122,6 +122,29 @@ met = struct.pack("<IIIIIddd", cs.MAGIC_MET, 1, 2, 4096, 1596, 4380e6, 30e3, 47.
 a, m = cs._parse_met(met)
 check(a == 1 and m["ch"] == "C" and m["fc_mhz"] == 4380.0 and m["bw_mhz"] == 47.88 and m["fft"] == 4096, "MET1 parses (channel C, 4380 MHz, 47.88 MHz)")
 check(cs._parse_met(met[:-8]) is None, "a short MET1 is dropped")
+# SPC1: the pilot spectrum, [magic][frame][ant][nbins][nfft][rate f32][rbw_hz f32] + nbins dBFS f32
+def spc1(nbins=512, nfft=2048, rate=122.88e6, db=None, magic=None):
+    db = [-57.0 - 0.1 * (i % 7) for i in range(nbins)] if db is None else db
+    return struct.pack("<IIIIIff", cs.MAGIC_SPC if magic is None else magic, 42, 1, nbins, nfft, rate,
+                       rate / max(nbins, 1)) + struct.pack("<%df" % len(db), *db)
+check(struct.pack("<I", cs.MAGIC_SPC) == b"1CPS" and cs.MAGIC_SPC == 0x53504331,
+      "SPC1's magic is the sounder's 0x53504331 (mutation: any other constant)")
+a, sp = cs._parse_spc(spc1())
+check(a == 1 and sp["frame"] == 42 and sp["nbins"] == 512 and sp["nfft"] == 2048 and len(sp["db"]) == 512
+      and sp["db"][0] == -57.0 and sp["db"][6] == -57.6 and abs(sp["rbw_hz"] - 240e3) < 0.1 and sp["rate"] == 122.88e6,
+      "SPC1 parses: 512 bins of dBFS in order, 240 kHz bins at 122.88 Msps (mutation: read the values from byte 24)")
+check(cs._parse_spc(spc1()[:-4]) is None, "an SPC1 one value short is dropped, not raised (the unpack would overrun)")
+check(cs._parse_spc(spc1()[:20]) is None, "an SPC1 shorter than its header is dropped, not raised")
+check(cs._parse_spc(spc1() + b"\0\0\0\0") is None, "an SPC1 with trailing bytes is dropped (mutation: a >= length check)")
+check(cs._parse_spc(spc1(nbins=0, db=[])) is None, "nbins 0 is dropped (mutation: drop the nbins check, the page divides by it)")
+check(cs._parse_spc(spc1(nbins=500, db=[-60.0] * 500)) is None,
+      "nfft not a multiple of nbins is dropped (mutation: drop the nfft % nbins check, the page's bin centres go wrong)")
+check(cs._parse_spc(spc1(db=[-60.0] * 511 + [float("nan")])) is None, "a NaN bin is dropped: it would break the page's JSON")
+check(cs._parse_spc(spc1(rate=float("nan"))) is None and cs._parse_spc(spc1(rate=0.0)) is None,
+      "a NaN or zero rate is dropped (the page divides by it)")
+check(re.search(r"data-view=\"adc\">Spectrum<", cs.PAGE) is not None and "function drawSpc(" in cs.PAGE
+      and "if(rec.spc && rec.spc.frame!==card.lastSpc)" in cs.PAGE,
+      "the page has the Spectrum tab and draws SPC1 records (mutation: onData never reads rec.spc)")
 # The |H| axis top: --mag-top, else the config's dashboard_mag_top, else the default.
 import json, os, tempfile
 td = tempfile.mkdtemp(prefix="csi_magtop_")

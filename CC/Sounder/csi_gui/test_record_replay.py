@@ -39,6 +39,18 @@ except ValueError:
     ok = True
 check(ok, "a file without the header is refused by name (mutation: skip the header check)")
 
+class _Full:
+    def write(self, b): raise OSError(28, "No space left on device")
+    def flush(self): pass
+    def close(self): pass
+logs2 = []
+r = cr.Recorder(os.path.join(td, "full.rec"), 1 << 20, log=logs2.append); r.f.close(); r.f = _Full()
+try:
+    r.write(1.0, b"x"); r.write(2.0, b"y"); ok = r.f is None and len(logs2) == 1
+except OSError:
+    ok = False
+check(ok, "a write error (a full disk) stops the recording once and never raises into the receive loop (mutation: drop the try)")
+
 check(rf.schedule([10.0, 10.25, 11.5], 2.0) == [0.0, 0.125, 0.75], "the schedule keeps the recorded spacing scaled by speed (mutation: ignore speed)")
 check([t for t, _ in rf.load(p, 0.25, 1.25)] == [10.25], "a window takes [start, start + duration) from the first datagram (mutation: an inclusive end)")
 check(len(rf.load(p, 0.0, 0.0)) == 3, "duration 0 plays to the end (mutation: treat 0 as empty)")

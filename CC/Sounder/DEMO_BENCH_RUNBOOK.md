@@ -239,13 +239,46 @@ constellation, CIR, ADC, beacon sync).
 2. Replay, with no sounder running:
 
    ```sh
-   python3 csi_gui/csi_server.py &
+   python3 csi_gui/csi_server.py --conf files/houdini-dualband.json &
    python3 csi_gui/replay_feed.py ~/demo_rec/<name>.rec --loop
    ```
 
-   `--start` and `--duration` pick a window (seconds into the recording), for
+   The `--conf` sets the page's |H| axis and guard marks for the recorded
+   configuration (without it the dashboard falls back to a single-band config
+   and the dual-band |H| reads off scale). `--start` and `--duration` pick a window (seconds into the recording), for
    example a stretch with steering settled. Each loop restarts the frame
    counters, which the beacon-sync card shows as a new segment.
+
+## A8c. Demo day: bring-up at the venue (in order)
+
+Moving the rig means rebooting the rig host, which re-draws the NIC's receive
+hashing (a node's RX flow can land on a pinned core) and can wedge a node's data
+egress (HS-225). Do every step, every power-up.
+
+1. On the rig host: `cat /sys/devices/system/cpu/isolated` reads `15-19`.
+2. `python3 csi_gui/check_setup.py --conf files/houdini-dualband-steer.json`:
+   Ready, egress PASS on both nodes, the stacks match. A stack FAIL reading
+   `SoapyRPCUnpacker::recv() TIMEOUT` can be a slow radio open: run it again.
+   An egress FAIL needs that node's PL reload or reboot.
+3. The launch environment, then the dashboard (A4, A5):
+
+   ```sh
+   export HOUDINI_CORE_MAP=main=15 HOUDINI_TX_CPU_AFFINITY=18,19 HOUDINI_TX_HOST_STATUS=1
+   export HOUDINI_CSI_RECORD=~/demo_rec/<name>.rec    # optional: records a fallback
+   python3 csi_gui/csi_server.py --control --conf files/houdini-dualband-steer.json
+   ```
+
+4. Within the first minute of a Start:
+   - the log shows `steer.enable = true [json]` and `Clock steering [0]: ON`
+     (the environment variable alone does NOT enable steering);
+   - `python3 tests/demo-verify/pacer_core_check.py --cores 15,18,19` prints
+     `ok`. If it names a core, Stop, pick two isolated cores it did not name
+     (`--cores` again to confirm), change `HOUDINI_TX_CPU_AFFINITY`, restart
+     the dashboard, Start.
+5. During the demo: a freeze (A7), or the BS sub-6 degraded from the start with
+   the DCDR line (A8): Stop, then Start. The yellow "under-driven" bar on both
+   antennas is expected on the cabled rig (the links are transmit-limited).
+6. Anything that cannot be fixed in a minute: the canned-data fallback (A8b).
 
 ## A9. The CPU isolation experiment (checklist)
 

@@ -70,6 +70,13 @@ Wire formats (little-endian), one datagram per (frame, antenna) per kind:
         them makes every update a different signal; peak/clipped describe that slot,
         any_peak/any_clipped cover every slot since the previous send.  ADC1 is the
         same without the last three fields and is still accepted.
+  SPC1  [magic][frame][ant][nbins][nfft][rate f32][rbw_hz f32]  then nbins * dBFS f32:
+        the PILOT slot's spectrum (include/houdini/spectrum.h), a Welch average of
+        nfft-point Hann segments, DC-centred from -rate/2; bin i is centred at
+        (i r + (r - 1) / 2 - nfft / 2) * rate / nfft with r = nfft / nbins. Each bin
+        is the power in its rbw_hz = rate / nbins band, in dB re the int16 rail: a
+        full-scale complex tone reads 0 dBFS. In the recorder's (conjugated) sense,
+        as the CSI. A few per second per antenna (HOUDINI_CSI_SPC_FPS, default 4).
 """
 import argparse
 import collections
@@ -99,6 +106,8 @@ MAGIC_ADC = 0x41444331   # "ADC1" -- raw-ADC envelope, any slot (legacy)
 MAGIC_ADC2 = 0x41444332  # "ADC2" -- pilot-slot envelope + an all-slot clip ledger
 MAGIC_CIR = 0x43495231   # "CIR1" -- impulse response window, dB re the peak tap
 MAGIC_MET = 0x4D455431   # "MET1" -- the channel's constants (centre, bandwidth)
+MAGIC_SPC = 0x53504331   # "SPC1" -- the pilot slot's spectrum, dBFS per bin
+SPC_HDR = struct.Struct("<IIIIIff")    # magic, frame, ant, nbins, nfft, rate, rbw_hz
 CIR_HDR = struct.Struct("<IIIIIIIf")   # magic, frame, ant, ntaps, pre, peak, N, tap_ns
 MET_HDR = struct.Struct("<IIIIIddd")   # magic, ant, channel, fft, occ tones, fc, scs, occ bw
 MAGIC_SYN = 0x53594E31   # "SYN1" -- UE beacon sync state, resid and CFO
@@ -323,6 +332,22 @@ def _parse_met(payload):
                       "occ": int(occ)}
 
 
+def _parse_spc(payload):
+    """SPC1 -> one antenna's pilot spectrum; None for a short or malformed one."""
+    if len(payload) < SPC_HDR.size:
+        return None
+    _m, frame, ant, nbins, nfft, rate, rbw = SPC_HDR.unpack_from(payload, 0)
+    if (nbins == 0 or nfft < nbins or nfft % nbins or len(payload) != SPC_HDR.size + 4 * nbins
+            or not (math.isfinite(rate) and rate > 0 and math.isfinite(rbw))):
+        return None
+    db = struct.unpack_from("<%df" % nbins, payload, SPC_HDR.size)
+    if not all(math.isfinite(v) for v in db):
+        return None
+    return int(ant), {"frame": int(frame), "nbins": int(nbins), "nfft": int(nfft),
+                      "rate": float(rate), "rbw_hz": float(rbw),
+                      "db": [round(v, 1) for v in db]}
+
+
 def _parse_syn(payload):
     if len(payload) != SYN_HDR.size:
         # Deliberately NOT back-compatible: the wire may change freely, but a
@@ -389,6 +414,8 @@ def _udp_loop(bind_host, bind_port, recorder=None):
             parsed, kind = _parse_cir(data), "cir"
         elif magic == MAGIC_MET:
             parsed, kind = _parse_met(data), "met"
+        elif magic == MAGIC_SPC:
+            parsed, kind = _parse_spc(data), "spc"
         elif magic == MAGIC_SYN:
             rec = _parse_syn(data)
             if rec is not None:
@@ -1241,6 +1268,16 @@ const STALE_MS=__STALE_MS__;         // no update for this long -> dim + badge
 // reviewed capture and wrong for a live one. Do not copy it here.)
 const MAG_TOP=__MAG_TOP__, MAG_BOT=__MAG_TOP__-__MAG_SPAN__;
 const CONS_R=1.7;                     // constellation half-width, in unit-power units
+// The Spectrum tab's fixed axis, dBFS per bin. From the V1 run's dumps at
+// 240 kHz bins: occupied band -57 (sub-6) and -61 (X-IF), the sub-6 Fs/2 spur
+// -75, the X-IF refclk image -80, floors -125 (sub-6, int16 quantisation past
+// the channel filter) and -107 (X-IF). The top is a full-scale tone.
+const SPC_TOP=0, SPC_BOT=-140, SPC_STEP=20;
+function spcLabels(){
+  const out=[];
+  for(let v=SPC_TOP;v>=SPC_BOT;v-=SPC_STEP) out.push(String(v));
+  return out;
+}
 const cards={};                       // ant_id -> {mag,phase,wf,wfimg,cons,...}
 
 // ---- theme ---------------------------------------------------------------
@@ -1355,7 +1392,7 @@ function makeCard(ant){
     +'<div class="card-body p-3 csi-collapsible">'
      +'<ul class="nav nav-underline mb-3 csi-tabs">'
        +'<li class="nav-item"><a href="#" class="nav-link active" data-view="channel">Channel</a></li>'
-       +'<li class="nav-item"><a href="#" class="nav-link" data-view="adc">ADC</a></li>'
+       +'<li class="nav-item"><a href="#" class="nav-link" data-view="adc">Spectrum</a></li>'
      +'</ul>'
      +'<div class="csi-plots csi-view" data-view="channel">'
       +frame('|H| (dB rel.) vs subcarrier','csi-h-line',magLabels(),['','',''],off)
@@ -1379,10 +1416,11 @@ function makeCard(ant){
       +'<div class="csi-quality tnum"></div>'
      +'</div>'
      +'<div class="csi-plots csi-adc csi-view" data-view="adc" hidden>'
-      +frame('raw ADC min/max envelope, whole slot','csi-h-adc',
-             ['','','','',''],['0','sample','end'],clip)
-      // The trace is FITTED to the slot, so the absolute question it cannot answer
-      // ("how much converter range am I using") gets its own fixed-scale widget.
+      // The pilot slot's spectrum (SPC1). It shows where the power is, not how
+      // close the samples come to the rail, so the converter range (ADC2) keeps
+      // its own fixed-scale widget and the clipping badge.
+      +frame('pilot spectrum','csi-h-adc',spcLabels(),['','',''],
+             '<span class="badge bg-red-lt text-red csi-spc-off" hidden>off scale</span>'+clip)
       +'<div class="csi-head">'
         +'<div class="d-flex justify-content-between csi-head-lbl">'
           +'<span>converter range used</span><span class="csi-head-pct"></span></div>'
@@ -1395,7 +1433,7 @@ function makeCard(ant){
   document.getElementById('ants').appendChild(wrap);
   const cvs=[...wrap.querySelectorAll('.csi-view canvas')];
   cards[ant]={magCv:cvs[0],rawPhaseCv:cvs[1],phaseCv:cvs[2],wfCv:cvs[3],
-              consCv:cvs[4],cirCv:cvs[5],adcCv:cvs[6],dim:null,wfimg:null,
+              consCv:cvs[4],cirCv:cvs[5],spcCv:cvs[6],dim:null,wfimg:null,
               quality:wrap.querySelector('.csi-quality'),
               phOff:wrap.querySelector('.csi-ph-off'),phDelay:wrap.querySelector('.csi-ph-delay'),
               phAcc:null,phLast:null,phT:0,
@@ -1405,13 +1443,14 @@ function makeCard(ant){
               el:wrap,badge:wrap.querySelector('.csi-stale'),
               off:wrap.querySelector('.csi-off'),
               clip:wrap.querySelector('.csi-clip'),
-              adcTitle:wrap.querySelector('.csi-adc .csi-plot-title span'),
-              adcY:wrap.querySelectorAll('.csi-adc .csi-y-axis span'),
+              spcTitle:wrap.querySelector('.csi-adc .csi-plot-title span'),
+              spcOff:wrap.querySelector('.csi-spc-off'),
+              spcX:wrap.querySelectorAll('.csi-adc .csi-x-axis span'),
               headPct:wrap.querySelector('.csi-head-pct'),
               headBar:wrap.querySelector('.csi-head-bar'),
               xax:wrap.querySelectorAll('.csi-view[data-view=channel] .csi-x-axis'),
-              lastCsi:-1,lastCns:-1,lastAdc:-1,lastCir:-1,
-              csiRec:null,cnsRec:null,adcRec:null,cirRec:null,metRec:null,frame:0};
+              lastCsi:-1,lastCns:-1,lastAdc:-1,lastCir:-1,lastSpc:-1,
+              csiRec:null,cnsRec:null,adcRec:null,cirRec:null,spcRec:null,metRec:null,frame:0};
   // Tabs are per card so you can watch one antenna's ADC while another shows its
   // channel, which is how you find the one converter that is actually clipping.
   // Measure once the card is in the document, and again whenever the grid reflows.
@@ -1438,6 +1477,7 @@ function repaintCard(card){
   if(card.csiRec) drawCsi(card,card.csiRec,false);
   if(card.cnsRec) drawCons(card,card.cnsRec);
   if(card.adcRec) drawAdc(card,card.adcRec);
+  if(card.spcRec) drawSpc(card,card.spcRec);
   if(card.cirRec) drawCir(card,card.cirRec);
 }
 
@@ -1492,11 +1532,11 @@ function fitCard(card, force){
   d.phase= fitCanvas(card.phaseCv,true);
   d.cons = fitCanvas(card.consCv, true);
   d.cir  = fitCanvas(card.cirCv,  true);
-  d.adc  = fitCanvas(card.adcCv,  true);
+  d.spc  = fitCanvas(card.spcCv,  true);
   d.wf   = fitCanvas(card.wfCv,   false);
   card.dim=d;
   card.mag=d.mag.ctx; card.rawph=d.rawph.ctx; card.phase=d.phase.ctx;
-  card.cons=d.cons.ctx; card.cir=d.cir.ctx; card.adc=d.adc.ctx; card.wf=d.wf.ctx;
+  card.cons=d.cons.ctx; card.cir=d.cir.ctx; card.spc=d.spc.ctx; card.wf=d.wf.ctx;
   // Only when the waterfall's device size ACTUALLY changed: its history lives in
   // the bitmap and cannot be resampled honestly, so a real resize has to restart
   // it -- but a no-op refit must not. The card's height changes whenever the
@@ -1589,11 +1629,14 @@ function drawPhase(card,c,advance){
     }
     a.frames++; a.slope+=sh.slope;
   }
+  // A repaint (advance false: a resize, a tab switch, an expand) redraws the last
+  // published mean and leaves the running one alone, or every resize would publish
+  // a one-frame mean.
   const now=Date.now();
   if(advance!==false && now-card.phT<PH_DRAW_MS) return;
-  card.phT=now;
   const a=card.phAcc;
-  if(a && a.frames){
+  if(advance!==false && a && a.frames){
+    card.phT=now;
     const vals=new Array(a.re.length);
     for(let k=0;k<vals.length;k++)
       vals[k]=a.cnt[k] ? Math.atan2(a.im[k],a.re[k])*180/Math.PI : null;
@@ -1667,47 +1710,12 @@ function drawCsi(card,c,advance){
      +(c.rate/1e6).toFixed(2)+' MS/s · peak '+formatScaled(c.peak_db,'db');
 }
 
+// The converter's range (ADC2): the pilot's peak on a fixed full-scale bar and
+// the clipping badge, which covers every slot. The canvas is the spectrum's.
 function drawAdc(card,a){
   card.adcRec=a;
-  const ctx=card.adc, d=card.dim.adc, AW=d.w, AH=d.h;
   const FS=a.full_scale||ADC_FS;
-  ctx.clearRect(0,0,AW,AH);
-  // Power envelope in dBFS on a FIXED 0..-80 axis [user 2026-08-30: the raw
-  // I/Q min/max bands read as a noise block -- "pretty messy"]. One line, the
-  // burst structure visible: where energy starts and ends against the nominal
-  // guard seats (dashed), which is the live landing view. Clip catching is
-  // unchanged: the amplitude per column is still the max over EVERY sample it
-  // covers, so one clipped sample pins its column at 0 dBFS.
-  const n=a.cols, DB_BOT=-80;
-  const amp=new Array(n);
-  for(let k=0;k<n;k++)
-    amp[k]=Math.max(Math.abs(a.i_min[k]),Math.abs(a.i_max[k]),
-                    Math.abs(a.q_min[k]),Math.abs(a.q_max[k]));
-  ctx.strokeStyle=C.grid; ctx.lineWidth=1;
-  for(let i=0;i<=4;i++){const y=(AH*i/4)|0;
-    ctx.beginPath();ctx.moveTo(0,y+.5);ctx.lineTo(AW,y+.5);ctx.stroke();}
-  // Nominal guard seats: signal should occupy [128, samps-128) of the slot.
-  if(a.samps>GUARD_PRE+GUARD_POST){
-    ctx.strokeStyle=C.warn; ctx.setLineDash([3,3]);
-    for(const fx of [GUARD_PRE/a.samps, (a.samps-GUARD_POST)/a.samps]){
-      const x=(AW*fx)|0;
-      ctx.beginPath();ctx.moveTo(x+.5,0);ctx.lineTo(x+.5,AH);ctx.stroke();
-    }
-    ctx.setLineDash([]);
-  }
-  ctx.strokeStyle=C.mag; ctx.lineWidth=1.5; ctx.beginPath();
-  let started=false;
-  for(let k=0;k<n;k++){
-    const db=20*Math.log10(Math.max(amp[k],1)/FS);
-    const y=Math.min(AH-1,(db/DB_BOT)*AH);
-    const x=AW*k/(n-1);
-    if(!started){ctx.moveTo(x,y);started=true;}else ctx.lineTo(x,y);
-  }
-  ctx.stroke();
-  for(let i=0;i<=4;i++)
-    if(card.adcY[i]) card.adcY[i].textContent=(DB_BOT*i/4).toFixed(0);
   const pct=100*a.peak/FS;
-  card.adcTitle.textContent='pilot power envelope (dBFS), slot '+(a.slot>=0?a.slot:'?')+', nominal guards dashed';
   // The fixed-scale half of the panel. Under-driving is the failure we actually have,
   // so it gets a colour of its own rather than sharing "fine" with a healthy level.
   card.headBar.style.width=Math.max(0.5,Math.min(100,pct)).toFixed(2)+'%';
@@ -1723,6 +1731,49 @@ function drawAdc(card,a){
     +a.peak+' of '+FS+' ('+pct.toFixed(1)+'% FS) \u00b7 all slots: peak '
     +anyPct.toFixed(1)+'% FS, '
     +(anyClip?anyClip+' sample(s) clipped':'no clipping');
+}
+
+// The pilot slot's spectrum (SPC1) on a FIXED dBFS axis: each bin is the power
+// in its rbw_hz band, so a full-scale complex tone reads 0 dBFS; x in MHz from
+// the NCO with a 10 MHz grid, and the occupied band's edges (MET1) dashed. A
+// value above the top pins to it and lights the badge; below the bottom it
+// rests on the bottom edge (a filtered channel's int16 quantisation floor sits
+// near -125 dBFS a 240 kHz bin, the silence floor at -200).
+function drawSpc(card,s){
+  card.spcRec=s;
+  const ctx=card.spc, d=card.dim.spc, W=d.w, H=d.h, n=s.db.length, m=card.metRec;
+  const half=s.rate/2e6, r=s.nfft/s.nbins, df=s.rate/s.nfft/1e6;
+  const xOf=f=>W*(f+half)/(2*half);   // f in MHz from the NCO
+  const yOf=v=>H*(SPC_TOP-v)/(SPC_TOP-SPC_BOT);
+  ctx.clearRect(0,0,W,H);
+  ctx.strokeStyle=C.grid; ctx.lineWidth=1; ctx.beginPath();
+  for(let v=SPC_TOP;v>=SPC_BOT;v-=SPC_STEP){ const y=Math.round(yOf(v))+.5; ctx.moveTo(0,y); ctx.lineTo(W,y); }
+  for(let f=-10*Math.floor(half/10);f<=half;f+=10){ const x=Math.round(xOf(f))+.5; ctx.moveTo(x,0); ctx.lineTo(x,H); }
+  ctx.stroke();
+  if(m && m.bw_mhz>0){
+    ctx.strokeStyle=C.phase; ctx.setLineDash([4,3]); ctx.beginPath();
+    for(const f of [-m.bw_mhz/2, m.bw_mhz/2]){ const x=Math.round(xOf(f))+.5; ctx.moveTo(x,0); ctx.lineTo(x,H); }
+    ctx.stroke(); ctx.setLineDash([]);
+  }
+  let over=false;
+  ctx.strokeStyle=C.mag; ctx.lineWidth=1.5; ctx.beginPath();
+  for(let i=0;i<n;i++){
+    const v=s.db[i];
+    if(v>SPC_TOP) over=true;
+    const x=xOf((i*r+(r-1)/2-s.nfft/2)*df), y=yOf(Math.max(SPC_BOT,Math.min(SPC_TOP,v)));
+    if(i) ctx.lineTo(x,y); else ctx.moveTo(x,y);
+  }
+  ctx.stroke();
+  card.spcOff.hidden=!over;
+  const key=s.rate+'/'+s.rbw_hz+'/'+(m?m.fc_mhz+'/'+m.bw_mhz:'');
+  if(card.spcKey!==key){
+    card.spcKey=key;
+    card.spcX[0].textContent='-'+half.toFixed(2)+' MHz';
+    card.spcX[1].textContent=m?'NCO '+m.fc_mhz.toFixed(3)+' MHz':'NCO';
+    card.spcX[2].textContent='+'+half.toFixed(2)+' MHz';
+    card.spcTitle.textContent='pilot spectrum, dBFS per '+(s.rbw_hz/1e3).toFixed(0)
+      +' kHz bin (a full-scale complex tone reads 0), 10 MHz grid'+(m?', occupied band dashed':'');
+  }
 }
 
 // ideal alphabet (unit average power), mod = bits/symbol (2=QPSK,4=16QAM,6=64QAM)
@@ -1828,6 +1879,7 @@ function redrawAll(){
     if(card.csiRec) drawCsi(card,card.csiRec,false);
     if(card.cnsRec) drawCons(card,card.cnsRec);
     if(card.adcRec) drawAdc(card,card.adcRec);
+    if(card.spcRec) drawSpc(card,card.spcRec);
     if(card.cirRec) drawCir(card,card.cirRec);
   }
 }
@@ -2091,6 +2143,10 @@ function onData(obj){
     if(rec.adc && rec.adc.frame!==card.lastAdc){
       if(open) drawAdc(card,rec.adc); else card.adcRec=rec.adc;
       card.lastAdc=rec.adc.frame;
+    }
+    if(rec.spc && rec.spc.frame!==card.lastSpc){
+      if(open) drawSpc(card,rec.spc); else card.spcRec=rec.spc;
+      card.lastSpc=rec.spc.frame;
     }
     // The sounder stops sending for an antenna whose slots carried RX gaps, so
     // the panels hold their last good estimate. Say that on screen: a frozen
