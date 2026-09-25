@@ -254,6 +254,22 @@ constellation, CIR, ADC, beacon sync).
    and the dual-band |H| reads off scale). `--start` and `--duration` pick a window (seconds into the recording), for
    example a stretch with steering settled. Each loop restarts the frame
    counters, which the beacon-sync card shows as a new segment.
+3. The same replay on a laptop, independent of the rig host (the demo-day
+   fallback to carry): it needs only Python 3, no SoapySDR and no radios. Copy
+   the dashboard, the configs and a recording, then run step 2 there and browse
+   `http://localhost:8080`:
+
+   ```sh
+   mkdir -p ~/houdini_replay && cd ~/houdini_replay
+   scp -r <user>@<rig-host>:<checkout>/CC/Sounder/csi_gui .
+   scp -r <user>@<rig-host>:<checkout>/CC/Sounder/files .
+   scp <user>@<rig-host>:demo_rec/<name>.rec .
+   python3 csi_gui/csi_server.py --conf files/houdini-dualband-xw.json &
+   python3 csi_gui/replay_feed.py <name>.rec --loop
+   ```
+
+   On the rig host itself, never replay while a sounder run is live: the replay
+   and the run's dashboard use the same ports (UDP 9999, HTTP 8080).
 
 ## A8c. Demo day: bring-up at the venue (in order)
 
