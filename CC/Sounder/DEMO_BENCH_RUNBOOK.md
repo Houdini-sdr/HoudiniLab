@@ -19,10 +19,14 @@ is the earlier single-band CSI demo on rig B (`.64`), kept as it was.
 | Machine | Address | Role | What runs on it |
 |---|---|---|---|
 | Build VM | this repo at `/space/vmshare/repos/HoudiniLab` | Development only | Editing, compile checks, offline analysis. Code ships to the rig as a git bundle over ssh. |
-| Rig host "burton" | `168.6.244.26`, user `houdini` | The whole host side | The sounder and the dashboard backend. A DGX Spark: 20 aarch64 cores, fast ones 5-9 and 15-19. Data NICs `enp1s0f0np0` 192.168.5.11 (UE side) and `enp1s0f1np1` 192.168.6.13 (BS side), MTU 9000. |
-| Base station | `168.6.244.22`, user `houdini` | BS radio | `SoapySDRServer` (systemd) with the device plugin. |
-| Client | `168.6.244.21`, user `houdini` | UE radio | The same stack as the BS. |
+| Rig host "burton" | `168.6.244.26`, user `houdini` | The whole host side | The sounder and the dashboard backend. A DGX Spark: 20 aarch64 cores, fast ones 5-9 and 15-19. Data NICs `enp1s0f0np0` 192.168.5.11 (UE side) and `enp1s0f1np1` 192.168.6.13 (BS side), MTU 9000. The control network to the boards is `enx00e04c242668` 192.168.10.26. |
+| Base station | `192.168.10.22`, user `houdini` | BS radio | `SoapySDRServer` (systemd) with the device plugin. |
+| Client | `192.168.10.21`, user `houdini` | UE radio | The same stack as the BS. |
 | Your workstation | anywhere | Viewer | A browser through an ssh tunnel (section A5). |
+
+The boards sit on a control network only the rig host reaches: from any other
+machine, go through it (`ssh -J houdini@168.6.244.26 houdini@192.168.10.22`).
+Every SoapyRemote control call from the sounder rides that network.
 
 The roles are the reverse of Part B's: here `.22` is the BS and `.21` the UE
 (`files/topology-houdini-dualband.json`). Both boards run their reference in
