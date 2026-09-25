@@ -1181,7 +1181,7 @@ PAGE = r"""<!doctype html>
 .csi-card.csi-collapsed .csi-fold svg{transform:rotate(-90deg)}
 .csi-plots{display:grid;grid-template-columns:1fr 1fr;gap:.75rem 1rem}
 .csi-phase-stack{display:flex;flex-direction:column;gap:.35rem}
-.csi-h-half canvas{height:74px}
+.csi-h-half canvas{height:110px}
 /* (retired) The quality strip sat in the SAME grid cell as the magnitude panel, directly
    under it, so the two share one subcarrier axis exactly. A strip in its own
    full-width row would be a different pixels-per-subcarrier scale, and a null would
@@ -1581,7 +1581,7 @@ function line(ctx,vals,ymin,ymax,color,w,h){
 // moves by about a sample from one frame to the next, plus the two free-running
 // carriers' phase; both swamped the shape, which on a cable is the filters' ripple.
 // The removed delay is printed beside the title instead.
-const PH_DRAW_MS=500, PH_SPAN_DEG=30;
+const PH_DRAW_MS=500, PH_SPAN_DEG=5;  // measured: the shape is about +-1 deg typical, 5-9 deg at the 99th percentile
 function phaseShape(ph){
   const n=ph.length;
   let sr=0, si=0;
