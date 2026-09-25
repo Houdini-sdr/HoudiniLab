@@ -53,6 +53,10 @@ class FakeDevice : public SoapySDR::Device {
   bool unsynced = false;         ///< channels report rfdc_mts_synced=0
   bool wrong_cal = false;        ///< every ADC block reads cal=mode2
   std::string preflight = "ok known DAC0.0:FIFO_OVR(HS-207)";
+  // AP-86: the X-band front end, as the software lane's 329e23d plugin behaves.
+  bool extpin_ignored = false;       ///< the keys no-op (standing trap 1): STAT never shows static
+  int drive_allow_off = -1;          ///< this TX channel reads drive_allow_chK=0 (guarded, no pa_ready)
+  bool extpin_lost_on_setup = false; ///< setupStream resets CTRL/SRC
 
   size_t getNumChannels(const int dir) const override { return dir == SOAPY_SDR_TX ? 2 : 4; }
   void setSampleRate(const int dir, const size_t ch, const double rate) override {
@@ -76,6 +80,7 @@ class FakeDevice : public SoapySDR::Device {
   void writeSetting(const std::string& key, const std::string& value) override {
     calls.push_back(value.empty() ? key : key + "=" + value);
     set_[key] = value;
+    if (key == "FORCE_IDLE") set_.erase("TDD_EXTPIN_SRC"), set_.erase("TDD_EXTPIN_CTRL");  // the plugin resets both
     if (key == "RFDC_TX_NYQUIST_ZONE" || key == "RFDC_RX_NYQUIST_ZONE" || key == "RFDC_TX_INVSINC" || key == "RFDC_ADC_CAL")
       for (const auto& kv : houdini::modev::detail::chanList(value)) lists_[key][kv.first] = kv.second;
   }
@@ -123,6 +128,14 @@ class FakeDevice : public SoapySDR::Device {
       }
       return s;
     }
+    if (key == "TDD_EXTPIN_STAT") {
+      // The fields the software lane named, mixed separators on purpose.
+      const bool st = !extpin_ignored && val("TDD_EXTPIN_SRC").rfind("src=static", 0) == 0 &&
+                      val("TDD_EXTPIN_CTRL").find("ilock=1") != std::string::npos;
+      std::string s = std::string("mode=xband src_applied=") + (st ? "static" : "tdd") + ",seq_busy=0 drive_allow=1";
+      for (int c = 0; c < 2; ++c) s += " drive_allow_ch" + std::to_string(c) + "=" + (c == drive_allow_off ? "0" : "1");
+      return s;
+    }
     if (key == "RFDC_PREFLIGHT") return preflight + "\ndetail";
     if (key == "RFDC_INTR_FIRE_COUNT") return "14032361";
     const auto it = set_.find(key);
@@ -141,6 +154,7 @@ class FakeDevice : public SoapySDR::Device {
   SoapySDR::Stream* setupStream(const int, const std::string&, const std::vector<size_t>&,
                                 const SoapySDR::Kwargs&) override {
     calls.push_back("setupStream");
+    if (extpin_lost_on_setup) set_.erase("TDD_EXTPIN_SRC");
     return nullptr;
   }
 
@@ -386,5 +400,79 @@ int main() {
   }
 
   std::printf("%s: %d failure(s)\n", g_fail == 0 ? "ALL PASS" : "FAILED", g_fail);
+  // ---- AP-86: the X-band front end's static state (step 1b) ---------------
+  {
+    FakeDevice f;
+    houdini::modev::bringUp(f, uePlan());
+    check(count(f.calls, "TDD_EXTPIN_") == 0,
+          "AP-86 off (no xband_fe_state): no TDD_EXTPIN write, the wired build unchanged [mutation: step 1b ignores the empty state]");
+  }
+  {
+    FakeDevice f;
+    auto p = uePlan();
+    p.xband_fe_state = "tx";
+    const auto r = houdini::modev::bringUp(f, p);
+    for (const auto& l : r.log) if (l.rfind("TDD_EXTPIN", 0) == 0) std::printf("  ue: %s\n", l.c_str());
+    check(f.calls.size() > 2 && f.calls[1] == "TDD_EXTPIN_CTRL=txsel=1,trsw=1,ilock=1" &&
+              f.calls[2] == "TDD_EXTPIN_SRC=src=static,state=tx" && idx(f.calls, "TDD_EXTPIN_SRC") < idx(f.calls, "rate TX "),
+          "AP-86 UE: CTRL with the interlock, then SRC static tx, right after FORCE_IDLE and before any rate [mutations: SRC before CTRL; the pair after the converters; state rx on the UE]");
+    check(orderOk(f.calls), "AP-86 UE: the converter order still holds");
+    const auto ps = houdini::modev::postSetupCheck(f, r);
+    check(has(ps.log, "TDD_EXTPIN_STAT after the setups -> mode=xband src_applied=static,seq_busy=0 drive_allow=1 drive_allow_ch0=1 drive_allow_ch1=1"),
+          "AP-86 post-setup: the static state re-read after the setups [mutation: the re-check dropped]");
+  }
+  {
+    FakeDevice f;
+    auto p = bsPlan();
+    p.xband_fe_state = "rx";
+    f.drive_allow_off = 1;  // the BS opens TX ch0 only: ch1's flag is not its concern
+    bool threw = false;
+    try { houdini::modev::bringUp(f, p); } catch (const std::exception&) { threw = true; }
+    check(!threw && has(f.calls, "TDD_EXTPIN_SRC=src=static,state=rx"),
+          "AP-86 BS: static rx, drive_allow checked on the OPENED TX channels only [mutation: every channel checked, refusing a healthy BS]");
+  }
+  {
+    FakeDevice f;
+    f.extpin_ignored = true;
+    auto p = uePlan();
+    p.xband_fe_state = "tx";
+    bool threw = false;
+    try { houdini::modev::bringUp(f, p); } catch (const std::runtime_error&) { threw = true; }
+    check(threw && idx(f.calls, "rate TX ") < 0,
+          "AP-86: keys the plugin ignores (STAT never static) throw before any converter write [mutation: the STAT poll removed]");
+  }
+  {
+    FakeDevice f;
+    f.drive_allow_off = 1;
+    auto p = uePlan();
+    p.xband_fe_state = "tx";
+    bool threw = false;
+    try { houdini::modev::bringUp(f, p); } catch (const std::runtime_error&) { threw = true; }
+    check(threw, "AP-86 UE: drive_allow_ch1=0 (its X-band TX would be blanked) throws [mutation: drive_allow not checked]");
+  }
+  {
+    FakeDevice f;
+    f.extpin_lost_on_setup = true;
+    auto p = uePlan();
+    p.xband_fe_state = "tx";
+    const auto r = houdini::modev::bringUp(f, p);
+    f.setupStream(SOAPY_SDR_TX, "CS16", {0, 1}, {});
+    bool threw = false;
+    try { houdini::modev::postSetupCheck(f, r); } catch (const std::runtime_error&) { threw = true; }
+    check(threw, "AP-86 post-setup: a static state lost across the setups throws [mutation: the re-check reads nothing]");
+  }
+  {
+    FakeDevice f;
+    auto p = uePlan();
+    p.xband_fe_state = "on";
+    bool threw = false;
+    try { houdini::modev::bringUp(f, p); } catch (const std::invalid_argument&) { threw = true; }
+    check(threw && f.calls.empty(), "AP-86: a state other than tx/rx is refused before any write");
+  }
+  check(houdini::modev::detail::kvField("drive_allow=1,drive_allow_ch0=0", "drive_allow_ch0") == "0" &&
+            houdini::modev::detail::kvField("drive_allow_ch0=0 drive_allow=1", "drive_allow") == "1" &&
+            houdini::modev::detail::kvField("seq_busy=0", "seq") == "",
+        "kvField matches whole keys [mutation: a prefix match reads drive_allow_ch0 for drive_allow]");
+
   return g_fail == 0 ? 0 : 1;
 }

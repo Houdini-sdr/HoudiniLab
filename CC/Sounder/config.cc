@@ -401,6 +401,17 @@ Config::Config(const std::string& jsonfile, const std::string& directory,
   cl_power_ramp_hi_ = tddConf.value("ue_ramp_max_gain", 42);
   frame_mode_ = tddConf.value("frame_mode", "continuous_resync");
   hw_framer_ = tddConf.value("ue_hw_framer", false);
+  // AP-86: the X-band RF front end (XUD1A + ADTR1107) is attached. Each node
+  // holds its board STATIC for the session (BS rx, UE tx; the mode V bring-up,
+  // step 1b). The UE must never arm a TDD schedule then: the device's arm gate
+  // refuses it under a static source with a guarded channel.
+  xband_frontend_static_ = tddConf.value("xband_frontend_static", false);
+  if (xband_frontend_static_ && !mode_v()) {
+    throw std::invalid_argument("xband_frontend_static needs the mode-V converter plan (rfdc_adc_fs_mhz / rfdc_dac_fs_mhz)");
+  }
+  if (xband_frontend_static_ && hw_framer_) {
+    throw std::invalid_argument("xband_frontend_static: ue_hw_framer must be false (the UE must not arm a TDD schedule while its board is held static)");
+  }
   radio_type_ = tddConf.value("radio_type", "iris");
   remote_port_ = tddConf.value("remote_port", "55132");
   ue_tdd_pilot_ = tddConf.value("ue_tdd_pilot", false);

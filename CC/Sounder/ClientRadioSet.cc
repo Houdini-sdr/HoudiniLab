@@ -251,6 +251,7 @@ void ClientRadioSet::init(ClientRadioContext* context) {
   p.half_bw_by_channel = _cfg->channel_half_bw_hz();
   p.tx_gain_db = _cfg->houdini_tx_gain_db();
   p.rx_gain_db = _cfg->houdini_rx_gain_db();
+  if (_cfg->xband_frontend_static()) p.xband_fe_state = "tx";  // AP-86: the UE's board transmits
   p.rx_freq_offset_hz = ueRxFreqOffsetHz();
   p.tx_freq_offset_hz = ueTxFreqOffsetHz();
   // Houdini UE: the UE feeds pilots live, so host-fed streaming TX (SH-183);

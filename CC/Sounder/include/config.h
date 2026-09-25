@@ -74,6 +74,8 @@ class Config {
   inline size_t guard_mult(void) const { return this->guard_mult_; }
   inline bool bs_hw_framer(void) const { return this->bs_hw_framer_; }
   inline bool hw_framer(void) const { return this->hw_framer_; }
+  /// AP-86: the X-band RF front end attached (per-session static state).
+  inline bool xband_frontend_static(void) const { return this->xband_frontend_static_; }
   // Radio backend selector within the SoapySDR (non-UHD) path: "iris" (default)
   // drives the Iris HW correlator/TDD; "houdini" drives the Houdini RFSoC over
   // SoapyHoudiniSDR with software beacon sync (find_beacon). See ClientRadioSet.
@@ -506,6 +508,7 @@ class Config {
   std::string frame_mode_;
   bool bs_hw_framer_;
   bool hw_framer_;
+  bool xband_frontend_static_ = false;  // AP-86
   std::string radio_type_;
   std::string remote_port_;
   bool ue_tdd_pilot_ = false;

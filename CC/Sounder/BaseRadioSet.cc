@@ -274,6 +274,7 @@ void BaseRadioSet::init(BaseRadioContext* context) {
   p.half_bw_by_channel = _cfg->channel_half_bw_hz();
   p.tx_gain_db = _cfg->houdini_tx_gain_db();
   p.rx_gain_db = _cfg->houdini_rx_gain_db();
+  if (_cfg->xband_frontend_static()) p.xband_fe_state = "rx";  // AP-86: the BS's board receives
   // Houdini BS: the beacon is device BRAM replay (tx_mode=replay). The RX
   // host port follows the channel (RadioHoudini::rxStreamArgs).
   p.tx_mode = "replay";

@@ -239,6 +239,7 @@ houdini::modev::Plan RadioHoudini::modeVPlan(const RadioParams& p) {
   m.rx_gain_db = p.rx_gain_db;
   m.rx_freq_offset_hz = p.rx_freq_offset_hz;
   m.tx_freq_offset_hz = p.tx_freq_offset_hz;
+  m.xband_fe_state = p.xband_fe_state;
   return m;
 }
 

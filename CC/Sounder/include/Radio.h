@@ -76,6 +76,7 @@ struct RadioParams {
   std::map<size_t, double> half_bw_by_channel;  ///< AP-85: per-channel overrides of half_bw_hz
   double tx_gain_db = std::numeric_limits<double>::quiet_NaN();  ///< NaN: not written
   double rx_gain_db = std::numeric_limits<double>::quiet_NaN();
+  std::string xband_fe_state;  ///< AP-86: the X-band front end's static state, "tx"/"rx"; empty = none
 };
 
 class Radio {

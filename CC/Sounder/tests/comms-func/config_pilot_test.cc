@@ -18,6 +18,8 @@
  */
 #include <algorithm>
 #include <cmath>
+#include <fstream>
+#include <iterator>
 #include <complex>
 #include <cstdio>
 #include <string>
@@ -111,6 +113,31 @@ int main() {
     } catch (const std::exception& e) {
       check(false, std::string(f) + ": Config threw: " + e.what());
     }
+  }
+  {  // AP-86: the X-band front-end switch
+    try {
+      Config fe("files/houdini-dualband-xw-steer-fe.json", "/tmp", false, false, false);
+      check(fe.xband_frontend_static(), "houdini-dualband-xw-steer-fe.json: xband_frontend_static on [mutation: the key not parsed]");
+      Config demo("files/houdini-dualband-xw-steer.json", "/tmp", false, false, false);
+      check(!demo.xband_frontend_static(), "the frozen demo config leaves the front end off [mutation: the default flipped]");
+    } catch (const std::exception& e) {
+      check(false, std::string("AP-86 configs: Config threw: ") + e.what());
+    }
+    // With a UE hardware framer the UE would arm a TDD schedule under the
+    // static source, which the device refuses: the config must refuse first.
+    std::ifstream in("files/houdini-dualband-xw-steer-fe.json");
+    std::string txt((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    const std::string key = "\"xband_frontend_static\": true,";
+    const size_t at = txt.find(key);
+    bool refused = false;
+    if (at != std::string::npos) {
+      txt.insert(at + key.size(), " \"ue_hw_framer\": true,");
+      const char* tmp = "files/.ap86_hw_framer_tmp.json";
+      std::ofstream(tmp) << txt;
+      try { Config bad(tmp, "/tmp", false, false, false); } catch (const std::invalid_argument&) { refused = true; }
+      std::remove(tmp);
+    }
+    check(refused, "xband_frontend_static with ue_hw_framer is refused at load [mutation: the guard removed]");
   }
   std::printf("%s: %d failure(s)\n", g_fail == 0 ? "ALL PASS" : "FAILED", g_fail);
   return g_fail == 0 ? 0 : 1;
