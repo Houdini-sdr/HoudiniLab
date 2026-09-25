@@ -1152,7 +1152,7 @@ PAGE = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Houdini live CSI</title>
+<title>Houdini LIVE: Magic in the airwaves</title>
 <link rel="stylesheet" href="/vendor/tabler.min.css">
 <style>
 /* Local layer: only what Tabler has no class for. Every colour here is a Tabler
@@ -1226,7 +1226,7 @@ PAGE = r"""<!doctype html>
            fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
            stroke-linejoin="round" class="icon"><path stroke="none" d="M0 0h24v24H0z" fill="none"/>
         <path d="M6 18l0 -3"/><path d="M10 18l0 -6"/><path d="M14 18l0 -9"/><path d="M18 18l0 -12"/></svg>
-      <span>Houdini live CSI</span>
+      <span>Houdini LIVE: Magic in the airwaves</span>
     </span>
     <div class="ms-auto d-flex align-items-center gap-3">
       <div class="d-flex align-items-center gap-2" id="ctl" hidden>
