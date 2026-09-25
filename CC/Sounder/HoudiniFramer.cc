@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cerrno>
 #include <cmath>
 #include <complex>
@@ -19,6 +20,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <SoapySDR/Errors.hpp>
@@ -29,6 +31,7 @@
 #include "include/rx_gap_sink.h"
 #include "include/utils.h"
 #include "houdini/replay_strobe.h"
+#include "houdini/bs_slots.h"
 #include "houdini/slot_align.h"
 #include "houdini/tx_rx_boundary.h"
 #include "sync/beacon_shape.h"
@@ -187,6 +190,27 @@ void HoudiniFramer::start(void) {
   // Start the BS RX streams on demand (the reverse link / UE pilots). Kept
   // separate from beacon arming so the RX stream is not left overflowing while
   // the caller is busy elsewhere (e.g. waiting for the UE to acquire).
+  if (cfg_->bs_hw_framer() && cfg_->bs_rx_slots()) {
+    // AP-87: activate once the schedule runs (the proven order; a capture
+    // started earlier is not on the slot grid the cut assumes).
+    for (size_t c = 0; c < radios_.size(); ++c)
+      for (size_t i = 0; i < radios_.at(c).size(); ++i) {
+        if (i != cfg_->beacon_radio()) continue;
+        auto* dev = radios_.at(c).at(i)->RawDev();
+        std::string st;
+        const auto t0 = std::chrono::steady_clock::now();
+        for (;;) {
+          st = dev->readSetting("TDD_STAT");
+          if (st.find("state=running") != std::string::npos) break;
+          if (std::chrono::steady_clock::now() - t0 > std::chrono::seconds(3)) {
+            MLPD_WARN("BS: the TDD schedule is not running 3 s after the arm (TDD_STAT '%s'); activating anyway\n",
+                      st.c_str());
+            break;
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+      }
+  }
   for (size_t c = 0; c < radios_.size(); ++c)
     for (size_t i = 0; i < radios_.at(c).size(); ++i)
       radios_.at(c).at(i)->activateRecv();
@@ -342,6 +366,24 @@ void HoudiniFramer::armTdd(void) {
       // bench. (The guarded probe ring in DEMO_VERIFICATION.md 4.12 avoided
       // the warning; the shipped ring does not.)
       tdd.at(beacon_slot) = '6';        // + beacon strobe on the B slot
+      if (cfg_->bs_rx_slots()) {
+        // AP-87, the fix for O1: arm the pattern the schedule means (the beacon
+        // slot strobe only, the rx slots rx, guards closed) with the device's
+        // slots mode, which keeps the capture alive and cuts every packet
+        // outside the rx slots. The framer's read then carries the UE's P and U
+        // on their true offsets and zeros elsewhere: its own beacon and
+        // whatever is on the air in the guards never reach the search.
+        if (sched.size() != spf_tdd)
+          throw std::runtime_error("bs_rx_slots: the BS schedule has " + std::to_string(sched.size()) +
+                                   " slots and the frame " + std::to_string(spf_tdd));
+        tdd = houdini::bsslots::tddPattern(sched, true);
+        dev->writeSetting("TDD_RX_MODE", "slots");  // the framer is idle here (the ladder above)
+        std::string mode = dev->readSetting("TDD_RX_MODE");
+        mode.erase(mode.find_last_not_of(" \t\r\n") + 1);
+        if (mode != "slots")
+          throw std::runtime_error("bs_rx_slots: TDD_RX_MODE reads '" + mode +
+                                   "' (a device without SH-347 slots mode ignores the key)");
+      }
       htdd_frame_ticks_ = static_cast<long long>(spf_tdd) * htdd_symbol_ticks_;
 
       // PHYSICAL TX channel for the strobe (beacon_channel() is the logical index
@@ -436,6 +478,24 @@ void HoudiniFramer::armTdd(void) {
       setup_framer();
       htdd_epoch_ = armTddOnce(dev, setup_framer, htdd_symbol_ticks_,
                                   static_cast<long long>(spf_tdd));
+      if (cfg_->bs_rx_slots()) {
+        // The device's own record of the rx slots it cuts to, against ours.
+        const std::string rs = dev->readSetting("TDD_RX_SLOTS");
+        std::string active, rxmap;
+        std::stringstream ss(rs);
+        std::string tok;
+        while (ss >> tok) {
+          if (tok.rfind("active=", 0) == 0) active = tok.substr(7);
+          if (tok.rfind("rx=", 0) == 0) rxmap = tok.substr(3);
+        }
+        const std::string want = houdini::bsslots::rxBits(tdd);
+        if (active != "1" || rxmap != want)
+          throw std::runtime_error("bs_rx_slots: TDD_RX_SLOTS reads '" + rs + "', wanted active=1 rx=" + want);
+        auto* hrs = dynamic_cast<RadioHoudini*>(r);
+        if (hrs == nullptr) throw std::runtime_error("bs_rx_slots: the BS radio is not a Houdini radio");
+        hrs->setRxSlotMap(htdd_epoch_, htdd_symbol_ticks_, htdd_frame_ticks_, want);
+        MLPD_INFO("BS: receives only its rx slots (AP-87): TDD_RX_SLOTS %s\n", rs.c_str());
+      }
       htdd_rx_cursor_ = 0;
       htdd_last_win_tick_ = 0;
       MLPD_INFO(

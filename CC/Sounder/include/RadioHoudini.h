@@ -8,6 +8,8 @@
 #ifndef RADIO_HOUDINI_H_
 #define RADIO_HOUDINI_H_
 
+#include <string>
+#include <utility>
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -71,6 +73,17 @@ class RadioHoudini : public RadioSoapy {
   /// interpolated and beat-padded here; otherwise RadioSoapy::xmit unchanged.
   int xmit(const void* const* buffs, int samples, int flags, long long& frameTime) override;
   size_t lastPadSamples() const override { return last_pad_samples_; }
+  /// AP-87: the armed schedule's rx slots (one '0'/'1' per slot, slots of n
+  /// ticks, frames of fr from `epoch`). With the device's slots mode the guards
+  /// and the beacon slot are cut from the stream, so a read's timestamp gap
+  /// there is the schedule, not a loss: recv zero-pads it as always but counts
+  /// (and reports to the gap sink) only the part inside an rx slot.
+  void setRxSlotMap(long long epoch, long long n, long long fr, std::string rx) {
+    slot_epoch_ = epoch;
+    slot_n_ = n;
+    slot_fr_ = fr;
+    slot_rx_ = std::move(rx);
+  }
   int64_t rxSamplePos() const override { return rx_sample_pos_; }
 
   /// The device and stream arguments for a Houdini node.
@@ -115,6 +128,8 @@ class RadioHoudini : public RadioSoapy {
   double rx_rate_ = 0.0;         // cached RX sample rate for the grid tracker
   int64_t rx_sample_pos_ = 0;    // absolute samples emitted across recv calls
   size_t last_pad_samples_ = 0;  // zeros inserted into the last window
+  long long slot_epoch_ = 0, slot_n_ = 0, slot_fr_ = 0;  // AP-87 rx slot map (setRxSlotMap)
+  std::string slot_rx_;
 };
 
 #endif  // RADIO_HOUDINI_H_

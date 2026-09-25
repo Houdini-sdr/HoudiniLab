@@ -4,6 +4,7 @@
   *
   * RENEW OPEN SOURCE LICENSE: http://renew-wireless.org/license
 */
+#include "houdini/bs_slots.h"
 #include "houdini/rx_packet.h"
 #include "include/RadioHoudini.h"
 
@@ -679,10 +680,19 @@ int RadioHoudini::recv(void* const* buffs, int samples, long long& frameTime) {
         std::memmove(d + pad * kBytesPerSamp, d, keep * kBytesPerSamp);
         std::memset(d, 0, pad * kBytesPerSamp);
       }
-      Sounder::RxGapSink::instance().push({rx_sample_pos_ + got,
-                                           static_cast<int64_t>(pad),
-                                           Sounder::kGapTimeJump});
-      padded += pad;
+      // AP-87: in slots mode the part of the gap in a guard or the beacon slot is
+      // the schedule's (cut by the device); only the part in an rx slot is lost.
+      size_t loss = pad;
+      if (!slot_rx_.empty() && rx_rate_ > 0.0) {
+        const long long win_tick = std::llround(static_cast<double>(frameTime) * rx_rate_ / 1e9);
+        loss = static_cast<size_t>(houdini::bsslots::rxOverlap(win_tick + got, static_cast<long long>(pad),
+                                                               slot_epoch_, slot_n_, slot_fr_, slot_rx_));
+      }
+      if (loss > 0)
+        Sounder::RxGapSink::instance().push({rx_sample_pos_ + got,
+                                             static_cast<int64_t>(loss),
+                                             Sounder::kGapTimeJump});
+      padded += loss;
       got += static_cast<int>(pad + keep);
     } else {
       got += r;

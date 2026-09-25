@@ -73,6 +73,8 @@ class Config {
   inline size_t num_cells(void) const { return this->num_cells_; }
   inline size_t guard_mult(void) const { return this->guard_mult_; }
   inline bool bs_hw_framer(void) const { return this->bs_hw_framer_; }
+  /// AP-87: the BS receives only its rx slots (the real pattern, SH-347 slots mode).
+  inline bool bs_rx_slots(void) const { return this->bs_rx_slots_; }
   inline bool hw_framer(void) const { return this->hw_framer_; }
   // Radio backend selector within the SoapySDR (non-UHD) path: "iris" (default)
   // drives the Iris HW correlator/TDD; "houdini" drives the Houdini RFSoC over
@@ -505,6 +507,7 @@ class Config {
   std::string bs_rx_channel_;
   std::string frame_mode_;
   bool bs_hw_framer_;
+  bool bs_rx_slots_ = false;  // AP-87
   bool hw_framer_;
   std::string radio_type_;
   std::string remote_port_;

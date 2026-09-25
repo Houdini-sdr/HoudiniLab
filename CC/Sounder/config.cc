@@ -7,6 +7,7 @@
 ---------------------------------------------------------------------
 */
 
+#include "houdini/rx_packet.h"
 #include "include/config.h"
 
 #include <cerrno>
@@ -340,6 +341,9 @@ Config::Config(const std::string& jsonfile, const std::string& directory,
     max_frame_ = static_cast<size_t>(std::strtoull(mf, nullptr, 10));
   }
   bs_hw_framer_ = tddConf.value("bs_hw_framer", true);
+  // AP-87: the BS receives only its rx slots (the real TDD pattern and the
+  // device's SH-347 slots mode); checked below once the slot size is known.
+  bs_rx_slots_ = tddConf.value("bs_rx_slots", false);
 
   // Load/Build BS and Client SDRs' Schedules
   bs_array_frames_.resize(num_cells_);
@@ -518,6 +522,13 @@ Config::Config(const std::string& jsonfile, const std::string& directory,
   ofdm_symbol_size_ = fft_size_ + cp_size_;
   slot_samp_size_ = symbol_per_slot_ * ofdm_symbol_size_;
   samps_per_slot_ = slot_samp_size_ + prefix_ + postfix_;
+  if (bs_rx_slots_ && !bs_hw_framer_) {
+    throw std::invalid_argument("bs_rx_slots needs bs_hw_framer (the native TDD framer arms the pattern)");
+  }
+  if (bs_rx_slots_ && houdini::rxpkt::tiledPacketOrDefault(samps_per_slot_) == 0) {
+    throw std::invalid_argument("bs_rx_slots needs packets that tile the slot (the device cuts whole packets at the "
+                                "slot edges); a " + std::to_string(samps_per_slot_) + "-sample slot has no such packet");
+  }
   assert((internal_measurement_ && num_cl_antennas_ == 0) || (dl_pilots_en_) ||
          (num_cl_sdrs_ > 0 && slot_per_frame_ == cl_frames_.at(0).size()));
 

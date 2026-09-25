@@ -112,6 +112,29 @@ int main() {
       check(false, std::string(f) + ": Config threw: " + e.what());
     }
   }
+  {  // AP-87: the BS receiving only its rx slots
+    try {
+      Config sl("files/houdini-dualband-xw-steer-slots.json", "/tmp", false, false, false);
+      check(sl.bs_rx_slots() && sl.bs_hw_framer(), "houdini-dualband-xw-steer-slots.json: bs_rx_slots on [mutation: the key not parsed]");
+      Config demo("files/houdini-dualband-xw-steer.json", "/tmp", false, false, false);
+      check(!demo.bs_rx_slots(), "the demo config leaves bs_rx_slots off [mutation: the default flipped]");
+    } catch (const std::exception& e) {
+      check(false, std::string("AP-87 configs: Config threw: ") + e.what());
+    }
+    std::ifstream in("files/houdini-dualband-xw-steer-slots.json");
+    std::string txt((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    const std::string key = "\"bs_hw_framer\": true,";
+    const size_t at = txt.find(key);
+    bool refused = false;
+    if (at != std::string::npos) {
+      txt.replace(at, key.size(), "\"bs_hw_framer\": false,");
+      const char* tmp = "files/.ap87_no_framer_tmp.json";
+      std::ofstream(tmp) << txt;
+      try { Config bad(tmp, "/tmp", false, false, false); } catch (const std::invalid_argument&) { refused = true; }
+      std::remove(tmp);
+    }
+    check(refused, "bs_rx_slots without bs_hw_framer is refused at load [mutation: the check removed]");
+  }
   std::printf("%s: %d failure(s)\n", g_fail == 0 ? "ALL PASS" : "FAILED", g_fail);
   return g_fail == 0 ? 0 : 1;
 }
