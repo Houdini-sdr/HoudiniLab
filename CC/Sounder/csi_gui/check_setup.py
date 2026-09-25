@@ -285,7 +285,10 @@ def hwinfo(ip, port):
     finally:
         # A clean close: a connection dropped at process exit leaves a
         # "handlerLoop() FAIL: recv(header)" in each radio's server journal.
-        SoapySDR.Device.unmake(sdr)
+        # close(), not Device.unmake(sdr): only close() flags the object, so the
+        # binding's __del__ does not unmake the freed device a second time (in
+        # one process that corrupted the heap on the next open: a bus error).
+        sdr.close()
 
 
 def check_egress(rep, ip, raw):
