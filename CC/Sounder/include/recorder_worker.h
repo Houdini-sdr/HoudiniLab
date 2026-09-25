@@ -18,6 +18,7 @@
 #include "config.h"
 #include "houdini/cir.h"
 #include "houdini/dc_fft.h"
+#include "houdini/spectrum.h"
 #include "hdf5_lib.h"
 #include "receiver.h"
 
@@ -60,6 +61,9 @@ class RecorderWorker {
   std::vector<std::complex<float>> pilot_ref_;  // DC-centered freq-domain pilot
   std::unique_ptr<houdini::DcCenteredFft> fft_;  // DC-centred per-symbol FFT (AP-79)
   std::unique_ptr<houdini::CirFromH> cir_;       // the view's impulse response (AP-79)
+  std::unique_ptr<houdini::WelchSpectrum> spc_;  // the pilot slot's spectrum (null: off)
+  std::unordered_map<uint32_t, long long> spc_last_ns_;  // spectrum send timer
+  double spc_throttle_ns_ = 0.0;                 // its own, slower, interval
   std::unordered_map<uint32_t, long long> met_last_ns_;  // channel-info send timer
   void sendMeta(uint32_t ant, long long now_ns);
   double csi_throttle_ns_ = 0.0;                // per-antenna min send interval
@@ -103,6 +107,7 @@ class RecorderWorker {
   void sendCsi(Packet* pkt);                          // pilot -> CSI + cache H
   void sendConstellation(Packet* pkt);                // uplink data -> equalize
   void sendAdc(Packet* pkt, bool is_pilot);           // pilot slot -> raw-ADC envelope
+  void sendSpectrum(Packet* pkt);                     // pilot slot -> its spectrum (SPC1)
   // Saturation ledger across ALL slots between two sends: the drawn envelope is the
   // pilot's, but clipping on any other slot still has to be reported.
   struct AdcAny { int32_t peak = 0; uint32_t clipped = 0; };
