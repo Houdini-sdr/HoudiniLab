@@ -208,12 +208,44 @@ steering:
 - Stop from the dashboard, or Ctrl+C on the backend (it stops the sounder's
   whole process group).
 - A TX playout freeze (A7): Stop, then Start. The new run's stream setup clears it.
+- The BS's sub-6 receive degraded from the very start of a run, with the log line
+  `ADC0 SUBADC_DCDR STILL set after 4 attempts, proceeding`: the ADC's bring-up
+  retry ran out (SH-227; `.22` needed its fourth and last attempt once). Stop,
+  then Start: a fresh open reruns the tile bring-up (every retry so far came up
+  healthy within four attempts; the recovery itself is inferred, not tested).
 - After a rig-host reboot, run the setup check before anything else: a bounce of
   the host's data ports can wedge a node's FPGA egress (HS-225), which fails the
   check's `egress` line; recover by reloading that node's PL or rebooting it.
 - A radio still held by an old sounder: the setup check names its pid; stop that
   run or `kill <pid>`. `tools/rig_release_holders.py` also works but stops EVERY
   sounder and dashboard on the host, including a running `--control` backend.
+
+## A8b. The canned-data fallback
+
+A recording of the dashboard's input from a good run, played back into the
+dashboard with no radios: every panel shows real rig data (channel,
+constellation, CIR, ADC, beacon sync).
+
+1. Record during a good run: set `HOUDINI_CSI_RECORD` before the dashboard
+   starts, in the same shell as the A4 exports (a scripted `fstage_run.sh` run
+   inherits it too):
+
+   ```sh
+   mkdir -p ~/demo_rec && export HOUDINI_CSI_RECORD=~/demo_rec/<name>.rec
+   ```
+
+   The dashboard prints `recording every datagram to ...` at start. It flushes
+   about once a second and stops at 2 GB (`--record-max-mb`).
+2. Replay, with no sounder running:
+
+   ```sh
+   python3 csi_gui/csi_server.py &
+   python3 csi_gui/replay_feed.py ~/demo_rec/<name>.rec --loop
+   ```
+
+   `--start` and `--duration` pick a window (seconds into the recording), for
+   example a stretch with steering settled. Each loop restarts the frame
+   counters, which the beacon-sync card shows as a new segment.
 
 ## A9. The CPU isolation experiment (checklist)
 
