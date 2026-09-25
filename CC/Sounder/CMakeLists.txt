@@ -52,7 +52,12 @@ if(${CMAKE_C_COMPILER_ID} STREQUAL "GNU")
   # on here to keep a shadowed declaration from silently hiding an outer one:
   # the tree was clean of all 7 when it was turned on, and third_party/ is a
   # SYSTEM include below, so it contributes no noise.
-  set(CMAKE_CXX_FLAGS "-std=c++17 -Wall -Wextra -Wshadow ${ARCH_FLAGS}")
+  # -Wno-psabi: GCC's x86 note that passing a struct with a std::complex<float>
+  # member (the detector's Detection) "changed ABI in GCC 4.4" matters only when
+  # linking against objects built with a GCC older than 4.4; it printed once per
+  # call site on every x86 build and buried real warnings. The ARM build never
+  # printed it.
+  set(CMAKE_CXX_FLAGS "-std=c++17 -Wall -Wextra -Wshadow -Wno-psabi ${ARCH_FLAGS}")
   set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -O0")
 else()
   message(FATAL_ERROR "Unsupported version of compiler")
