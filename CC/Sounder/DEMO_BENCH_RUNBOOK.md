@@ -271,6 +271,29 @@ constellation, CIR, ADC, beacon sync).
    On the rig host itself, never replay while a sounder run is live: the replay
    and the run's dashboard use the same ports (UDP 9999, HTTP 8080).
 
+## A8d. Over the air: antennas and the room (before the first run)
+
+The first sub-6 over-the-air runs lost about 20 dB to antenna placement and a
+quarter of the beacons to nearby emitters; both are fixed at the bench, not in
+software.
+
+1. Stand every stick vertical (same polarisation), each node's TX stick
+   broadside to the other node's RX stick (sides facing, never end to end),
+   in line of sight, off the bench surface and away from metal. A stick
+   rotated about its own axis changes nothing; a few centimetres of position
+   can move a reflection null by 10 dB, so try small moves.
+2. Clear the UE's antennas of 2.4 GHz emitters: phones, smartwatches, BLE tags,
+   wireless keyboard and mouse dongles, and Wi-Fi access points close by. The
+   bench survey found a bursty emitter at 2426 MHz (BLE advertising channel
+   38, on the sub-6 centre) near the UE, and 27% of the UE's beacon detections
+   fell below 10 dB until it was dealt with.
+3. Aim against the live dashboard: the beacon-sync card's `beacon SNR` (the
+   demo's detector floor is 25 dB; wired reads about 42), the Sub-6 card's MER
+   over time and |H|, and the X-band card's MER holding steady (a dipping
+   X-band on a cabled IF means the UE's beacon is weak or hit).
+4. Hold still for a minute and read the numbers again before starting the
+   demo run.
+
 ## A8c. Demo day: bring-up at the venue (in order)
 
 **The demo build [user]:** the X-band at 270 RB (97.2 MHz) beside the sub-6 at
