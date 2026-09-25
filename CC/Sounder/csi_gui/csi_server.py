@@ -2141,8 +2141,13 @@ function drawSyncCard(tid, sync){
         +(Math.abs(bm)<CFO_NOISE_HZ?', inside the ~2 kHz phase-noise floor':'')
         +')';
   }
-  card.read.textContent=
-    'clock '+kppm.toFixed(3)+' ppm (tracked)  |  residual '
+  // The beacon's detection SNR at the UE [user: 'is beacon SNR displayed
+  // anywhere?']: the median over the latest detections, the number to watch
+  // while aiming antennas (the demo's detector floor is 25 dB).
+  const snrs=hist.slice(-40).map(h=>h.snr).filter(v=>Number.isFinite(v)).sort((a,b)=>a-b);
+  const snrStr=snrs.length?('beacon SNR '+snrs[snrs.length>>1].toFixed(1)+' dB (median of '+snrs.length+')  |  '):'';
+  card.read.textContent=snrStr
+    +'clock '+kppm.toFixed(3)+' ppm (tracked)  |  residual '
     +tppm.toFixed(4)+' ppm (resid slope)  |  '+bstr
     +'  |  '+n+' locked over '+span+' frames'+note;
 }
