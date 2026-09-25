@@ -122,4 +122,18 @@ met = struct.pack("<IIIIIddd", cs.MAGIC_MET, 1, 2, 4096, 1596, 4380e6, 30e3, 47.
 a, m = cs._parse_met(met)
 check(a == 1 and m["ch"] == "C" and m["fc_mhz"] == 4380.0 and m["bw_mhz"] == 47.88 and m["fft"] == 4096, "MET1 parses (channel C, 4380 MHz, 47.88 MHz)")
 check(cs._parse_met(met[:-8]) is None, "a short MET1 is dropped")
+# The |H| axis top: --mag-top, else the config's dashboard_mag_top, else the default.
+import json, os, tempfile
+td = tempfile.mkdtemp(prefix="csi_magtop_")
+for name, body in (("with.json", {"dashboard_mag_top": 115}), ("without.json", {}),
+                   ("bad.json", {"dashboard_mag_top": "115"}), ("flag.json", {"dashboard_mag_top": True})):
+    json.dump(body, open(os.path.join(td, name), "w"))
+check(cs._mag_top(td, "with.json", None) == 115.0, "the config's dashboard_mag_top sets the |H| axis top (mutation: ignore the config)")
+check(cs._mag_top(td, "with.json", 100.0) == 100.0, "an explicit --mag-top beats the config (mutation: config first)")
+check(cs._mag_top(td, "without.json", None) == cs.MAG_TOP_DEFAULT == 90.0, "no key: the old default 90 (mutation: a new default)")
+check(cs._mag_top(td, "bad.json", None) == 90.0 and cs._mag_top(td, "flag.json", None) == 90.0,
+      "a non-number (a string, a bool) falls back to the default (mutation: float() any value)")
+check(cs._mag_top(td, "missing.json", None) == 90.0, "an unreadable config falls back to the default")
+demo = json.load(open(os.path.join(os.path.dirname(os.path.abspath("csi_server.py")), "..", "files", "houdini-dualband.json")))
+check(demo.get("dashboard_mag_top") == 115, "the demo config carries its axis top (|H| read 97-104 dB there)")
 print("FAILED %d" % fails if fails else "ALL PASS"); sys.exit(1 if fails else 0)
