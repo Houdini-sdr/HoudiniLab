@@ -1301,7 +1301,7 @@ function readTheme(){
   const s=getComputedStyle(document.documentElement), v=n=>s.getPropertyValue(n).trim();
   C={grid:v('--tblr-border-color'), bg:v('--tblr-bg-surface-tertiary'),
      mag:v('--tblr-azure'), phase:v('--tblr-green'), warn:v('--tblr-red'),
-     rawph:v('--tblr-yellow'),
+     mer:v('--tblr-purple'),
      pts:'rgba('+v('--tblr-azure-rgb')+',0.55)'};
 }
 let themeChanged=false;
@@ -1396,10 +1396,15 @@ function makeCard(ant){
      +'</ul>'
      +'<div class="csi-plots csi-view" data-view="channel">'
       +frame('|H| (dB rel.) vs subcarrier','csi-h-line',magLabels(),['','',''],off)
-      // Raw above corrected [user]: raw = arg(H) exactly as measured (window
-      // back-off ramp + per-run offset); corrected = de-ramped and run-anchored.
+      // MER over the last minute above the phase shape [user]. It replaced the
+      // raw arg(H) panel, which carried the FFT window's half-CP advance (56
+      // turns across the sub-6 band, 114 across the X-band) and showed nothing
+      // readable; MER over time shows steering, fades and interference as they
+      // happen.
       +'<div class="csi-phase-stack">'
-      +frame('phase (raw, rad)','csi-h-half',['1.0π','0.0π','-1.0π'],['','',''])
+      +frame('MER (dB), last '+MER_HIST_S+' s','csi-h-half',
+             [MER_TOP,MER_TOP*3/4,MER_TOP/2,MER_TOP/4,0].map(String),['-'+MER_HIST_S+' s','-'+(MER_HIST_S/2)+' s','now'],
+             '<span class="text-secondary tnum csi-mer-now"></span>')
       +frame('phase shape, delay and common phase removed (deg)','csi-h-half',
              ['+'+PH_SPAN_DEG+'°','0°','-'+PH_SPAN_DEG+'°'],['','',''],
              '<span class="text-secondary tnum csi-ph-delay"></span>'
@@ -1432,11 +1437,12 @@ function makeCard(ant){
     +'</div>';
   document.getElementById('ants').appendChild(wrap);
   const cvs=[...wrap.querySelectorAll('.csi-view canvas')];
-  cards[ant]={magCv:cvs[0],rawPhaseCv:cvs[1],phaseCv:cvs[2],wfCv:cvs[3],
+  cards[ant]={magCv:cvs[0],merCv:cvs[1],phaseCv:cvs[2],wfCv:cvs[3],
               consCv:cvs[4],cirCv:cvs[5],spcCv:cvs[6],dim:null,wfimg:null,
               quality:wrap.querySelector('.csi-quality'),
               phOff:wrap.querySelector('.csi-ph-off'),phDelay:wrap.querySelector('.csi-ph-delay'),
               phAcc:null,phLast:null,phT:0,
+              merHist:[],merT:0,merNow:wrap.querySelector('.csi-mer-now'),
               cirX:wrap.querySelectorAll('.csi-h-cir .csi-x-axis span'),
               status:wrap.querySelector('.csi-status'),
               adcStatus:wrap.querySelector('.csi-adc-status'),
@@ -1479,6 +1485,7 @@ function repaintCard(card){
   if(card.adcRec) drawAdc(card,card.adcRec);
   if(card.spcRec) drawSpc(card,card.spcRec);
   if(card.cirRec) drawCir(card,card.cirRec);
+  drawMer(card);
 }
 
 // Collapsible cards [user]: a chevron in the header folds the card to its header.
@@ -1528,14 +1535,14 @@ function fitCanvas(cv, useDpr){
 function fitCard(card, force){
   const d={};
   d.mag  = fitCanvas(card.magCv,  true);
-  d.rawph= fitCanvas(card.rawPhaseCv,true);
+  d.merh = fitCanvas(card.merCv,  true);
   d.phase= fitCanvas(card.phaseCv,true);
   d.cons = fitCanvas(card.consCv, true);
   d.cir  = fitCanvas(card.cirCv,  true);
   d.spc  = fitCanvas(card.spcCv,  true);
   d.wf   = fitCanvas(card.wfCv,   false);
   card.dim=d;
-  card.mag=d.mag.ctx; card.rawph=d.rawph.ctx; card.phase=d.phase.ctx;
+  card.mag=d.mag.ctx; card.merc=d.merh.ctx; card.phase=d.phase.ctx;
   card.cons=d.cons.ctx; card.cir=d.cir.ctx; card.spc=d.spc.ctx; card.wf=d.wf.ctx;
   // Only when the waterfall's device size ACTUALLY changed: its history lives in
   // the bitmap and cannot be resampled honestly, so a real resize has to restart
@@ -1581,6 +1588,32 @@ function line(ctx,vals,ymin,ymax,color,w,h){
 // moves by about a sample from one frame to the next, plus the two free-running
 // carriers' phase; both swamped the shape, which on a cable is the filters' ripple.
 // The removed delay is printed beside the title instead.
+// MER history [user]: the dashboard's own 1 s pooled MER (the quality line's
+// figure), sampled every MER_STEP_MS into a MER_HIST_S window on a FIXED
+// 0..MER_TOP dB axis; a gap in the line is a stretch with no constellation.
+const MER_HIST_S=60, MER_STEP_MS=500, MER_TOP=40;
+function sampleMer(card,cn){
+  if(!cn || cn.mer_db===undefined) return false;
+  const now=Date.now();
+  if(now-card.merT<MER_STEP_MS) return false;
+  card.merT=now;
+  card.merHist.push({t:now,v:cn.mer_db});
+  while(card.merHist.length && now-card.merHist[0].t>MER_HIST_S*1000) card.merHist.shift();
+  return true;
+}
+function drawMer(card){
+  if(!card.dim || !card.merc) return;
+  const d=card.dim.merh, n=Math.round(MER_HIST_S*1000/MER_STEP_MS)+1, now=Date.now();
+  grid(card.merc,d.w,d.h);
+  const vals=new Array(n).fill(null);
+  for(const p of card.merHist){
+    const k=n-1-Math.round((now-p.t)/MER_STEP_MS);
+    if(k>=0 && k<n) vals[k]=Math.max(0,Math.min(MER_TOP,p.v));
+  }
+  line(card.merc,vals,0,MER_TOP,C.mer,d.w,d.h);
+  const last=card.merHist.length ? card.merHist[card.merHist.length-1] : null;
+  card.merNow.textContent=(last && now-last.t<2000) ? ('now '+last.v.toFixed(1)+' dB') : '';
+}
 const PH_DRAW_MS=500, PH_SPAN_DEG=10;  // measured: the shape is about +-1 deg typical, 5-9 deg at the 99th percentile; +-5 pinned the tails [user]
 function phaseShape(ph){
   const n=ph.length;
@@ -1643,9 +1676,7 @@ function drawPhase(card,c,advance){
     card.phLast={vals:vals, slope:a.slope/a.frames, frames:a.frames};
     card.phAcc=null;
   }
-  const dr=card.dim.rawph, dp=card.dim.phase;
-  grid(card.rawph,dr.w,dr.h);
-  if(c.raw_ph) line(card.rawph,c.raw_ph,-Math.PI,Math.PI,C.rawph,dr.w,dr.h);
+  const dp=card.dim.phase;
   grid(card.phase,dp.w,dp.h);
   const L=card.phLast;
   if(!L) return;
@@ -1671,11 +1702,11 @@ function setScAxis(card,nsc){
   if(card.nsc===nsc) return;
   card.nsc=nsc;
   const lab=['-'+(nsc>>1),'DC','+'+(nsc>>1)];
-  // Gutters in document order: mag, raw phase, corrected phase, waterfall.
-  // The constellation (index 4) keeps its own I/Q labels (Opus review M14:
-  // adding the phase stack shifted these indices and the waterfall lost its
-  // labels).
-  for(let i=0;i<4;i++){
+  // Gutters in document order: mag, MER history, phase shape, waterfall. The
+  // MER history (index 1) keeps its time labels and the constellation (index 4)
+  // its I/Q labels (Opus review M14: adding the phase stack shifted these
+  // indices and the waterfall lost its labels).
+  for(const i of [0,2,3]){
     const sp=card.xax[i].querySelectorAll('span');
     for(let j=0;j<3;j++) sp[j].textContent=lab[j];
   }
@@ -2133,6 +2164,7 @@ function onData(obj){
     if(rec.cns && rec.cns.frame!==card.lastCns){
       if(open){ drawCons(card,rec.cns); drawQuality(card); } else card.cnsRec=rec.cns;
       card.lastCns=rec.cns.frame; card.cnsT=Date.now();
+      if(sampleMer(card,rec.cns) && open) drawMer(card);
     }
     if(rec.met && !card.metRec) { card.metRec=rec.met; if(open) drawQuality(card); }
     else if(rec.met) card.metRec=rec.met;
