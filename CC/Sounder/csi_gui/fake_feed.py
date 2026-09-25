@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Synthetic CSI/constellation/ADC feed, so the dashboard can be seen with no radios.
 
-Sends the same three datagram kinds `sounder --view` sends, at the same rates, to a
+Sends the datagram kinds `sounder --view` sends, at the same rates, to a
 running ``csi_server.py``. Use it to look at the dashboard, to check a change to the
 page, or to reproduce a display bug without booting the rig:
 
@@ -36,6 +36,7 @@ MAGIC_ADC = 0x41444331
 MAGIC_ADC2 = 0x41444332
 MAGIC_CIR = 0x43495231
 MAGIC_MET = 0x4D455431
+MAGIC_SPC = 0x53504331
 ADC_FS = 32767
 ADC_COLS = 250
 
@@ -145,6 +146,29 @@ def send_met(sock, dest, ant):
     sock.sendto(struct.pack("<IIIIIddd", MAGIC_MET, ant, ch, 4096, 1596, fc, 30e3, 1596 * 30e3), dest)
 
 
+def send_spc(sock, dest, frame, ant):
+    """SPC1, the pilot spectrum at the R3 numerology (122.88 Msps, 2048-point
+    segments, 512 bins of 240 kHz), shaped loosely on the rig's levels: the
+    occupied band, its skirts, the channel filter, and one tone (antenna 0 an
+    Fs/2-like spur at +32.6 MHz, antenna 1 an image at -43.68 MHz)."""
+    nbins, nfft, rate = 512, 2048, 122.88e6
+    r = nfft // nbins
+    band, floor_in, floor_out = (-57.0, -110.0, -125.0) if ant % 2 == 0 else (-61.0, -104.0, -107.0)
+    tone_mhz, tone_db = (32.6, -75.0) if ant % 2 == 0 else (-43.68, -80.0)
+    db = []
+    for i in range(nbins):
+        f = (i * r + (r - 1) / 2.0 - nfft / 2) * rate / nfft / 1e6
+        a = abs(f)
+        v = band + 0.8 * math.sin(f / 3.0) if a < 23.94 else max(floor_in, band - 12.0 - 6.0 * (a - 23.94))
+        if a > 33.0:
+            v = max(floor_out, floor_in - 4.0 * (a - 33.0))
+        if abs(f - tone_mhz) < rate / nbins / 2e6:
+            v = tone_db
+        db.append(v + random.gauss(0, 0.4))
+    sock.sendto(struct.pack("<IIIIIff", MAGIC_SPC, frame, ant, nbins, nfft, rate, rate / nbins)
+                + struct.pack("<%df" % nbins, *db), dest)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -195,6 +219,8 @@ def main():
                     send_cir(sock, dest, frame, ant, args.rate)
                     if frame % max(1, int(args.fps)) == 0:
                         send_met(sock, dest, ant)
+                    if frame % max(1, int(args.fps / 4)) == 0:  # the sounder's 4 Hz
+                        send_spc(sock, dest, frame, ant)
             frame += 1
             time.sleep(1.0 / args.fps)
     except KeyboardInterrupt:
