@@ -373,6 +373,13 @@ RadioHoudini::~RadioHoudini() {
   // The end-of-run state, while the streams are still open (the base class
   // closes them after this), so drift across the run is visible.
   if (dev_ != nullptr) writeStateRecord(params_.label, *dev_, kEndOfRunStage, params_.rx_channels, params_.tx_channels);
+  // Every stamped read against the stream's count, for the whole run.
+  if (rd_reads_ > 0) {  // braces: MLPD_INFO is several statements
+    MLPD_INFO("%s: RX read check: %lld stamped reads, %lld on the count, %lld after a gap (%lld samples lost in rx "
+              "slots, %lld the schedule's gaps), %lld out of order, %lld time jumps\n",
+              params_.label.c_str(), rd_reads_, rd_on_count_, rd_gap_reads_, rd_gap_lost_, rd_gap_sched_,
+              rd_backward_, rd_resync_);
+  }
   if (!slot_rx_.empty()) {
     // AP-87: our own check of every read against the rx slots, and the host
     // plugin's cut counters, read while the stream is still open (its
@@ -687,6 +694,27 @@ int RadioHoudini::recv(void* const* buffs, int samples, long long& frameTime) {
     if (rx_rate_ > 0.0 && (flags & SOAPY_SDR_HAS_TIME) != 0) {
       const Sounder::GridCheck gc = grid.onStamp(t, got);
       pad = std::min(gc.pad_samples, static_cast<size_t>(samples - got));
+      ++rd_reads_;
+      if (gc.backward || gc.resync) {
+        // The read is NOT where the count puts it: earlier than the samples
+        // already placed (out of order or overlapping) or a jump beyond the
+        // gap cap. Splicing it in would put its samples at the wrong times, so
+        // the whole window is marked untrusted (counted as padded, which the
+        // consumers refuse) instead of used.
+        long long& n_bad = gc.backward ? rd_backward_ : rd_resync_;
+        const long long k = ++n_bad;
+        if ((k & (k - 1)) == 0) {  // braces: MLPD_WARN is several statements
+          MLPD_WARN("%s: a read of %d samples stamped %lld samples %s the stream's count (%s, occurrence %lld): "
+                    "this window is marked untrusted\n",
+                    params_.label.c_str(), r, static_cast<long long>(gc.delta < 0 ? -gc.delta : gc.delta),
+                    gc.delta < 0 ? "BEFORE" : "after", gc.backward ? "out of order" : "a time jump", k);
+        }
+        padded += static_cast<size_t>(r);
+      } else if (gc.pad_samples == 0) {
+        ++rd_on_count_;
+      } else {
+        ++rd_gap_reads_;
+      }
     } else {
       // No usable stamp, so this read is spliced onto the previous one with no
       // continuity check: precisely the corruption the grid tracker exists to
@@ -729,6 +757,8 @@ int RadioHoudini::recv(void* const* buffs, int samples, long long& frameTime) {
                                              static_cast<int64_t>(loss),
                                              Sounder::kGapTimeJump});
       padded += loss;
+      rd_gap_lost_ += static_cast<long long>(loss);
+      rd_gap_sched_ += static_cast<long long>(pad - loss);
       got += static_cast<int>(pad + keep);
     } else {
       got += r;

@@ -132,6 +132,12 @@ class RadioHoudini : public RadioSoapy {
   std::string slot_rx_;
   // AP-87 check: every read's stamped samples must lie inside an rx slot.
   long long slot_reads_ = 0, slot_samples_ = 0, slot_stray_ = 0, slot_stray_reads_ = 0;
+  // Every stamped read against the stream's sample count [user: 'make sure the
+  // data you read is where you expected it'] (the RX packets carry no sequence
+  // number, so the stamp is the count): on it, after a gap (samples lost vs the
+  // schedule's own gaps), out of order (earlier than the count), a time jump.
+  long long rd_reads_ = 0, rd_on_count_ = 0, rd_gap_reads_ = 0, rd_gap_lost_ = 0, rd_gap_sched_ = 0,
+            rd_backward_ = 0, rd_resync_ = 0;
 };
 
 #endif  // RADIO_HOUDINI_H_

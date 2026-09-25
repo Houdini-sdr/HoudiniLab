@@ -49,6 +49,7 @@ struct GridCheck {
   size_t pad_samples = 0;  // zeros to emit BEFORE the read's samples
   bool backward = false;   // timestamp moved backward (no pad)
   bool resync = false;     // time-base jump: t0 re-anchored (no pad)
+  int64_t delta = 0;       // the read's stamp minus the count, in samples (0 on the count)
 };
 
 // The one grid<->file time convention: sample index -> nanoseconds at
@@ -104,6 +105,7 @@ class TimeGridTracker {
       return result;
     }
     const int64_t delta = static_cast<int64_t>(std::llround(delta_d));
+    result.delta = delta;
     // |delta| <= tolerance_: timestamp rounding jitter, not a real gap.
     if (delta > tolerance_) {
       result.pad_samples = static_cast<size_t>(delta);
