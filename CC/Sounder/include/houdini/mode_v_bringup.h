@@ -293,10 +293,12 @@ inline Result bringUp(SoapySDR::Device& dev, const Plan& p) {
     }
   }
   for (const auto& t : res.tx)
-    logLine("TX ch" + std::to_string(t.channel) + fmt(": NCO %.3f MHz", t.nco_hz / 1e6) + ", zone " +
+    logLine("TX ch" + std::to_string(t.channel) + fmt(": NCO %.3f MHz", t.nco_hz / 1e6) +
+            fmt(", occupied +-%.3f MHz", p.halfBwFor(t.channel) / 1e6) + ", zone " +
             std::to_string(t.zone) + ", inverse sinc follows the zone");
   for (const auto& r : res.rx)
-    logLine("RX ch" + std::to_string(r.channel) + fmt(": NCO %.3f MHz", r.nco_hz / 1e6) + ", zone " +
+    logLine("RX ch" + std::to_string(r.channel) + fmt(": NCO %.3f MHz", r.nco_hz / 1e6) +
+            fmt(", occupied +-%.3f MHz", p.halfBwFor(r.channel) / 1e6) + ", zone " +
             std::to_string(r.zone) + ", cal Mode " + std::to_string(r.cal_mode) +
             (r.channel_filter ? ", +-24 MHz channel filter ON" : ", no channel filter"));
   // 8

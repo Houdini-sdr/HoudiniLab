@@ -314,7 +314,7 @@ aarch64.
 
 | # | Prediction | Falsifier |
 |---|---|---|
-| P1 | X starts; the mode-V log shows UE TX ch1 and BS RX ch2 planned at +-48.600 MHz (zone 2, BS RX ch2 cal mode 2, no RX filter), sub-6 lanes unchanged at +-23.940 MHz with the filter; the UE logs TX lane 1 as the wide halfband | a refusal, a filter on ch2, or ch0's plan changed |
+| P1 | X starts; the mode-V plan lines read "UE TX ch1: NCO 4380.000 MHz, occupied +-48.600 MHz, zone 2" and "BS RX ch2: NCO 4380.000 MHz, occupied +-48.600 MHz, zone 2, cal Mode 2, no channel filter", the sub-6 lines "occupied +-23.940 MHz" with the filter on RX ch0; the UE logs "TX ch1: occupied +-48.600 MHz, wide 47-tap halfband" and "Channel B band: 3240 tones" | a refusal, a filter on ch2, or ch0's plan changed |
 | P2 | `pilot_grid_off` in X equals B's within 4 samples (mean) and B's spread: the framer places the burst on lane 0, the byte-identical sub-6 | a mean shift over 4 samples |
 | P2b | The X-band lane's own timing is unchanged (both TX paths are zero phase): antenna 1's "delay removed" figure on the dashboard phase panel, and its CIR peak tap, equal in X and B within their spread | a shift beyond the spread: a delay entered with the wide halfband |
 | P3 | Sub-6 (antenna 0): |H| median, MER, CNS-low rate and the pilot seat are the same in X and B within their run-to-run spread | a difference outside the spread |
@@ -374,3 +374,11 @@ constructor on the main thread); P2b and P8's method added; P6 on the data's
 loop indexes the per-channel map by the channel, and `forBand` is tested);
 the cross-node config guard (one sounder process drives both nodes from one
 file, so the nodes cannot disagree).
+
+**Code review (one round, independent reviewer): 1 must-fix, folded.** P1
+cited a planned width the mode-V log never printed (the plan lines carried
+NCO, zone, calibration mode and filter only): each TX and RX plan line now
+carries its channel's occupied half width, and P1 names the exact lines. The
+reviewer traced every named mutation and found none vacuous, and found the
+single-band behaviour (one interpolator per lane, the beacon's null lanes,
+output-buffer lifetime, the ZC rule to 2053 tones) unchanged.
