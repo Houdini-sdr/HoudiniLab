@@ -171,6 +171,12 @@ steering:
 
 ## A7. Known limits today
 
+- **Do not open a node from a second program while a run is live** (a manual
+  `check_setup.py`, `SoapySDRUtil --probe`, a Python session). The sounder opens
+  each node with its own packet size, so a second open gets a separate driver
+  instance on the node, and its setup and its close reset state the run depends
+  on (gains, and the X-band front end's static state). The dashboard's Check
+  already refuses while a run is live. Run the setup check before Start.
 - **UE transmit timing on the host (SH-427) is solved** with the isolated layout
   above: the pacer's worst wake over a 35 min run is about 0.3 ms (9.43-9.46).
   Read the installed host plugin's build id in the setup check before judging a

@@ -23,6 +23,8 @@ int main() {
         "MTU 7738 makes the device derive exactly 1920 (mutation: mtuFor off by the header)");
   check(rp::samplesForSlot(4096) == 1024 && rp::samplesForSlot(0) == 0 && rp::samplesForSlot(61441) == 0,
         "a power-of-two slot gets 1024, since 2048 exceeds the MTU (mutation: the MTU cap dropped); no divisor gives 0 (mutation: no divisibility check)");
+  check(rp::tiledPacketOrDefault(61440) == 1920 && rp::tiledPacketOrDefault(4096) == 0,
+        "a small tiling packet (4096 -> 1024) keeps the default instead of doubling the packet rate (mutation: no 3/4 floor)");
   if (failures) std::printf("FAILED: %d failure(s)\n", failures);
   return failures ? 1 : 0;
 }

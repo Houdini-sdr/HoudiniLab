@@ -161,6 +161,14 @@ int main() {
     check(q.first >= 0 && q.second < 0.001 * wbest,
           "UE silent: the scheduled window holds only noise, so the presence gate skips the frame "
           "(mutation: the whole read, which finds the beacon)");
+    // The framer takes the next frame's copy when the pilot sits at the head of
+    // the read (expect < n/2): there the whole P+U fits and the slot before P
+    // is the silent guard burstPilotStart needs.
+    const auto head = capture(CG, 10 + FR, N, {-2, 0, 1}, {1500.0, 400.0, 400.0}, 128, 128, 13);
+    const long long e_head = 10 < N / 2 ? 10 + FR : 10;
+    const auto hn = sa::densestNear(head, e_head, N / 4, N, 128);
+    check(hn.first >= 0 && std::llabs(sa::burstPilotStart(head, hn.first, N, 128) - (10 + FR)) <= 32,
+          "the next frame's copy, which the framer takes when the pilot sits at the head of the read, places within 32 samples (premise check; the clamp failure itself is framer-level)");
     check(sa::densestNear(air, 0, N / 4, N, 128).first >= 0 && sa::densestNear(air, 0, N / 4, N, 128).first <= N / 4 &&
               sa::densestNear(air, CG, N / 4, N, 128).first <= CG - N &&
               sa::densestNear(std::vector<double>(N / 2, 0.0), 0, N / 4, N, 128).first == -1,

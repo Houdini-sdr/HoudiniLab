@@ -42,5 +42,14 @@ inline size_t deviceSamples(size_t mtu) {
   return (mtu - kOverheadBytes) / kBytesPerSample / kBeatSamples * kBeatSamples;
 }
 
+/// samplesForSlot, but only when it keeps at least 3/4 of the default MTU's
+/// packet; otherwise 0 (the default). A slot with no large divisor (4096 ->
+/// 1024) would double the packet rate and halve the TX bank's depth in time
+/// for nothing.
+inline size_t tiledPacketOrDefault(size_t slot_samples) {
+  const size_t s = samplesForSlot(slot_samples);
+  return (s * 4 >= deviceSamples(kDefaultMtu) * 3) ? s : 0;
+}
+
 }  // namespace rxpkt
 }  // namespace houdini
