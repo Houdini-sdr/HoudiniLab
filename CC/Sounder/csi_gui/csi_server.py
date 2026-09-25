@@ -1383,7 +1383,7 @@ function makeCard(ant){
 
   wrap.innerHTML=
     '<div class="card-header py-2">'
-     +'<h3 class="card-title">RX antenna '+ant+'</h3>'
+     +'<h3 class="card-title">RX antenna '+ant+'</h3>'  // named by band once its metadata arrives (setCardTitle)
      +'<div class="card-actions d-flex gap-1">'
        +'<span class="badge bg-orange-lt text-orange csi-stale" hidden></span>'
        +foldButton()
@@ -1440,6 +1440,7 @@ function makeCard(ant){
   cards[ant]={magCv:cvs[0],merCv:cvs[1],phaseCv:cvs[2],wfCv:cvs[3],
               consCv:cvs[4],cirCv:cvs[5],spcCv:cvs[6],dim:null,wfimg:null,
               quality:wrap.querySelector('.csi-quality'),
+              ant:ant, titleEl:wrap.querySelector('.card-title'),
               phOff:wrap.querySelector('.csi-ph-off'),phDelay:wrap.querySelector('.csi-ph-delay'),
               phAcc:null,phLast:null,phT:0,
               merHist:[],merT:0,merNow:wrap.querySelector('.csi-mer-now'),
@@ -1839,13 +1840,24 @@ function drawCir(card,r){
 // make whole resource blocks), MER is decision-directed (TR 101 290), averaged
 // over ~1 s as error power, and the delay figures carry their threshold and
 // the resolution (about 2/B, the Hann mainlobe).
+// The card is named by its BAND [user: 'RX antenna 0/1' above and 'ch A/C' in
+// the quality line read as four different things]. The band follows from the
+// lane's own NCO (sub-6 below 3 GHz; the X-band lane runs at its IF), with the
+// sounder's channel letter and the dashboard's antenna index kept as a muted
+// note, so the mapping stays visible without leading.
+function setCardTitle(card){
+  const m=card.metRec;
+  if(!m || !card.titleEl) return;
+  const band=m.fc_mhz<3000 ? ('Sub-6 · '+m.fc_mhz.toFixed(0)+' MHz') : ('X-band · IF '+m.fc_mhz.toFixed(0)+' MHz');
+  card.titleEl.innerHTML=band+' <span class="text-secondary small">(RX ch '+m.ch+', antenna '+card.ant+')</span>';
+}
 function drawQuality(card){
   const m=card.metRec, q=[];
   if(m){
     // Resource blocks only at an NR numerology (38.211 4.2: 15 x 2^mu kHz).
     const nr=[15,30,60,120,240].some(v=>Math.abs(m.scs_khz-v)<1e-6);
     const rb=(nr && m.occ%12===0)?(m.occ/12)+' RB × 12 × ':m.occ+' tones × ';
-    q.push('ch '+m.ch+' · IF/NCO '+m.fc_mhz.toFixed(3)+' MHz · transmission BW '
+    q.push('IF/NCO '+m.fc_mhz.toFixed(3)+' MHz · transmission BW '
            +m.bw_mhz.toFixed(2)+' MHz ('+rb+(+m.scs_khz.toFixed(3))+' kHz, fft '+m.fft+')');
   }
   const cn=card.cnsRec;
@@ -2166,7 +2178,7 @@ function onData(obj){
       card.lastCns=rec.cns.frame; card.cnsT=Date.now();
       if(sampleMer(card,rec.cns) && open) drawMer(card);
     }
-    if(rec.met && !card.metRec) { card.metRec=rec.met; if(open) drawQuality(card); }
+    if(rec.met && !card.metRec) { card.metRec=rec.met; setCardTitle(card); if(open) drawQuality(card); }
     else if(rec.met) card.metRec=rec.met;
     if(rec.cir && rec.cir.frame!==card.lastCir){
       if(open) drawCir(card,rec.cir); else card.cirRec=rec.cir;
