@@ -1,8 +1,9 @@
 /**
  * @file houdini/rx_packet.h
- * @brief The RX packet size that tiles a slot exactly (the user's ask: a UDP
+ * @brief The packet size that tiles a slot exactly (the user's ask: a UDP
  *        packet a direct divisor of the slot, so a slot is a whole number of
- *        packets for any per-window or tag-and-drop receive).
+ *        packets, RX and TX alike; the host plugin sizes TX packets from the
+ *        same MTU, and the TX slot is twice the RX slot's samples).
  *
  * The device derives its RX packet from the link MTU given at make()
  * (HOUDINI_MTU): the largest whole number of 512-bit beats (8 words of 64 bits,

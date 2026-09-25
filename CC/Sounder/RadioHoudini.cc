@@ -43,12 +43,13 @@ SoapySDR::Kwargs RadioHoudini::deviceArgs(const RadioParams& p) {
   args["remote:driver"] = "houdinisdr-device";
   args["remote:type"] = "houdinisdr";
   args["timeout"] = p.timeout;
-  // The RX packet size is derived by the device from the link MTU at make();
-  // asking for the MTU that yields exactly rx_packet_samples makes a slot a
-  // whole number of packets. The BS only: the UE streams TX, which the host
-  // plugin also sizes from this MTU, so the UE keeps the validated default.
-  if (p.rx_packet_samples > 0)
-    args["remote:HOUDINI_MTU"] = std::to_string(houdini::rxpkt::mtuFor(p.rx_packet_samples));
+  // The device derives its RX packet from the link MTU at make(), and the host
+  // plugin sizes TX packets from the same MTU (TxPacketizer, DeriveFrameWords):
+  // asking for the MTU that yields exactly packet_samples makes every RX slot
+  // and every TX slot (twice the samples, at the 2x TX rate) a whole number of
+  // packets, so a slot-exact TX burst ends on a packet boundary [user].
+  if (p.packet_samples > 0)
+    args["remote:HOUDINI_MTU"] = std::to_string(houdini::rxpkt::mtuFor(p.packet_samples));
   return args;
 }
 
@@ -268,7 +269,7 @@ RadioHoudini::RadioHoudini(const RadioParams& params,
                  mv == nullptr
                      ? std::function<void(SoapySDR::Device&)>()
                      : [mv, plan = modeVPlan(params), label = params.label,
-                        pkt = params.rx_packet_samples](SoapySDR::Device& dev) {
+                        pkt = params.packet_samples](SoapySDR::Device& dev) {
                          if (pkt > 0) {
                            // A kwarg the device did not take is silent: the readback is the evidence.
                            const std::string fw = dev.readSetting("HOUDINI_RX_FRAME_WORDS");
@@ -277,7 +278,7 @@ RadioHoudini::RadioHoudini(const RadioParams& params,
                              throw std::runtime_error(label + ": RX packet " + std::to_string(got) +
                                                       " samples (HOUDINI_RX_FRAME_WORDS '" + fw + "'), asked " +
                                                       std::to_string(pkt));
-                           MLPD_INFO("%s: RX packets of %zu samples (HOUDINI_MTU %zu)\n", label.c_str(), pkt,
+                           MLPD_INFO("%s: packets of %zu samples, RX and TX (HOUDINI_MTU %zu)\n", label.c_str(), pkt,
                                      houdini::rxpkt::mtuFor(pkt));
                          }
                          try {

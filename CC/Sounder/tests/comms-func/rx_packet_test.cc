@@ -17,6 +17,8 @@ int main() {
   const size_t s = rp::samplesForSlot(61440);
   check(s == 1920 && 61440 % s == 0 && 61440 / s == 32,
         "the demo slot (61440) tiles as 32 packets of 1920 (mutation: a non-divisor, e.g. 2032)");
+  check(122880 % s == 0 && 122880 / s == 64,
+        "the same packet tiles the TX slot at the 2x TX rate (64 per 122880) (mutation: a divisor of the RX slot only)");
   check(rp::mtuFor(1920) == 7738 && rp::deviceSamples(rp::mtuFor(1920)) == 1920,
         "MTU 7738 makes the device derive exactly 1920 (mutation: mtuFor off by the header)");
   check(rp::samplesForSlot(4096) == 1024 && rp::samplesForSlot(0) == 0 && rp::samplesForSlot(61441) == 0,

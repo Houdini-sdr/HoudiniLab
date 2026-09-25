@@ -76,9 +76,11 @@ struct RadioParams {
   std::map<size_t, double> half_bw_by_channel;  ///< AP-85: per-channel overrides of half_bw_hz
   double tx_gain_db = std::numeric_limits<double>::quiet_NaN();  ///< NaN: not written
   double rx_gain_db = std::numeric_limits<double>::quiet_NaN();
-  /// RX samples per packet asked of the device (HOUDINI_MTU at make()); 0 =
-  /// the driver's default. The BS asks for a divisor of the slot.
-  size_t rx_packet_samples = 0;
+  /// Samples per packet asked of the device through HOUDINI_MTU at make(): the
+  /// device sizes RX packets from it and the host plugin sizes TX packets from
+  /// the same MTU, so one divisor of the slot tiles both (the TX slot is twice
+  /// the RX slot's samples). 0 = the driver's default MTU.
+  size_t packet_samples = 0;
 };
 
 class Radio {

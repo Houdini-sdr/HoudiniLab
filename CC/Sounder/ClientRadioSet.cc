@@ -9,6 +9,7 @@
   */
 #include <atomic>
 #include <cstdlib>
+#include "houdini/rx_packet.h"
 #include "include/ClientRadioSet.h"
 #include "include/RadioHoudini.h"
 
@@ -251,6 +252,9 @@ void ClientRadioSet::init(ClientRadioContext* context) {
   p.half_bw_by_channel = _cfg->channel_half_bw_hz();
   p.tx_gain_db = _cfg->houdini_tx_gain_db();
   p.rx_gain_db = _cfg->houdini_rx_gain_db();
+  // Packets that tile the slot exactly, RX and TX alike (1920: 32 per RX slot,
+  // 64 per TX slot at the 2x TX rate) [user].
+  p.packet_samples = houdini::rxpkt::samplesForSlot(_cfg->samps_per_slot());
   p.rx_freq_offset_hz = ueRxFreqOffsetHz();
   p.tx_freq_offset_hz = ueTxFreqOffsetHz();
   // Houdini UE: the UE feeds pilots live, so host-fed streaming TX (SH-183);
