@@ -1,7 +1,7 @@
 {
  "_description": "X-BAND FRONT END (AP-86): houdini-dualband-xw-steer.json plus xband_frontend_static: the BS holds its X-band board STATIC rx, the UE STATIC tx, per session",
  "_comment": "AP-79 dual-band demo, HS-202 mode V: sub-6 ISM 2.4 (2400 to 2450 MHz, NCO 2425) both ways plus the X-band IF (NCO 4380) UE to BS, one numerology on both bands. Derived from houdini-2ch-decouple.json (the AP-78 two-channel demo) with the P + U schedule of houdini-ul.json. BS .22: TX ch0 (A, sub-6 beacon), RX ch0 (A, sub-6 uplink) + ch2 (C, X-IF uplink). UE .21: RX ch0 (A, sub-6 beacon), TX ch0 (A, sub-6) + ch1 (B, X-IF). Wiring per plan section 6: .22 DAC_B -> .21 ADC_D, .21 DAC_B -> .22 ADC_D, .21 DAC_A -> .22 ADC_B.",
- "_status": "NOT YET RUN on the rig. Needs fpga 1.33 + the software lane's device build, and houdini-role applied on both nodes (ue on the UE, bs on the BS, as root after every PL load or reboot); the XUD1A and ADTR1107 boards attached. Otherwise identical to houdini-dualband-xw-steer.json",
+ "_status": "NOT YET RUN on the rig. Needs fpga 1.33 + the software lane's device build, and houdini-role applied on both nodes (ue on the UE, bs on the BS, as root after every PL load or reboot); the XUD1A and ADTR1107 boards attached. Otherwise identical to houdini-dualband-xw-steer.json.",
  "serial_file": "files/topology-houdini-dualband.json",
  "dashboard_mag_top": 115,
  "_dashboard_note": "The live dashboard's fixed |H| axis top in dB (csi_gui/csi_server.py reads it; --mag-top overrides; the span stays --mag-span, 40). At this numerology |H| read 97-104 dB on both antennas (DEMO_VERIFICATION 9.48), above the old default window of 50-90 dB.",
