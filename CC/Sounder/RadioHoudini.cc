@@ -373,6 +373,21 @@ RadioHoudini::~RadioHoudini() {
   // The end-of-run state, while the streams are still open (the base class
   // closes them after this), so drift across the run is visible.
   if (dev_ != nullptr) writeStateRecord(params_.label, *dev_, kEndOfRunStage, params_.rx_channels, params_.tx_channels);
+  if (!slot_rx_.empty()) {
+    // AP-87: our own check of every read against the rx slots, and the host
+    // plugin's cut counters, read while the stream is still open (its
+    // tdd_* counts are per activation and only open streams are listed).
+    MLPD_INFO("%s: AP-87 slot check: %lld reads, %lld samples, %lld of them outside the rx slots (%lld reads)\n",
+              params_.label.c_str(), slot_reads_, slot_samples_, slot_stray_, slot_stray_reads_);
+    if (dev_ != nullptr) {
+      try {
+        const std::string hs = dev_->readSetting("RX_HOST_STATUS");
+        MLPD_INFO("%s: RX_HOST_STATUS %s\n", params_.label.c_str(), hs.c_str());
+      } catch (const std::exception& e) {
+        MLPD_WARN("%s: RX_HOST_STATUS unreadable: %s\n", params_.label.c_str(), e.what());
+      }
+    }
+  }
 }
 
 void RadioHoudini::maybeStartHealth() {
@@ -647,6 +662,27 @@ int RadioHoudini::recv(void* const* buffs, int samples, long long& frameTime) {
       break;
     }
     if (got == 0) frameTime = t;  // first (grid-anchoring) read stamps the window
+    // AP-87: with the device's slots mode every delivered sample must be stamped
+    // inside an rx slot; the host cut guarantees it, and this checks it on every
+    // read rather than trusting it (stray samples would land in the timeline
+    // where the guards should be zero, unflagged by anything else).
+    if (!slot_rx_.empty() && rx_rate_ > 0.0 && (flags & SOAPY_SDR_HAS_TIME) != 0) {
+      const long long tick = std::llround(static_cast<double>(t) * rx_rate_ / 1e9);
+      const long long stray =
+          r - houdini::bsslots::rxOverlap(tick, r, slot_epoch_, slot_n_, slot_fr_, slot_rx_);
+      ++slot_reads_;
+      slot_samples_ += r;
+      if (stray > 0) {
+        slot_stray_ += stray;
+        const long long k = ++slot_stray_reads_;
+        if ((k & (k - 1)) == 0) {  // braces: MLPD_WARN is several statements
+          const auto p = houdini::bsslots::slotPos(tick, slot_epoch_, slot_n_, slot_fr_);
+          MLPD_WARN("%s: a read of %d samples stamped at tick %lld (slot %lld, offset %lld) has %lld "
+                    "outside the rx slots (occurrence %lld): the slot cut let them through\n",
+                    params_.label.c_str(), r, tick, p.slot, p.off, stray, k);
+        }
+      }
+    }
     size_t pad = 0;
     if (rx_rate_ > 0.0 && (flags & SOAPY_SDR_HAS_TIME) != 0) {
       const Sounder::GridCheck gc = grid.onStamp(t, got);

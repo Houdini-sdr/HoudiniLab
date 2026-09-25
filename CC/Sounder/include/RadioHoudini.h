@@ -130,6 +130,8 @@ class RadioHoudini : public RadioSoapy {
   size_t last_pad_samples_ = 0;  // zeros inserted into the last window
   long long slot_epoch_ = 0, slot_n_ = 0, slot_fr_ = 0;  // AP-87 rx slot map (setRxSlotMap)
   std::string slot_rx_;
+  // AP-87 check: every read's stamped samples must lie inside an rx slot.
+  long long slot_reads_ = 0, slot_samples_ = 0, slot_stray_ = 0, slot_stray_reads_ = 0;
 };
 
 #endif  // RADIO_HOUDINI_H_

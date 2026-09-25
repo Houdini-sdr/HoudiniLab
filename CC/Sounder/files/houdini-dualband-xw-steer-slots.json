@@ -56,7 +56,8 @@
  "_beacon_note": "nr_pss_bl: the band-limited beacon (AP-79): the 127-tone NR PSS at 240 kHz behind NR's 36-sample CP, then a guarded TRS pair on the central 96 tones (+-23 MHz); 1076 ticks. tx_full_scale 0.34 = -16 dBFS RMS at its 6.6 dB PAPR, the plan's DAC back-off. The argmax pick: the shipped first_path rule lands 2 samples early on this lobe (beacon_bandlimit_test).",
  "sync": {
   "steer": {
-   "enable": true
+   "enable": true,
+   "deadband_ppm": 0.12
   },
   "beacon": {
    "type": "nr_pss_bl",
