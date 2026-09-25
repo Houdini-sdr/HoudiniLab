@@ -243,18 +243,14 @@ void Receiver::initBuffers() {
       throw std::runtime_error("Error allocating memory");
     }
   }
-  pilotbuffA_.at(0) = config_->pilot_ci16().data();
+  // Each TX lane's pilot is its own channel's band (AP-85; one band unless
+  // channel_ofdm_data_num widens a channel).
+  pilotbuffA_.at(0) = const_cast<std::complex<int16_t>*>(config_->ueTxBand(0).pilot_ci16.data());
   if (config_->cl_tx_ch() == 2) {  // UE transmits a pilot on each TX channel
     pilotbuffA_.at(1) = zeros_.at(0);
-    pilotbuffB_.at(1) = config_->pilot_ci16().data();
+    pilotbuffB_.at(1) = const_cast<std::complex<int16_t>*>(config_->ueTxBand(1).pilot_ci16.data());
     pilotbuffB_.at(0) = zeros_.at(1);
   }
-  // Viewing-mode UE uplink-data slot buffer (ch A). Transmitted continuously in
-  // the U slot alongside the pilot so the BS can equalize it and show the
-  // constellation. Empty (0-length data()) when the config has no data slot.
-  ue_databuffA_.resize(2);
-  ue_databuffA_.at(0) = config_->ue_data_ci16().data();
-  ue_databuffA_.at(1) = zeros_.at(0);
 }
 
 std::vector<pthread_t> Receiver::startClientThreads(SampleBuffer* rx_buffer,
@@ -1096,8 +1092,9 @@ void Receiver::clientTxPilots(size_t user_id, long long base_time,
       if (pad != burst_pad) {
         // The burst spans from the pad to the last content: the furthest pilot
         // slot (channels are time-orthogonal) or the uplink slot, whichever is
-        // later. Each channel gets its pilot at its own slot offset; the uplink
-        // data (ch A's) rides on every channel at the same U-slot offset.
+        // later. Each channel gets its pilot at its own slot offset and its
+        // uplink data at the same U-slot offsets, both from its own band
+        // (AP-85: the X-band at 270 RB beside the sub-6 at 133).
         long long span = num_samps;
         for (size_t c = 0; c < num_tx; ++c) {
           const long long off = (pslot_of(c) - base_slot) * num_samps;
@@ -1111,10 +1108,11 @@ void Receiver::clientTxPilots(size_t user_id, long long base_time,
         for (size_t c = 0; c < num_tx; ++c) {
           bursts[c].assign(total + (total & 1), std::complex<int16_t>(0, 0));
           const long long poff = pad + (pslot_of(c) - base_slot) * num_samps;
-          std::memcpy(bursts[c].data() + poff, config_->pilot_ci16().data(),
+          const OfdmBand& band = config_->ueTxBand(c);
+          std::memcpy(bursts[c].data() + poff, band.pilot_ci16.data(),
                       static_cast<size_t>(num_samps) * 4);
           for (const long long off : ul_offs) {  // the same data in every U slot
-            std::memcpy(bursts[c].data() + pad + off, ue_databuffA_.at(0),
+            std::memcpy(bursts[c].data() + pad + off, band.ue_data_ci16.data(),
                         static_cast<size_t>(num_samps) * 4);
           }
         }

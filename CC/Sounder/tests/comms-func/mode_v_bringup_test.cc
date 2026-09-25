@@ -354,6 +354,37 @@ int main() {
     check(!ueValuesOk(f.calls, r), "mutant ignoring the per-channel NCO fails the UE values");
   }
 
+  {
+    // AP-85: per-channel widths, the X-band at 270 RB (+-48.6 MHz) on UE TX ch1
+    // and BS RX ch2 beside the sub-6 at +-23.94 MHz. Each channel is planned
+    // at its own width: the X-band channels keep their zones and calibration
+    // mode, and the same width on the sub-6 channel is refused (over the
+    // channel filter's passband), before any write.
+    FakeDevice fu, fb;
+    auto pu = uePlan();
+    pu.half_bw_by_channel = {{1, 48.6e6}};
+    auto pb = bsPlan();
+    pb.half_bw_by_channel = {{2, 48.6e6}};
+    const Result ru = houdini::modev::bringUp(fu, pu);
+    const Result rb = houdini::modev::bringUp(fb, pb);
+    check(ueValuesOk(fu.calls, ru) && bsValuesOk(fb.calls, rb),
+          "per-channel widths: the X-band at +-48.6 MHz plans exactly as at +-23.94 (zone 2, Mode 2, no filter)");
+    FakeDevice f;
+    auto p0 = bsPlan();
+    p0.half_bw_by_channel = {{0, 48.6e6}};
+    bool threw = false;
+    try { houdini::modev::bringUp(f, p0); } catch (const std::invalid_argument&) { threw = true; }
+    check(threw && f.calls.empty(),
+          "per-channel widths: +-48.6 MHz on the sub-6 channel is refused before any write "
+          "[mutation: the plan ignores half_bw_by_channel]");
+    FakeDevice g;
+    auto one = bsPlan();
+    one.half_bw_hz = 48.6e6;  // one width for every channel
+    threw = false;
+    try { houdini::modev::bringUp(g, one); } catch (const std::invalid_argument&) { threw = true; }
+    check(threw, "one width for every channel cannot carry the X-band at 270 RB (the sub-6 channel is refused)");
+  }
+
   std::printf("%s: %d failure(s)\n", g_fail == 0 ? "ALL PASS" : "FAILED", g_fail);
   return g_fail == 0 ? 0 : 1;
 }

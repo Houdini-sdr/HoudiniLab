@@ -58,7 +58,10 @@ class RecorderWorker {
   // else H[k] lands on the mirror subcarrier (N-k) and the constellation scrambles.
   bool rx_conj_ = false;
   int csi_sock_ = -1;
-  std::vector<std::complex<float>> pilot_ref_;  // DC-centered freq-domain pilot
+  // DC-centered freq-domain pilot per RX lane (lane = ant % bs_rx_ch): each
+  // antenna's own channel's band (AP-85).
+  std::vector<std::vector<std::complex<float>>> pilot_ref_;
+  const std::vector<std::complex<float>>& pilotRef(uint32_t ant) const { return pilot_ref_[ant % pilot_ref_.size()]; }
   std::unique_ptr<houdini::DcCenteredFft> fft_;  // DC-centred per-symbol FFT (AP-79)
   std::unique_ptr<houdini::CirFromH> cir_;       // the view's impulse response (AP-79)
   std::unique_ptr<houdini::WelchSpectrum> spc_;  // the pilot slot's spectrum (null: off)

@@ -417,6 +417,18 @@ target_link_libraries(config_pilot_test houdini_sync -lpthread ${GFLAGS_LIBRARIE
     ${SoapySDR_LIBRARIES} ${HDF5_LIBRARIES} ${MUFFT_LIBRARIES})
 add_test(NAME config_pilot COMMAND config_pilot_test WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 
+# AP-85: per-band channel widths through the real Config: the backward
+# compatibility pin (today's configs byte for byte) and the wide band.
+add_executable(per_band_test tests/comms-func/per_band_test.cc ${SOUNDER_SOURCES})
+target_include_directories(per_band_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(per_band_test houdini_sync -lpthread ${GFLAGS_LIBRARIES} ${UHD_LIBRARIES}
+    ${SoapySDR_LIBRARIES} ${HDF5_LIBRARIES} ${MUFFT_LIBRARIES})
+add_test(NAME per_band COMMAND per_band_test WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+# AP-85: the host cost of the UE's TX interpolation per lane path. Standalone,
+# not a test: run it on the rig host (./build/tx_interp_bench [rounds]).
+add_executable(tx_interp_bench tests/comms-func/tx_interp_bench.cc)
+target_include_directories(tx_interp_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
 # The index-convention check AP-34(a) did not have. Links the real CommsLib so
 # it exercises the REAL detector; a replica would agree with itself.
 add_executable(beacon_geometry_test

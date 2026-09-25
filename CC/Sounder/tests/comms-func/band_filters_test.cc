@@ -93,13 +93,15 @@ struct InterpResult {
   double worst_phase_rad = 0.0;    // wanted-tone phase error, worst over the band
 };
 
-InterpResult measureInterp(const Interp& interp) {
+// `edge` bins either side of DC in `step`-bin steps, plus the band edges:
+// the narrow design's +-25 MHz by default, the wide one's +-49.14 MHz (1638
+// bins, the last whole 30 kHz bin inside 0.4 x 122.88) for AP-85.
+InterpResult measureInterp(const Interp& interp, long edge = 833, long step = 33) {
   InterpResult r;
   double gmin = 1e9, gmax = -1e9;
-  // +-25 MHz in 0.99 MHz steps, both signs, plus the band edges.
   std::vector<long> bins;
-  for (long b = -833; b <= 833; b += 33) bins.push_back(b);
-  bins.push_back(-833); bins.push_back(833);
+  for (long b = -edge; b <= edge; b += step) bins.push_back(b);
+  bins.push_back(-edge); bins.push_back(edge);
   for (long b : bins) {
     const double f = static_cast<double>(b) * kBinIn;
     const auto y = interp(tone(kN, f, kRx));
@@ -153,6 +155,29 @@ ChanResult measureChan(const Filt& filt) {
   return r;
 }
 
+// The edge contract: content inside the stated zero margins matches the
+// unbounded filter.
+bool edgeMatches(const HalfbandInterp2& hb, size_t margin_before, size_t margin_after) {
+    const size_t body = 64;
+    const auto t = tone(body, 3.3e6, kRx);
+    std::vector<cf> tight(margin_before + body + margin_after, cf(0, 0));
+    std::vector<cf> wide(tight.size() + 64, cf(0, 0));
+    for (size_t k = 0; k < body; ++k) { tight[margin_before + k] = t[k]; wide[32 + margin_before + k] = t[k]; }
+    std::vector<cf> yt(2 * tight.size()), yw(2 * wide.size());
+    hb.run(tight.data(), tight.size(), yt.data());
+    hb.run(wide.data(), wide.size(), yw.data());
+    // The tight output must equal the wide one where they overlap AND the
+    // wide output must be zero everywhere the tight buffer does not reach:
+    // a margin that is too small loses the tail off the end, which an
+    // overlap-only comparison cannot see.
+    for (size_t k = 0; k < yw.size(); ++k) {
+      const bool inside = k >= 64 && k < 64 + yt.size();
+      const cf ref = inside ? yt[k - 64] : cf(0, 0);
+      if (std::abs(ref - yw[k]) > 1e-6f) return false;
+    }
+    return true;
+  }
+
 // The requirement predicates, shared by the real filters and the mutants so a
 // mutant is judged by exactly the rule it must break.
 bool imagesOk(const InterpResult& r) { return r.worst_image_db <= -60.0; }
@@ -191,26 +216,7 @@ int main() {
 
   {  // edge contract: content inside the stated zero margin matches the
      // unbounded filter; one sample closer to the edge and it must not.
-    auto edge_matches = [&hb](size_t margin_before, size_t margin_after) {
-      const size_t body = 64;
-      const auto t = tone(body, 3.3e6, kRx);
-      std::vector<cf> tight(margin_before + body + margin_after, cf(0, 0));
-      std::vector<cf> wide(tight.size() + 64, cf(0, 0));
-      for (size_t k = 0; k < body; ++k) { tight[margin_before + k] = t[k]; wide[32 + margin_before + k] = t[k]; }
-      std::vector<cf> yt(2 * tight.size()), yw(2 * wide.size());
-      hb.run(tight.data(), tight.size(), yt.data());
-      hb.run(wide.data(), wide.size(), yw.data());
-      // The tight output must equal the wide one where they overlap AND the
-      // wide output must be zero everywhere the tight buffer does not reach:
-      // a margin that is too small loses the tail off the end, which an
-      // overlap-only comparison cannot see.
-      for (size_t k = 0; k < yw.size(); ++k) {
-        const bool inside = k >= 64 && k < 64 + yt.size();
-        const cf ref = inside ? yt[k - 64] : cf(0, 0);
-        if (std::abs(ref - yw[k]) > 1e-6f) return false;
-      }
-      return true;
-    };
+    auto edge_matches = [&hb](size_t before, size_t after) { return edgeMatches(hb, before, after); };
     std::printf("interp context: %zu before, %zu after\n", hb.contextBefore(), hb.contextAfter());
     check(edge_matches(hb.contextBefore(), hb.contextAfter()),
           "interp output inside the stated margins equals the unbounded filter");
@@ -252,6 +258,38 @@ int main() {
     const size_t sat_hi = cs16Circular(in_hi, &pk);
     check(sat_hi > 0, "interp CS16 saturation counter fires at full scale "
                       "[mutation: a counter that never increments would pass the check above]");
+  }
+
+  // ---- wide interpolator (AP-85: the X-band at 270 RB) ---------------------
+  // The same measurement over +-49.14 MHz, the widest band the config accepts
+  // (0.4 x 122.88): its images start at 73.73 MHz.
+  const HalfbandInterp2 hbw = HalfbandInterp2::wide();
+  constexpr long kWideEdge = 1638, kWideStep = 13;
+  const Interp wide_interp = [&hbw](const std::vector<cf>& x) {
+    std::vector<cf> y(2 * x.size());
+    hbw.runCircular(x.data(), x.size(), y.data());
+    return y;
+  };
+  const auto iw = measureInterp(wide_interp, kWideEdge, kWideStep);
+  std::printf("wide interp: worst image %.1f dB, ripple %.5f dB, worst phase %.2e rad over +-49.14 MHz\n",
+              iw.worst_image_db, iw.ripple_db, iw.worst_phase_rad);
+  check(imagesOk(iw), "wide interp images >= 60 dB down over +-49.14 MHz [mutation: the 23-tap halfband on the wide band]");
+  check(iw.worst_image_db <= -70.0, "wide interp keeps the design's 10 dB margin (>= 70 dB) [mutation: 43 taps]");
+  check(interpFlat(iw), "wide interp passband ripple <= 0.01 dB [mutation: beta 3 wide halfband]");
+  check(interpZeroPhase(iw), "wide interp zero phase [mutation: output delayed one TX sample]");
+  {
+    const auto x = tone(kN, 7.0 * kBinIn * 211, kRx);
+    const auto y = wide_interp(x);
+    bool exact = true;
+    for (size_t k = 0; k < kN; ++k) exact = exact && (y[2 * k] == x[k]);
+    check(exact, "wide interp out[2k] == in[k] bit-exact [mutation: output delayed one TX sample]");
+    std::printf("wide interp context: %zu before, %zu after\n", hbw.contextBefore(), hbw.contextAfter());
+    check(edgeMatches(hbw, hbw.contextBefore(), hbw.contextAfter()) &&
+              !edgeMatches(hbw, hbw.contextBefore(), hbw.contextAfter() - 1) &&
+              !edgeMatches(hbw, hbw.contextBefore() - 1, hbw.contextAfter()),
+          "wide interp stated margins are exact [mutation: a context figure one short]");
+    check(hbw.contextBefore() <= 32 && hbw.contextAfter() <= 32,
+          "wide interp margins fit inside the demo slot's 32-tick zero prefix/postfix");
   }
 
   // ---- channel filter ------------------------------------------------------
@@ -326,6 +364,37 @@ int main() {
       return d;
     };
     check(!chanZeroPhase(measureChan(delayed)), "mutant one-sample-delayed channel filter fails the phase check");
+  }
+
+  {  // AP-85: the wide design's mutants, through the wide band's measurement
+    const HalfbandInterp2 narrow;
+    check(!imagesOk(measureInterp([&narrow](const std::vector<cf>& x) {
+            std::vector<cf> y(2 * x.size()); narrow.runCircular(x.data(), x.size(), y.data()); return y; },
+                                  kWideEdge, kWideStep)),
+          "mutant: the 23-tap halfband over +-49.14 MHz fails the image check");
+    const HalfbandInterp2 short_wide(43, 6.5);  // the sweep's best at 43 taps
+    check(measureInterp([&short_wide](const std::vector<cf>& x) {
+            std::vector<cf> y(2 * x.size()); short_wide.runCircular(x.data(), x.size(), y.data()); return y; },
+                        kWideEdge, kWideStep).worst_image_db > -70.0,
+          "mutant: a 43-tap wide halfband misses the 10 dB margin");
+    const HalfbandInterp2 soft(HalfbandInterp2::kWideTaps, 3.0);
+    check(!interpFlat(measureInterp([&soft](const std::vector<cf>& x) {
+            std::vector<cf> y(2 * x.size()); soft.runCircular(x.data(), x.size(), y.data()); return y; },
+                                    kWideEdge, kWideStep)),
+          "mutant: the beta-3 wide halfband fails the ripple check");
+    const Interp delayed = [&wide_interp](const std::vector<cf>& x) {
+      auto y = wide_interp(x);
+      std::vector<cf> d(y.size());
+      for (size_t k = 0; k < y.size(); ++k) d[k] = y[(k + y.size() - 1) % y.size()];
+      return d;
+    };
+    check(!interpZeroPhase(measureInterp(delayed, kWideEdge, kWideStep)),
+          "mutant: the one-sample-delayed wide interp fails the phase check");
+    const auto x = tone(kN, 7.0 * kBinIn * 211, kRx);
+    const auto y = delayed(x);
+    bool exact = true;
+    for (size_t k = 0; k < kN; ++k) exact = exact && (y[2 * k] == x[k]);
+    check(!exact, "mutant: the one-sample-delayed wide interp fails the passthrough check");
   }
 
   std::printf("%s: %d failure(s)\n", g_fail == 0 ? "ALL PASS" : "FAILED", g_fail);

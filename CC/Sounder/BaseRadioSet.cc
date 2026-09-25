@@ -271,6 +271,7 @@ void BaseRadioSet::init(BaseRadioContext* context) {
   p.dac_fs_hz = _cfg->dac_fs_hz();
   p.nco_by_channel = _cfg->channel_nco();
   p.half_bw_hz = _cfg->occupied_half_bw_hz();
+  p.half_bw_by_channel = _cfg->channel_half_bw_hz();
   p.tx_gain_db = _cfg->houdini_tx_gain_db();
   p.rx_gain_db = _cfg->houdini_rx_gain_db();
   // Houdini BS: the beacon is device BRAM replay (tx_mode=replay). The RX

@@ -234,6 +234,7 @@ houdini::modev::Plan RadioHoudini::modeVPlan(const RadioParams& p) {
   m.default_nco_hz = p.nco_hz;
   m.nco_by_channel = p.nco_by_channel;
   m.half_bw_hz = p.half_bw_hz;
+  m.half_bw_by_channel = p.half_bw_by_channel;
   m.tx_gain_db = p.tx_gain_db;
   m.rx_gain_db = p.rx_gain_db;
   m.rx_freq_offset_hz = p.rx_freq_offset_hz;
@@ -296,12 +297,19 @@ RadioHoudini::RadioHoudini(const RadioParams& params,
     if (params.tx_rate_hz != 2.0 * params.rate_hz) {
       throw std::invalid_argument("RadioHoudini: only TX = 2 x sample_rate is interpolated");
     }
-    // Shape the TX spectrum with the channel filter whenever the waveform fits
-    // its passband (every first-pass channel does): unshaped splatter beyond
-    // 40.2 MHz folds back onto the sub-6 channel at the far ADC.
-    const bool prefilter = params.half_bw_hz > 0.0 &&
-                           params.half_bw_hz <= houdini::rfplan::Rules{}.filter_pass_hz;
-    tx_interp_ = std::make_unique<houdini::boundary::TxBurstInterpolator>(prefilter);
+    // One interpolator per TX lane, chosen by the lane's band (AP-85): a band
+    // inside the channel filter's passband is prefiltered, since unshaped
+    // splatter beyond 40.2 MHz folds back onto the sub-6 channel at the far
+    // ADC; the X-band at 270 RB takes the wide halfband alone.
+    for (const size_t ch : params.tx_channels) {
+      const auto it = params.half_bw_by_channel.find(ch);
+      const double hb = it != params.half_bw_by_channel.end() ? it->second : params.half_bw_hz;
+      tx_interp_.push_back(std::make_unique<houdini::boundary::TxBurstInterpolator>(
+          houdini::boundary::TxBurstInterpolator::forBand(hb)));
+      MLPD_INFO("%s TX ch%zu: occupied +-%.3f MHz, %s\n", params.label.c_str(), ch, hb / 1e6,
+                hb > houdini::rfplan::Rules{}.filter_pass_hz ? "wide 47-tap halfband"
+                                                             : "channel prefilter + 23-tap halfband");
+    }
   }
   if (mode_v_ != nullptr) {
     auto on = houdini::boundary::laneFlags(
@@ -447,13 +455,21 @@ int RadioHoudini::xmit(const void* const* buffs, int samples, int flags,
   // interpolated here as a whole and padded to a whole 8-sample TX beat. The
   // time is in ns and does not change; the caller counts in ticks, so a full
   // write reports its own sample count back.
-  if (!tx_interp_ || samples <= 0) {
+  if (tx_interp_.empty() || samples <= 0) {
     const int r0 = RadioSoapy::xmit(buffs, samples, flags, frameTime);
     // RadioSoapy::xmit returns 0 on a radio with no TX stream: not a short write.
     if (!params_.tx_channels.empty() && r0 < samples) app_tx_short_.fetch_add(1, std::memory_order_relaxed);
     return r0;
   }
-  const auto o = tx_interp_->run(buffs, params_.tx_channels.size(), static_cast<size_t>(samples));
+  // Each lane through its own interpolator; every lane's output is the same
+  // length (the input's, beat-padded and doubled).
+  houdini::boundary::TxBurstInterpolator::Out o;
+  for (size_t c = 0; c < tx_interp_.size(); ++c) {
+    const auto oc = tx_interp_[c]->run(&buffs[c], 1, static_cast<size_t>(samples));
+    o.buffs.push_back(oc.buffs.at(0));
+    o.samples = oc.samples;
+    o.saturated += oc.saturated;
+  }
   if (o.saturated > 0) {
     app_tx_sat_.fetch_add(1, std::memory_order_relaxed);
     static std::atomic<unsigned> warned{0};

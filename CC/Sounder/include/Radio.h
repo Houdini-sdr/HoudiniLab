@@ -73,6 +73,7 @@ struct RadioParams {
   double dac_fs_hz = 0.0;
   std::map<size_t, double> nco_by_channel;  ///< per-channel overrides of nco_hz
   double half_bw_hz = 0.0;  ///< occupied half bandwidth of the waveform
+  std::map<size_t, double> half_bw_by_channel;  ///< AP-85: per-channel overrides of half_bw_hz
   double tx_gain_db = std::numeric_limits<double>::quiet_NaN();  ///< NaN: not written
   double rx_gain_db = std::numeric_limits<double>::quiet_NaN();
 };

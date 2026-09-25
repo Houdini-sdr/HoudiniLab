@@ -608,6 +608,20 @@ std::vector<std::vector<float>> CommsLib::getSequence(size_t type,
         break;
       }
     }
+    // AP-85: the table ends at 2039, and a longer sequence fell through to it:
+    // 3240 tones (the X-band at 270 RB) were a length-2039 sequence repeated
+    // over 59 % of the band, 5.26 dB PAPR where the length-3229 one has 3.69.
+    // Past the table, the largest prime below the length; every length the
+    // table covers is unchanged.
+    if (seq_len > Consts::prime[308]) {
+      auto is_prime = [](size_t n) {
+        for (size_t d = 2; d * d <= n; ++d)
+          if (n % d == 0) return false;
+        return n >= 2;
+      };
+      for (M = seq_len - 1; !is_prime(M); --M) {
+      }
+    }
     float qh = M * (u + 1) / 31;
     float q = std::floor(qh + 0.5) + v * std::pow(-1, std::floor(2 * qh));
     std::vector<std::complex<float>> zc_freq;
