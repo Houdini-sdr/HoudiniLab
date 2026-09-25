@@ -87,6 +87,15 @@ void RecorderWorker::initCsi(void) {
   double fps = 30.0;
   if (const char* f = std::getenv("HOUDINI_CSI_FPS")) fps = std::max(0.5, atof(f));
   csi_throttle_ns_ = 1e9 / fps;
+  // The Spectrum tab: 2048-point segments over the whole pilot slot, 512 bins
+  // (240 kHz at 122.88 Msps), on its own throttle, default 4 Hz per antenna;
+  // HOUDINI_CSI_SPC_FPS=0 turns it off.
+  double spc_fps = 4.0;
+  if (const char* f = std::getenv("HOUDINI_CSI_SPC_FPS")) spc_fps = atof(f);
+  if (spc_fps > 0.0 && static_cast<int>(cfg_->samps_per_slot()) >= 2048) {
+    spc_ = std::make_unique<houdini::WelchSpectrum>(2048, 512);
+    spc_throttle_ns_ = 1e9 / spc_fps;
+  }
   // What the platform's receive path does to the samples (sync/rx_path_fixes.h).
   const houdini::sync::RxPathFixes fixes = cfg_->rx_path_fixes();
   rx_conj_ = fixes.conjugate;  // undo the R2C mixer's spectral inversion (RFSoC only)
@@ -194,6 +203,7 @@ void RecorderWorker::streamCsi(Packet* pkt, NodeType node_type) {
   // Saturation on the OTHER slots still has to be caught, so peak and clip counts are
   // accumulated over every slot and ride along with the pilot's envelope.
   sendAdc(pkt, is_pilot);
+  if (is_pilot) sendSpectrum(pkt);
   if (node_type == kBS)  // the channel mapping below is the BS's RX list
     sendMeta(pkt->ant_id, std::chrono::duration_cast<std::chrono::nanoseconds>(
                             std::chrono::steady_clock::now().time_since_epoch())
@@ -305,6 +315,44 @@ void RecorderWorker::sendAdc(Packet* pkt, bool is_pilot) {
   (void)::send(csi_sock_, buf.data(), buf.size(), 0);
   any.peak = 0;            // the ledger covers the interval between sends
   any.clipped = 0;
+}
+
+// Pilot slot -> its spectrum for the Spectrum tab (houdini/spectrum.h has the
+// normalisation: dBFS per bin, a full-scale complex tone reads 0, the int16
+// rail being full scale as for ADC2). In the recorder's sense (rx_conj_), the
+// same as the CSI. About 1.4 ms a send on a 3 GHz Xeon, so 4 Hz on two
+// antennas is about 1 % of a core.
+// [magic 'SPC1'][frame][ant][nbins][nfft][rate f32][rbw_hz f32] then nbins
+// dBFS f32, DC-centred from -rate/2; rbw_hz = rate / nbins, each bin's band.
+void RecorderWorker::sendSpectrum(Packet* pkt) {
+  if (!spc_) return;
+  const long long now =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count();
+  auto it = spc_last_ns_.find(pkt->ant_id);
+  if (it != spc_last_ns_.end() &&
+      (now - it->second) < static_cast<long long>(spc_throttle_ns_))
+    return;
+  spc_last_ns_[pkt->ant_id] = now;
+  const std::vector<float> db =
+      spc_->run(pkt->data, static_cast<int>(cfg_->samps_per_slot()), rx_conj_, kAdcFullScale);
+  if (db.empty()) return;
+  std::vector<uint8_t> buf(28 + 4 * db.size());
+  const uint32_t magic = 0x53504331u, fr = pkt->frame_id, an = pkt->ant_id,
+                 nb = static_cast<uint32_t>(db.size()),
+                 nf = static_cast<uint32_t>(spc_->seg());
+  const float rate = static_cast<float>(cfg_->rate());
+  const float rbw = rate / static_cast<float>(nb);
+  std::memcpy(&buf[0], &magic, 4);
+  std::memcpy(&buf[4], &fr, 4);
+  std::memcpy(&buf[8], &an, 4);
+  std::memcpy(&buf[12], &nb, 4);
+  std::memcpy(&buf[16], &nf, 4);
+  std::memcpy(&buf[20], &rate, 4);
+  std::memcpy(&buf[24], &rbw, 4);
+  std::memcpy(&buf[28], db.data(), 4 * db.size());
+  (void)::send(csi_sock_, buf.data(), buf.size(), 0);
 }
 
 // Pilot slot -> channel estimate H[k] (DC-centered), cached per antenna + streamed.
