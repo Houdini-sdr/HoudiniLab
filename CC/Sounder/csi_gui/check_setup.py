@@ -322,7 +322,7 @@ def check_clock(rep, ip, port, st):
                 "Release it back into the calibrated hold before the run: python3 -c \"import SoapySDR as S; "
                 "d = S.Device({'driver': 'houdinisdr', 'remote': 'tcp://%s:%s', 'remote:driver': "
                 "'houdinisdr-device', 'remote:type': 'houdinisdr', 'timeout': '3000000'}); "
-                "d.writeSetting('CLOCK_ADJ', 'release'); S.Device.unmake(d)\"" % (ip, port))
+                "d.writeSetting('CLOCK_ADJ', 'release'); d.close()\"" % (ip, port))
     elif not off.lstrip("-").isdigit():
         rep.add("INFO", "clock %s" % ip, "ref=%s: not held at a calibration code, no steering offset"
                 % f.get("ref", "?"))
@@ -332,7 +332,7 @@ def check_clock(rep, ip, port, st):
                 "Release it before the run: python3 -c \"import SoapySDR as S; d = S.Device({'driver': "
                 "'houdinisdr', 'remote': 'tcp://%s:%s', 'remote:driver': 'houdinisdr-device', 'remote:type': "
                 "'houdinisdr', 'timeout': '3000000'}); d.writeSetting('CLOCK_ADJ', 'release'); "
-                "S.Device.unmake(d)\"" % (ip, port))
+                "d.close()\"" % (ip, port))
     else:
         rep.add("INFO", "clock %s" % ip, "ref=%s, at its calibration code %s (offset 0)"
                 % (f.get("ref", "?"), f.get("cal_dac", "?")))
