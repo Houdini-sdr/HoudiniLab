@@ -239,7 +239,7 @@ constellation, CIR, ADC, beacon sync).
 2. Replay, with no sounder running:
 
    ```sh
-   python3 csi_gui/csi_server.py --conf files/houdini-dualband.json &
+   python3 csi_gui/csi_server.py --conf files/houdini-dualband-xw.json &   # files/houdini-dualband.json for FINAL.rec
    python3 csi_gui/replay_feed.py ~/demo_rec/<name>.rec --loop
    ```
 
@@ -250,6 +250,15 @@ constellation, CIR, ADC, beacon sync).
    counters, which the beacon-sync card shows as a new segment.
 
 ## A8c. Demo day: bring-up at the venue (in order)
+
+**The demo build [user]:** the X-band at 270 RB (97.2 MHz) beside the sub-6 at
+133 RB, steered: branch `feat/demo-xw`, rig host worktree
+`~/repos/HoudiniLab-demoxw`, config `files/houdini-dualband-xw-steer.json`, its
+canned fallback `~/demo_rec/FINAL_XW.rec`. **The fallback build:** the X-band
+at 133 RB (47.88 MHz), steered: `feat/clock-steer-rollin` @ `0232d54`,
+`~/repos/HoudiniLab-steer`, `files/houdini-dualband-steer.json`, fallback
+recording `~/demo_rec/FINAL.rec`. Run the steps below from the chosen worktree
+with its config.
 
 Moving the rig means rebooting the rig host, which re-draws the NIC's receive
 hashing (a node's RX flow can land on a pinned core) and can wedge a node's data
