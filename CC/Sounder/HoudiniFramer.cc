@@ -554,9 +554,10 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
       best = near.second;
     }
     static std::atomic<bool> said{false};
-    if (!said.exchange(true))
+    if (!said.exchange(true)) {  // braces: MLPD_INFO is three statements (logger.h)
       MLPD_INFO("BS: the UE burst is searched only within +-%d samples of the scheduled pilot slot (SH-347 host half)\n",
                 n / 4);
+    }
   }
   // The read spans ~1.17 frames, so when the pilot lands in the first few
   // slots of the buffer a SECOND copy (next frame) is also fully contained
