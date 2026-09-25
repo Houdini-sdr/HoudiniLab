@@ -28,6 +28,7 @@
 #include "include/rx_gap_sink.h"  // RxGapSink -> /Data/Gaps at finalize
 #include "include/utils.h"
 #include "include/houdini/pilot_slope_fit.h"
+#include "include/houdini/cns_sample.h"
 
 namespace Sounder {
 
@@ -851,7 +852,9 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
   // 2026-09-23). The CNS score now includes the band edges too, so its
   // earlier baselines are not comparable.
   const size_t cand = Ys.size() * data_ind.size();
-  const size_t stride = std::max<size_t>(1, (cand + kMaxPts - 1) / kMaxPts);
+  // Coprime with the tone count, or the stride revisits the same tones every frame
+  // (houdini/cns_sample.h).
+  const size_t stride = houdini::cnsStride(cand, kMaxPts, data_ind.size());
   for (size_t si = 0; si < Ys.size() && pts.size() < kMaxPts; ++si) {
     const auto& Y = Ys[si];
     const std::complex<float> dr = sym_derot[si];
