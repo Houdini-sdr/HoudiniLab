@@ -191,11 +191,17 @@ inline std::string kvField(const std::string& raw, const std::string& key) {
   return "";
 }
 
-/// AP-86: whether TDD_EXTPIN_STAT shows the static source applied and settled,
-/// and every channel in `tx` allowed to drive. `why` names the first miss.
-inline bool extpinStaticOk(const std::string& stat, const std::vector<size_t>& tx, std::string* why) {
+/// AP-86: whether TDD_EXTPIN_STAT shows the static source applied in `state`
+/// (tx or rx) and settled, and every channel in `tx` allowed to drive. `why`
+/// names the first miss.
+inline bool extpinStaticOk(const std::string& stat, const std::string& state, const std::vector<size_t>& tx,
+                           std::string* why) {
   if (kvField(stat, "src_applied") != "static") {
     *why = "src_applied=" + kvField(stat, "src_applied");
+    return false;
+  }
+  if (kvField(stat, "applied") != state) {  // a board static in the WRONG state passes the rest
+    *why = "applied=" + kvField(stat, "applied") + ", wanted " + state;
     return false;
   }
   if (kvField(stat, "seq_busy") != "0") {
@@ -270,11 +276,13 @@ inline Result bringUp(SoapySDR::Device& dev, const Plan& p) {
     const auto t0 = std::chrono::steady_clock::now();
     for (;;) {
       stat = dev.readSetting("TDD_EXTPIN_STAT");
-      if (detail::extpinStaticOk(stat, tx_chs, &why)) break;
+      if (detail::extpinStaticOk(stat, p.xband_fe_state, tx_chs, &why)) break;
       if (std::chrono::steady_clock::now() - t0 > std::chrono::milliseconds(200))
         throw std::runtime_error("mode V bring-up: the X-band front end's static " + p.xband_fe_state +
                                  " did not take (" + why + "; TDD_EXTPIN_STAT '" + stat +
-                                 "'). Is houdini-role applied on this node?");
+                                 "'): a plugin that ignores the keys, or the board not ready (pa_ready: its "
+                                 "power board or the ADTR1107 init); a node without houdini-role refuses the "
+                                 "SRC write itself, with its reason");
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     logLine("TDD_EXTPIN_CTRL txsel=1,trsw=1,ilock=1 -> " + dev.readSetting("TDD_EXTPIN_CTRL"));
@@ -462,7 +470,7 @@ inline PostSetup postSetupCheck(SoapySDR::Device& dev, const Result& r) {
     for (const auto& t : r.tx) tx_chs.push_back(t.channel);
     const std::string stat = dev.readSetting("TDD_EXTPIN_STAT");
     std::string why;
-    if (!detail::extpinStaticOk(stat, tx_chs, &why))
+    if (!detail::extpinStaticOk(stat, r.xband_fe_state, tx_chs, &why))
       throw std::runtime_error("mode V: the X-band front end's static " + r.xband_fe_state +
                                " was lost across the setups (" + why + "; TDD_EXTPIN_STAT '" + stat + "')");
     ps.log.push_back("TDD_EXTPIN_STAT after the setups -> " + stat);

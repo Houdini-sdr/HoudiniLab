@@ -57,6 +57,7 @@ class FakeDevice : public SoapySDR::Device {
   bool extpin_ignored = false;       ///< the keys no-op (standing trap 1): STAT never shows static
   int drive_allow_off = -1;          ///< this TX channel reads drive_allow_chK=0 (guarded, no pa_ready)
   bool extpin_lost_on_setup = false; ///< setupStream resets CTRL/SRC
+  bool seq_busy_stuck = false;       ///< the source walk never settles (seq_busy=1)
 
   size_t getNumChannels(const int dir) const override { return dir == SOAPY_SDR_TX ? 2 : 4; }
   void setSampleRate(const int dir, const size_t ch, const double rate) override {
@@ -132,7 +133,10 @@ class FakeDevice : public SoapySDR::Device {
       // The fields the software lane named, mixed separators on purpose.
       const bool st = !extpin_ignored && val("TDD_EXTPIN_SRC").rfind("src=static", 0) == 0 &&
                       val("TDD_EXTPIN_CTRL").find("ilock=1") != std::string::npos;
-      std::string s = std::string("mode=xband src_applied=") + (st ? "static" : "tdd") + ",seq_busy=0 drive_allow=1";
+      const std::string src = val("TDD_EXTPIN_SRC");
+      const std::string applied = !st ? "idle" : (src.find("state=tx") != std::string::npos ? "tx" : "rx");
+      std::string s = std::string("mode=xband src_applied=") + (st ? "static" : "tdd") + " applied=" + applied +
+                      ",seq_busy=" + (seq_busy_stuck ? "1" : "0") + " drive_allow=1";
       for (int c = 0; c < 2; ++c) s += " drive_allow_ch" + std::to_string(c) + "=" + (c == drive_allow_off ? "0" : "1");
       return s;
     }
@@ -399,7 +403,6 @@ int main() {
     check(threw, "one width for every channel cannot carry the X-band at 270 RB (the sub-6 channel is refused)");
   }
 
-  std::printf("%s: %d failure(s)\n", g_fail == 0 ? "ALL PASS" : "FAILED", g_fail);
   // ---- AP-86: the X-band front end's static state (step 1b) ---------------
   {
     FakeDevice f;
@@ -418,7 +421,7 @@ int main() {
           "AP-86 UE: CTRL with the interlock, then SRC static tx, right after FORCE_IDLE and before any rate [mutations: SRC before CTRL; the pair after the converters; state rx on the UE]");
     check(orderOk(f.calls), "AP-86 UE: the converter order still holds");
     const auto ps = houdini::modev::postSetupCheck(f, r);
-    check(has(ps.log, "TDD_EXTPIN_STAT after the setups -> mode=xband src_applied=static,seq_busy=0 drive_allow=1 drive_allow_ch0=1 drive_allow_ch1=1"),
+    check(has(ps.log, "TDD_EXTPIN_STAT after the setups -> mode=xband src_applied=static applied=tx,seq_busy=0 drive_allow=1 drive_allow_ch0=1 drive_allow_ch1=1"),
           "AP-86 post-setup: the static state re-read after the setups [mutation: the re-check dropped]");
   }
   {
@@ -473,6 +476,29 @@ int main() {
             houdini::modev::detail::kvField("drive_allow_ch0=0 drive_allow=1", "drive_allow") == "1" &&
             houdini::modev::detail::kvField("seq_busy=0", "seq") == "",
         "kvField matches whole keys [mutation: a prefix match reads drive_allow_ch0 for drive_allow]");
+  {
+    FakeDevice f;
+    f.seq_busy_stuck = true;
+    auto p = uePlan();
+    p.xband_fe_state = "tx";
+    bool threw = false;
+    try { houdini::modev::bringUp(f, p); } catch (const std::runtime_error&) { threw = true; }
+    check(threw, "AP-86: a source walk that never settles (seq_busy=1) throws [mutation: seq_busy not checked]");
+  }
+  {
+    FakeDevice f;
+    f.drive_allow_off = 0;  // the BS's beacon channel blanked
+    auto p = bsPlan();
+    p.xband_fe_state = "rx";
+    bool threw = false;
+    try { houdini::modev::bringUp(f, p); } catch (const std::runtime_error&) { threw = true; }
+    check(threw, "AP-86 BS: its beacon channel not allowed to drive (drive_allow_ch0=0) throws [mutation: the BS's opened channels not checked]");
+  }
+  std::string why_w;
+  check(!houdini::modev::detail::extpinStaticOk("src_applied=static applied=tx seq_busy=0 drive_allow_ch0=1", "rx", {0}, &why_w) &&
+            houdini::modev::detail::extpinStaticOk("src_applied=static applied=rx seq_busy=0 drive_allow_ch0=1", "rx", {0}, &why_w),
+        "AP-86: a board static in the WRONG state is refused (mutation: applied= not checked)");
+  std::printf("%s: %d failure(s)\n", g_fail == 0 ? "ALL PASS" : "FAILED", g_fail);
 
   return g_fail == 0 ? 0 : 1;
 }

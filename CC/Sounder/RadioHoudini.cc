@@ -203,6 +203,9 @@ void RadioHoudini::writeStateRecord(const std::string& label, SoapySDR::Device& 
       return;
     }
     section("RFDC_PREFLIGHT", [&] { return dev.readSetting("RFDC_PREFLIGHT"); });
+    // AP-86: the front end's state, so an end-of-run record shows whether a
+    // static source survived the run (a second client's close resets it).
+    section("TDD_EXTPIN_STAT", [&] { return dev.readSetting("TDD_EXTPIN_STAT"); });
     auto info = [&](int dir, const char* dir_name, const std::vector<size_t>& chans) {
       for (auto ch : chans) {
         const std::string title = std::string("getChannelInfo ") + dir_name + " ch" + std::to_string(ch);
