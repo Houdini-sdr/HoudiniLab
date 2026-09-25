@@ -1581,7 +1581,7 @@ function line(ctx,vals,ymin,ymax,color,w,h){
 // moves by about a sample from one frame to the next, plus the two free-running
 // carriers' phase; both swamped the shape, which on a cable is the filters' ripple.
 // The removed delay is printed beside the title instead.
-const PH_DRAW_MS=500, PH_SPAN_DEG=5;  // measured: the shape is about +-1 deg typical, 5-9 deg at the 99th percentile
+const PH_DRAW_MS=500, PH_SPAN_DEG=10;  // measured: the shape is about +-1 deg typical, 5-9 deg at the 99th percentile; +-5 pinned the tails [user]
 function phaseShape(ph){
   const n=ph.length;
   let sr=0, si=0;
