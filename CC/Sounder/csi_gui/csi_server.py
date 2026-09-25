@@ -467,7 +467,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/" or self.path.startswith("/index"):
             pre, post = self.server.guard_seats()
             body = (PAGE.replace("__STALE_MS__", str(self.server.stale_ms))
-                        .replace("__MAG_TOP__", str(self.server.mag_top))
+                        .replace("__MAG_TOP__", str(self.server.mag_top()))
                         .replace("__MAG_SPAN__", str(self.server.mag_span))
                         .replace("__GUARD_PRE__", str(pre))
                         .replace("__GUARD_POST__", str(post))
@@ -649,6 +649,20 @@ def _load_conf(sounder_dir, conf):
         return cj if isinstance(cj, dict) else None
     except (OSError, ValueError):
         return None
+
+
+MAG_TOP_DEFAULT = 90.0
+
+
+def _mag_top(sounder_dir, conf, explicit):
+    """The |H| axis top: --mag-top when given, else the config's
+    dashboard_mag_top (a finite number), else MAG_TOP_DEFAULT."""
+    if explicit is not None:
+        return explicit
+    v = (_load_conf(sounder_dir, conf) or {}).get("dashboard_mag_top")
+    if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v):
+        return float(v)
+    return MAG_TOP_DEFAULT
 
 
 def _topology_of(sounder_dir, conf):
@@ -979,8 +993,9 @@ def main():
                     help="web server bind host (default 0.0.0.0; 127.0.0.1 with --control)")
     ap.add_argument("--http-port", type=int, default=8080, help="web server port")
     ap.add_argument("--fps", type=float, default=30.0, help="dashboard push rate")
-    ap.add_argument("--mag-top", type=float, default=90.0,
-                    help="top of the FIXED |H| axis in dB (default: %(default)s)")
+    ap.add_argument("--mag-top", type=float, default=None,
+                    help="top of the FIXED |H| axis in dB (default: the config's "
+                         "dashboard_mag_top, else %.0f)" % MAG_TOP_DEFAULT)
     ap.add_argument("--mag-span", type=float, default=40.0,
                     help="height of the FIXED |H| axis in dB (default: %(default)s). "
                          "Both panels are fixed frame to frame; widen the span if "
@@ -1013,7 +1028,7 @@ def main():
     args = ap.parse_args()
     # Validate BEFORE anything launches: a SystemExit after the supervisor starts
     # orphaned the sounder group holding the radios (second review 2.5).
-    if not (math.isfinite(args.mag_top) and math.isfinite(args.mag_span)
+    if not ((args.mag_top is None or math.isfinite(args.mag_top)) and math.isfinite(args.mag_span)
             and args.mag_span > 0):
         raise SystemExit("--mag-top/--mag-span must be finite (span > 0)")
 
@@ -1050,7 +1065,10 @@ def main():
     srv = ThreadingHTTPServer((args.http_host, args.http_port), Handler)
     srv.fps = args.fps
     srv.stale_ms = args.stale_ms
-    srv.mag_top = args.mag_top
+    # The |H| level depends on the config (its FFT size, above all), so the config
+    # may carry the axis top; an explicit --mag-top wins. Resolved per page load
+    # so a config switch under --control takes effect on the next reload.
+    srv.mag_top = lambda: _mag_top(args.sounder_dir, sup.conf if sup else args.conf, args.mag_top)
     srv.mag_span = args.mag_span
     # Nominal guard seats for the ADC panel's dashed markers (Opus review M16:
     # 128 was hardcoded but eight shipped configs use 160), from the config the
@@ -1113,6 +1131,14 @@ PAGE = r"""<!doctype html>
 /* A stale card dims its plots but NOT its header, so the badge that explains the
    dimming does not dim along with the thing it is explaining. */
 .csi-card.stale .csi-plots{opacity:.4}
+/* A collapsed card keeps its header (title, badges, the sync chip) and hides the
+   rest. A class, not the hidden attribute: Tabler's d-* utilities override that. */
+.csi-card.csi-collapsed .csi-collapsible{display:none}
+/* Tabler's .d-flex{display:flex!important} comes after its [hidden] rule and so
+   beat it: a view-only dashboard showed the control bar. An ID rule wins. */
+#ctl[hidden]{display:none!important}
+.csi-fold svg{transition:transform .15s}
+.csi-card.csi-collapsed .csi-fold svg{transform:rotate(-90deg)}
 .csi-plots{display:grid;grid-template-columns:1fr 1fr;gap:.75rem 1rem}
 .csi-phase-stack{display:flex;flex-direction:column;gap:.35rem}
 .csi-h-half canvas{height:74px}
@@ -1310,9 +1336,10 @@ function makeCard(ant){
      +'<h3 class="card-title">RX antenna '+ant+'</h3>'
      +'<div class="card-actions d-flex gap-1">'
        +'<span class="badge bg-orange-lt text-orange csi-stale" hidden></span>'
+       +foldButton()
      +'</div>'
     +'</div>'
-    +'<div class="card-body p-3">'
+    +'<div class="card-body p-3 csi-collapsible">'
      +'<ul class="nav nav-underline mb-3 csi-tabs">'
        +'<li class="nav-item"><a href="#" class="nav-link active" data-view="channel">Channel</a></li>'
        +'<li class="nav-item"><a href="#" class="nav-link" data-view="adc">ADC</a></li>'
@@ -1323,7 +1350,10 @@ function makeCard(ant){
       // back-off ramp + per-run offset); corrected = de-ramped and run-anchored.
       +'<div class="csi-phase-stack">'
       +frame('phase (raw, rad)','csi-h-half',['1.0π','0.0π','-1.0π'],['','',''])
-      +frame('phase, bulk delay removed (rad)','csi-h-half',['1.0π','0.0π','-1.0π'],['','',''])
+      +frame('phase shape, delay and common phase removed (deg)','csi-h-half',
+             ['+'+PH_SPAN_DEG+'°','0°','-'+PH_SPAN_DEG+'°'],['','',''],
+             '<span class="text-secondary tnum csi-ph-delay"></span>'
+             +'<span class="badge bg-red-lt text-red csi-ph-off" hidden>off scale</span>')
       +'</div>'
       +frame('waterfall |H| (time down)','csi-h-wf',['older','','now'],['','',''])
       +frame('constellation (equalized U)','csi-h-cons',
@@ -1354,6 +1384,8 @@ function makeCard(ant){
   cards[ant]={magCv:cvs[0],rawPhaseCv:cvs[1],phaseCv:cvs[2],wfCv:cvs[3],
               consCv:cvs[4],cirCv:cvs[5],adcCv:cvs[6],dim:null,wfimg:null,
               quality:wrap.querySelector('.csi-quality'),
+              phOff:wrap.querySelector('.csi-ph-off'),phDelay:wrap.querySelector('.csi-ph-delay'),
+              phAcc:null,phLast:null,phT:0,
               cirX:wrap.querySelectorAll('.csi-h-cir .csi-x-axis span'),
               status:wrap.querySelector('.csi-status'),
               adcStatus:wrap.querySelector('.csi-adc-status'),
@@ -1382,13 +1414,42 @@ function makeCard(ant){
         v=>{v.hidden=(v.dataset.view!==want);});
       // A canvas in a hidden div measures 0, so anything drawn while the tab was
       // closed went nowhere. Re-fit and repaint the moment it becomes visible.
-      const card=cards[ant];
-      fitCard(card);
-      if(card.csiRec) drawCsi(card,card.csiRec,false);
-      if(card.cnsRec) drawCons(card,card.cnsRec);
-      if(card.adcRec) drawAdc(card,card.adcRec);
-      if(card.cirRec) drawCir(card,card.cirRec);
+      repaintCard(cards[ant]);
     });
+  });
+  // Expanding repaints for the same reason; while collapsed nothing is drawn.
+  setupFold(wrap,'ant:'+ant,()=>repaintCard(cards[ant]));
+}
+function repaintCard(card){
+  fitCard(card);
+  if(card.csiRec) drawCsi(card,card.csiRec,false);
+  if(card.cnsRec) drawCons(card,card.cnsRec);
+  if(card.adcRec) drawAdc(card,card.adcRec);
+  if(card.cirRec) drawCir(card,card.cirRec);
+}
+
+// Collapsible cards [user]: a chevron in the header folds the card to its header.
+// Remembered per browser, per card; a browser that refuses storage just starts open.
+const FOLD_KEY='csi-fold:';
+const CHEVRON='<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none"'
+  +' stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon m-0">'
+  +'<path stroke="none" d="M0 0h24v24H0z" fill="none"/><path d="M6 9l6 6l6 -6"/></svg>';
+function foldButton(){
+  return '<button class="btn btn-sm btn-icon btn-ghost-secondary csi-fold" title="Collapse / expand"'
+    +' aria-label="Collapse or expand this card" aria-expanded="true">'+CHEVRON+'</button>';
+}
+function isFolded(el){ return el.classList.contains('csi-collapsed'); }
+function setupFold(wrap,key,onOpen){
+  const btn=wrap.querySelector('.csi-fold');
+  const apply=c=>{ wrap.classList.toggle('csi-collapsed',c); btn.setAttribute('aria-expanded',String(!c)); };
+  let folded=false;
+  try{ folded=localStorage.getItem(FOLD_KEY+key)==='1'; }catch(e){}
+  apply(folded);
+  btn.addEventListener('click',()=>{
+    const c=!isFolded(wrap);
+    apply(c);
+    try{ localStorage.setItem(FOLD_KEY+key,c?'1':'0'); }catch(e){}
+    if(!c && onOpen) onOpen();
   });
 }
 
@@ -1456,6 +1517,98 @@ function line(ctx,vals,ymin,ymax,color,w,h){
   ctx.stroke();
 }
 
+// Phase panels [user: "too zoomed out and update too fast"]. Both redraw every
+// PH_DRAW_MS, not every frame. The raw panel stays arg(H) as measured on -pi..+pi.
+// The lower panel is the channel's phase SHAPE: from each frame the sounder's
+// de-ramped phase loses its measured delay (a least-squares line, seeded by the
+// mean phase step between adjacent tones so wrapping cannot fool it) and its common
+// phase, and what is left is averaged over the frames since
+// the last draw (as unit phasors) and drawn on a fixed +-PH_SPAN_DEG axis. Removing
+// only the window back-off (the sounder's de-ramp) left a tilt that the frame timing
+// moves by about a sample from one frame to the next, plus the two free-running
+// carriers' phase; both swamped the shape, which on a cable is the filters' ripple.
+// The removed delay is printed beside the title instead.
+const PH_DRAW_MS=500, PH_SPAN_DEG=30;
+function phaseShape(ph){
+  const n=ph.length;
+  let sr=0, si=0;
+  for(let k=0;k+1<n;k++){
+    const a=ph[k], b=ph[k+1];
+    if(a===null||b===null) continue;
+    sr+=Math.cos(b-a); si+=Math.sin(b-a);
+  }
+  const slope=Math.atan2(si,sr);  // rad per tone
+  let cr=0, ci=0;
+  for(let k=0;k<n;k++){
+    if(ph[k]===null) continue;
+    cr+=Math.cos(ph[k]-slope*k); ci+=Math.sin(ph[k]-slope*k);
+  }
+  const cp=Math.atan2(ci,cr);
+  // The mean step behaves like an end-to-end slope, so a ripple with a net tilt
+  // biases it; a least-squares line through the now small residual (no wrapping
+  // left) makes it the standard fit.
+  const r=new Array(n);
+  let m=0, sk=0, skk=0, sr2=0, skr=0;
+  for(let k=0;k<n;k++){
+    if(ph[k]===null){ r[k]=null; continue; }
+    const d=ph[k]-slope*k-cp;
+    r[k]=Math.atan2(Math.sin(d),Math.cos(d));
+    m++; sk+=k; skk+=k*k; sr2+=r[k]; skr+=k*r[k];
+  }
+  const den=m*skk-sk*sk, b=den ? (m*skr-sk*sr2)/den : 0, a=m ? (sr2-b*sk)/m : 0;
+  const re=new Array(n), im=new Array(n);
+  for(let k=0;k<n;k++){
+    if(r[k]===null){ re[k]=null; im[k]=null; continue; }
+    const v=r[k]-a-b*k;
+    re[k]=Math.cos(v); im[k]=Math.sin(v);
+  }
+  return {slope:slope+b, re:re, im:im};
+}
+function drawPhase(card,c,advance){
+  if(advance!==false){
+    const sh=phaseShape(c.phase), n=sh.re.length;
+    let a=card.phAcc;
+    if(!a || a.re.length!==n)
+      a=card.phAcc={re:new Float64Array(n), im:new Float64Array(n), cnt:new Uint32Array(n), frames:0, slope:0};
+    for(let k=0;k<n;k++){
+      if(sh.re[k]===null) continue;
+      a.re[k]+=sh.re[k]; a.im[k]+=sh.im[k]; a.cnt[k]++;
+    }
+    a.frames++; a.slope+=sh.slope;
+  }
+  const now=Date.now();
+  if(advance!==false && now-card.phT<PH_DRAW_MS) return;
+  card.phT=now;
+  const a=card.phAcc;
+  if(a && a.frames){
+    const vals=new Array(a.re.length);
+    for(let k=0;k<vals.length;k++)
+      vals[k]=a.cnt[k] ? Math.atan2(a.im[k],a.re[k])*180/Math.PI : null;
+    card.phLast={vals:vals, slope:a.slope/a.frames, frames:a.frames};
+    card.phAcc=null;
+  }
+  const dr=card.dim.rawph, dp=card.dim.phase;
+  grid(card.rawph,dr.w,dr.h);
+  if(c.raw_ph) line(card.rawph,c.raw_ph,-Math.PI,Math.PI,C.rawph,dr.w,dr.h);
+  grid(card.phase,dp.w,dp.h);
+  const L=card.phLast;
+  if(!L) return;
+  // Clamp so a shape outside the axis is pinned to the edge, and say so.
+  let off=false;
+  const shown=L.vals.map(v=>{
+    if(v===null) return null;
+    if(Math.abs(v)>PH_SPAN_DEG){ off=true; return Math.sign(v)*PH_SPAN_DEG; }
+    return v;
+  });
+  line(card.phase,shown,-PH_SPAN_DEG,PH_SPAN_DEG,C.phase,dp.w,dp.h);
+  card.phOff.hidden=!off;
+  // delay = -slope / (2 pi scs); the tones are one subcarrier apart.
+  const scs=card.metRec && card.metRec.scs_khz ? card.metRec.scs_khz*1e3 : 0;
+  card.phDelay.textContent=scs
+    ? ('delay removed '+(-L.slope/(2*Math.PI*scs)*1e9).toFixed(1)+' ns, '+L.frames+'-frame mean')
+    : (L.frames+'-frame mean');
+}
+
 // The subcarrier axis is only known once a frame has arrived, so the three x-axis
 // gutters that share it are filled in on the first one and left alone after.
 function setScAxis(card,nsc){
@@ -1477,20 +1630,14 @@ function drawCsi(card,c,advance){
   setScAxis(card,c.sc);
   // Magnitude: FIXED axis, never re-ranged. Set with --mag-top / --mag-span.
   const top=MAG_TOP, bot=MAG_BOT;
-  const dm=card.dim.mag, dp=card.dim.phase, dw=card.dim.wf;
+  const dm=card.dim.mag, dw=card.dim.wf;
   grid(card.mag,dm.w,dm.h);
   line(card.mag,c.mag_db,bot,top,C.mag,dm.w,dm.h);
   // A fixed axis can hide the trace entirely if the level moves off scale, so say
   // so rather than showing an innocent-looking empty panel.
   const fin=c.mag_db.filter(v=>v!==null);
   card.off.hidden=!(fin.length&&(Math.max(...fin)>top||Math.min(...fin)<bot));
-  // Both phase panels: fixed -pi..+pi. Raw = as measured; corrected =
-  // de-ramped + run-anchored (the sounder does both transforms).
-  const dr=card.dim.rawph;
-  grid(card.rawph,dr.w,dr.h);
-  if(c.raw_ph) line(card.rawph,c.raw_ph,-Math.PI,Math.PI,C.rawph,dr.w,dr.h);
-  grid(card.phase,dp.w,dp.h);
-  line(card.phase,c.phase,-Math.PI,Math.PI,C.phase,dp.w,dp.h);
+  drawPhase(card,c,advance);
   // waterfall: scroll up 1px, draw new bottom row coloured by magnitude
   if(advance!==false){
     card.wf.drawImage(card.wf.canvas,0,-1);
@@ -1663,6 +1810,7 @@ function redrawAll(){
   }
   for(const a in cards){
     const card=cards[a];
+    if(isFolded(card.el)) continue;    // repainted when it is expanded
     fitCard(card, themeChanged);       // clears the waterfall only when it must
     if(card.csiRec) drawCsi(card,card.csiRec,false);
     if(card.cnsRec) drawCons(card,card.cnsRec);
@@ -1713,13 +1861,17 @@ function makeSyncCard(tid){
   wrap.innerHTML='<div class="card-body">'
     +'<div class="d-flex align-items-center justify-content-between mb-2">'
       +'<h3 class="card-title mb-0">beacon sync'+(tid!=='0'?(' [UE '+tid+']'):'')+'</h3>'
-      +'<span class="badge bg-secondary-lt sync-chip">--</span></div>'
+      +'<div class="d-flex align-items-center gap-1">'
+        +'<span class="badge bg-secondary-lt sync-chip">--</span>'+foldButton()+'</div></div>'
+    +'<div class="csi-collapsible">'
     +frame('resid vs the anchored grid (samples)','csi-h-line',
            ['','','0','',''],['older','frame','now'])
     +'<div class="text-secondary tnum mt-2 sync-read" style="font-size:.75rem"></div>'
-    +'</div>';
+    +'</div></div>';
   document.getElementById('sync').appendChild(wrap);
-  syncCards[tid]={cv:wrap.querySelector('canvas'),
+  // The chip stays live while folded; the plot is redrawn on expand.
+  setupFold(wrap,'sync:'+tid,()=>{ if(syncCards[tid].rec) drawSyncCard(tid,syncCards[tid].rec); });
+  syncCards[tid]={el:wrap,cv:wrap.querySelector('canvas'),
                   chip:wrap.querySelector('.sync-chip'),
                   read:wrap.querySelector('.sync-read'),
                   plot:wrap.querySelector('.csi-plot'),
@@ -1784,6 +1936,7 @@ function drawSyncCard(tid, sync){
   card.chip.textContent=label;
   card.chip.className='badge '+cls;
   if(card.plot) card.plot.style.opacity=(age>=quietMs)?'0.4':'1';
+  if(isFolded(card.el)) return;
 
   const d=fitCanvas(card.cv,true), ctx=d.ctx;
   ctx.clearRect(0,0,d.w,d.h);
@@ -1906,19 +2059,25 @@ function onData(obj){
     const rec=ant[a], card=cards[a];
     // A stale re-push carries the SAME record, so gate redraw and the rate meter
     // on the frame number. Otherwise a stalled link would read as busy.
+    // A folded card keeps the newest records (drawn on expand) and draws nothing.
+    const open=!isFolded(card.el);
     if(rec.csi && rec.csi.frame!==card.lastCsi){
-      drawCsi(card,rec.csi,true); card.lastCsi=rec.csi.frame; pktCount++;
+      if(open) drawCsi(card,rec.csi,true); else card.csiRec=rec.csi;
+      card.lastCsi=rec.csi.frame; pktCount++;
     }
     if(rec.cns && rec.cns.frame!==card.lastCns){
-      drawCons(card,rec.cns); card.lastCns=rec.cns.frame; card.cnsT=Date.now(); drawQuality(card);
+      if(open){ drawCons(card,rec.cns); drawQuality(card); } else card.cnsRec=rec.cns;
+      card.lastCns=rec.cns.frame; card.cnsT=Date.now();
     }
-    if(rec.met && !card.metRec) { card.metRec=rec.met; drawQuality(card); }
+    if(rec.met && !card.metRec) { card.metRec=rec.met; if(open) drawQuality(card); }
     else if(rec.met) card.metRec=rec.met;
     if(rec.cir && rec.cir.frame!==card.lastCir){
-      drawCir(card,rec.cir); card.lastCir=rec.cir.frame;
+      if(open) drawCir(card,rec.cir); else card.cirRec=rec.cir;
+      card.lastCir=rec.cir.frame;
     }
     if(rec.adc && rec.adc.frame!==card.lastAdc){
-      drawAdc(card,rec.adc); card.lastAdc=rec.adc.frame;
+      if(open) drawAdc(card,rec.adc); else card.adcRec=rec.adc;
+      card.lastAdc=rec.adc.frame;
     }
     // The sounder stops sending for an antenna whose slots carried RX gaps, so
     // the panels hold their last good estimate. Say that on screen: a frozen
