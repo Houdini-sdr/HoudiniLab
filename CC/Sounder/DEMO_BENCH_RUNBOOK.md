@@ -265,7 +265,7 @@ hashing (a node's RX flow can land on a pinned core) and can wedge a node's data
 egress (HS-225). Do every step, every power-up.
 
 1. On the rig host: `cat /sys/devices/system/cpu/isolated` reads `15-19`.
-2. `python3 csi_gui/check_setup.py --conf files/houdini-dualband-steer.json`:
+2. `python3 csi_gui/check_setup.py --conf files/houdini-dualband-xw-steer.json`:
    Ready, egress PASS on both nodes, the stacks match. A stack FAIL reading
    `SoapyRPCUnpacker::recv() TIMEOUT` can be a slow radio open: run it again.
    An egress FAIL needs that node's PL reload or reboot.
@@ -274,7 +274,7 @@ egress (HS-225). Do every step, every power-up.
    ```sh
    export HOUDINI_CORE_MAP=main=15 HOUDINI_TX_CPU_AFFINITY=18,19 HOUDINI_TX_HOST_STATUS=1
    export HOUDINI_CSI_RECORD=~/demo_rec/<name>.rec    # optional: records a fallback
-   python3 csi_gui/csi_server.py --control --conf files/houdini-dualband-steer.json
+   python3 csi_gui/csi_server.py --control --conf files/houdini-dualband-xw-steer.json
    ```
 
 4. Within the first minute of a Start:
