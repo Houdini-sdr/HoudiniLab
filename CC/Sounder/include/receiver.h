@@ -142,7 +142,6 @@ class Receiver {
   SampleBuffer* bs_tx_buffer_;
   std::vector<void*> pilotbuffA_;
   std::vector<void*> pilotbuffB_;
-  std::vector<void*> ue_databuffA_;  // viewing-mode UE uplink-data slot (ch A)
   std::vector<void*> zeros_;
   size_t txTimeDelta_;
   size_t txFrameDelta_;

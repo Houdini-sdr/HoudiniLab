@@ -96,7 +96,8 @@ class RadioHoudini : public RadioSoapy {
                                const std::string& failure);
 
   std::shared_ptr<houdini::modev::Result> mode_v_;  // null unless mode V
-  std::unique_ptr<houdini::boundary::TxBurstInterpolator> tx_interp_;  // TX = 2 x rate
+  // TX = 2 x rate: one interpolator per TX lane (lane c = tx_channels[c]), AP-85.
+  std::vector<std::unique_ptr<houdini::boundary::TxBurstInterpolator>> tx_interp_;
   std::unique_ptr<houdini::boundary::RxLaneFilters> rx_filters_;       // any lane filtered
   bool recv_filter_ = true;  // off when the BS framer filters its slices itself
   std::function<long long(long long)> placer_;  // set for one recv() by placeNextWindow

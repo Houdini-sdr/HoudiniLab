@@ -24,6 +24,24 @@
 #include "sync/rx_path_fixes.h"
 #include "sync/sync_config.h"
 
+/// One band's OFDM waveform (AP-85): everything derived from its tone count.
+/// Band 0 is `ofdm_data_num`, the band of every channel without an override in
+/// `channel_ofdm_data_num`; the legacy accessors (pilot_ci16(), data_ind(),
+/// ...) are band 0. Built once by Config::buildBand, so the bands cannot
+/// differ in anything but their tone count.
+struct OfdmBand {
+  size_t data_num = 0;                              ///< occupied tones
+  float tx_scale = 0.0f;                            ///< the pilot's scale (peak at FS / 2)
+  std::vector<std::vector<float>> pilot_sym_t;      ///< [I, Q] x fft_size
+  std::vector<std::vector<float>> pilot_sym_f;      ///< [I, Q] x fft_size, DC-centred
+  std::vector<std::complex<int16_t>> pilot_ci16;    ///< the pilot slot
+  std::vector<std::complex<float>> pilot_sc;        ///< the data symbols' pilot tones
+  std::vector<size_t> pilot_sc_ind;
+  std::vector<size_t> data_ind;
+  std::vector<std::complex<int16_t>> ue_data_ci16;  ///< the UE uplink-data slot
+  std::vector<std::complex<float>> ue_data_f;       ///< its frequency-domain reference
+};
+
 class Config {
  public:
   Config(const std::string&, const std::string&, const bool, const bool,
@@ -232,14 +250,14 @@ class Config {
     return this->tx_data_;
   };
   inline std::vector<std::complex<int16_t>>& pilot_ci16(void) {
-    return this->pilot_ci16_;
+    return this->bands_.at(0).pilot_ci16;
   }
   // Self-contained UE uplink-data slot for viewing mode (random modulated symbols
   // on the data subcarriers, one OFDM symbol repeated across the slot) + its
   // modulation order (2/4/6 = QPSK/16/64-QAM). Transmitted continuously in the U
   // slot; the BS equalizes it with the pilot CSI to show the constellation.
   inline std::vector<std::complex<int16_t>>& ue_data_ci16(void) {
-    return this->ue_data_ci16_;
+    return this->bands_.at(0).ue_data_ci16;
   }
   inline int ue_data_mod_order(void) const { return this->ue_data_mod_order_; }
   inline std::vector<size_t>& n_bs_sdrs(void) { return this->n_bs_sdrs_; }
@@ -273,7 +291,7 @@ class Config {
   }
 
   inline const std::vector<size_t>& data_ind(void) const {
-    return this->data_ind_;
+    return this->bands_.at(0).data_ind;
   }
   inline const std::vector<uint32_t>& coeffs(void) const {
     return this->coeffs_;
@@ -290,17 +308,34 @@ class Config {
   }
 
   inline std::vector<std::vector<float>>& pilot_sym_t(void) {
-    return this->pilot_sym_t_;
+    return this->bands_.at(0).pilot_sym_t;
   };
   inline std::vector<std::vector<float>>& pilot_sym_f(void) {
-    return this->pilot_sym_f_;
+    return this->bands_.at(0).pilot_sym_f;
   };
   inline std::vector<std::complex<float>>& pilot_sc(void) {
-    return this->pilot_sc_;
+    return this->bands_.at(0).pilot_sc;
   };
   inline std::vector<size_t>& pilot_sc_ind(void) {
-    return this->pilot_sc_ind_;
+    return this->bands_.at(0).pilot_sc_ind;
   };
+
+  // AP-85: per-band channel widths. A channel is a converter channel index
+  // (A = 0); one without a `channel_ofdm_data_num` entry carries band 0.
+  /// The band channel `ch` carries.
+  const OfdmBand& band(size_t ch) const {
+    const auto it = band_of_channel_.find(ch);
+    return bands_.at(it == band_of_channel_.end() ? 0 : it->second);
+  }
+  /// The band of BS antenna `ant`: its RX channel, rx_channel's letter at
+  /// ant % bs_rx_ch (the recorder's antenna order).
+  const OfdmBand& bsRxBand(size_t ant) const;
+  /// The band of UE TX lane `lane`: ue_tx_channel's letter at `lane`.
+  const OfdmBand& ueTxBand(size_t lane) const;
+  inline size_t num_bands(void) const { return bands_.size(); }
+  /// The occupied half bandwidth of each channel with an override, Hz (the
+  /// radio's per-channel plan; the others use occupied_half_bw_hz()).
+  std::map<size_t, double> channel_half_bw_hz(void) const;
 
   inline const std::vector<std::vector<std::string>>& bs_sdr_ids(void) const {
     return this->bs_sdr_ids_;
@@ -378,6 +413,9 @@ class Config {
   unsigned getCoreCount();
 
   void genPilots();
+  /// One band's pilot and data at `data_num` tones; `tx_scale_cfg` is the
+  /// configured tx_scale (0 = derive the band's own).
+  OfdmBand buildBand(size_t data_num, float tx_scale_cfg) const;
   void loadULData();
   void loadDLData();
 
@@ -515,17 +553,13 @@ class Config {
   std::vector<int> tx_advance_;
   std::vector<float> corr_scale_;
   std::vector<float> corr_scale_init_;
-  std::vector<size_t> data_ind_;
   std::vector<uint32_t> coeffs_;
-  std::vector<std::complex<int16_t>> pilot_ci16_;
-  std::vector<std::complex<int16_t>> ue_data_ci16_;  // viewing-mode UE UL data slot
-  std::vector<std::complex<float>> ue_data_f_;  // its freq-domain ref (ul_data_f_*.bin)
   int ue_data_mod_order_ = 2;                        // QPSK by default
   std::vector<uint32_t> pilot_;
-  std::vector<std::complex<float>> pilot_sc_;
-  std::vector<size_t> pilot_sc_ind_;
-  std::vector<std::vector<float>> pilot_sym_t_;
-  std::vector<std::vector<float>> pilot_sym_f_;
+  // AP-85: the bands (band 0 = ofdm_data_num), and the channels overriding it.
+  std::vector<OfdmBand> bands_;
+  std::map<size_t, size_t> channel_data_num_;  // channel -> tone count, as configured
+  std::map<size_t, size_t> band_of_channel_;   // channel -> index into bands_
   std::vector<std::vector<std::complex<float>>> tx_data_;
   std::vector<std::vector<std::complex<float>>> txdata_freq_dom_;
   std::vector<std::vector<std::complex<float>>> txdata_time_dom_;

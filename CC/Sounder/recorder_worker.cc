@@ -75,10 +75,15 @@ void RecorderWorker::initCsi(void) {
     return;
   }
   const int N = static_cast<int>(cfg_->fft_size());
-  auto& pf = cfg_->pilot_sym_f();
-  pilot_ref_.resize(N);
-  for (int k = 0; k < N; ++k)
-    pilot_ref_[k] = {pf.at(0).at(k), pf.at(1).at(k)};  // DC-centered
+  // One reference per RX lane, from that lane's channel's band (AP-85: the
+  // X-band antenna at 270 RB beside the sub-6 at 133).
+  const size_t lanes = std::max<size_t>(1, cfg_->bs_rx_ch());
+  pilot_ref_.assign(lanes, std::vector<std::complex<float>>(N));
+  for (size_t l = 0; l < lanes; ++l) {
+    const auto& pf = cfg_->bsRxBand(l).pilot_sym_f;
+    for (int k = 0; k < N; ++k)
+      pilot_ref_[l][k] = {pf.at(0).at(k), pf.at(1).at(k)};  // DC-centered
+  }
   // The DC-centred spectrum (natural bin (k+N/2)%N), matching the DC-centred
   // pilot reference. An FFT with a plan made once (AP-79): the explicit N x N
   // DFT matrix this replaced was 16.7 M multiply-adds a symbol at fft 4096.
@@ -317,6 +322,7 @@ void RecorderWorker::sendCsi(Packet* pkt) {
   const int es = symStart(d, slot);  // symbol-0 start (fixed prefix by default; sym_start knob)
   int s0 = nsym / 8, s1 = nsym - nsym / 8;
   if (s1 <= s0) { s0 = 0; s1 = nsym; }
+  const auto& pilot_ref = pilotRef(pkt->ant_id);
   std::vector<std::complex<float>> hacc_avg(N, {0.0f, 0.0f});
   int used = 0;
   for (int sym = s0; sym < s1; ++sym) {
@@ -324,7 +330,7 @@ void RecorderWorker::sendCsi(Packet* pkt) {
     if (base < 0) continue;  // a symbol whose body starts before the slot (AP-79 guard)
     if (base + N > slot) break;
     const auto F = symbolFft(d, base);
-    for (int k = 0; k < N; ++k) hacc_avg[k] += F[k] * std::conj(pilot_ref_[k]);
+    for (int k = 0; k < N; ++k) hacc_avg[k] += F[k] * std::conj(pilot_ref[k]);
     ++used;
   }
   for (auto& v : hacc_avg) v /= static_cast<float>(std::max(1, used));
@@ -333,7 +339,7 @@ void RecorderWorker::sendCsi(Packet* pkt) {
   csi_h_frame_[pkt->ant_id] = pkt->frame_id;
   H.assign(N, {0.0f, 0.0f});
   for (int k = 0; k < N; ++k) {
-    const float pw = std::norm(pilot_ref_[k]);
+    const float pw = std::norm(pilot_ref[k]);
     if (pw > 1e-6f && used > 0) H[k] = hacc_avg[k] / pw;
   }
   // Throttle the CSI datagram (H is cached above regardless).
@@ -467,7 +473,7 @@ void RecorderWorker::sendMeta(uint32_t ant, long long now_ns) {
   const double center = nit != cfg_->channel_nco().end() ? nit->second : cfg_->nco();
   const uint32_t n = static_cast<uint32_t>(cfg_->fft_size());
   uint32_t occ = 0;
-  for (const auto& v : pilot_ref_)
+  for (const auto& v : pilotRef(ant))
     if (std::norm(v) > 1e-12f) ++occ;
   const double scs = cfg_->rate() / static_cast<double>(n);
   const double occ_bw = occ * scs;
@@ -509,7 +515,8 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
   const int slot = static_cast<int>(cfg_->samps_per_slot());
   const short* d = pkt->data;
   const int es = symStart(d, slot);  // symbol-0 start (fixed prefix by default; sym_start knob)
-  const auto& data_ind = cfg_->data_ind();
+  const OfdmBand& band = cfg_->bsRxBand(pkt->ant_id);  // this antenna's channel's band (AP-85)
+  const auto& data_ind = band.data_ind;
   double fix_r = 0.0;  // the timing-fix r this frame, for the low-score autopsy
   // One-shot raw dump for offline analysis: [N cp es nsym ndata i32]
   // [H re,im f32]*N [data_ind i32]*ndata [U slot re,im i16]*slot.
@@ -634,8 +641,8 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
     // unambiguous range of the 14-bin pilot spacing, and averaging over the
     // middle symbols makes the estimate stable -- no blind tie-breaking, so
     // no frame-to-frame flapping.
-    const auto& psc = cfg_->pilot_sc();
-    const auto& pind = cfg_->pilot_sc_ind();
+    const auto& psc = band.pilot_sc;
+    const auto& pind = band.pilot_sc_ind;
     if (pind.size() >= 2 && !Ys.empty()) {
       std::vector<double> kks;
       std::vector<std::complex<double>> accs;
@@ -719,8 +726,8 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
   //
   // Self-correcting: it consumes no CFO estimate, so it is immune to the
   // estimator bias entirely.
-  const auto& psc_d = cfg_->pilot_sc();
-  const auto& pind_d = cfg_->pilot_sc_ind();
+  const auto& psc_d = band.pilot_sc;
+  const auto& pind_d = band.pilot_sc_ind;
   std::vector<std::complex<float>> sym_derot(Ys.size(),
                                              std::complex<float>(1.0f, 0.0f));
   std::vector<double> sym_phase(Ys.size(), 0.0);
@@ -1002,6 +1009,14 @@ void RecorderWorker::init(void) {
         "VIEW MODE (HOUDINI_CSI_UDP is set): CSI streams to the dashboard and "
         "NO HDF5 FILE IS WRITTEN. Unset it to record.\n");
     return;
+  }
+  if (this->cfg_->num_bands() > 1) {
+    // AP-85: the file's OFDM_* attributes describe ONE band, so a file with
+    // two would describe the X-band antenna with the sub-6 pilot, and the
+    // offline tools would compute a wrong channel without saying so.
+    throw std::invalid_argument(
+        "recording mode (HDF5) is not supported with channel_ofdm_data_num (the file describes one band): "
+        "run in view mode and use the CSI dumps (HOUDINI_CSI_DUMP)");
   }
   this->hdf5_ = new Hdf5Lib(this->hdf5_name_, "Data");
   // Write Atrributes

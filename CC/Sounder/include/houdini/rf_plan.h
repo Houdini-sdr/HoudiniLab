@@ -62,6 +62,7 @@ struct Rules {
   double mix_max_frac = 0.95;         ///< .. 0.95 Fs
   double filter_pass_hz = 24.0e6;     ///< dsp::ChannelFilter passband edge
   double filter_stop_hz = 40.2e6;     ///< dsp::ChannelFilter stopband edge
+  double decim_pass_frac = 0.4;       ///< PG269 p.77: the decimator's 80 % passband, +-0.4 x the RX rate
   int max_rx_zone = 2;                ///< the device firmware accepts zones 1 and 2
 };
 

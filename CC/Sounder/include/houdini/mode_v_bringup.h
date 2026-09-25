@@ -65,6 +65,7 @@ struct Plan {
   double default_nco_hz = 0.0;             ///< the common NCO
   std::map<size_t, double> nco_by_channel; ///< the per-channel overrides
   double half_bw_hz = 0.0;                 ///< occupied half bandwidth of the waveform
+  std::map<size_t, double> half_bw_by_channel;  ///< AP-85: per-channel overrides
   double tx_gain_db = std::numeric_limits<double>::quiet_NaN();  ///< NaN: not written
   double rx_gain_db = std::numeric_limits<double>::quiet_NaN();
   double rx_freq_offset_hz = 0.0;          ///< deliberate detune (AP-33), normally 0
@@ -73,6 +74,10 @@ struct Plan {
   double ncoFor(size_t ch) const {
     const auto it = nco_by_channel.find(ch);
     return it != nco_by_channel.end() ? it->second : default_nco_hz;
+  }
+  double halfBwFor(size_t ch) const {
+    const auto it = half_bw_by_channel.find(ch);
+    return it != half_bw_by_channel.end() ? it->second : half_bw_hz;
   }
   rfplan::ConverterPoint converters() const { return {adc_fs_hz, dac_fs_hz, rx_rate_hz, tx_rate_hz}; }
 };
@@ -178,11 +183,11 @@ inline Result bringUp(SoapySDR::Device& dev, const Plan& p) {
   // leaves the device untouched.
   const auto cp = p.converters();
   for (size_t ch : p.tx_channels) {
-    const auto t = rfplan::planTx(p.ncoFor(ch), p.half_bw_hz, cp);
+    const auto t = rfplan::planTx(p.ncoFor(ch), p.halfBwFor(ch), cp);
     res.tx.push_back({ch, p.ncoFor(ch), t.zone, 0, false});
   }
   for (size_t ch : p.rx_channels) {
-    const auto r = rfplan::planRx(p.ncoFor(ch), p.half_bw_hz, cp);
+    const auto r = rfplan::planRx(p.ncoFor(ch), p.halfBwFor(ch), cp);
     res.rx.push_back({ch, p.ncoFor(ch), r.zone, r.cal_mode, r.channel_filter});
   }
   auto logLine = [&res](const std::string& s) { res.log.push_back(s); };
