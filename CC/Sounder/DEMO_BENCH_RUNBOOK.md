@@ -130,6 +130,19 @@ For evidence runs without the dashboard, `tests/demo-verify/run_rung.sh` and
 `fstage_run.sh` launch one sounder run with the logs and dumps that
 `rung_report.py`, `fstage_report.py` and `ab_report.py` read.
 
+While HS-227 is open, run the freeze watcher on the rig host beside every
+demo-length run. It reads only the local log (no network traffic) and prints
+one line when any TX channel's `played` stops, or when the device reports
+`PLAYOUT FROZEN`:
+
+```sh
+python3 tests/demo-verify/freeze_watch.py --run-dir $PWD/ap79_runs --tag <TAG> > /tmp/<TAG>_freeze.txt 2>&1 &
+echo $! > /tmp/<TAG>_freeze.pid
+```
+
+Start it in the same breath as `fstage_run.sh` (it waits up to 90 s for the
+run's pid and record). `--replay <log>` applies the same rule to a finished log.
+
 ## A5. Viewing
 
 From your workstation:
@@ -162,8 +175,9 @@ steering:
   above: the pacer's worst wake over a 35 min run is about 0.3 ms (9.43-9.46).
   Read the installed host plugin's build id in the setup check before judging a
   run.
-- **The UE's TX playout can freeze (HS-227; the fpga lane has found a race in
-  the TX pump present since HS-146 and is fixing it).** In two of
+- **The UE's TX playout can freeze (HS-227: a race in the TX pump present since
+  HS-146; the fpga lane's fix is bitstream 1.32, deployed, its demo-length
+  validation run owed).** On 1.31, in two of
   three demo-length runs on the HS-220 bitstream (9.44, 9.45) the UE's FPGA
   stopped playing its TX bank at a random time (767 s, 1,979 s) and judged every
   later packet late. The BS then loses the UE's pilots and the dashboard's cards
@@ -175,7 +189,9 @@ steering:
   carries ssh and every control call to the radios. It has not hung since, but
   the driver is unchanged; check
   `journalctl -k | grep -E "rtl8127|blocked for more than"` after a long run.
-  Never copy large files off the host during a run: they share this NIC.
+  The control calls have since moved to their own network (A1: a USB RTL8153B,
+  `enx00e04c242668`, driver r8152, which linked at 100 Mb/s); ssh to the host
+  still uses the r8127. Never copy large files off the host during a run.
 - **Radio opens that time out (SH-442).** A launch sometimes cannot open the BS
   within the device timeout (`SoapyRPCUnpacker::recv() TIMEOUT` in the log).
   The sounder retries the open itself ("Radios Not Found. Will attempt a
