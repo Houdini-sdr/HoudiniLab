@@ -39,7 +39,7 @@ inline SlopeFit pilotSlopeFit(const std::vector<double>& kk, const std::vector<s
   // Unwrap along frequency: tones sorted by offset, each phase taken as the
   // previous one plus the angle between neighbours. Valid while ADJACENT tones
   // differ by under pi (the slope times the tone spacing), independent of the
-  // common phase: +-2.3 samples at fft 64 with 14-bin pilots, far more at R3.
+  // common phase: N / (2 * spacing) samples (+-2.3 at fft 64 with 14-bin pilots).
   std::vector<size_t> ord(n);
   for (size_t i = 0; i < n; ++i) ord[i] = i;
   std::sort(ord.begin(), ord.end(), [&](size_t a, size_t b) { return kk[a] < kk[b]; });

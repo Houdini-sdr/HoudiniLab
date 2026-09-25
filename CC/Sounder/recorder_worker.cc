@@ -685,11 +685,11 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
       if (score > best_score) { best_score = score; best_r = r; }
     }
     // Stage 2: deterministic fractional refinement from the U-slot's OWN
-    // pilot tones (4 known-value subcarriers per symbol). After the integer
-    // correction the residual is < 1 sample, well inside the +-2.3-sample
-    // unambiguous range of the 14-bin pilot spacing, and averaging over the
-    // middle symbols makes the estimate stable -- no blind tie-breaking, so
-    // no frame-to-frame flapping.
+    // pilot tones (the band's pilot_sc_ind, known values). After the integer
+    // correction the residual is < 1 sample, inside the unambiguous range the
+    // pilot spacing allows (N / (2 * spacing) samples), and averaging over the
+    // middle symbols makes the estimate stable: no blind tie-breaking, so no
+    // frame-to-frame flapping.
     const auto& psc = band.pilot_sc;
     const auto& pind = band.pilot_sc_ind;
     if (pind.size() >= 2 && !Ys.empty()) {
@@ -698,7 +698,7 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
       for (size_t c = 0; c < pind.size(); ++c) {
         const size_t k = pind[c];
         if (k >= static_cast<size_t>(N)) continue;
-        // Deep-fade gate, same hmin as the data tones: an unweighted 4-point
+        // Deep-fade gate, same hmin as the data tones: an unweighted few-point
         // LS slope is dominated by one faded pilot tone (Opus review M10).
         if (std::abs(H[k]) < hmin) continue;
         const double ang0 =
