@@ -239,11 +239,13 @@ constellation, CIR, ADC, beacon sync).
 2. Replay, with no sounder running:
 
    ```sh
-   python3 csi_gui/csi_server.py &
+   python3 csi_gui/csi_server.py --conf files/houdini-dualband.json &
    python3 csi_gui/replay_feed.py ~/demo_rec/<name>.rec --loop
    ```
 
-   `--start` and `--duration` pick a window (seconds into the recording), for
+   The `--conf` sets the page's |H| axis and guard marks for the recorded
+   configuration (without it the dashboard falls back to a single-band config
+   and the dual-band |H| reads off scale). `--start` and `--duration` pick a window (seconds into the recording), for
    example a stretch with steering settled. Each loop restarts the frame
    counters, which the beacon-sync card shows as a new segment.
 

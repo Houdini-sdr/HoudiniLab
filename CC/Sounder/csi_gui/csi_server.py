@@ -1589,11 +1589,14 @@ function drawPhase(card,c,advance){
     }
     a.frames++; a.slope+=sh.slope;
   }
+  // A repaint (advance false: a resize, a tab switch, an expand) redraws the last
+  // published mean and leaves the running one alone, or every resize would publish
+  // a one-frame mean.
   const now=Date.now();
   if(advance!==false && now-card.phT<PH_DRAW_MS) return;
-  card.phT=now;
   const a=card.phAcc;
-  if(a && a.frames){
+  if(advance!==false && a && a.frames){
+    card.phT=now;
     const vals=new Array(a.re.length);
     for(let k=0;k<vals.length;k++)
       vals[k]=a.cnt[k] ? Math.atan2(a.im[k],a.re[k])*180/Math.PI : null;

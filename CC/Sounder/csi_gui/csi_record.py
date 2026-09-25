@@ -33,13 +33,18 @@ class Recorder:
             self.close()
             self.log("[csi] recording stopped at its size cap after %d datagrams" % self.n)
             return
-        self.f.write(REC_HDR.pack(t, len(data)))
-        self.f.write(data)
+        try:
+            self.f.write(REC_HDR.pack(t, len(data)))
+            self.f.write(data)
+            if t - self.t_flush >= 1.0:
+                self.f.flush()
+                self.t_flush = t
+        except OSError as e:  # a full disk must not stop the live dashboard
+            self.f = None
+            self.log("[csi] recording stopped after %d datagrams: %s" % (self.n, e))
+            return
         self.left -= n
         self.n += 1
-        if t - self.t_flush >= 1.0:
-            self.f.flush()
-            self.t_flush = t
 
     def close(self):
         if self.f is not None:
