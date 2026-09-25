@@ -60,6 +60,7 @@
 #include <vector>
 
 #include "dsp/band_filters.h"
+#include "houdini/rf_plan.h"
 
 namespace houdini {
 namespace boundary {
@@ -83,9 +84,32 @@ class TxBurstInterpolator {
   /// the channel filter's half length plus the halfband's own margins.
   static size_t prefilterLead() { return dsp::ChannelFilter().halfLength() + dsp::HalfbandInterp2().contextBefore(); }
   static size_t prefilterTail() { return dsp::ChannelFilter().halfLength() + dsp::HalfbandInterp2().contextAfter(); }
+  /// The same for whichever lane path needs more (AP-85: the wide halfband's
+  /// own margins beside the prefiltered path's): what a slot's zero prefix and
+  /// postfix must cover.
+  static size_t maxLead() { return std::max(prefilterLead(), dsp::HalfbandInterp2::wide().contextBefore()); }
+  static size_t maxTail() { return std::max(prefilterTail(), dsp::HalfbandInterp2::wide().contextAfter()); }
 
-  explicit TxBurstInterpolator(bool prefilter = false, CacheKey key = CacheKey::kContent, bool place = true)
-      : prefilter_(prefilter), key_(key), place_(place && key == CacheKey::kContent) {}
+  /// `wide` selects the wide halfband (dsp/band_filters.h) for a band beyond
+  /// the narrow design's +-25 MHz.
+  explicit TxBurstInterpolator(bool prefilter = false, CacheKey key = CacheKey::kContent, bool place = true,
+                               bool wide = false)
+      : prefilter_(prefilter),
+        key_(key),
+        place_(place && key == CacheKey::kContent),
+        hb_(wide ? dsp::HalfbandInterp2::wide() : dsp::HalfbandInterp2()) {}
+
+  /// The interpolator for one TX lane whose band occupies +-half_bw_hz
+  /// (AP-85). A band inside the channel filter's passband keeps the prefilter
+  /// and the narrow halfband, exactly as before (the sub-6, and every
+  /// first-pass channel); a wider one, the X-band at 270 RB, takes the wide
+  /// halfband alone: the prefilter would cut it, and its only purpose, keeping
+  /// splatter off the far ADC's real-sampling mirror, does not arise where the
+  /// mirror is over 1 GHz away (rf_plan: no RX filter on that lane).
+  static TxBurstInterpolator forBand(double half_bw_hz) {
+    const bool fits = half_bw_hz > 0.0 && half_bw_hz <= rfplan::Rules{}.filter_pass_hz;
+    return TxBurstInterpolator(fits, CacheKey::kContent, true, half_bw_hz > rfplan::Rules{}.filter_pass_hz);
+  }
 
   /// Zeros placement needs before the content (and appends after it): every
   /// non-zero output of the channel filter (support +-half) must have its whole

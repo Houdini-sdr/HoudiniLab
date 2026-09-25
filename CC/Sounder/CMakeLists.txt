@@ -407,6 +407,11 @@ target_link_libraries(config_pilot_test houdini_sync -lpthread ${GFLAGS_LIBRARIE
     ${SoapySDR_LIBRARIES} ${HDF5_LIBRARIES} ${MUFFT_LIBRARIES})
 add_test(NAME config_pilot COMMAND config_pilot_test WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 
+# AP-85: the host cost of the UE's TX interpolation per lane path. Standalone,
+# not a test: run it on the rig host (./build/tx_interp_bench [rounds]).
+add_executable(tx_interp_bench tests/comms-func/tx_interp_bench.cc)
+target_include_directories(tx_interp_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
 # The index-convention check AP-34(a) did not have. Links the real CommsLib so
 # it exercises the REAL detector; a replica would agree with itself.
 add_executable(beacon_geometry_test

@@ -32,6 +32,26 @@ void check(bool ok, const std::string& what) {
   if (!ok) ++g_fail;
 }
 
+// The three TX lane paths: the prefiltered narrow one (sub-6), the narrow
+// halfband alone, and the wide halfband alone (AP-85, the X-band at 270 RB).
+struct LanePath {
+  bool pre, wide;
+  const char* name;
+};
+const LanePath kLanePaths[] = {{true, false, "prefilter"}, {false, false, "halfband only"}, {false, true, "wide"}};
+
+// Amplitude of the tone at `f` Hz in TX samples [n0, n0 + m) at 245.76 MHz,
+// relative to `amp`, in dB.
+double toneDb(const void* out, size_t n0, size_t m, double f, double amp) {
+  const auto* p = static_cast<const cs16*>(out);
+  std::complex<double> acc(0.0, 0.0);
+  for (size_t n = n0; n < n0 + m; ++n) {
+    const double ph = -2.0 * M_PI * f * static_cast<double>(n) / 245.76e6;
+    acc += std::complex<double>(p[n].real(), p[n].imag()) * std::complex<double>(std::cos(ph), std::sin(ph));
+  }
+  return 20.0 * std::log10(std::abs(acc) / static_cast<double>(m) / amp);
+}
+
 // A burst shaped like the UE's: zeros, a tone "slot", zeros.
 std::vector<cs16> burst(size_t n, double f_frac, double amp, size_t lead = 32, size_t tail = 32) {
   std::vector<cs16> b(n, cs16(0, 0));
@@ -280,9 +300,10 @@ int main() {
       const int16_t im = static_cast<int16_t>(static_cast<int>((lcg >> 16) % 12001) - 6000);
       content[k] = cs16(re, im);
     }
-    for (bool pre : {true, false}) {
-      TxBurstInterpolator placed(pre);
-      TxBurstInterpolator full(pre, TxBurstInterpolator::CacheKey::kContent, false);
+    for (const LanePath& lp : kLanePaths) {
+      const bool pre = lp.pre;
+      TxBurstInterpolator placed(pre, TxBurstInterpolator::CacheKey::kContent, true, lp.wide);
+      TxBurstInterpolator full(pre, TxBurstInterpolator::CacheKey::kContent, false, lp.wide);
       bool exact = true;
       int first_bad = -1, fallbacks = 0;
       for (int pad = 0; pad < 384; ++pad) {
@@ -304,12 +325,11 @@ int main() {
         }
       }
       std::printf("      placement (%s): misses %zu over 384 pads, %d fell back, first mismatch %d\n",
-                  pre ? "prefilter" : "halfband only", placed.misses(), fallbacks, first_bad);
+                  lp.name, placed.misses(), fallbacks, first_bad);
       check(exact, std::string("placement is bit-exact against the zero-extended full computation for every pad (") +
-                       (pre ? "prefilter" : "halfband only") +
-                       ") (mutation: place the core at the input offset instead of twice it)");
+                       lp.name + ") (mutation: place the core at the input offset instead of twice it)");
       check(placed.misses() <= static_cast<size_t>(1 + fallbacks),
-            std::string("one interpolation serves every placeable pad (") + (pre ? "prefilter" : "halfband only") +
+            std::string("one interpolation serves every placeable pad (") + lp.name +
                 ") (mutation: key the cache on the burst with its pad, a miss per pad)");
     }
   }
@@ -326,9 +346,9 @@ int main() {
     std::vector<cs16> content(5936);
     for (size_t k = 0; k < content.size(); ++k)
       content[k] = cs16(static_cast<int16_t>((k * 37) % 9001 - 4500), static_cast<int16_t>((k * 53) % 7001 - 3500));
-    for (bool pre : {true, false}) {
-      TxBurstInterpolator placed(pre);
-      TxBurstInterpolator full(pre, TxBurstInterpolator::CacheKey::kContent, false);
+    for (const LanePath& lp : kLanePaths) {
+      TxBurstInterpolator placed(lp.pre, TxBurstInterpolator::CacheKey::kContent, true, lp.wide);
+      TxBurstInterpolator full(lp.pre, TxBurstInterpolator::CacheKey::kContent, false, lp.wide);
       bool exact = true;
       for (size_t z : {size_t{200}, size_t{0}}) {  // placed, then the full path
         std::vector<cs16> in(n, cs16(0, 0));
@@ -343,8 +363,49 @@ int main() {
         }
       }
       check(exact, std::string("a burst too close to its start after a placed one takes the full path, exact (") +
-                       (pre ? "prefilter" : "halfband only") + ")");
+                       lp.name + ")");
     }
+  }
+
+  {
+    // AP-85: the lane path per band. The sub-6 band (133 RB, +-23.94 MHz) keeps
+    // today's prefiltered path bit for bit; the X-band at 270 RB (+-48.6 MHz)
+    // takes the wide halfband, which passes a 45 MHz tone that the prefilter
+    // (stop from 40.2 MHz) would remove.
+    const auto b = burst(8000, 0.1, 6000.0);
+    const void* bb[1] = {b.data()};
+    auto sub6 = TxBurstInterpolator::forBand(1596 * 30e3 / 2.0);
+    TxBurstInterpolator today(true);
+    const auto o1 = sub6.run(bb, 1, b.size());
+    const auto o2 = today.run(bb, 1, b.size());
+    const std::vector<cs16> ref(static_cast<const cs16*>(o2.buffs[0]), static_cast<const cs16*>(o2.buffs[0]) + o2.samples);
+    check(o1.samples == o2.samples && equal(o1.buffs[0], ref),
+          "forBand(+-23.94 MHz) is today's prefiltered interpolator, bit for bit "
+          "(mutation: the wide halfband for every band)");
+    const double f45 = 45.0e6;
+    const auto t = burst(8000, f45 / 122.88e6, 6000.0);
+    const void* tb[1] = {t.data()};
+    auto xband = TxBurstInterpolator::forBand(3240 * 30e3 / 2.0);
+    const auto ow = xband.run(tb, 1, t.size());
+    const double gw = toneDb(ow.buffs[0], 2000, 12000, f45, 6000.0);
+    TxBurstInterpolator mutant(true);  // the prefiltered path on the wide band
+    const auto om = mutant.run(tb, 1, t.size());
+    const double gm = toneDb(om.buffs[0], 2000, 12000, f45, 6000.0);
+    std::printf("      a 45 MHz tone: %.4f dB through forBand(+-48.6 MHz), %.1f dB through the prefiltered path\n", gw, gm);
+    check(std::fabs(gw) <= 0.01,
+          "forBand(+-48.6 MHz) passes a 45 MHz tone within 0.01 dB "
+          "(mutation: the prefiltered path chosen for the wide band)");
+    check(gm < -40.0, "mutant: the prefiltered path on the wide band cuts the 45 MHz tone by more than 40 dB");
+    using houdini::dsp::HalfbandInterp2;
+    std::printf("      lead/tail: prefiltered %zu/%zu, wide %zu/%zu, max %zu/%zu\n", TxBurstInterpolator::prefilterLead(),
+                TxBurstInterpolator::prefilterTail(), HalfbandInterp2::wide().contextBefore(),
+                HalfbandInterp2::wide().contextAfter(), TxBurstInterpolator::maxLead(), TxBurstInterpolator::maxTail());
+    check(TxBurstInterpolator::maxLead() >= TxBurstInterpolator::prefilterLead() &&
+              TxBurstInterpolator::maxLead() >= HalfbandInterp2::wide().contextBefore() &&
+              TxBurstInterpolator::maxTail() >= TxBurstInterpolator::prefilterTail() &&
+              TxBurstInterpolator::maxTail() >= HalfbandInterp2::wide().contextAfter() &&
+              TxBurstInterpolator::maxLead() <= 32 && TxBurstInterpolator::maxTail() <= 32,
+          "the zero-margin figures cover both lane paths and fit the demo slot's 32-tick prefix/postfix");
   }
 
   {

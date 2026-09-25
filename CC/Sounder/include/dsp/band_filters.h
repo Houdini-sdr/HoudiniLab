@@ -46,7 +46,14 @@
  *     72 dB down from +-40.2 MHz (need 40; the alias arrives at 0 dBc),
  *     passband ripple 0.043 dB over +-24 MHz (96 subcarriers at 480 kHz
  *     occupy +-23.28 MHz).
- * tests/comms-func/band_filters_test.cc measures both on the implementation
+ *   - wide halfband (AP-85, the X-band at 270 RB, +-48.6 MHz): 47 taps, beta
+ *     7. Its content reaches +-49.152 MHz (0.4 x 122.88, the RFDC decimator's
+ *     80 % passband and the widest band the config accepts), so its images
+ *     start at 73.728 MHz, a third of the narrow design's transition. Images
+ *     at least 70.5 dB down (need 60), passband ripple 0.0044 dB over
+ *     +-49.152 MHz, 24 multiplies per odd output. The sweep, each at its best
+ *     beta: 39 taps 60.3 dB, 43 taps 66.1 dB, 47 taps 70.5 dB.
+ * tests/comms-func/band_filters_test.cc measures them on the implementation
  * (tones through run(), not a formula on the taps) and checks that each named
  * mutation of them fails.
  *
@@ -104,6 +111,11 @@ class HalfbandInterp2 {
  public:
   static constexpr size_t kTaps = 23;   ///< 4m+3, so the outermost taps are non-zero
   static constexpr double kBeta = 9.0;
+  static constexpr size_t kWideTaps = 47;  ///< AP-85: content to +-49.152 MHz
+  static constexpr double kWideBeta = 7.0;
+
+  /// The wide design, for a band wider than the narrow one's +-25 MHz.
+  static HalfbandInterp2 wide() { return HalfbandInterp2(kWideTaps, kWideBeta); }
 
   explicit HalfbandInterp2(size_t taps = kTaps, double beta = kBeta) {
     if (taps % 4 != 3) throw std::invalid_argument("HalfbandInterp2: taps must be 4m+3");
