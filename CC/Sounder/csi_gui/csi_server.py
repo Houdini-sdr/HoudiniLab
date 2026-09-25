@@ -90,6 +90,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from check_setup import plugin_env  # noqa: E402  one plugin environment, not two
+import csi_record  # noqa: E402  the record format replay_feed.py plays back
 
 MAGIC_CSI = 0x43534931   # "CSI1" -- pilot channel estimate (legacy, no quality)
 MAGIC_CSI2 = 0x43534932  # "CSI2" -- as CSI1 plus per-subcarrier raw phase
@@ -356,7 +357,7 @@ def _parse_syn(payload):
     return rec
 
 
-def _udp_loop(bind_host, bind_port):
+def _udp_loop(bind_host, bind_port, recorder=None):
     global _seq
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -368,6 +369,8 @@ def _udp_loop(bind_host, bind_port):
             data, _ = sock.recvfrom(65535)
         except OSError:
             break
+        if recorder is not None:  # every datagram as received, parsed or not
+            recorder.write(time.monotonic(), data)
         if len(data) < 4:
             continue
         magic = struct.unpack_from("<I", data, 0)[0]
@@ -989,6 +992,11 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--udp-host", default="0.0.0.0", help="CSI UDP bind host")
     ap.add_argument("--udp-port", type=int, default=9999, help="CSI UDP bind port")
+    ap.add_argument("--record", default=os.environ.get("HOUDINI_CSI_RECORD") or None,
+                    help="append every datagram to this file for replay_feed.py, the "
+                         "canned-data fallback (default: $HOUDINI_CSI_RECORD, else off)")
+    ap.add_argument("--record-max-mb", type=float, default=2048.0,
+                    help="stop recording at this size (default: %(default)s)")
     ap.add_argument("--http-host", default=None,
                     help="web server bind host (default 0.0.0.0; 127.0.0.1 with --control)")
     ap.add_argument("--http-port", type=int, default=8080, help="web server port")
@@ -1032,7 +1040,12 @@ def main():
             and args.mag_span > 0):
         raise SystemExit("--mag-top/--mag-span must be finite (span > 0)")
 
-    t = threading.Thread(target=_udp_loop, args=(args.udp_host, args.udp_port),
+    recorder = None
+    if args.record:
+        recorder = csi_record.Recorder(args.record, int(args.record_max_mb * 1e6),
+                                       log=lambda m: print(m, flush=True))
+        print("[csi] recording every datagram to %s" % args.record, flush=True)
+    t = threading.Thread(target=_udp_loop, args=(args.udp_host, args.udp_port, recorder),
                          daemon=True)
     t.start()
 
