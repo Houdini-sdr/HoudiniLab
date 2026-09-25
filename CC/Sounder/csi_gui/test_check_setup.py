@@ -49,7 +49,14 @@ open(os.path.join(fake, "SoapySDR.py"), "w").write(
     "        if v is None: raise RuntimeError('unknown key')\n"
     "        return v\n"
     "    @staticmethod\n"
-    "    def unmake(d): open(%r, 'a').write(d.ip + '\\n')\n" % (info_file, egress_file, os.path.join(root, "unmade")))
+    "    def unmake(d): open(%r, 'a').write(d.ip + '\\n')\n"
+    # as the real binding: close() flags the object, __del__ closes; a direct
+    # unmake is not flagged, so __del__ unmakes the freed device again
+    "    def close(self):\n"
+    "        try: getattr(self, '__closed__')\n"
+    "        except AttributeError: Device.unmake(self)\n"
+    "        setattr(self, '__closed__', True)\n"
+    "    def __del__(self): self.close()\n" % (info_file, egress_file, os.path.join(root, "unmade")))
 HEALTHY = "drop=p0:0,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marked=p0:0,p1:0,p2:0,p3:0"
 json.dump({"127.0.0.1": HEALTHY, "127.0.0.2": HEALTHY}, open(egress_file, "w"))
 same = {k: "v1" for k in ("fpga_version", "fpga_commit", "fpga_board", "device_version",
@@ -73,7 +80,7 @@ rc, rep, lv = run()
 check(rc == 0 and rep["ok"], "a ready host passes (rc 0)")
 check(lv.get("stack match") == "PASS" and lv.get("server 127.0.0.2") == "PASS", "full form: servers answer and stacks match")
 check(sorted(open(os.path.join(root, "unmade")).read().split()) == ["127.0.0.1", "127.0.0.2"],
-      "each radio opened for its stack is closed cleanly (unmake), not dropped at exit")
+      "each radio opened for its stack is closed exactly once, not dropped at exit (fails on a direct Device.unmake: the binding's __del__ repeats it)")
 # A real sounder on this host (a rig host mid-run) runs on other radios than the
 # fake 127.0.0.x ones, so it may add a note or, for another user's process, a WARN.
 check(all(l != "WARN" for w, l in lv.items() if w != "radios free"), "no warnings on a ready host: %s" % lv)
