@@ -535,6 +535,29 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
     if (e > best) { best = e; at = t; }
     if (worst < 0.0 || e < worst) worst = e;
   }
+  // The UE burst is searched for only where the schedule puts the pilot
+  // (SH-347, the host half of "a TDD node receives only its RX slots"): the
+  // rx gate is open all frame, so over the air the BS's own beacon slot and
+  // the guards carry whatever is on the air, and the whole-read search above
+  // took the loudest of it (its own beacon through the adjacent antennas) for
+  // the UE, cutting every lane there (O1a/O1b). The window is +-n/4 around
+  // the scheduled start: wired, the pilot sits 4 samples from it
+  // (pilot_grid_off); a slot away is the guard or the data slot. Without a
+  // read stamp, the whole-read search stands. The floor keeps the whole read.
+  if (ft > 0) {
+    const long long stamp_ticks = llround(static_cast<double>(ft) * htdd_tick_rate_ / 1e9);
+    const long long expect = houdini::slotalign::expectedPilotStart(
+        stamp_ticks, htdd_epoch_, static_cast<long long>(htdd_pilot_slot_), n, htdd_frame_ticks_);
+    const auto near = houdini::slotalign::densestNear(cse, expect, n / 4, n, 128);
+    if (near.first >= 0) {
+      at = static_cast<int>(near.first);
+      best = near.second;
+    }
+    static std::atomic<bool> said{false};
+    if (!said.exchange(true))
+      MLPD_INFO("BS: the UE burst is searched only within +-%d samples of the scheduled pilot slot (SH-347 host half)\n",
+                n / 4);
+  }
   // The read spans ~1.17 frames, so when the pilot lands in the first few
   // slots of the buffer a SECOND copy (next frame) is also fully contained
   // near the tail -- and the densest-window search picks between two

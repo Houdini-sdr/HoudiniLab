@@ -1,6 +1,7 @@
 // AP-79: the BS framer's whole-burst slot alignment (houdini/slot_align.h).
 // Each assertion names the mutation that breaks it.
 #include <cmath>
+#include <cstdlib>
 #include <cstdio>
 #include <random>
 #include <vector>
@@ -134,6 +135,37 @@ int main() {
   const auto cse4 = capture(cg, truth, n, p, {1000.0}, 128, 128, 4);
   check(houdini::slotalign::burstPilotStart(cse4, cg, n, 128) <= cg - n,
         "the start is clamped so the pilot slot lies inside the capture (mutation: no clamp)");
+  // ---- SH-347 host half: the UE burst searched only at the scheduled pilot ----
+  {
+    namespace sa = houdini::slotalign;
+    const long long N = 4096, FR = 20 * N, CG = FR + 5 * N, EP = 1000;
+    check(sa::expectedPilotStart(EP, EP, 2, N, FR) == 2 * N &&
+              sa::expectedPilotStart(EP + 2 * N + 5, EP, 2, N, FR) == FR - 5 &&
+              sa::expectedPilotStart(EP - 3 * FR, EP, 2, N, FR) == 2 * N,
+          "expectedPilotStart folds the schedule into [0, fr) (mutation: stamp - epoch, the sign flipped; no fold)");
+    // Over the air: the BS's own beacon two slots before the pilot, far louder
+    // than a weak uplink P+U at the scheduled position (O1a/O1b).
+    const long long ue = 7 * N;
+    const auto air = capture(CG, ue, N, {-2, 0, 1}, {1500.0, 400.0, 400.0}, 128, 128, 11);
+    long long whole = 0;
+    double wbest = 0;
+    for (long long t = 0; t + N <= CG; t += 128)
+      if (air[t + N] - air[t] > wbest) { wbest = air[t + N] - air[t]; whole = t; }
+    const auto near = sa::densestNear(air, ue, N / 4, N, 128);
+    check(std::llabs(whole - (ue - 2 * N)) < N / 2,
+          "the whole-read search takes the loud self-beacon for the UE (the failure this fixes)");
+    check(near.first >= 0 && std::llabs(near.first - ue) <= N / 4 && near.second < 0.2 * wbest,
+          "densestNear stays on the scheduled pilot, not the louder beacon (mutation: tol ignored, the whole read)");
+    const auto silent = capture(CG, ue, N, {-2}, {1500.0}, 128, 128, 12);
+    const auto q = sa::densestNear(silent, ue, N / 4, N, 128);
+    check(q.first >= 0 && q.second < 0.001 * wbest,
+          "UE silent: the scheduled window holds only noise, so the presence gate skips the frame "
+          "(mutation: the whole read, which finds the beacon)");
+    check(sa::densestNear(air, 0, N / 4, N, 128).first >= 0 && sa::densestNear(air, 0, N / 4, N, 128).first <= N / 4 &&
+              sa::densestNear(air, CG, N / 4, N, 128).first <= CG - N &&
+              sa::densestNear(std::vector<double>(N / 2, 0.0), 0, N / 4, N, 128).first == -1,
+          "densestNear clamps to the capture and returns -1 when no window fits (mutation: no clamp)");
+  }
   if (failures) std::printf("FAILED: %d failure(s)\n", failures);
   return failures ? 1 : 0;
 }

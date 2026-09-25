@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
 #include <vector>
 
 namespace houdini {
@@ -85,6 +86,35 @@ inline long long burstPilotStart(const std::vector<double>& cse, long long guess
       break;
     }
   return std::max(0LL, std::min(st, cg - n));
+}
+
+/// Where the pilot slot must start in a BS capture, from the BS's own
+/// schedule: the capture's first-sample stamp and the armed schedule's epoch
+/// (both in ticks, one tick per sample), the pilot slot index, the slot length
+/// n and the frame length fr. The earliest copy, in [0, fr).
+inline long long expectedPilotStart(long long stamp_ticks, long long epoch, long long pilot_slot, long long n,
+                                    long long fr) {
+  return (((epoch + pilot_slot * n - stamp_ticks) % fr) + fr) % fr;
+}
+
+/// The densest n-sample window whose start lies within +-tol of `expect`,
+/// stepping `step`, over the cumulative energy cse: {start, energy}, or
+/// {-1, 0} when no window fits the capture. The host half of the user's
+/// contract that a TDD node receives only its RX slots (SH-347): the BS keeps
+/// its rx gate open all frame (a gate close abandons the continuous capture),
+/// so over the air its own beacon slot and the guards carry whatever is on
+/// the air, and a whole-frame search takes the loudest of it for the UE.
+/// Searching only the scheduled pilot position cannot.
+inline std::pair<long long, double> densestNear(const std::vector<double>& cse, long long expect, long long tol,
+                                                long long n, long long step) {
+  const long long cg = static_cast<long long>(cse.size()) - 1;
+  const long long lo = std::max(0LL, expect - tol), hi = std::min(cg - n, expect + tol);
+  std::pair<long long, double> best{-1, 0.0};
+  for (long long t = lo; t <= hi; t += step) {
+    const double e = cse[static_cast<size_t>(t + n)] - cse[static_cast<size_t>(t)];
+    if (best.first < 0 || e > best.second) best = {t, e};
+  }
+  return best;
 }
 
 }  // namespace slotalign
