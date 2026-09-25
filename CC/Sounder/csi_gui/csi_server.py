@@ -1188,12 +1188,12 @@ PAGE = r"""<!doctype html>
    appear at two different x positions in two panels that describe the same tone. */
 .csi-adc .csi-plot{grid-column:1 / -1}
 .csi-head{grid-column:1 / -1;margin-top:.5rem}
-.csi-head-lbl{font-size:.7rem;color:var(--tblr-secondary);margin-bottom:.15rem}
+.csi-head-lbl{font-size:.85rem;color:var(--tblr-secondary);margin-bottom:.15rem}
 .csi-head-pct{font-variant-numeric:tabular-nums}
-.csi-plot-title{font-size:.7rem;color:var(--tblr-secondary);margin-bottom:.15rem;
+.csi-plot-title{font-size:.85rem;color:var(--tblr-secondary);margin-bottom:.15rem;
   display:flex;align-items:center;gap:.35rem}
 .csi-stage{display:flex}
-.csi-y-axis{position:relative;width:36px;flex:0 0 36px;font-size:.65rem;
+.csi-y-axis{position:relative;width:46px;flex:0 0 46px;font-size:.8rem;
   color:var(--tblr-secondary);font-variant-numeric:tabular-nums}
 .csi-y-axis span{position:absolute;right:5px;transform:translateY(-50%);white-space:nowrap}
 /* The top and bottom labels sit ON the canvas edge, so centring them there would
@@ -1209,12 +1209,12 @@ PAGE = r"""<!doctype html>
 .csi-h-wf   canvas{height:190px}
 .csi-h-cons canvas{height:250px}
 .csi-h-cir  canvas{height:150px}
-.csi-quality{font-size:.8rem;line-height:1.5;align-self:center}
+.csi-quality{font-size:.95rem;line-height:1.5;align-self:center}
 .csi-h-adc  canvas{height:220px}
 .csi-stage{min-width:0}
 .csi-plot{min-width:0}
-.csi-x-axis{display:flex;justify-content:space-between;margin-left:36px;margin-top:.1rem;
-  font-size:.65rem;color:var(--tblr-secondary);font-variant-numeric:tabular-nums}
+.csi-x-axis{display:flex;justify-content:space-between;margin-left:46px;margin-top:.1rem;
+  font-size:.8rem;color:var(--tblr-secondary);font-variant-numeric:tabular-nums}
 .tnum{font-variant-numeric:tabular-nums}
 </style>
 </head>
@@ -1427,8 +1427,8 @@ function makeCard(ant){
         +'<div class="progress progress-sm"><div class="progress-bar csi-head-bar"'
         +' style="width:0%"></div></div></div>'
      +'</div>'
-     +'<div class="text-secondary tnum mt-3 csi-status" style="font-size:.75rem"></div>'
-     +'<div class="text-secondary tnum mt-1 csi-adc-status" style="font-size:.75rem"></div>'
+     +'<div class="text-secondary tnum mt-3 csi-status" style="font-size:.85rem"></div>'
+     +'<div class="text-secondary tnum mt-1 csi-adc-status" style="font-size:.85rem"></div>'
     +'</div>';
   document.getElementById('ants').appendChild(wrap);
   const cvs=[...wrap.querySelectorAll('.csi-view canvas')];
@@ -1931,7 +1931,7 @@ function makeSyncCard(tid){
     +'<div class="csi-collapsible">'
     +frame('resid vs the anchored grid (samples)','csi-h-line',
            ['','','0','',''],['older','frame','now'])
-    +'<div class="text-secondary tnum mt-2 sync-read" style="font-size:.75rem"></div>'
+    +'<div class="text-secondary tnum mt-2 sync-read" style="font-size:.85rem"></div>'
     +'</div></div>';
   document.getElementById('sync').appendChild(wrap);
   // The chip stays live while folded; the plot is redrawn on expand.
