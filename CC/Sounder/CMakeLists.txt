@@ -462,6 +462,14 @@ target_include_directories(per_band_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${C
 target_link_libraries(per_band_test houdini_sync -lpthread ${GFLAGS_LIBRARIES} ${UHD_LIBRARIES}
     ${SoapySDR_LIBRARIES} ${HDF5_LIBRARIES} ${MUFFT_LIBRARIES})
 add_test(NAME per_band COMMAND per_band_test WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+
+# RadioHoudini's device and stream arguments for the demo config, from the
+# static builders (no device). Builds the sounder's own sources.
+add_executable(radio_houdini_args_test tests/comms-func/radio_houdini_args_test.cc ${SOUNDER_SOURCES})
+target_include_directories(radio_houdini_args_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(radio_houdini_args_test houdini_sync -lpthread ${GFLAGS_LIBRARIES} ${UHD_LIBRARIES}
+    ${SoapySDR_LIBRARIES} ${HDF5_LIBRARIES} ${MUFFT_LIBRARIES})
+add_test(NAME radio_houdini_args COMMAND radio_houdini_args_test WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 # AP-85: the host cost of the UE's TX interpolation per lane path. Standalone,
 # not a test: run it on the rig host (./build/tx_interp_bench [rounds]).
 add_executable(tx_interp_bench tests/comms-func/tx_interp_bench.cc)
