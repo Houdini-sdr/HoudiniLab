@@ -2,12 +2,13 @@
 # usage: [FILTERS=<state>] fstage_run.sh <stage F0..F4b> <rung tag> <conf> <secs>
 # One filter-staging run (DEMO_FREQUENCY_PLAN 6.1b): run_rung.sh with the
 # measurement dumps on, then every per-run artefact moved into
-# ap79_runs/<stage>/<tag>_<T>/ so runs never overwrite. Rig tool: the paths are
-# the AP-79 rig host's (see run_rung.sh). Analyse with fstage_report.py.
+# ap79_runs/<stage>/<tag>_<T>/ so runs never overwrite. Rig tool: it runs the
+# checkout it lives in (see run_rung.sh). Analyse with run_summary.py or
+# fstage_report.py.
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 ST=$1; TAG=$2; CONF=$3; SECS=$4
-cd "${SOUNDER_DIR:-$HOME/repos/HoudiniLab-ap79/CC/Sounder}" || exit 1  # SOUNDER_DIR: another worktree's build
+cd "${SOUNDER_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}" || exit 1  # default: this checkout; SOUNDER_DIR: another worktree's build
 D=ap79_runs
 rm -f "$D"/cns_dump*.bin "$D/beacon_ram.bin" "$D/gold.bin"
 RW=$(mktemp -d /tmp/rw_XXXX)
@@ -35,6 +36,7 @@ mv "$D"/cns_dump*.bin "$D/beacon_ram.bin" "$O/" 2>/dev/null
 # written at stream start and at the end of the run under HOUDINI_DUMP_DIR):
 # a run that moves between sessions (a pilot seat, a level) is traced from them.
 mv "$D"/rfdc_*.txt "$O/" 2>/dev/null
+mv "$D"/modev_*.txt "$O/" 2>/dev/null  # each node's mode-V bring-up record
 mv "$RW" "$O/resync"
 SYN1=$(nstat -az TcpExtTCPSynRetrans 2>/dev/null | awk '/SynRetrans/{print $2}')
 echo "stage $ST filters: ${FILTERS:-unset}" > "$O/stage.txt"

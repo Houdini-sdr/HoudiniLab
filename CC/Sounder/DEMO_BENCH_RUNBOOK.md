@@ -170,14 +170,27 @@ climb. R0 (NCO 500 MHz) cannot run while the F3b chain is fitted: the VBF-2450+
 bandpasses on the sub-6 DAC paths block its beacon, so the UE never acquires
 (`DEMO_VERIFICATION.md` 9.40). It is the control only with the filters out.
 
-For evidence runs without the dashboard, `tests/demo-verify/run_rung.sh` and
-`fstage_run.sh` launch one sounder run with the logs and dumps that
-`rung_report.py`, `fstage_report.py` and `ab_report.py` read.
+For evidence runs without the dashboard, `tests/demo-verify/demo_run.sh` runs
+the demo head for a set time with the samplers the records cite (the freeze
+watch, the MER every 15 s, three spectra), files them into the run directory
+and ends with `run_summary.py`'s verdict against A6 (its exit status):
 
-While HS-227 is open, run the freeze watcher on the rig host beside every
-demo-length run. It reads only the local log (no network traffic) and prints
-one line when any TX channel's `played` stops, or when the device reports
-`PLAYOUT FROZEN`:
+```sh
+tests/demo-verify/demo_run.sh <TAG> files/houdini-dualband-xw-steer-slots.json 2100 slots
+```
+
+The run lands in `ap79_runs/DEMO/<TAG>_<HHMMSS>/`. `run_summary.py <run dir>`
+judges a finished run again, and `run_summary.py ~/demo_logs/sounder_<UTC>.log`
+a dashboard session (A8c step 4). Underneath, `run_rung.sh` and `fstage_run.sh`
+launch one sounder run with the logs and dumps that `rung_report.py` and
+`fstage_report.py` read; `reg_snap.py` reads the fpga 1.34 gate's fault
+registers before and after a run, and `gate_runs.py` the BS landing dumps
+(9.70).
+
+`demo_run.sh` starts the freeze watcher itself. HS-227 is fixed from fpga 1.32
+(A7) and the watcher stays as a cheap guard: it reads only the local log (no
+network traffic) and prints one line when any TX channel's `played` stops, or
+when the device reports `PLAYOUT FROZEN`. For a run started another way:
 
 ```sh
 python3 tests/demo-verify/freeze_watch.py --run-dir $PWD/ap79_runs --tag <TAG> > /tmp/<TAG>_freeze.txt 2>&1 &

@@ -1,10 +1,10 @@
 #!/bin/bash
 # usage: run_rung.sh <tag> <conf> <secs> [health_s]
 # Rig tool (AP-79): one sounder run in view mode with the receive-only
-# dashboard, CPU and thread sampling. Paths are the AP-79 rig host's: the
-# worktree ~/repos/HoudiniLab-ap79 and the venv ~/houdini_test (SOUNDER_DIR and
-# VENV override them). The sounder's pid goes to ap79_runs/<tag>.pid.
-cd "${SOUNDER_DIR:-$HOME/repos/HoudiniLab-ap79/CC/Sounder}" || exit 1  # SOUNDER_DIR: another worktree's build
+# dashboard, CPU and thread sampling. It runs the checkout it lives in, with
+# the venv ~/houdini_test (SOUNDER_DIR and VENV override them). The sounder's
+# pid goes to ap79_runs/<tag>.pid.
+cd "${SOUNDER_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}" || exit 1  # default: this checkout; SOUNDER_DIR: another worktree's build
 rm -f "ap79_runs/$1.current" "ap79_runs/$1.pid" "ap79_runs/$1.csipid"  # a launch that fails below leaves no stale record to reuse
 source "${VENV:-$HOME/houdini_test}/bin/activate" || exit 1
 export LD_LIBRARY_PATH=$VIRTUAL_ENV/lib SOAPY_SDR_PLUGIN_PATH=$VIRTUAL_ENV/lib/SoapySDR/modules0.8-3
