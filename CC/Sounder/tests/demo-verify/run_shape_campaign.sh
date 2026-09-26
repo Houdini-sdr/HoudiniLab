@@ -16,7 +16,8 @@
 #   OUT=logs/shape_<date>       log directory
 #   ATTEMPTS=3                  launch attempts per run before giving up (1 for
 #                               a level sweep where "no lock" IS the result)
-#   SOUNDER_DIR / VENV          as run_pad_campaign.sh
+#   SOUNDER_DIR                 the checkout to run (default: this one)
+#   VENV                        the Soapy venv prefix (default ~/houdini_test)
 #
 # Output: $OUT/<shape>_r<k>.log per run, $OUT/campaign.log, and a gate_summary
 # over all logs at the end. Exit code is non-zero if any run failed to START
