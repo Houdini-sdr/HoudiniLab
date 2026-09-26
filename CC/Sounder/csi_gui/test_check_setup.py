@@ -189,4 +189,20 @@ os.killpg(p.pid, 9); p.wait()
 srv.shutdown(socket.SHUT_RDWR); srv.close()
 rc, rep, lv = run(); check(rc == 1 and lv["server 127.0.0.1"] == "FAIL" and "stack match" not in lv,
                           "a server that does not answer fails, and the stack read is skipped")
+# plugin_env, the environment the dashboard's Start runs the sounder in, follows
+# HOUDINI_SOAPY_ROOT exactly as run_rung.sh does.
+import check_setup
+saved = os.environ.pop("HOUDINI_SOAPY_ROOT", None)
+orig_root = os.environ.get("SOAPY_SDR_ROOT")
+e0 = check_setup.plugin_env("/v")
+os.environ["HOUDINI_SOAPY_ROOT"] = "/slots"
+e1 = check_setup.plugin_env("/v")
+os.environ.pop("HOUDINI_SOAPY_ROOT")
+if saved is not None:
+    os.environ["HOUDINI_SOAPY_ROOT"] = saved
+check(e0["SOAPY_SDR_PLUGIN_PATH"] == "/v/lib/SoapySDR/modules0.8-3" and e0.get("SOAPY_SDR_ROOT") == orig_root,
+      "without HOUDINI_SOAPY_ROOT the venv's plugin loads (mutation: the root applied always)")
+check(e1.get("SOAPY_SDR_ROOT") == "/slots" and e1.get("SOAPY_SDR_PLUGIN_PATH") == "",
+      "with HOUDINI_SOAPY_ROOT that prefix loads, not the venv's (mutation: the variable ignored, so the dashboard "
+      "runs a slots config on the default plugin; or the venv's module path left set, which SoapySDR searches too)")
 print("%d failure(s)" % fails); sys.exit(1 if fails else 0)

@@ -136,8 +136,17 @@ def plugin_dir(venv):
 
 
 def plugin_env(venv):
-    """The environment that loads the Houdini plugin; csi_server.py runs the sounder in it."""
-    return dict(os.environ, LD_LIBRARY_PATH=os.path.join(venv, "lib"), SOAPY_SDR_PLUGIN_PATH=plugin_dir(venv))
+    """The environment that loads the Houdini plugin; csi_server.py runs the sounder in it.
+
+    HOUDINI_SOAPY_ROOT selects another host-plugin prefix (the slots plugin a
+    bs_rx_slots config runs on), exactly as tests/demo-verify/run_rung.sh does,
+    so the dashboard's Check and Start run the stack a scripted run validated.
+    """
+    env = dict(os.environ, LD_LIBRARY_PATH=os.path.join(venv, "lib"), SOAPY_SDR_PLUGIN_PATH=plugin_dir(venv))
+    root = os.environ.get("HOUDINI_SOAPY_ROOT")
+    if root:
+        env.update(SOAPY_SDR_ROOT=root, SOAPY_SDR_PLUGIN_PATH="")
+    return env
 
 
 def check_plugin(rep, venv):
