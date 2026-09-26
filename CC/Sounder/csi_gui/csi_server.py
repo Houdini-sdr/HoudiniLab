@@ -1263,10 +1263,25 @@ const ADC_FS=32767;
 let GUARD_PRE=__GUARD_PRE__, GUARD_POST=__GUARD_POST__;  // pollCtl follows a config switch
 const STALE_MS=__STALE_MS__;         // no update for this long -> dim + badge
 // Both top panels are FIXED frame to frame. An axis that re-ranges per frame makes
-// a static channel look alive and hides real drift, so nothing here auto-scales.
-// (raynet-compiler's LinePlot deliberately does re-range: that is right for a
-// reviewed capture and wrong for a live one. Do not copy it here.)
-const MAG_TOP=__MAG_TOP__, MAG_BOT=__MAG_TOP__-__MAG_SPAN__;
+// a static channel look alive and hides real drift, so nothing here auto-scales
+// per frame. (raynet-compiler's LinePlot deliberately does re-range: that is right
+// for a reviewed capture and wrong for a live one. Do not copy it here.)
+// The |H| axis is per card and STEPPED [user: not auto-scale, but a few updates]:
+// the bands can sit 20 dB apart (the X-band through the XUD1A), so one config
+// top leaves a card off scale. Each card starts at the config's top and moves in
+// MAG_STEP dB steps, at most once per MAG_RERANGE_MS, and only when its trace
+// has left the axis or sat in its bottom quarter for that whole period
+// (nextMagTop). A steady trace never moves it.
+const MAG_TOP=__MAG_TOP__, MAG_SPAN=__MAG_SPAN__, MAG_BOT=MAG_TOP-MAG_SPAN;
+const MAG_STEP=10, MAG_RERANGE_MS=3000;
+// The axis top for a trace whose high level over the last period is `hi` (the
+// highest per-frame 95th percentile of |H|, dB): unchanged while hi sits in the
+// axis's top three quarters, else the next step at least 3 dB above hi.
+function nextMagTop(top, span, hi){
+  if(!isFinite(hi)) return top;
+  if(hi<=top && hi>=top-0.75*span) return top;
+  return Math.ceil((hi+3)/MAG_STEP)*MAG_STEP;
+}
 const CONS_R=1.7;                     // constellation half-width, in unit-power units
 // The Spectrum tab's fixed axis, dBFS per bin. From the V1 run's dumps at
 // 240 kHz bins: occupied band -57 (sub-6) and -61 (X-IF), the sub-6 Fs/2 spur
@@ -1375,6 +1390,13 @@ function magLabels(){
   for(let i=0;i<=4;i++) out.push(formatAxisValue(MAG_TOP-(MAG_TOP-MAG_BOT)*i/4));
   return out;
 }
+// Relabel a card's |H| axis after nextMagTop moved it.
+function setMagAxis(card){
+  if(!card.magYax) return;
+  card.magYax.querySelectorAll('span').forEach((s,i)=>{
+    s.textContent=formatAxisValue(card.magTop-MAG_SPAN*i/4);
+  });
+}
 function makeCard(ant){
   const wrap=document.createElement('div');
   wrap.className='card csi-card';
@@ -1437,7 +1459,8 @@ function makeCard(ant){
     +'</div>';
   document.getElementById('ants').appendChild(wrap);
   const cvs=[...wrap.querySelectorAll('.csi-view canvas')];
-  cards[ant]={magCv:cvs[0],merCv:cvs[1],phaseCv:cvs[2],wfCv:cvs[3],
+  cards[ant]={magTop:MAG_TOP,magHi:-Infinity,magT:0,magYax:wrap.querySelector('.csi-h-line .csi-y-axis'),
+              magCv:cvs[0],merCv:cvs[1],phaseCv:cvs[2],wfCv:cvs[3],
               consCv:cvs[4],cirCv:cvs[5],spcCv:cvs[6],dim:null,wfimg:null,
               quality:wrap.querySelector('.csi-quality'),
               ant:ant, titleEl:wrap.querySelector('.card-title'),
@@ -1716,14 +1739,25 @@ function setScAxis(card,nsc){
 function drawCsi(card,c,advance){
   card.frame=c.frame; card.csiRec=c;
   setScAxis(card,c.sc);
-  // Magnitude: FIXED axis, never re-ranged. Set with --mag-top / --mag-span.
-  const top=MAG_TOP, bot=MAG_BOT;
+  // Magnitude: this card's STEPPED axis (nextMagTop), fixed between steps; it
+  // starts at --mag-top and keeps --mag-span. A repaint never moves it.
+  const fin=c.mag_db.filter(v=>v!==null);
+  if(fin.length&&advance!==false){
+    const srt=fin.slice().sort((a,b)=>a-b);
+    card.magHi=Math.max(card.magHi,srt[Math.min(srt.length-1,Math.floor(0.95*srt.length))]);
+    const now=performance.now();
+    if(now-card.magT>=MAG_RERANGE_MS){
+      const nt=nextMagTop(card.magTop,MAG_SPAN,card.magHi);
+      if(nt!==card.magTop){ card.magTop=nt; setMagAxis(card); }
+      card.magHi=-Infinity; card.magT=now;
+    }
+  }
+  const top=card.magTop, bot=card.magTop-MAG_SPAN;
   const dm=card.dim.mag, dw=card.dim.wf;
   grid(card.mag,dm.w,dm.h);
   line(card.mag,c.mag_db,bot,top,C.mag,dm.w,dm.h);
-  // A fixed axis can hide the trace entirely if the level moves off scale, so say
-  // so rather than showing an innocent-looking empty panel.
-  const fin=c.mag_db.filter(v=>v!==null);
+  // Between steps the trace can still leave the axis, so say so rather than
+  // showing an innocent-looking empty panel.
   card.off.hidden=!(fin.length&&(Math.max(...fin)>top||Math.min(...fin)<bot));
   drawPhase(card,c,advance);
   // waterfall: scroll up 1px, draw new bottom row coloured by magnitude
