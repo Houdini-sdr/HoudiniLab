@@ -363,7 +363,6 @@ void RecorderWorker::sendSpectrum(Packet* pkt) {
   (void)::send(csi_sock_, buf.data(), buf.size(), 0);
 }
 
-// Pilot slot -> channel estimate H[k] (DC-centered), cached per antenna + streamed.
 // bs_cfo_pre_fft: the rotation can clamp a sample the ADC delivered within 3 dB
 // of full scale (houdini/pre_cfo.h derotate). Counted and warned, never silent.
 void RecorderWorker::notePreCfoSaturation(long long values, uint32_t ant) {
@@ -377,6 +376,7 @@ void RecorderWorker::notePreCfoSaturation(long long values, uint32_t ant) {
   }
 }
 
+// Pilot slot -> channel estimate H[k] (DC-centered), cached per antenna + streamed.
 void RecorderWorker::sendCsi(Packet* pkt) {
   const int N = static_cast<int>(cfg_->fft_size());
   const int cp = static_cast<int>(cfg_->cp_size());

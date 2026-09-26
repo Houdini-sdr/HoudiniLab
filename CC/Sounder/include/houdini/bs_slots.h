@@ -26,7 +26,8 @@ namespace bsslots {
 /// rx_gate, bit0 tx_gate}. rx_slots_only: the beacon slot '4' (strobe, no rx),
 /// P/U/R/N '2', everything else '0' (a guard). Otherwise the all-rx form the
 /// continuous capture needed before slots mode: '6' on the beacon, '2' elsewhere.
-/// The slots form puts a guard ('0', the last slot) directly before the beacon
+/// The slots form puts a guard ('0'; across the frame wrap when the beacon is
+/// slot 0, as in the demo schedule) directly before the beacon
 /// ('4'). The device refuses that arm (rule 6b, the power board's warm return)
 /// only while the schedule drives TX_SEL; highz and AP-86's static source do
 /// not, so it arms. A per-symbol T/R switch from the schedule would be refused,

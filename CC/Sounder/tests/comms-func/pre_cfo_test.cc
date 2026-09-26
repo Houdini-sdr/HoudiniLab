@@ -63,14 +63,16 @@ int main() {
   }
   check(worst < 0.02, "the next slot derotated from t0 = n matches the pilot's phase (mutation: t0 ignored)");
   // Saturation is counted, not silent: 30000+30000j turned 45 degrees is 42426j.
-  const short hot[2] = {30000, 30000}, cool[2] = {20000, 20000};
-  short o_hot[2], o_cool[2];
+  const short hot[2] = {30000, 30000}, cold[2] = {-30000, -30000}, cool[2] = {20000, 20000};
+  short o_hot[2], o_cold[2], o_cool[2];
   const long long s_hot = pc::derotate(hot, o_hot, 1, -rate / 8.0, rate, 1);
+  const long long s_cold = pc::derotate(cold, o_cold, 1, -rate / 8.0, rate, 1);
   const long long s_cool = pc::derotate(cool, o_cool, 1, -rate / 8.0, rate, 1);
-  check(s_hot == 1 && o_hot[1] == 32767 && s_cool == 0 && std::abs(o_cool[1] - 28284) <= 1 &&
-            pc::derotate(d.data(), out.data(), n, e.hz, rate, 0) == 0,
-        "a rotation past the int16 range is counted and clamped, an in-range one and the test pilot are not "
-        "(mutation: the count never incremented, or the clamp dropped so the value wraps)");
+  check(s_hot == 1 && o_hot[1] == 32767 && s_cold == 1 && o_cold[1] == -32768 && s_cool == 0 &&
+            std::abs(o_cool[1] - 28284) <= 1 && pc::derotate(d.data(), out.data(), n, e.hz, rate, 0) == 0,
+        "a rotation past the int16 range is counted and clamped on either rail, an in-range one and the test "
+        "pilot are not (mutation: the count never incremented, the negative rail unchecked, or the clamp dropped "
+        "so the value wraps)");
   if (failures) std::printf("FAILED: %d failure(s)\n", failures);
   else std::printf("ALL PASS\n");
   return failures ? 1 : 0;

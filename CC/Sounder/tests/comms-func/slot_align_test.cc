@@ -191,6 +191,9 @@ int main() {
               !sa::lanePresent(200.0, 51.0, 0.9, false) && sa::lanePresent(200.0, 49.0, 0.0, false),
           "the presence gate needs rms 120 and 4x the floor, whatever the pilot's shape (mutation: either bar "
           "dropped, the floor factor changed, or the LTS stand-in applied outside slots mode)");
+    check(!sa::lanePresent(150.0, 0.0, 0.39, true) && sa::lanePresent(150.0, 0.0, 0.40, true),
+          "slots mode: the stand-in bar is the LTS check's own kLtsMinSelfsim (mutation: > instead of >=, or a "
+          "different bar, so a pilot the LTS check accepts is skipped as quiet)");
     check(!sa::lanePresent(500.0, 0.0, 0.30, true) && sa::lanePresent(150.0, 0.0, 0.85, true) &&
               !sa::lanePresent(110.0, 0.0, 0.95, true),
           "slots mode: with no noise floor the LTS check stands in, so interference above the bar is a quiet "

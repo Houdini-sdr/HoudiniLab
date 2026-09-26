@@ -524,8 +524,8 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
   // buffers and RadioHoudini::recv reads C lanes, so every read/cache/deliver here
   // must span all C -- a single-lane read hands the driver a null buffs[1] and its
   // null-lane guard rejects the whole read (-2 STREAM_ERROR). The pilot/timing is
-  // located on lane 0 and applied to all lanes (they are sample-aligned by the
-  // combined stream). C==1 reduces to the original single-channel path. The cache
+  // located on the lane with the cleanest pilot and applied to all lanes (they are
+  // sample-aligned by the combined stream). C==1 reduces to the original single-channel path. The cache
   // is laid out slot-major, lanes contiguous within a slot: [slot k][lane c].
   const size_t C = std::max<size_t>(1, cfg_->bs_rx_ch());
 
@@ -740,7 +740,7 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
   // path's numbers are lane 0's as before.
   if (!ref.present) {
     ++htdd_quiet_streak_;
-    constexpr size_t kQuietWarnFrames = 200;  // ~0.2 s at 1 kHz frames
+    constexpr size_t kQuietWarnFrames = 200;  // about 4 s at the BS's ~50 frames/s
     if (htdd_frame_counter_ > 0 &&
         (htdd_quiet_streak_ == kQuietWarnFrames ||
          (htdd_quiet_streak_ > kQuietWarnFrames &&
@@ -788,7 +788,7 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
   auto selfsim = [&](int off) -> double { return laneSelfsim(s, off); };
   const int p_at = ref.p_at;
   const double pilot_ss = ref.ss;
-  if (pilot_ss < 0.4) {
+  if (pilot_ss < houdini::slotalign::kLtsMinSelfsim) {
     htdd_frame_pad_ += static_cast<size_t>(n);
     // Recording mode ignores rx_pad (only the view refuses on it), so also
     // push the extent into the gap sink: the HDF5's /Data/Gaps then records
