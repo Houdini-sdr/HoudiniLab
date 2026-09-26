@@ -54,7 +54,7 @@ class RecorderWorker {
   // both, the raw-ADC envelope, the spectrum, the impulse response and the
   // channel constants go to the dashboard as UDP datagrams (CSI2, CNS1, ADC2,
   // SPC1, CIR1, MET1; the layouts are at their senders), each kind on its own
-  // per-antenna throttle. ---
+  // per-antenna throttle except CIR1, which goes out with each CSI2. ---
   bool view_mode_ = false;
   // Houdini RFSoC only: the matched-NCO R2C RX mixer delivers baseband CONJUGATED
   // (a +f tone returns at -f -- same inversion buildHoudiniBeacon pre-conjugates the

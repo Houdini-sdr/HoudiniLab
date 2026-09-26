@@ -1,7 +1,7 @@
 /**
  * @file houdini/bs_slots.h
  * @brief The BS receiving only its RX slots (AP-87; the over-the-air runs,
- *        DEMO_VERIFICATION 9.62-9.64): the TDD pattern the schedule means,
+ *        DEMO_VERIFICATION 9.62, 9.64 and 9.66): the TDD pattern the schedule means,
  *        where a tick sits on the slot grid, and how much of a gap in the read
  *        falls in the RX slots.
  *

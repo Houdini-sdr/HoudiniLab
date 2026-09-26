@@ -13,8 +13,9 @@ class SignalException : public runtime_error {
 
 class SignalHandler {
  protected:
-  // Written by the SIGINT handler and read by every thread: a lock-free atomic
-  // is safe in a handler and visible across threads (a plain bool is neither).
+  // Written by the SIGINT handler and read by the scheduler's loop on another
+  // thread: a lock-free atomic is safe in a handler and visible across threads
+  // (a plain bool is neither).
   static std::atomic<bool> mbGotExitSignal;
 
  public:

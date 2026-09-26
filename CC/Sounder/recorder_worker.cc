@@ -67,7 +67,7 @@ static bool throttleDue(const std::unordered_map<uint32_t, long long>& last, uin
 
 // One constellation dump: [N cp es nsym ndata i32] [H re,im f32]*N
 // [data_ind i32]*ndata [U slot re,im i16]*slot. The format of HOUDINI_CSI_DUMP
-// and HOUDINI_CNS_DUMP_LOW alike (tests/demo-verify/ap15_diff.py and
+// and HOUDINI_CNS_DUMP_LOW alike (tests/demo-verify/archive/ap15_diff.py and
 // ap15_correlate.py read it). False when the file cannot be opened.
 static bool writeCnsDump(const char* path, int N, int cp, int es, int nsym, const std::vector<size_t>& data_ind,
                          const std::vector<std::complex<float>>& H, const short* d, int slot) {

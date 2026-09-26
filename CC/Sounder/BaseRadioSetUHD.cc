@@ -220,7 +220,7 @@ void BaseRadioSetUHD::init(BaseRadioContext* context) {
   }
   MLPD_TRACE("BaseRadioSet: Init complete\n");
   assert(thread_count->load() != 0);
-  thread_count->store(thread_count->load() - 1);
+  thread_count->fetch_sub(1);  // one atomic step (see BaseRadioSet::init)
 }
 
 void* BaseRadioSetUHD::configure_launch(void* in_context) {
@@ -243,7 +243,7 @@ void BaseRadioSetUHD::configure(BaseRadioContext* context) {
     bsRadios->dev_init(_cfg, ch, rxgain, txgain);
   }
   assert(thread_count->load() != 0);
-  thread_count->store(thread_count->load() - 1);
+  thread_count->fetch_sub(1);  // one atomic step (see BaseRadioSet::init)
 }
 
 uhd::usrp::multi_usrp::sptr BaseRadioSetUHD::baseRadio(size_t cellId) {

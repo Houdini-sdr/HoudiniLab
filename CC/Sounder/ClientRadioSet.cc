@@ -399,10 +399,10 @@ int ClientRadioSet::radioTx(size_t radio_id, const void* const* buffs,
   if (_cfg->hw_framer()) {
     return radios.at(radio_id)->xmit(buffs, numSamps, flags, frameTime);
   } else {
-    // The transmit time grid is the backend's: RadioHoudini adds
-    // ue_tx_advance_ticks and snaps to the 3.125 us TDD window grid with the
-    // `tdd=1` stream arg (ue_tdd_pilot, SH-248/SH-301), or to whole ms
-    // without it (RadioHoudini::txTimeNs); the others convert plainly.
+    // The transmit time grid is the backend's: with the `tdd=1` stream arg
+    // (ue_tdd_pilot, SH-248/SH-301) RadioHoudini adds ue_tx_advance_ticks and
+    // snaps to the 3.125 us TDD window grid; without it, it snaps to whole ms
+    // and adds no advance (RadioHoudini::txTimeNs); the others convert plainly.
     long long frameTimeNs = radios.at(radio_id)->txTimeNs(
         frameTime, _cfg->rate(), _cfg->ue_tdd_pilot(), _cfg->ue_tx_advance_ticks());
     const int r = radios.at(radio_id)->xmit(buffs, numSamps, flags, frameTimeNs);
