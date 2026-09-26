@@ -1,11 +1,19 @@
 # Per-band channel widths (AP-85)
 
+Status: implemented and in the demo head (`channel_ofdm_data_num`, used by
+every `houdini-dualband-xw*` config). The rig predictions of section 5 ran as
+`DEMO_VERIFICATION.md` 9.55: P1 to P4, P6, P8 and P9 held, P5 held only in
+part, P7 and P10 were not evaluated. Sections 1 to 4 are the reference for the
+key; sections 5 to 7 are the design's record. Q3's framer placement is
+superseded by AP-90 (the note at Q3).
+
 The X-band carries 270 RB (3240 subcarriers, 97.2 MHz occupied) beside the sub-6's
 133 RB (1596 subcarriers, 47.88 MHz), on ONE numerology: SCS 30 kHz, FFT 4096 at
 122.88 Msps, CP 288, 14 symbols per 0.5 ms slot, the same TDD schedule, timing and
 stream rates. Only the X-band's tone count, and what derives from it, changes.
 
-Requirement: HS-202 `docs/DEMO_FREQUENCY_PLAN.md` section 3.3 (the numerology table,
+Requirement: HS-202, in the Houdini-Streaming repository:
+`docs/DEMO_FREQUENCY_PLAN.md` section 3.3 (the numerology table,
 "X-band later, near 100 MHz: 270 RB adopted"), section 6.1 (the W3 note on the
 refclk image at +43.68 MHz), section 9b ("X-band channel near 100 MHz [user]"),
 section 1 and `docs/XUD1A_FREQUENCY_PLAN.md` (IF 4380, 98.3 MHz usable, 4330.85 to
