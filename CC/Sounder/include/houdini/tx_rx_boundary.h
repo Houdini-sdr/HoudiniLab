@@ -5,7 +5,7 @@
  *        filter on the lanes that need it. Pure, so the test drives it without
  *        a radio; RadioHoudini owns one of each.
  *
- * TX. Every waveform is still built at sample_rate (122.88 = the tick), so
+ * TX. Every waveform is built at sample_rate (122.88 = the tick), so
  * everything upstream of the radio (slot offsets, the 384-grid pad, the U-slot
  * offset) stays in ticks and simply doubles when the whole burst is
  * interpolated. That is exact only when a burst is written in ONE call with
@@ -101,8 +101,8 @@ class TxBurstInterpolator {
 
   /// The interpolator for one TX lane whose band occupies +-half_bw_hz
   /// (AP-85). A band inside the channel filter's passband keeps the prefilter
-  /// and the narrow halfband, exactly as before (the sub-6, and every
-  /// first-pass channel); a wider one, the X-band at 270 RB, takes the wide
+  /// and the narrow halfband (the sub-6, and any channel at the common
+  /// 133 RB); a wider one, the X-band at 270 RB, takes the wide
   /// halfband alone: the prefilter would cut it, and its only purpose, keeping
   /// splatter off the far ADC's real-sampling mirror, does not arise where the
   /// mirror is over 1 GHz away (rf_plan: no RX filter on that lane).

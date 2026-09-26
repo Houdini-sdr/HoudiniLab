@@ -1,14 +1,14 @@
 /**
  * @file houdini/pre_cfo.h
  * @brief The carrier offset from a slot of identical symbols, removed in the
- *        time domain before the FFT [user: the weakly steered UE clock was
- *        dragging the wired X-band's MER down].
+ *        time domain before the FFT (a weakly steered UE clock otherwise drags
+ *        the wired X-band's MER down).
  *
- * The BS used to take the carrier offset out per symbol after the FFT: that
+ * Taking the carrier offset out per symbol after the FFT is not enough: that
  * removes the common phase but not the leakage between subcarriers the offset
- * causes, so a residual offset still capped MER (DEMO_VERIFICATION 9.13: 691 Hz
+ * causes, so a residual offset still caps MER (DEMO_VERIFICATION 9.13: 691 Hz
  * held it near 25 dB), and the X-band, at 1.81x the sub-6's offset in Hz,
- * followed every swing of the UE's steering. The pilot slot is identical
+ * follows every swing of the UE's steering. The pilot slot is identical
  * symbols, so the phase from each to the next (one symbol, cp + fft samples)
  * is the offset, measured on that lane's own pilot; rotating it out of the
  * samples before the FFT removes the leakage too.

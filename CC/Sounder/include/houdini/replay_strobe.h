@@ -3,7 +3,7 @@
  * @brief The beacon replay strobe's offset and length (TDD_REPLAY_STROBE
  *        offs / len), as one pure function so the units are tested (AP-79).
  *
- * UNITS, from the driver and fpga lanes (2026-09-22): offs is in 122.88 MHz
+ * UNITS, from the driver and fpga lanes: offs is in 122.88 MHz
  * ticks whatever the TX rate, at least 256, and the RTL quantizes the stamp up
  * to the beat grid; len counts units of 2 TX SAMPLES (so one unit is one tick
  * at TX = 2 x the tick rate, half a tick at 1 x), 8..2048, in whole 8-unit
@@ -33,7 +33,7 @@ struct ReplayStrobe {
 };
 
 /// The inputs by NAME: six integers in a row could be swapped at the call
-/// site (lead and tail are both small ints) and still compile (review).
+/// site (lead and tail are both small ints) and still compile.
 struct ReplayStrobeInputs {
   int k_tx = 1;                ///< TX samples per tick (1 or 2)
   long long symbol_ticks = 0;  ///< the replay window (the TDD symbol = the sounder slot)

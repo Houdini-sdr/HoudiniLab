@@ -16,7 +16,7 @@ int main() {
   check(bs::tddPattern("BGPUGGGGGGGGGGGGGGGG", true) == "40220000000000000000",
         "slots only: the beacon '4' (strobe, no rx), P/U '2', guards '0' (mutation: the rx bit left on the beacon)");
   check(bs::tddPattern("BGPUGGGGGGGGGGGGGGGG", false) == "62222222222222222222",
-        "the legacy pattern is byte-identical to the one armed today (mutation: the default path changed)");
+        "the all-rx pattern is the one the framer arms without bs_rx_slots (mutation: the default path changed)");
   check(bs::tddPattern("GBGPRUNG", true) == "04022220",
         "R and N slots receive too, the beacon anywhere in the frame (mutation: only P/U, or slot 0 assumed)");
   check(bs::rxBits("40220000000000000000") == "00110000000000000000" && bs::rxBits("6222") == "1111",

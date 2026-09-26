@@ -1,7 +1,7 @@
 /** @file RadioSoapy.cc
   * @brief The SoapySDR backend (Iris, and SoapyUHD when built for it): the
-  *        plumbing every Soapy radio shares. Today's Radio.cc with the Houdini
-  *        branch moved to RadioHoudini.cc.
+  *        plumbing every Soapy radio shares. The Houdini specifics are in
+  *        RadioHoudini.cc.
   *
   * Copyright (c) 2018-2022, Rice University
   * RENEW OPEN SOURCE LICENSE: http://renew-wireless.org/license
@@ -145,21 +145,15 @@ RadioSoapy::RadioSoapy(const RadioParams& params, Type type, const SoapySDR::Kwa
     throw std::invalid_argument("error making SoapySDR::Device\n");
   }
 
-  /* Moved to dev_init function (seems to fix the rate issue)
-    for (auto ch : channels) {
-        dev_->setSampleRate(SOAPY_SDR_RX, ch, rate);
-        dev_->setSampleRate(SOAPY_SDR_TX, ch, rate);
-    }*/
   // Backends that forbid live rate changes (Houdini) must have the rate and
-  // NCO set BEFORE the stream opens; the Iris path passes 0 and keeps setting
-  // these in dev_init (post-setupStream) as before. RX/TX rates are independent;
-  // a negative preStreamTxRate is a sentinel for "use the device max TX rate"
-  // (the replay RAM plays at that rate and the RFDC interpolates to the DAC) --
-  // but the BS beacon now passes the app rate, so no host upsampling is needed.
+  // NCO set BEFORE the stream opens; the Iris path passes 0 and sets them in
+  // setup() (after setupStream). RX/TX rates are independent; a negative
+  // preStreamTxRate selects the device's max TX rate (no caller passes one:
+  // the BS beacon replays at the tick rate, HoudiniFramer::buildBeacon).
   // A backend that owns its whole pre-stream configuration (Houdini mode V,
   // AP-79) runs it here, between make() and the first setupStream, in place
   // of the one-rate, one-NCO block below. A throw releases the device first,
-  // for the same reason the stream setup below does (Opus review M12).
+  // for the same reason the stream setup below does.
   if (preStream) {
     try {
       preStream(*dev_);
@@ -241,9 +235,9 @@ RadioSoapy::RadioSoapy(const RadioParams& params, Type type, const SoapySDR::Kwa
     // A throw from any setup below escapes the constructor, so ~Radio never
     // runs: release what this ctor already owns (the aux stream, then the
     // device) before rethrowing, or the in-process radio-open retry finds
-    // the device still held by a half-built attempt (Opus review M12).
+    // the device still held by a half-built attempt.
     try {
-      // The ADC half of the MTS rule (software lane, M2): the group needs an
+      // The ADC half of the MTS rule (the software lane's): the group needs an
       // RX member on ADC tile 0. The planned nodes have one (RX ch0); a node
       // that omits it is refused here, naming the fix, rather than left to a
       // sync that fails or lands unsynced. Skipped when the driver does not
@@ -291,10 +285,10 @@ RadioSoapy::RadioSoapy(const RadioParams& params, Type type, const SoapySDR::Kwa
         ++tx_i;
         tx_streams_.push_back(dev_->setupStream(SOAPY_SDR_TX, soapyFmt, {ch}, a));
       }
-      // One combined RX stream over the RX channels. Since SH-142/SH-159 landed
-      // the driver activates a >1-channel RX stream and readStream fills buffs[i]
-      // per channel, sample-aligned with one timestamp -- the same shape Iris
-      // uses. RX channels may differ from TX (e.g. an RX-only converter).
+      // One combined RX stream over the RX channels. The driver (SH-142/SH-159)
+      // activates a >1-channel RX stream and readStream fills buffs[i] per
+      // channel, sample-aligned with one timestamp -- the same shape Iris uses.
+      // RX channels may differ from TX (e.g. an RX-only converter).
       rxs_ = dev_->setupStream(SOAPY_SDR_RX, soapyFmt, rx_channels, rxStreamArgs);
       // After the LAST setup of the group and before any activate (Houdini
       // mode V: the MTS / calibration / preflight check). A throw here closes
@@ -510,7 +504,7 @@ int RadioSoapy::xmit(const void* const* buffs, int samples, int flags,
   int flag_args = soapyFlags[flags];
   if (tx_streams_.empty()) return 0;
   // One multi-channel stream (Iris/UHD, or a single channel): write the whole
-  // per-channel buffer array in one call, exactly as before.
+  // per-channel buffer array in one call.
   if (tx_streams_.size() == 1) {
     int r = dev_->writeStream(tx_streams_.front(), buffs, samples, flag_args,
                               frameTime, 1000000);
@@ -526,40 +520,7 @@ int RadioSoapy::xmit(const void* const* buffs, int samples, int flags,
   // TDD grid. Return the first short/failed write so the caller's BAD-Write
   // check still fires.
   int ret = samples;
-  // AP-78 diag: the second-written per-channel stream's burst can miss its tick
-  // (arrives late -> the bank never starts -> zero-fill), while the first-written
-  // one makes the deadline. HOUDINI_TX_REVERSE flips the write order so we can
-  // tell an order-dependent margin (the dead lane follows the order) from a
-  // stream-specific fault (the dead lane stays put).
-  static const bool tx_reverse = getenv("HOUDINI_TX_REVERSE") != nullptr;
-  const size_t nstreams = tx_streams_.size();
-  // AP-78 step-2 diag: the real per-burst host lead is frameTime - device clock
-  // at the moment of the write. One getHardwareTime RPC per xmit (env-gated,
-  // throttled) -- both streams write within ~us of this, so it is the base lead
-  // they share; if it is under the driver's ~500 us threshold the second write
-  // misses. Not in the shipped loop (the RPC is ~0.1-1.5 ms).
-  static const bool margin_log = getenv("HOUDINI_TX_MARGIN") != nullptr;
-  if (margin_log) {
-    static long long last_margin_ns = 0;
-    const long long nowns =
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now().time_since_epoch())
-            .count();
-    if (nowns - last_margin_ns > 2000000000LL) {
-      last_margin_ns = nowns;
-      long long hw = -1;
-      try {
-        hw = dev_->getHardwareTime();
-      } catch (...) {
-      }
-      MLPD_WARN(
-          "TX margin: frameTime=%lld ns hw_time=%lld ns lead=%.1f us "
-          "(nstreams=%zu)\n",
-          frameTime, hw, (hw >= 0 ? (frameTime - hw) / 1000.0 : 0.0), nstreams);
-    }
-  }
-  for (size_t k = 0; k < nstreams; ++k) {
-    const size_t i = tx_reverse ? (nstreams - 1 - k) : k;
+  for (size_t i = 0; i < tx_streams_.size(); ++i) {
     // A null channel buffer means "nothing on this channel this write" -- the BS
     // beacon is single-antenna, so it passes its samples only on the beacon
     // channel and nullptr on the others; fanning it to every channel would fill
@@ -571,8 +532,8 @@ int RadioSoapy::xmit(const void* const* buffs, int samples, int flags,
     // STREAM, exactly like ft above -- otherwise the first stream's write zeroes
     // the flags and every later stream is written with 0x0 (no HAS_TIME), so its
     // burst is never anchored to its tick, the bank never activates, and it
-    // zero-fills. That was the whole dead-second-antenna bug (AP-78): the driver
-    // DIAG showed ch0 flags=0x6 but ch1 flags=0x0 for the same pilot.
+    // zero-fills: the dead-second-antenna bug (AP-78; the driver DIAG showed
+    // ch0 flags=0x6 but ch1 flags=0x0 for the same pilot).
     int fl = flag_args;
     const void* one[1] = {buffs[i]};
     int r = dev_->writeStream(tx_streams_[i], one, samples, fl, ft, 1000000);

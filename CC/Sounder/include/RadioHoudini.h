@@ -62,8 +62,10 @@ class RadioHoudini : public RadioSoapy {
   long long txTimeNs(long long frame_ticks, double rate_hz, bool tdd_pilot,
                      long long advance_ticks) const override;
 
-  /// The mixer NCO is the only tuning knob and there are no gain stages: the
-  /// rate and NCO were applied before the streams opened, so this reports.
+  /// Rate, NCO and (mode V) the gains were applied before the streams opened,
+  /// so this only reports; the Iris-style per-channel gains passed in are not
+  /// used (the Houdini gains are houdini_rx_gain_db / houdini_tx_gain_db,
+  /// written by the mode-V bring-up).
   void setup(int ch, double rxgain, double txgain) override;
   /// SoapyHoudiniSDR delivers ~1 MTU per readStream and buffers a backlog:
   /// drain it, then accumulate a contiguous window, zero-padding any
@@ -132,10 +134,10 @@ class RadioHoudini : public RadioSoapy {
   std::string slot_rx_;
   // AP-87 check: every read's stamped samples must lie inside an rx slot.
   long long slot_reads_ = 0, slot_samples_ = 0, slot_stray_ = 0, slot_stray_reads_ = 0;
-  // Every stamped read against the stream's sample count [user: 'make sure the
-  // data you read is where you expected it'] (the RX packets carry no sequence
-  // number, so the stamp is the count): on it, after a gap (samples lost vs the
-  // schedule's own gaps), out of order (earlier than the count), a time jump.
+  // Every stamped read against the stream's sample count, so the data read is
+  // where it was expected (the RX packets carry no sequence number, so the
+  // stamp is the count): on it, after a gap (samples lost vs the schedule's
+  // own gaps), out of order (earlier than the count), a time jump.
   long long rd_reads_ = 0, rd_on_count_ = 0, rd_gap_reads_ = 0, rd_gap_lost_ = 0, rd_gap_sched_ = 0,
             rd_backward_ = 0, rd_resync_ = 0;
 };

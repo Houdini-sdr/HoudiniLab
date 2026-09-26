@@ -4,18 +4,17 @@
  *        WHOLE burst (AP-79).
  *
  * The UE sends its pilot and every uplink-data slot as ONE burst, each at an
- * exact whole-slot offset from the pilot (receiver.cc composes it). The BS
- * framer used to centroid-align each slot separately, over a window 1.25 slots
- * wide starting n/8 before the slot. That dated from when each slot was its own
- * burst snapped to the TDD grid. With P and U in ADJACENT slots (the AP-79
- * schedule) each window takes in its neighbour's energy: P's centroid is pulled
- * late by U's head and U's early by P's tail. Measured on silicon (R1c,
- * 2026-09-23): U extracted 264-317 samples before P + n, and the data would
- * not decode (5 dB) where the same capture, correctly windowed, decodes at
- * 39.7 dB.
+ * exact whole-slot offset from the pilot (receiver.cc composes it). So the BS
+ * places the pilot once, by its leading edge (see burstPilotStart), and every
+ * other slot at a whole number of slots from it, as sent.
  *
- * The fix places the pilot once, by its leading edge (see burstPilotStart),
- * and every other slot at a whole number of slots from it, as sent.
+ * Do not centroid-align each slot separately (a window 1.25 slots wide from
+ * n/8 before the slot, which suits slots that are separate bursts). With P and
+ * U in ADJACENT slots (the AP-79 schedule) each window takes in its
+ * neighbour's energy: P's centroid is pulled late by U's head and U's early by
+ * P's tail. Measured on silicon (R1c, DEMO_VERIFICATION 9.3): U extracted
+ * 264-317 samples before P + n, and the data would not decode (5 dB) where the
+ * same capture, correctly windowed, decodes at 39.7 dB.
  */
 #pragma once
 
@@ -29,7 +28,7 @@ namespace slotalign {
 
 /// The pilot slot's start in the capture, from the pilot's LEADING EDGE.
 ///
-/// A centroid over the whole burst (the first fix tried) is level-sensitive:
+/// Not a centroid over the whole burst: that is level-sensitive, since
 /// it counts samples above a fraction of the PEAK, so a data slot quieter than
 /// the pilot is under-counted and one more than ~8 dB down drops out entirely.
 /// The edge is not: the slot before the pilot is silent (a guard), and the
@@ -47,7 +46,7 @@ inline long long burstPilotStart(const std::vector<double>& cse, long long guess
   auto m = [&](long long i) { return cse[i + 64] - cse[i - 64]; };
   // The coarse guess can be off by up to about n/2: when the data slot is
   // within ~0.5 dB of the pilot, the densest-window search that produces it
-  // is nearly flat across P+U (an Opus review, L1). So the level is the 75th
+  // is nearly flat across P+U. So the level is the 75th
   // percentile of the windowed energy over [guess - n/2, guess + 3n/2], which
   // holds the whole pilot either way, and the edge search starts at guess -
   // n/2, in the silent guard slot before the pilot.
@@ -72,8 +71,8 @@ inline long long burstPilotStart(const std::vector<double>& cse, long long guess
   if (coarse < 0) return std::max(0LL, std::min(st, cg - n));
   // Stage 2: the PILOT's own plateau, the median over a quarter slot just
   // inside it, and the first crossing of half of that, from before the
-  // coarse edge. Independent of the data slot's level (a louder U no longer
-  // sets the threshold).
+  // coarse edge. Independent of the data slot's level (a louder U does not
+  // set the threshold).
   std::vector<double> own;
   for (long long i = coarse + 192; i < coarse + 192 + n / 4; i += 8)
     if (i + 64 <= cg) own.push_back(m(i));
@@ -102,7 +101,7 @@ inline long long expectedPilotStart(long long stamp_ticks, long long epoch, long
 /// sample 0, where the edge search finds no silent guard before it) AND that
 /// copy fits the read with the window and the rx span (`span_n`, as the framer
 /// counts it); otherwise `expect`. A short read (a gap) keeps the head copy:
-/// shifting there left the window empty and fell back to the whole read.
+/// shifting there would leave the window empty and fall back to the whole read.
 inline long long chooseExpect(long long expect, long long n, long long fr, long long span_n, long long cg) {
   if (expect < n / 2 && expect + fr + n / 4 + span_n <= cg) return expect + fr;
   return expect;
@@ -110,13 +109,12 @@ inline long long chooseExpect(long long expect, long long n, long long fr, long 
 
 /// The densest n-sample window whose start lies within +-tol of `expect`,
 /// stepping `step`, over the cumulative energy cse: {start, energy}, or
-/// {-1, 0} when no window fits the capture. The host half of the user's
-/// contract that a TDD node receives only its RX slots (SH-347): without
-/// bs_rx_slots the BS keeps its rx gate open all frame (up to fpga 1.33 a gate
-/// close abandoned the continuous capture),
-/// so over the air its own beacon slot and the guards carry whatever is on
-/// the air, and a whole-frame search takes the loudest of it for the UE.
-/// Searching only the scheduled pilot position cannot.
+/// {-1, 0} when no window fits the capture. The host half of the contract
+/// that a TDD node receives only its RX slots (SH-347): without bs_rx_slots
+/// the BS keeps its rx gate open all frame (up to fpga 1.33 a gate close
+/// abandoned the continuous capture), so over the air its own beacon slot and
+/// the guards carry whatever is on the air, and a whole-frame search takes the
+/// loudest of it for the UE. Searching only the scheduled pilot position cannot.
 inline std::pair<long long, double> densestNear(const std::vector<double>& cse, long long expect, long long tol,
                                                 long long n, long long step) {
   const long long cg = static_cast<long long>(cse.size()) - 1;

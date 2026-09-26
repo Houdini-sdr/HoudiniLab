@@ -7,13 +7,13 @@
  * call re-derives txTime from the tracked beacon grid, so the new txTime is NOT
  * on the old call's lattice: it lands a fraction of a sample either side.
  *
- * The rule this replaces resumed at the first i with cur >= cursor + frame
- * (ceil). When txTime lands early by any fraction, that ceil rounds past the
- * next frame and SKIPS it. Measured on silicon (AP-79 R0 and R1, 2026-09-23):
- * the UE covered only 74-75 % of the frames, and the BS logged every missing
- * frame as "no UE burst". The fix resumes at the first i whose burst starts more
- * than HALF a frame past the cursor, which is the next frame for any grid
- * jitter under half a frame, and can never queue the cursor's own frame twice.
+ * Resume at the first i whose burst starts more than HALF a frame past the
+ * cursor: that is the next frame for any grid jitter under half a frame, and
+ * can never queue the cursor's own frame twice. Do not resume at the first i
+ * with cur >= cursor + frame (ceil): when txTime lands early by any fraction,
+ * that ceil rounds past the next frame and SKIPS it. Measured on silicon
+ * (AP-79 R0 and R1): the UE covered only 74-75 % of the frames, and the BS
+ * logged every missing frame as "no UE burst".
  */
 #pragma once
 

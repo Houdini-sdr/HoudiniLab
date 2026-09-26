@@ -5,16 +5,16 @@
  * The anchored UE loop drains the RX backlog and reads a fresh one-slot window
  * each iteration, and a targeted re-sync is attempted only when the grid's next
  * predicted beacon END lands inside that window with the search slice's lead
- * and tail around it (receiver.cc: kLead <= off <= request - kTail). That
- * relied on the window's phase against the frame being random. Measured on
- * silicon (AP-79 F0 and the AP-80 run, 2026-09-23, DEMO_VERIFICATION 9.16): the
- * loop period locks to exactly two frames for 15-25 s at a time, the window
- * then holds a phase that misses the beacon, 0 windows are searched, and the UE
- * schedule free-runs until the lock breaks (the BS pilot seat walked to +901).
+ * and tail around it (receiver.cc: kLead <= off <= request - kTail). So when a
+ * re-sync is due the window is PLACED: the radio reads up to a start computed
+ * from the stream's own head tick, so the predicted beacon end sits `want`
+ * samples into the window whatever the loop period is.
  *
- * The fix places the window instead: when a re-sync is due, the radio reads up
- * to a start computed from the stream's own head tick, so the predicted beacon
- * end sits `want` samples into the window whatever the loop period is.
+ * Do not rely on the window's phase against the frame being random. Measured
+ * on silicon (AP-79 F0 and the AP-80 run, DEMO_VERIFICATION 9.16): the loop
+ * period locks to exactly two frames for 15-25 s at a time, the window then
+ * holds a phase that misses the beacon, 0 windows are searched, and the UE
+ * schedule free-runs until the lock breaks (the BS pilot seat walked to +901).
  */
 #pragma once
 

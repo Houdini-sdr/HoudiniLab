@@ -17,7 +17,6 @@ const char* Radio::name(Type type) {
     case Type::kSoapyIris: return "iris";
     case Type::kSoapyUhd: return "uhd (SoapySDR)";
     case Type::kSoapyHoudini: return "houdini";
-    case Type::kUhdNative: return "uhd (native)";
   }
   return "?";
 }
@@ -29,10 +28,6 @@ std::unique_ptr<Radio> Radio::create(Type type, const RadioParams& params) {
       return std::make_unique<RadioSoapy>(params, type);
     case Type::kSoapyHoudini:
       return std::make_unique<RadioHoudini>(params);
-    case Type::kUhdNative:
-      // Seam step S3 folds the native UHD radio behind this factory; until
-      // then it is the separate compile-time path (RADIO_TYPE=PURE_UHD).
-      throw std::invalid_argument("Radio::create: the native UHD backend is not behind the factory yet");
   }
   throw std::invalid_argument("Radio::create: unknown radio type");
 }

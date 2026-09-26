@@ -369,18 +369,18 @@ int main() {
 
   {
     // AP-85: the lane path per band. The sub-6 band (133 RB, +-23.94 MHz) keeps
-    // today's prefiltered path bit for bit; the X-band at 270 RB (+-48.6 MHz)
+    // the prefiltered path bit for bit; the X-band at 270 RB (+-48.6 MHz)
     // takes the wide halfband, which passes a 45 MHz tone that the prefilter
     // (stop from 40.2 MHz) would remove.
     const auto b = burst(8000, 0.1, 6000.0);
     const void* bb[1] = {b.data()};
     auto sub6 = TxBurstInterpolator::forBand(1596 * 30e3 / 2.0);
-    TxBurstInterpolator today(true);
+    TxBurstInterpolator prefiltered(true);
     const auto o1 = sub6.run(bb, 1, b.size());
-    const auto o2 = today.run(bb, 1, b.size());
+    const auto o2 = prefiltered.run(bb, 1, b.size());
     const std::vector<cs16> ref(static_cast<const cs16*>(o2.buffs[0]), static_cast<const cs16*>(o2.buffs[0]) + o2.samples);
     check(o1.samples == o2.samples && equal(o1.buffs[0], ref),
-          "forBand(+-23.94 MHz) is today's prefiltered interpolator, bit for bit "
+          "forBand(+-23.94 MHz) is the prefiltered interpolator, bit for bit "
           "(mutation: the wide halfband for every band)");
     const double f45 = 45.0e6;
     const auto t = burst(8000, f45 / 122.88e6, 6000.0);

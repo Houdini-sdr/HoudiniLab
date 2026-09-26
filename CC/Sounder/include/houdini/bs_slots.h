@@ -1,8 +1,9 @@
 /**
  * @file houdini/bs_slots.h
- * @brief The BS receiving only its RX slots (AP-87, the fix for O1): the TDD
- *        pattern the schedule means, where a tick sits on the slot grid, and how
- *        much of a gap in the read falls in the RX slots.
+ * @brief The BS receiving only its RX slots (AP-87; the over-the-air runs,
+ *        DEMO_VERIFICATION 9.62-9.64): the TDD pattern the schedule means,
+ *        where a tick sits on the slot grid, and how much of a gap in the read
+ *        falls in the RX slots.
  *
  * With `bs_rx_slots` the BS arms the pattern its schedule means (the beacon
  * symbol replay strobe only, the P/U/R/N slots rx, every other slot a guard)

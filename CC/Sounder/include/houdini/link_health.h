@@ -200,7 +200,7 @@ inline const std::vector<std::string>& txAlarmFields() {
   return f;
 }
 
-/// HS-220: the TX event counters WRAP mod 2^16 (they saturated before), and
+/// HS-220: the TX event counters WRAP mod 2^16 (earlier gateware saturated them), and
 /// the CLEAR_EPOCH register, read before and after them
 /// (TX_BANK_STATUS "epoch=<before>:<after>", [16] clear_busy, [15:0] clears
 /// since the PL load), says whether a clear came between two polls. The
@@ -308,10 +308,10 @@ inline Counters counterIncreases(const Counters& prev, const Counters& cur) {
 }
 
 /// The previous-check state after this check: every counter read now, plus
-/// the last known value of any counter this read did not return. Replacing
-/// the state with an empty or partial read erased the baseline, and the next
-/// full read then reported every counter's whole running total as new (a
-/// metric audit, 2026-09-23).
+/// the last known value of any counter this read did not return. Do not
+/// replace the state with the read: an empty or partial read would erase the
+/// baseline, and the next full read would then report every counter's whole
+/// running total as new.
 inline Counters carryCounters(const Counters& prev, const Counters& cur) {
   Counters out = prev;
   for (const auto& kv : cur) out[kv.first] = kv.second;

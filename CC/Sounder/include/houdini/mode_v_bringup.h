@@ -4,11 +4,11 @@
  *        device requires (AP-79), between make() and the first setupStream.
  *
  * THE ORDER, and why each step sits where it does. It is the software lane's
- * recipe (handoff 2026-09-22, the reference driver host/examples/dualband_link.py)
- * and the HS-202 plan section 3.2, which the device enforces:
+ * recipe (its reference driver host/examples/dualband_link.py) and the HS-202
+ * plan section 3.2, which the device enforces:
  *   1. FORCE_IDLE: a known-idle device, leaks from an earlier session reported.
  *   1b. AP-86, only with the X-band RF front end attached (Plan::xband_fe_state):
- *      the board's STATIC state for this session. After FORCE_IDLE, which
+ *      the board's STATIC state for this run. After FORCE_IDLE, which
  *      resets TDD_EXTPIN_CTRL/SRC, and before any schedule, arm or stream, since
  *      the static SRC write is refused unless the TDD framer is idle. CTRL with
  *      the interlock, SRC static tx (UE) or rx (BS), then TDD_EXTPIN_STAT polled
@@ -148,7 +148,7 @@ inline std::map<size_t, std::string> chanList(const std::string& raw) {
     const size_t e = std::min(raw.find(';', p), raw.size());
     std::string item = raw.substr(p, e - p);
     // Whitespace around an item (a newline at the end, a space after ';')
-    // must not fail a healthy readback (review).
+    // must not fail a healthy readback.
     const size_t a = item.find_first_not_of(" \t\r\n"), b = item.find_last_not_of(" \t\r\n");
     item = (a == std::string::npos) ? std::string() : item.substr(a, b - a + 1);
     const size_t c = item.find(':');

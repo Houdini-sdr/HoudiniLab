@@ -51,7 +51,7 @@ int main() {
   check(all, "every common phase from -180 to +180 degrees: exact");
   // The 802.11 layout at fft 64 (pilots at +-7 and +-21) with a 1.2-sample
   // residual and the common phase near 0: the unwrapped fit reads it exactly
-  // (an Opus review measured the unit-mean form reading -0.63).
+  // (the unit-mean form reads it as -0.63).
   {
     std::vector<double> k64{-21, -7, 7, 21};
     std::vector<std::complex<double>> a64;

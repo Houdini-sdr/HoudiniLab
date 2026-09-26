@@ -1,9 +1,8 @@
 /** @file HoudiniFramer.h
   * @brief The Houdini base-station framer: the beacon in the TX replay RAM,
   *        the native TDD ring with its strobe grid, the gated receive slots
-  *        extracted from one continuous read per frame. Moved out of
-  *        BaseRadioSet (seam step S2); the mechanics and their measured
-  *        reasons are unchanged.
+  *        extracted from one continuous read per frame. The mechanics and
+  *        their measured reasons are in HoudiniFramer.cc.
   *
   * RENEW OPEN SOURCE LICENSE: http://renew-wireless.org/license
 */
@@ -52,7 +51,7 @@ class HoudiniFramer : public BeaconFramer {
   long long armTddOnce(SoapySDR::Device* dev, const std::function<void()>& resetup,
                        long long symbol_ticks, long long symbols_per_frame);
 
-  // Native-TDD framer state (single-cell single-radio HIL for now).
+  // Native-TDD framer state (one BS radio in one cell: armTdd refuses more).
   double htdd_tick_rate_ = 122.88e6;
   long long htdd_epoch_ = 0;         // TDD_ARM epoch (ticks)
   long long htdd_frame_ticks_ = 0;   // symbols_per_frame * symbol_ticks
