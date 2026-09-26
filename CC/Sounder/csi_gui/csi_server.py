@@ -725,8 +725,8 @@ def _mag_top(sounder_dir, conf, explicit):
 def _topology_of(sounder_dir, conf):
     """The topology file a config names, or None if it cannot be determined.
 
-    Falling back to None is fine: teardown_framer.py then uses its own default,
-    which is the same file every shipped config points at.
+    With None the teardown runs without --topology and refuses, naming the fix;
+    under --control the quick check has already failed such a config.
     """
     return (_load_conf(sounder_dir, conf) or {}).get("serial_file") or None
 
@@ -1491,11 +1491,10 @@ function makeCard(ant){
      +'</ul>'
      +'<div class="csi-plots csi-view" data-view="channel">'
       +frame('|H| (dB rel.) vs subcarrier','csi-h-line',magLabels(),['','',''],off)
-      // MER over the last minute above the phase shape [user]. It replaced the
-      // raw arg(H) panel, which carried the FFT window's half-CP advance (56
-      // turns across the sub-6 band, 114 across the X-band) and showed nothing
-      // readable; MER over time shows steering, fades and interference as they
-      // happen.
+      // MER over the last minute above the phase shape [user]. Raw arg(H) is not
+      // drawn: it carries the FFT window's half-CP advance (56 turns across the
+      // sub-6 band, 114 across the X-band) and shows nothing readable; MER over
+      // time shows steering, fades and interference as they happen.
       +'<div class="csi-phase-stack">'
       +frame('MER (dB), last '+MER_HIST_S+' s','csi-h-half',
              [MER_TOP,MER_TOP*3/4,MER_TOP/2,MER_TOP/4,0].map(String),['-'+MER_HIST_S+' s','-'+(MER_HIST_S/2)+' s','now'],

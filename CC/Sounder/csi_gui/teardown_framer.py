@@ -8,10 +8,14 @@ script clears that: for each radio in the topology it issues the framer abort,
 clears the transmit RAM, and releases the gate.
 
 `csi_server.py --launch` runs this before each sounder attempt. You can also run
-it by hand after any run that ended abnormally:
+it by hand after any run that ended abnormally, naming the radios:
 
-    python3 csi_gui/teardown_framer.py                     # radios from the topology file
-    python3 csi_gui/teardown_framer.py --node 10.0.0.5     # or name them explicitly
+    python3 csi_gui/teardown_framer.py --conf <config>       # the topology the config names
+    python3 csi_gui/teardown_framer.py --topology <file>     # a topology file
+    python3 csi_gui/teardown_framer.py --node <address>      # or the radios themselves
+
+With none of the three it refuses: the shipped topologies name different
+benches, so a default would tear down whichever bench that file lists.
 
 Exit status is 0 only when every radio was torn down. Any radio that could not
 be opened or torn down makes the exit status non-zero, so a caller can tell the
@@ -43,7 +47,6 @@ _EXAMPLES = os.environ.get(
     "HOUDINI_EXAMPLES",
     os.path.expanduser("~/repos/SoapyHoudiniSDR/host/examples"))
 
-DEFAULT_TOPOLOGY = os.path.join(_SOUNDER, "files", "topology-houdini.json")
 SOAPY_SDR_RX = None   # bound in _import_deps once SoapySDR is importable
 
 
@@ -104,6 +107,38 @@ def nodes_from_topology(path):
         bs, ue = roles_from_topology(json.load(f))
     # Preserve order, drop duplicates (a single-board bench lists one address twice).
     return list(dict.fromkeys(bs + ue))
+
+
+def resolve_nodes(node, topology, conf, sounder_dir=_SOUNDER):
+    """(radio addresses, None) from --node, else --topology, else the topology
+    --conf's serial_file names (relative to the sounder checkout, as the
+    sounder resolves it); ([], the error to print) when none is given or the
+    file cannot be read."""
+    if node:
+        return node, None
+    if not topology and conf:
+        try:
+            with open(conf, encoding="utf-8") as f:
+                topology = json.load(f).get("serial_file")
+        except (OSError, ValueError, AttributeError) as e:
+            return [], "error: cannot read the config %s (%s)\n" % (conf, e)
+        if not topology:
+            return [], "error: %s names no serial_file: pass --topology or --node\n" % conf
+        if not os.path.isabs(topology):
+            topology = os.path.join(sounder_dir, topology)
+    if not topology:
+        return [], ("error: name the radios: --conf <config> (the topology it names), "
+                    "--topology <file>, or --node <address>\n")
+    try:
+        nodes = nodes_from_topology(topology)
+    except FileNotFoundError:
+        return [], ("error: no topology file at %s\n"
+                    "  Pass --topology, or name radios with --node.\n" % topology)
+    except (ValueError, KeyError, TypeError, AttributeError) as e:
+        return [], "error: cannot read radios from %s (%s)\n" % (topology, e)
+    if not nodes:
+        return [], "error: no radio addresses found in %s\n" % topology
+    return nodes, None
 
 
 def teardown_node(hs, teardown, ip, ch, passes):
@@ -180,34 +215,22 @@ def main():
     ap = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--topology", default=DEFAULT_TOPOLOGY,
-                    help="topology JSON to read radio addresses from "
-                         "(default: %(default)s)")
+    ap.add_argument("--topology",
+                    help="topology JSON to read radio addresses from")
+    ap.add_argument("--conf",
+                    help="sounder config: tear down the radios of the topology its "
+                         "serial_file names (used when --topology is not given)")
     ap.add_argument("--node", action="append", metavar="ADDR",
-                    help="radio address; repeatable. Overrides --topology.")
+                    help="radio address; repeatable. Overrides --topology and --conf.")
     ap.add_argument("--ch", type=int, default=1,
                     help="channel to open (default: %(default)s)")
     ap.add_argument("--passes", type=int, default=2,
                     help="teardown repeats per radio (default: %(default)s)")
     args = ap.parse_args()
 
-    if args.node:
-        nodes = args.node
-    else:
-        try:
-            nodes = nodes_from_topology(args.topology)
-        except FileNotFoundError:
-            sys.stderr.write("error: no topology file at %s\n"
-                             "  Pass --topology, or name radios with --node.\n"
-                             % args.topology)
-            return 2
-        except (ValueError, KeyError, TypeError) as e:
-            sys.stderr.write("error: cannot read radios from %s (%s)\n"
-                             % (args.topology, e))
-            return 2
-
-    if not nodes:
-        sys.stderr.write("error: no radio addresses found in %s\n" % args.topology)
+    nodes, err = resolve_nodes(args.node, args.topology, args.conf)
+    if err:
+        sys.stderr.write(err)
         return 2
 
     hs, teardown = _import_deps()
