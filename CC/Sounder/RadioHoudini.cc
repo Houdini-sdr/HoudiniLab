@@ -749,9 +749,10 @@ int RadioHoudini::recv(void* const* buffs, int samples, long long& frameTime) {
         MLPD_WARN(
             "RX read without a usable timestamp (rate=%.0f, flags=0x%x), count "
             "%d: splicing with NO gap check, so this window's timing is not "
-            "guaranteed.\n",
+            "guaranteed; the window is marked untrusted.\n",
             rx_rate_, flags, n_unstamped + 1);
       }
+      padded += static_cast<size_t>(r);
     }
     if (pad > 0) {
       // The r samples just read belong at got+pad: shift them forward and zero-fill

@@ -266,7 +266,7 @@ void ClientRadioSet::init(ClientRadioContext* context) {
   const Radio::Type type = radioTypeFor(*_cfg);
   try {
     radios.at(i) = Radio::create(type, p);
-  } catch (std::runtime_error& err) {
+  } catch (const std::exception& err) {  // an escaped one is std::terminate on this init thread
     has_runtime_error = true;
     MLPD_WARN("ClientRadioSet radio %d (%s, %s) setup failed: %s\n", i, p.id.c_str(),
               Radio::name(type), err.what());

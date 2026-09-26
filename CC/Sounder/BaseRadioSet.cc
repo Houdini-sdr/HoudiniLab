@@ -284,7 +284,9 @@ void BaseRadioSet::init(BaseRadioContext* context) {
   const Radio::Type type = radioTypeFor(*_cfg);
   try {
     bsRadios.at(c).at(i) = Radio::create(type, p);
-  } catch (std::runtime_error& err) {
+  } catch (const std::exception& err) {
+    // Any std::exception: this runs on an init thread, where an escaped one is
+    // std::terminate with no teardown.
     // Name the radio by what it actually is, and SAY WHY it was dropped. This
     // used to print "Ignoring iris <addr>" (upstream RENEWLab hardware we do not
     // run) and throw err.what() away, so a base station that failed to open gave

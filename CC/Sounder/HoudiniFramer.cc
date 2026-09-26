@@ -317,6 +317,14 @@ void HoudiniFramer::armTdd(void) {
   // And a continuous replay can't coexist with the framer anyway: arming the framer
   // silences activateXmit (-33 dB) and any tx_gate schedule is arm-rejected without
   // a strobe. So the strobe is the only way to get beacon + rx_gate on one board.
+  // One BS radio in one cell: rx() serves radios_.at(0) from one cursor, cache
+  // and epoch, and only the beacon radio is armed below, so a second radio
+  // would be activated and silently misframed.
+  size_t n_radios = 0;
+  for (const auto& cell : radios_) n_radios += cell.size();
+  if (radios_.size() != 1 || n_radios != 1)
+    throw std::runtime_error("bs_hw_framer: the Houdini TDD framer drives exactly one BS radio in one cell; the topology gives " +
+                             std::to_string(n_radios) + " radio(s) in " + std::to_string(radios_.size()) + " cell(s)");
   htdd_symbol_ticks_ = static_cast<long long>(cfg_->samps_per_slot());
   htdd_tick_rate_ = cfg_->rate();
 
@@ -499,7 +507,6 @@ void HoudiniFramer::armTdd(void) {
         MLPD_INFO("BS: receives only its rx slots (AP-87): TDD_RX_SLOTS %s\n", rs.c_str());
       }
       htdd_rx_cursor_ = 0;
-      htdd_last_win_tick_ = 0;
       MLPD_INFO(
           "Houdini BS TDD armed: sched=%s epoch=%lld frame=%lld ticks, "
           "%zu pilot slot(s) %s beacon strobe %zu samp\n",
@@ -616,8 +623,13 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
   // AP-87: the device delivers only the rx slots, so the read's guards are
   // exact zeros (no noise floor) and a head cut is possible at the slot edge.
   const bool slots_mode = cfg_->bs_rx_slots();
+  // Each lane's cumulative energy lives in a member buffer reused frame to
+  // frame: a fresh zero-filled vector per lane per frame cost about 24 MB of
+  // allocation and page faults every frame (review A m4). Every entry is
+  // rewritten below, so no fill is needed.
+  if (htdd_lane_cse_.size() < C) htdd_lane_cse_.resize(C);
   struct LaneSearch {
-    std::vector<double> cse;
+    std::vector<double>* cse = nullptr;
     int at = 0;
     double best = 0.0, worst = -1.0;
     int whole_at = 0;
@@ -628,9 +640,12 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
     double pilot_rms = 0.0, floor_rms = 0.0;
     bool present = false;
   };
-  auto searchLane = [&](const int16_t* ls) -> LaneSearch {
+  auto searchLane = [&](const int16_t* ls, size_t lane) -> LaneSearch {
     LaneSearch L;
-    L.cse.assign(static_cast<size_t>(cg) + 1, 0.0);
+    L.cse = &htdd_lane_cse_[lane];
+    std::vector<double>& cse = *L.cse;
+    cse.resize(static_cast<size_t>(cg) + 1);
+    cse[0] = 0.0;
     // Accumulated as integers: every partial sum is an integer below 2^53 (a
     // read under 4.19 M samples), so the double copy is exact and identical to
     // a double accumulation, and the integer chain costs about a third less on
@@ -639,10 +654,10 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
     for (int i = 0; i < cg; ++i) {
       const int64_t re = ls[2 * i], im = ls[2 * i + 1];
       acc += re * re + im * im;
-      L.cse[i + 1] = static_cast<double>(acc);
+      cse[i + 1] = static_cast<double>(acc);
     }
     for (int t = 0; t + n <= cg; t += 128) {
-      const double e = L.cse[t + n] - L.cse[t];
+      const double e = cse[t + n] - cse[t];
       if (e > L.best) { L.best = e; L.at = t; }
       if (L.worst < 0.0 || e < L.worst) L.worst = e;
     }
@@ -668,7 +683,7 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
                                                  static_cast<long long>(htdd_pilot_slot_), n, htdd_frame_ticks_),
           n, htdd_frame_ticks_, span_n, cg);
       L.sched_expect = expect;
-      const auto near = houdini::slotalign::densestNear(L.cse, expect, n / 4, n, 128);
+      const auto near = houdini::slotalign::densestNear(cse, expect, n / 4, n, 128);
       if (near.first >= 0) {
         L.at = static_cast<int>(near.first);
         L.best = near.second;
@@ -695,8 +710,8 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
     // pilot and equalization from the data.
     L.p_at = L.at;
     if (laneSelfsim(ls, L.at) < 0.5) {  // `at` is a data slot -> the pilot is `gap` earlier
-      if (laneSelfsim(ls, L.at - gap) >= 0.4) L.p_at = L.at - gap;
-      else if (laneSelfsim(ls, L.at + gap) >= 0.4) L.p_at = L.at + gap;
+      if (laneSelfsim(ls, L.at - gap) >= houdini::slotalign::kLtsMinSelfsim) L.p_at = L.at - gap;
+      else if (laneSelfsim(ls, L.at + gap) >= houdini::slotalign::kLtsMinSelfsim) L.p_at = L.at + gap;
     }
     L.ss = laneSelfsim(ls, L.p_at);
     L.pilot_rms = std::sqrt(L.best / n);
@@ -708,10 +723,10 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
   // those with a UE burst (slot_align.h laneTakesCut): gating on the chosen
   // lane alone let a weak lane skip a frame the other lane carried (review).
   const int16_t* s0 = htdd_cap_buf_.data();
-  LaneSearch ref = searchLane(s0);
+  LaneSearch ref = searchLane(s0, 0);
   size_t ref_lane = 0;
   for (size_t c = 1; c < C; ++c) {
-    LaneSearch L = searchLane(s0 + c * static_cast<size_t>(fn) * 2);
+    LaneSearch L = searchLane(s0 + c * static_cast<size_t>(fn) * 2, c);
     if (houdini::slotalign::laneTakesCut(L.present, L.ss, ref.present, ref.ss)) {
       ref = std::move(L);
       ref_lane = c;
@@ -726,7 +741,7 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
     }
   }
   const int16_t* s = s0 + ref_lane * static_cast<size_t>(fn) * 2;
-  const std::vector<double>& cse = ref.cse;
+  const std::vector<double>& cse = *ref.cse;
   const int at = ref.at;
   const int whole_at = ref.whole_at;
   const double whole_best = ref.whole_best;
@@ -988,7 +1003,11 @@ void HoudiniFramer::stop() {
       if (radios_.at(c).at(i) != nullptr) {
         try {
           tddLadder(radios_.at(c).at(i)->RawDev(), cfg_->diag_skip_tx_clear());
+        } catch (const std::exception& e) {
+          MLPD_WARN("BS: the TDD teardown of radio %zu failed (%s); the next run's arm may find the gates held\n",
+                    i, e.what());
         } catch (...) {
+          MLPD_WARN("BS: the TDD teardown of radio %zu failed; the next run's arm may find the gates held\n", i);
         }
       }
 }

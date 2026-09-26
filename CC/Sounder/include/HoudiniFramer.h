@@ -61,9 +61,9 @@ class HoudiniFramer : public BeaconFramer {
   size_t htdd_rx_cursor_ = 0;
   std::vector<int16_t> htdd_slot_cache_;  // extracted rx slots for the current frame
   long long htdd_cache_frame_ = 0;        // frame_id tag shared by a frame's slots
-  long long htdd_last_win_tick_ = 0;
   long long htdd_frame_counter_ = 0;  // 0,1,2,... like the Iris framer's frame_id
   std::vector<int16_t> htdd_cap_buf_;  // reused generous rx capture
+  std::vector<std::vector<double>> htdd_lane_cse_;  // per lane cumulative energy, reused
   // One continuous read yields EVERY rx slot of the frame, so a gap in that
   // read taints the whole frame. Held per frame and handed to each slot (AP-10).
   size_t htdd_frame_pad_ = 0;
