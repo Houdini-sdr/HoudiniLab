@@ -62,8 +62,10 @@ class RadioHoudini : public RadioSoapy {
   long long txTimeNs(long long frame_ticks, double rate_hz, bool tdd_pilot,
                      long long advance_ticks) const override;
 
-  /// The mixer NCO is the only tuning knob and there are no gain stages: the
-  /// rate and NCO were applied before the streams opened, so this reports.
+  /// Rate, NCO and (mode V) the gains were applied before the streams opened,
+  /// so this only reports; the Iris-style per-channel gains passed in are not
+  /// used (the Houdini gains are houdini_rx_gain_db / houdini_tx_gain_db,
+  /// written by the mode-V bring-up).
   void setup(int ch, double rxgain, double txgain) override;
   /// SoapyHoudiniSDR delivers ~1 MTU per readStream and buffers a backlog:
   /// drain it, then accumulate a contiguous window, zero-padding any

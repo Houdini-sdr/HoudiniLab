@@ -345,9 +345,9 @@ RadioHoudini::RadioHoudini(const RadioParams& params,
 }
 
 void RadioHoudini::setup(int ch, double rxgain, double txgain) {
-  // The mixer NCO is the only tuning knob and there is no antenna, analog
-  // bandwidth, gain or DC-offset stage to program. Rate and NCO were applied
-  // before the streams opened, so this reports.
+  // There is no antenna, analog bandwidth or DC-offset stage to program, and
+  // rate, NCO and (mode V) the gains were applied before the streams opened,
+  // so this reports; rxgain / txgain (the Iris-style gains) are not used.
   (void)rxgain;
   (void)txgain;
   MLPD_INFO("Houdini channel %d: rate %.2f MSPS, NCO %.2f MHz\n", ch,
@@ -549,7 +549,8 @@ long long RadioHoudini::txTimeNs(long long frame_ticks, double rate_hz, bool tdd
   return ((ns + q / 2) / q) * q;  // snap to the accepted grid
 }
 
-// SoapyHoudiniSDR delivers ~1 MTU (~1016 samples) per readStream and lets the
+// SoapyHoudiniSDR delivers about one packet (2032 samples at the default MTU,
+// 1920 with the slot-tiling packet) per readStream and lets the
 // host socket buffer a backlog while the caller is busy (e.g. running
 // find_beacon between windows), so a single readStream can neither fill a
 // multi-thousand-sample sync window nor guarantee it is contiguous. Drain any
