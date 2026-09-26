@@ -31,24 +31,40 @@ def schedule(times, speed):
     return [(t - t0) / speed for t in times]
 
 
+def window(path, start, duration):
+    """Yield the datagrams in [start, start + duration) s from the recording's
+    first one (duration 0: to the end), reading as a stream that stops past the
+    window: a recording is up to 2 GB, and a laptop replaying a window of it
+    should not need the whole file in memory."""
+    lo = hi = None
+    for t, d in read_recording(path):
+        if lo is None:
+            lo = t + start
+            hi = t + start + duration if duration else float("inf")
+        if t >= hi:  # arrival order: nothing later is in the window
+            return
+        if t >= lo:
+            yield t, d
+
+
 def load(path, start, duration):
-    recs = [(t, d) for t, d in read_recording(path)]
-    if not recs:
-        return []
-    t0 = recs[0][0]
-    lo = t0 + start
-    hi = t0 + start + duration if duration else float("inf")
-    return [(t, d) for t, d in recs if lo <= t < hi]
+    return list(window(path, start, duration))
 
 
 def play(sock, dest, recs, speed):
-    offs = schedule([t for t, _ in recs], speed)
-    base = time.monotonic()
-    for off, (_, data) in zip(offs, recs):
-        wait = base + off - time.monotonic()
+    """Send `recs` (any iterable of (t, datagram)) at their recorded pace; the
+    number sent."""
+    t0 = base = None
+    n = 0
+    for t, data in recs:
+        if t0 is None:
+            t0, base = t, time.monotonic()
+        wait = base + (t - t0) / speed - time.monotonic()
         if wait > 0:
             time.sleep(wait)
         sock.sendto(data, dest)
+        n += 1
+    return n
 
 
 def main():
@@ -63,17 +79,17 @@ def main():
     a = ap.parse_args()
     if a.speed <= 0:
         ap.error("--speed must be positive")
-    recs = load(a.recording, a.start, a.duration)
-    if not recs:
-        print("nothing to play in %s (window %.1f s + %.1f s)" % (a.recording, a.start, a.duration))
-        return 1
-    span = recs[-1][0] - recs[0][0]
-    print("replaying %d datagrams over %.1f s to %s:%d%s" % (len(recs), span / a.speed, a.host, a.port,
-                                                          ", looping" if a.loop else ""), flush=True)
+    print("replaying %s (from %.1f s, %s) to %s:%d%s" % (
+        a.recording, a.start, "%.1f s" % a.duration if a.duration else "to the end", a.host, a.port,
+        ", looping" if a.loop else ""), flush=True)
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        while True:
-            play(sock, (a.host, a.port), recs, a.speed)
+        while True:  # each loop reads the window from the file again
+            n = play(sock, (a.host, a.port), window(a.recording, a.start, a.duration), a.speed)
+            if n == 0:
+                print("nothing to play in %s (window %.1f s + %.1f s)" % (a.recording, a.start, a.duration))
+                return 1
+            print("played %d datagrams" % n, flush=True)
             if not a.loop:
                 return 0
     except KeyboardInterrupt:

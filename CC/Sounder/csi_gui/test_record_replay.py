@@ -67,6 +67,17 @@ check(ok, "a recording that cannot be created records nothing and never raises i
 check(rf.schedule([10.0, 10.25, 11.5], 2.0) == [0.0, 0.125, 0.75], "the schedule keeps the recorded spacing scaled by speed (mutation: ignore speed)")
 check([t for t, _ in rf.load(p, 0.25, 1.25)] == [10.25], "a window takes [start, start + duration) from the first datagram (mutation: an inclusive end)")
 check(len(rf.load(p, 0.0, 0.0)) == 3, "duration 0 plays to the end (mutation: treat 0 as empty)")
+read = [0]; real_read = rf.read_recording
+def counting_read(path):
+    for r in real_read(path):
+        read[0] += 1; yield r
+rf.read_recording = counting_read
+try:
+    got_w = [t for t, _ in rf.window(p, 0.0, 0.2)]
+finally:
+    rf.read_recording = real_read
+check(got_w == [10.0] and read[0] == 2, "a window stops reading at the first datagram past its end (mutation: read the "
+      "whole recording, then filter)")
 
 # End to end: the dashboard's own UDP loop records what it receives, and a replay of
 # that recording delivers the same datagrams in the same order.
