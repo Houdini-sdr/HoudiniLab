@@ -273,11 +273,16 @@ steered, cabled):
   a frame or two mid-run with no visible effect (9.71). The durable guard is
   keeping every NIC receive queue off the pacer cores (A8c step 4).
 - **Egress drop counters saturate (HS-212).** Each radio's per-port egress
-  drop and mark counters stop at 255 and clear only with a gateware (PL)
-  reload; a throughput test can fill them (9.73). A run is not affected, but
-  its link health can no longer see a new egress drop, and check_setup says
-  so with a WARN. Before a run that relies on that watch, a PL reload of the
-  same bitstream clears them: a deploy, so the user's call.
+  drop and mark counters stop at 255; a throughput test fills them (9.73). A
+  run is not affected, but its link health can no longer see a new egress
+  drop, and check_setup says so with a WARN. No software path clears them:
+  a node boot does (a power cycle or a reboot, because the boot service loads
+  the bitstream again), as does a PL reload of the same bitstream (a deploy,
+  so the user's call). A restart of the device services does not. Do not run
+  a throughput test after the nodes' last boot before a demo, and after any
+  boot confirm with check_setup that the counters read 0 and the fpga version
+  is the expected one (a re-flashed card boots the bitstream baked into its
+  image).
 - **The pilot seat moves between sessions** by a few samples (9.73: 0/+1 in
   VL1, -3/-4 in RV1), untraced; the converters' MTS latency lands differently
   each session (SH-468). Inside the +-32-sample slot margin; MER unchanged.
