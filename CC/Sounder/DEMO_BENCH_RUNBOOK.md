@@ -33,8 +33,11 @@ The roles are the reverse of Part B's: here `.22` is the BS and `.21` the UE
 **calibrated hold** (`clock_ref = calibrated`; `.21` DAC code 408, `.22` 404),
 with no shared 10 MHz: the UE-BS offset stays under about half a ppm, but it
 moves between sessions and ramps as the boards warm (`DEMO_VERIFICATION.md`
-8.125, 8.137, 9.28). Both boards carry the SYZYGY DNA adapter on
-POD2 and no X-band power board.
+8.125, 8.137, 9.28). Both boards carry the SYZYGY DNA adapter on POD2 and an
+ADTR1107 power board (the X-band front end); the XUD1A up/down converter sits
+on `.22`. Each node's X-band role (`houdini-role`: `.21` xband guard=ch1, `.22`
+xband guard=none) is needed only for the X-band RF chain (A2b); for the cabled
+chain the boards run with no role, in highz.
 
 ## A2. The wired RF chain (the final wired state, "F3b")
 
@@ -43,30 +46,61 @@ B = ch1, C = ch2.
 
 | Link | From | Filter(s) | To |
 |---|---|---|---|
-| Sub-6 downlink (the beacon) | `.22` TX ch0 (DAC_B) | VBF-2450+ at the DAC | `.21` RX ch0 (ADC_D) |
-| Sub-6 uplink | `.21` TX ch0 (DAC_B) | VBF-2450+ at the DAC | `.22` RX ch0 (ADC_D) |
+| Sub-6 downlink (the beacon) | `.22` TX ch0 (DAC_B) | VBF-2450+ at the DAC and (since 9.69) at the ADC | `.21` RX ch0 (ADC_D) |
+| Sub-6 uplink | `.21` TX ch0 (DAC_B) | VBF-2450+ at the DAC and (since 9.69) at the ADC | `.22` RX ch0 (ADC_D) |
 | X-band IF uplink | `.21` TX ch1 (DAC_A) | VBFZ-4000-S+ at the DAC, and a second VBFZ-4000-S+ at the ADC | `.22` RX ch2 (ADC_B) |
 | HIL self-loop (unused by the demo) | `.22` TX ch1 (DAC_A) | none | `.22` RX ch1 (ADC_C) |
 
 There is no X-band IF downlink and no attenuator in the chain (F4a and F4b
 tried a 10 dB pad at each sub-6 receive end; it came out again). What each filter did to the levels, and why
 the in-channel "tilt" is cable ripple rather than the filters, is
-`DEMO_VERIFICATION.md` 9.15 to 9.24.
+`DEMO_VERIFICATION.md` 9.15 to 9.24. The second sub-6 filter at each ADC
+costs about 2 dB of level against the recorded wired baseline; compare a new
+cabled run's levels with 9.69 to 9.71, not with 9.60/9.61.
+
+## A2b. The X-band RF chain (X2b: through the XUD1A)
+
+The X-band IF leaves `.21` DAC_A, goes up to RF in the XUD1A's channel A,
+over a direct cable into its channel B, back down to IF, and into `.22`
+ADC_B (VBFZ-4000-S+ at both IF ends). The ADTR1107 boards are powered and in
+their roles but out of the RF path (their antenna ports on the 40 dB pad).
+It needs:
+
+1. The roles applied: `sudo houdini-role status` exits 0 on both nodes. `.21`
+   applies its role at boot. `.22` applies it BY HAND after the XUD1A's 12 V
+   is on: boot `.22` with the 12 V off, switch the 12 V on, wait for clean SPI
+   (10 s to 2.5 min), then `sudo houdini-role apply bs`.
+2. The XUD1A LO for the chosen RF (the XUD1A board is chosen on the day, see
+   `DEMO_VERIFICATION.md` 9.67 and 9.68): the reworked board at RF 9.5 GHz
+   needs the LO at 13.88 GHz, `sudo houdini-xud1a pll tune --freq 13880000000
+   --out rf16` on `.22` with no stream open (it prints `LOCKED`; until the
+   role script carries 13.88, `houdini-role status` on `.22` reports the LO
+   not in effect). At RF 10 GHz this board measured about 9.5 dB weaker
+   (X-band MER 8-10 dB against 18.7-19.0 at 9.5 GHz).
+3. A config with `xband_frontend_static` (AP-86: the session holds the UE's
+   board in static TX and the BS's in static RX; without it `.21`'s guarded
+   channel plays silence): `files/houdini-dualband-xw-steer-slots-fe.json`
+   (with slots mode) or `files/houdini-dualband-xw-steer-fe.json`. Within the
+   first minute the log shows `TDD_EXTPIN_SRC src=static,state=tx ...
+   applied=tx ... drive_allow_ch1=1` for the UE and `state=rx` for the BS.
+   With no role these configs are refused at start; the cabled chain (A2)
+   uses the configs without `-fe`.
 
 ## A3. What runs on the rig host
 
 - **Checkouts.** `~/repos/HoudiniLab` belongs to its owner: do not change it.
-  The demo runs from its own worktree of the same repository, for example
-  `~/repos/HoudiniLab-ap80` (the build with the AP-80 fix). Other worktrees on the
-  host hold measurement builds (`-ap79` at `ca37797` for the SH-427 A/B, `-diag` for
-  the pacer diagnostics); `--sounder-dir` and the checkout the dashboard lives in
-  decide which binary runs.
+  The demo runs from `~/repos/HoudiniLab-rxwin`, the demo head
+  (`arc/dualband-demo`, checked out there as `fix/bs-rx-window`).
+  `~/repos/HoudiniLab-demoxw` holds the frozen fallback build (`demo-xw`, the
+  code validated on fpga 1.32 in 9.57 to 9.59). `--sounder-dir` and the
+  checkout the dashboard lives in decide which binary runs. Superseded run
+  directories are filed under `~/app_archive` (its `INDEX.md` maps them).
 - **Shipping a build.** Bundle, copy, and fetch INSIDE the target worktree
   (`FETCH_HEAD` is per worktree), then relink muFFT, which a checkout restores as
   an empty directory:
 
   ```sh
-  cd ~/repos/HoudiniLab-ap80 && git fetch /tmp/<bundle> <branch> && git reset --hard FETCH_HEAD
+  cd ~/repos/HoudiniLab-rxwin && git fetch /tmp/<bundle> <branch> && git reset --hard FETCH_HEAD
   cd CC/Sounder && rmdir mufft && ln -s ~/repos/HoudiniLab/CC/Sounder/mufft mufft
   source ~/houdini_test/bin/activate
   cmake -B build -DCMAKE_BUILD_TYPE=Release -DSoapySDR_DIR=$VIRTUAL_ENV/share/cmake/SoapySDR
@@ -77,8 +111,12 @@ the in-channel "tilt" is cable ripple rather than the filters, is
   `ln -sfn` onto the directory nests the link inside it; remove the directory
   first. Without `SoapySDR_DIR` the configure fails ("SoapySDR development files
   not found").
-- **Host plugin.** The validated host plugin lives only in the venv
-  `~/houdini_test` (`lib/SoapySDR/modules0.8-3/`). Activate it before anything.
+- **Host plugins.** Activate the venv `~/houdini_test` before anything; its
+  plugin (`lib/SoapySDR/modules0.8-3/`) is the default. The demo's slots
+  configs (`bs_rx_slots`, AP-87) run on the software lane's slots plugin in
+  `~/houdini_slots`: `export HOUDINI_SOAPY_ROOT=$HOME/houdini_slots` selects it
+  for `run_rung.sh`/`fstage_run.sh` runs AND for the dashboard's Check and
+  Start. The setup check's stack line shows which one loaded (`host_build`).
 - **Cores.** The sounder pins its own threads to cores 0-4, which are the slow
   ones on this host; the plugin's BS receive workers inherit core 0 (AP-81).
 
@@ -88,12 +126,13 @@ On the rig:
 
 ```sh
 source ~/houdini_test/bin/activate
-cd ~/repos/HoudiniLab-ap80/CC/Sounder
+cd ~/repos/HoudiniLab-rxwin/CC/Sounder
 cat /sys/devices/system/cpu/isolated   # 15-19 when A9 stage 1 is in force
-export HOUDINI_CORE_MAP=main=15 HOUDINI_TX_CPU_AFFINITY=16,17   # isolated (A9); without it: HOUDINI_TX_CPU_AFFINITY=10,11 only
-export HOUDINI_TX_HOST_STATUS=1   # logs the host pacer's state every health period (free; wanted while HS-227 is open)
-python3 csi_gui/check_setup.py --conf files/houdini-dualband.json   # must print Ready, egress PASS on both nodes.
-python3 csi_gui/csi_server.py --control --conf files/houdini-dualband.json
+export HOUDINI_CORE_MAP=main=15 HOUDINI_TX_CPU_AFFINITY=18,19   # isolated (A9); 18,19 while a BS receive flow lands on 16 (pacer_core_check, A8c)
+export HOUDINI_TX_HOST_STATUS=1   # logs the host pacer's state every health period (free)
+export HOUDINI_SOAPY_ROOT=$HOME/houdini_slots   # the slots plugin, for the slots configs (A3)
+python3 csi_gui/check_setup.py --conf files/houdini-dualband-xw-steer-slots.json   # must print Ready, egress PASS on both nodes.
+python3 csi_gui/csi_server.py --control --conf files/houdini-dualband-xw-steer-slots.json
 ```
 
 **Why the pinning.** Left to the kernel, the host plugin's two UE TX pacer
@@ -155,19 +194,19 @@ then open `http://localhost:8080/`. With `--control` the backend listens on
 127.0.0.1 only, so the tunnel is the way in. Pick the config in the header list
 and press Start.
 
-## A6. What good looks like at R3
+## A6. What good looks like
 
-From the validation runs (`DEMO_VERIFICATION.md` 9.14 to 9.26), before clock
-steering:
+From the validation runs on fpga 1.34 (`DEMO_VERIFICATION.md` 9.69 to 9.72:
+the demo head, `houdini-dualband-xw-steer-slots.json`, steered, cabled):
 
 | Where | Healthy | Note |
 |---|---|---|
-| Acquisition | coherence 0.95 to 0.99 | one low value is a beacon cut by a read boundary |
-| Beacon re-syncs | about one per 2.6 s, continuous | a long gap is AP-80 (fixed in the AP-80 build) |
-| Printed beacon SNR | 40 to 50 dB | swings about 7 dB between bring-ups with the ADC's own Fs/2 spur; it is NOT a link indicator |
-| Pilot seat at the BS | within about +-15 samples | a steady walk means the UE stopped re-syncing |
-| Constellation low count | 0 of about 6,600 in a clean 180 s run | read it from the periodic SUMMARY line |
-| MER (single frame) | sub-6 about 29-39 dB, X-IF about 24-34 dB | limited by each run's carrier offset until steering |
+| MER (15 s samples) | sub-6 35.4-37.5 dB, X-IF 30.7-32.8 dB | a cold start (just after a node power cycle) swings for the first few minutes while the steering converges |
+| Constellation low | 0.0 % in every 300 s window | from the run report's CNS lines |
+| Beacon SNR at the UE | about 39-47 dB wired | the sync card's `beacon SNR`; over the air the detector floor is 25 dB |
+| Pilot seat at the BS (`pilot_grid_off`) | within a few samples, steady within a run | it moves by a few samples between sessions (9.70); the slot margin is +-32 |
+| BS frames per second | about 50 (slots config), about 57 (all-rx config) | from the HOUDINI_BS_RX lines |
+| End-of-run lines | `RX read check`: 0 lost in rx slots, 0 out of order, 0 time jumps; `AP-87 slot check`: 0 outside the rx slots; `RX_HOST_STATUS`: tdd_straddle 0, tdd_refused 0, and on fpga 1.34 tdd_drop 0 | anything nonzero is a finding, not noise |
 
 ## A7. Known limits today
 
@@ -181,9 +220,9 @@ steering:
   above: the pacer's worst wake over a 35 min run is about 0.3 ms (9.43-9.46).
   Read the installed host plugin's build id in the setup check before judging a
   run.
-- **The UE's TX playout can freeze (HS-227: a race in the TX pump present since
-  HS-146; the fpga lane's fix is bitstream 1.32, deployed, its demo-length
-  validation run owed).** On 1.31, in two of
+- **The UE's TX playout could freeze (HS-227: a race in the TX pump present since
+  HS-146; FIXED from bitstream 1.32, no freeze in any demo-length run since,
+  9.57 to 9.71).** On 1.31, in two of
   three demo-length runs on the HS-220 bitstream (9.44, 9.45) the UE's FPGA
   stopped playing its TX bank at a random time (767 s, 1,979 s) and judged every
   later packet late. The BS then loses the UE's pilots and the dashboard's cards
@@ -202,12 +241,16 @@ steering:
   within the device timeout (`SoapyRPCUnpacker::recv() TIMEOUT` in the log).
   The sounder retries the open itself ("Radios Not Found. Will attempt a
   retry..."); if every try fails, press Start again.
-- **Clock steering** is off by default and lives on its own branch
-  (`feat/clock-steer-rollin`), reviewed and built on the rig, not yet validated
-  there. Without it R3's MER depends on the day: the two boards' offset reached
-  0.6-0.9 ppm in four of seven long runs and MER fell from about 30 to 12-18 dB
-  (sub-6) and 9-12 dB (X-IF) (9.33, 9.34, 9.44, 9.45); where it stayed within
-  about 0.4 ppm MER held 26-30 dB (9.39, 9.41, 9.46).
+- **Clock steering** is in the demo build and ON through the config
+  (`sync.steer.enable`; the environment variable alone does not enable it).
+  Without it MER depends on the day: the two boards' offset reached 0.6-0.9 ppm
+  in four of seven long runs and MER fell from about 30 to 12-18 dB (sub-6) and
+  9-12 dB (X-IF) (9.33, 9.34, 9.44, 9.45). The slots configs also remove each
+  lane's residual offset before the FFT (`bs_cfo_pre_fft`) and widen the
+  steering deadband to 0.12 ppm (one DAC count moves about 0.19 ppm, SH-462).
+- **Host timing.** One run in several shows a single UE TX late-release event of
+  a frame or two mid-run with no visible effect (9.71). The durable guard is
+  keeping every NIC receive queue off the pacer cores (A8c step 4).
 
 ## A8. Stopping and recovery
 
@@ -245,7 +288,7 @@ constellation, CIR, ADC, beacon sync).
 2. Replay, with no sounder running:
 
    ```sh
-   python3 csi_gui/csi_server.py --conf files/houdini-dualband-xw.json &   # files/houdini-dualband.json for FINAL.rec
+   python3 csi_gui/csi_server.py --conf files/houdini-dualband-xw.json &   # VL1_134.rec, FINAL_XW.rec; files/houdini-dualband.json for FINAL.rec
    python3 csi_gui/replay_feed.py ~/demo_rec/<name>.rec --loop
    ```
 
@@ -296,43 +339,59 @@ software.
 
 ## A8c. Demo day: bring-up at the venue (in order)
 
-**The demo build [user]:** the X-band at 270 RB (97.2 MHz) beside the sub-6 at
-133 RB, steered: branch `feat/demo-xw`, rig host worktree
-`~/repos/HoudiniLab-demoxw`, config `files/houdini-dualband-xw-steer.json`, its
-canned fallback `~/demo_rec/FINAL_XW.rec`. **The fallback build:** the X-band
-at 133 RB (47.88 MHz), steered: `feat/clock-steer-rollin` @ `0232d54`,
-`~/repos/HoudiniLab-steer`, `files/houdini-dualband-steer.json`, fallback
-recording `~/demo_rec/FINAL.rec`. Run the steps below from the chosen worktree
-with its config.
+**The demo build [user]:** the demo head `arc/dualband-demo` in
+`~/repos/HoudiniLab-rxwin` (the X-band at 270 RB beside the sub-6 at 133 RB,
+steered, the BS receiving only its rx slots): cabled, config
+`files/houdini-dualband-xw-steer-slots.json`; through the XUD1A (A2b),
+`files/houdini-dualband-xw-steer-slots-fe.json`. Both run on the slots plugin
+(`HOUDINI_SOAPY_ROOT`, A3). Canned fallback: `~/demo_rec/VL1_134.rec` (fpga
+1.34, the demo head). **The fallbacks:** the same build at 48 MHz X-band,
+`files/houdini-dualband-steer.json`, recording `~/demo_rec/FINAL.rec`; and the
+frozen build `demo-xw` in `~/repos/HoudiniLab-demoxw` with
+`files/houdini-dualband-xw-steer.json` on the default plugin (no
+`HOUDINI_SOAPY_ROOT`), recording `~/demo_rec/FINAL_XW.rec`.
 
 Moving the rig means rebooting the rig host, which re-draws the NIC's receive
 hashing (a node's RX flow can land on a pinned core) and can wedge a node's data
 egress (HS-225). Do every step, every power-up.
 
 1. On the rig host: `cat /sys/devices/system/cpu/isolated` reads `15-19`.
-2. `python3 csi_gui/check_setup.py --conf files/houdini-dualband-xw-steer.json`:
-   Ready, egress PASS on both nodes, the stacks match. A stack FAIL reading
-   `SoapyRPCUnpacker::recv() TIMEOUT` can be a slow radio open: run it again.
-   An egress FAIL needs that node's PL reload or reboot.
-3. The launch environment, then the dashboard (A4, A5):
+2. For the X-band RF chain only: the roles and the LO (A2b steps 1 and 2).
+3. The launch environment (A4), then the setup check:
 
    ```sh
+   source ~/houdini_test/bin/activate
+   cd ~/repos/HoudiniLab-rxwin/CC/Sounder
    export HOUDINI_CORE_MAP=main=15 HOUDINI_TX_CPU_AFFINITY=18,19 HOUDINI_TX_HOST_STATUS=1
-   export HOUDINI_CSI_RECORD=~/demo_rec/<name>.rec    # optional: records a fallback
-   python3 csi_gui/csi_server.py --control --conf files/houdini-dualband-xw-steer.json
+   export HOUDINI_SOAPY_ROOT=$HOME/houdini_slots
+   python3 csi_gui/check_setup.py --conf files/houdini-dualband-xw-steer-slots.json
    ```
 
-4. Within the first minute of a Start:
-   - the log shows `steer.enable = true [json]` and `Clock steering [0]: ON`
-     (the environment variable alone does NOT enable steering);
+   Ready, egress PASS on both nodes, the stacks match (the stack line's
+   `host_build` is the slots plugin's). A stack FAIL reading
+   `SoapyRPCUnpacker::recv() TIMEOUT` is a slow first open after a server
+   restart: run it again (twice in a row has happened, 9.70). An egress FAIL
+   needs that node's PL reload or reboot.
+4. The dashboard, from the same shell:
+
+   ```sh
+   export HOUDINI_CSI_RECORD=~/demo_rec/<name>.rec    # optional: records a fallback
+   python3 csi_gui/csi_server.py --control --conf files/houdini-dualband-xw-steer-slots.json
+   ```
+
+5. Within the first minute of a Start:
+   - the log shows `steer.enable = true [json]` and `Clock steering [0]: ON`;
+   - the BS logs `receives only its rx slots (AP-87): TDD_RX_SLOTS active=1`;
+   - with a `-fe` config, the `TDD_EXTPIN_SRC` lines of A2b step 3;
    - `python3 tests/demo-verify/pacer_core_check.py --cores 15,18,19` prints
      `ok`. If it names a core, Stop, pick two isolated cores it did not name
      (`--cores` again to confirm), change `HOUDINI_TX_CPU_AFFINITY`, restart
      the dashboard, Start.
-5. During the demo: a freeze (A7), or the BS sub-6 degraded from the start with
-   the DCDR line (A8): Stop, then Start. The yellow "under-driven" bar on both
-   antennas is expected on the cabled rig (the links are transmit-limited).
-6. Anything that cannot be fixed in a minute: the canned-data fallback (A8b).
+6. During the demo: a stalled stream, or the BS sub-6 degraded from the start
+   with the DCDR line (A8): Stop, then Start. Each card's |H| axis moves in
+   10 dB steps when its trace leaves the axis (at most every 3 s); a card that
+   keeps its old values while its age grows is stale (the badge shows).
+7. Anything that cannot be fixed in a minute: the canned-data fallback (A8b).
 
 ## A9. The CPU isolation experiment (checklist)
 
