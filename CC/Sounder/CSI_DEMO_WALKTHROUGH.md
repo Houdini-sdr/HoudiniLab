@@ -23,8 +23,9 @@ Five placeholders appear throughout. Add your own values:
 
 Additional reference material lives in `../../docs/UE_TX_FINE_GRID_TIMING.md`
 (why the client pilot lands on the fine timing grid) and
-`../../docs/TWO_BOARD_CLOCK_LOCK.md` (why both boards must share one reference
-clock).
+`../../docs/TWO_BOARD_CLOCK_LOCK.md` (locking both boards to one external
+reference clock). The record of every measurement behind this walkthrough is
+`DEMO_VERIFICATION.md`.
 
 ## 0. Quick start
 
@@ -105,9 +106,10 @@ fails.
   fetched from the internet and nothing has to be installed, so the dashboard
   still works on a host with no network access.
 - Two radios take part. The base station arms a hardware TDD schedule built
-  from the config frame (one slot per schedule character), transmits a single
-  496 sample beacon once per frame from its replay RAM, and runs one
-  continuous receive covering every receive slot. The client hunts for the
+  from the config frame (one slot per schedule character), transmits a short
+  beacon once per frame from its replay RAM (section 7.0), and receives its
+  receive slots: every slot but the beacon's, or, with `bs_rx_slots`, only the
+  slots the schedule marks for receive. The client hunts for the
   beacon, confirms it twice on the frame grid behind a sync SNR floor, anchors
   its own frame timing to it, and from then on transmits one zero padded burst
   per frame that seats the pilot and the uplink data in their scheduled slots
@@ -133,13 +135,21 @@ fails.
   Houdini server, on a firmware stack your team has blessed. Board bring up is
   owned by the SoapyHoudiniSDR and Houdini-Streaming projects and is not
   covered here. If you did not set the boards up yourself, ask whoever did.
-- **Both boards driven from one reference clock.** This is not optional. Two
-  free running boards drift far enough that the client pilot walks across the
-  whole base station frame and never stays inside the receive window. Feed both
-  boards a common 10 MHz on `CLK IN`
-  and confirm the firmware selects the external mux. See
-  `../../docs/TWO_BOARD_CLOCK_LOCK.md` for the evidence and the verification
-  procedure.
+- **A clock plan for the two boards.** Each board's reference is a device
+  setting (`clock_ref`) that whoever provisions the boards sets; the full
+  setup check (section 2.2) prints it on its `clock` line for each radio. One
+  of two plans:
+  - **One shared reference.** Feed both boards a common 10 MHz on `CLK IN`
+    and confirm the firmware selects the external mux
+    (`../../docs/TWO_BOARD_CLOCK_LOCK.md` has the verification procedure).
+    The legacy 500 MHz configs were validated this way.
+  - **Each board in calibrated hold, the client steered.** With
+    `clock_ref = calibrated` on both boards and no shared reference, the
+    client tracks the base station's frame timing on its own, but the two
+    carriers still sit apart by up to about a ppm, and that offset limits the
+    MER (`DEMO_VERIFICATION.md` 9.33, 9.34, 9.44). A config with
+    `sync.steer.enable` (every `-steer` config) steers the client's clock onto
+    the beacon for the whole run; the demo configs do.
 - An RF path between the two boards, cabled or over the air, at the frequency
   your config names.
 
@@ -223,24 +233,29 @@ cd <path-to-HoudiniLab>/CC/Sounder/mufft
 cmake -B . -DCMAKE_BUILD_TYPE=Release && make
 
 cd <path-to-HoudiniLab>/CC/Sounder
-cmake -B build -DCMAKE_BUILD_TYPE=Release
+source <your-houdini-venv>/bin/activate
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DSoapySDR_DIR=$VIRTUAL_ENV/share/cmake/SoapySDR
 cmake --build build -j
 ```
+
+`SoapySDR_DIR` points the configure at the SoapySDR the host plugin was
+installed with (section 2.4). Without it, a SoapySDR that lives only in the
+virtual environment is not found and the configure stops with "SoapySDR
+development files not found"; leave it out only when SoapySDR is installed
+system wide.
 
 You should end up with `build/sounder`. The GPU beacon correlator is a separate
 option, off by default, and the demo does not need it. Leave
 `HOUDINI_USE_CUDA` alone unless you are specifically testing that path.
 
-The build also produces the radio-free tests and bench tools (six `ctest`
-suites: the sync configuration, the golden beacon windows, the resync policy,
-the slice geometry, the grid tracker and the beacon geometry). Run them once
-after building:
+The build also produces the radio-free tests and bench tools (`ctest -N` in
+`build` lists them). Run them once after building:
 
 ```bash
 cd build && ctest
 ```
 
-They need no radio and take under a minute. A packager who wants only the
+They need no radio. A packager who wants only the
 sounder can configure with `-DSOUNDER_BUILD_TESTS=OFF`.
 
 ### 2.6 Point the demo at your bench
@@ -264,48 +279,56 @@ under `Clients`:
 Then open the config you plan to run (section 3) and check these fields against
 your bench:
 
-- `frequency` and `nco_frequency`: both default to 500 MHz. They must match
-  each other for the matched NCO loopback path to work.
-- `channel` and `ue_channel`: which RF channel each board uses.
-- `ue_rx_gain_a` / `ue_tx_gain_a` and the `_b` pair: **these do nothing today,
-  so do not spend bench time sweeping them.** The gain stages they name (LNA,
-  PGA, TIA, PAD) belong to the Iris and USRP front ends that share this config
-  format; the Houdini radio setup returns before those calls and discards the
-  values.
-
-  This is a "not wired up yet", not a "no such thing". The board does have gain
-  control of its own: a digital step attenuator on the receive path, and QMC
-  offset and gain in the RF data converter. Neither is exposed through the
-  driver at the time of writing (the SoapyHoudiniSDR device README lists QMC
-  among its deferred RFDC features), so there is no knob to turn from here yet.
-  Expect that to change, and re-check this section against the driver's
-  advertised gains before concluding the fields are still inert.
+- `frequency` and `nco_frequency`: the carrier and the converters' NCO, which
+  must match each other. The legacy configs set both to 500 MHz; the
+  dual-band configs set both to the sub-6 2425 MHz (2420 MHz in `-40`) and
+  move the X-band channels to their own NCO in `channel_nco_frequency`.
+- `channel` and `ue_channel` (and, in the multi-channel configs,
+  `tx_channel`, `rx_channel`, `ue_tx_channel`, `ue_rx_channel`): which RF
+  channels each board uses. The config's `_comment` names the cabling they
+  expect.
+- `houdini_rx_gain_db` and `houdini_tx_gain_db`, in the dual-band configs
+  only: the Houdini gain surface. The receive value is minus the step
+  attenuator's attenuation (0 is no attenuation), the transmit value sets the
+  DAC output current (0 is the maximum). Each is ONE value per direction,
+  written to every channel the radio opens and read back at start, so
+  attenuating the sub-6 receive attenuates the X-band receive too. The keys
+  apply only in mode V (the dual-band converter plan); a legacy config that
+  sets them is refused at load.
+- `ue_rx_gain_a` / `ue_tx_gain_a` and the `_b` pair: **these do nothing on a
+  Houdini radio, so do not spend bench time sweeping them.** The gain stages
+  they name (LNA, PGA, TIA, PAD) belong to the Iris and USRP front ends that
+  share this config format.
 - `ue_power_ramp` and the `ue_ramp_*` gains are equally inert here: that block
   only runs under the Iris hardware framer, which these configs do not use.
-- `ue_tx_advance_ticks`: the fine calibration that seats the client pilot
-  inside the base station receive window. Start at 0 and sweep it if the pilot
-  does not land (section 8).
+- `ue_tx_advance_ticks`: leave it at 0. It is quantized to the driver's
+  384-tick anchor grid, so values under 192 vanish. The fine seating of the
+  client pilot comes from `tx_advance` (section 3).
 
-Until a gain surface lands, signal level is set two other ways:
+Beyond the gain keys, signal level is set two ways:
 
-- **Physically**, by cabling and attenuation between the two boards. A direct
-  cable normally needs an attenuator; an over the air path normally does not.
-- **Digitally**, by the optional `tx_scale` field. Neither shipped config sets
-  it, which means it is computed automatically to normalize the OFDM peak, and
+- **Physically**, by cabling, filters and attenuation between the two boards.
+  Judge a direct cable by the converter range it uses (below); an over the air
+  path normally needs no attenuator.
+- **Digitally**, by the optional `tx_scale` field. No shipped config sets it,
+  which means it is computed automatically to normalize the OFDM peak, and
   that is the right starting point. Set it explicitly only when you need to back
   the transmitted amplitude off.
 
-Judge the level from the receive side rather than guessing at it. The
-dashboard's magnitude panel shows the peak in dB, and running the sounder with
-`HOUDINI_CL_RX_DEBUG=1` makes it print the received RMS and absolute maximum
-periodically. Samples are 16 bit, so an absolute maximum near 32767 means you
-are clipping and should attenuate; an RMS in the low tens means you are close
-to the noise floor and the beacon correlation will be marginal.
+Judge the level from the receive side rather than guessing at it. Each card's
+Spectrum tab shows how much of the converter the pilot uses and counts clipped
+samples (section 5.3), and running the sounder with `HOUDINI_CL_RX_DEBUG=1`
+makes it print the received RMS and absolute maximum periodically. Samples are
+16 bit, so an absolute maximum near 32767 means you are clipping and should
+attenuate; an RMS in the low tens means you are close to the noise floor and
+the beacon correlation will be marginal.
 
 Leave the frame geometry alone unless you know why you are changing it. The
-shipped numbers are load bearing: 30 slots of 4096 samples is 122880 samples,
-which at 122.88 MSPS is exactly 1 ms per frame, and `samps_per_slot` must stay
-at or below 4096 to fit the FPGA transmit RAM.
+shipped numbers are load bearing. In the legacy configs 30 slots of 4096
+samples is exactly 1 ms per frame at 122.88 MSPS, and `samps_per_slot` must
+stay at or below 4096 to fit the FPGA transmit RAM. In the dual-band configs
+20 slots of 61440 samples is exactly 10 ms, and every slot starts on the
+driver's 384-tick grid; each config's `_numerology_note` shows the arithmetic.
 
 ## 3. Choose a config
 
@@ -332,6 +355,12 @@ list shows. All of them run one client. Each names its own topology file in
 | `files/houdini-ul.json` | Legacy 500 MHz, 64 FFT with an uplink slot: channel estimate **plus** the equalized constellation |
 | `files/houdini-2ch-decouple.json` | Legacy 500 MHz, two links on two channels |
 
+The `-fe` configs set `xband_frontend_static`: they need the X-band front-end
+boards' roles applied on both nodes (`sudo houdini-role status` exits 0 on
+each) and are refused at start without them. The slots configs
+(`bs_rx_slots`) need the slots host plugin, selected by exporting
+`HOUDINI_SOAPY_ROOT=<its prefix>` before the setup check and the dashboard.
+
 On a new bench, go up the dual-band ladder one rung at a time: `r0` proves the
 link and the stack, `r1` the converter clocks and the sub-6 band, `r2` adds the
 X-band IF, `r3a` the demo numerology on sub-6, and `houdini-dualband.json` both
@@ -350,8 +379,11 @@ beacon leakage at the base station.
 Pilot and data placement is sample exact: the client pads each burst so its
 start escapes the driver's 3125 ns scheduling grid, and `tx_advance` in the
 config is a bench calibration that seats the burst at its nominal in-slot
-position. If you change cabling or the RF path, re-derive it with the
-procedure in the config's `_tx_advance_note`.
+position (247 on the legacy one-rate path, 169 on the dual-band converter
+path). If you change cabling or the RF path, re-derive it: run with
+`HOUDINI_BS_RX_DEBUG=1` across a few restarts and shift `tx_advance` by the
+mean `pilot_grid_off` the base station prints (the `_tx_advance_note` of
+`houdini-ul.json` and of each dual-band config gives the details).
 
 ## 4. Run the demo
 
@@ -363,12 +395,12 @@ debugging.
 
 ```sh
 cd <path-to-HoudiniLab>/CC/Sounder
-python3 csi_gui/csi_server.py --launch --conf files/houdini-1u.json
+python3 csi_gui/csi_server.py --launch --conf files/<config>.json
 ```
 
-The backend sets the environment, starts `sounder --view`, and retries the cold
-start up to four times, which matters because radio discovery often fails on
-the first attempt.
+The backend sets the environment, starts `sounder --view`, and makes up to
+four attempts at the cold start, which matters because a radio open can time
+out on the first attempt.
 
 Before each attempt it also runs `csi_gui/teardown_framer.py` to release a
 framer that a previous run may have left armed (section 8.4). You will see its
@@ -386,18 +418,22 @@ Two defaults assume one particular layout. If yours differs, override them:
   virtual environment is not at `~/houdini_test`.
 
 That command on its own is deliberately quiet. It prints the teardown, the
-sounder's startup and a `[csi]` datagram counter roughly once a second, and
+sounder's startup and a `[csi]` datagram counter every five seconds, and
 almost nothing per frame. That is the normal amount of output, so do not read
-a short log as a sign that something is wrong.
+a short log as a sign that something is wrong. Add `--log-dir <dir>` to keep
+each start's sounder output in `<dir>/sounder_<UTC>.log`, including the
+end-of-run checks it prints at Stop.
 
 If you want the per frame diagnostics instead, export them in the same shell
 before launching. Section 7 describes each one:
 
 ```sh
 export HOUDINI_BS_RX_DEBUG=1 HOUDINI_UE_TX_DEBUG=1 HOUDINI_CSI_R_DEBUG=1
-export HOUDINI_CFO_LOG_EVERY=1
-python3 csi_gui/csi_server.py --launch --conf files/houdini-1u.json
+python3 csi_gui/csi_server.py --launch --conf files/<config>.json
 ```
+
+Every beacon carrier estimate, rather than one in ten, is a config setting
+(`"sync": {"cfo": {"log_every": 1}}`, section 7.1), not an export.
 
 On a healthy cabled bench this is a large difference in output and no
 difference in behaviour. Two back to back runs on the same bench measured 6,189
@@ -423,8 +459,12 @@ source <your-houdini-venv>/bin/activate
 export LD_LIBRARY_PATH=$VIRTUAL_ENV/lib
 export SOAPY_SDR_PLUGIN_PATH=$VIRTUAL_ENV/lib/SoapySDR/modules0.8-3
 export HOUDINI_MAX_FRAME=2000000000        # keep running instead of stopping at max_frame
-./build/sounder --view --conf_file files/houdini-1u.json
+./build/sounder --view --conf_file files/<config>.json
 ```
+
+For a slots config (`bs_rx_slots`), point SoapySDR at the slots host plugin
+instead of the venv's module directory, as the dashboard does:
+`export SOAPY_SDR_ROOT=<slots-plugin-prefix> SOAPY_SDR_PLUGIN_PATH=`.
 
 Note the flag names differ between the two programs. The sounder takes
 `--conf_file`; the dashboard backend takes `--conf`.
@@ -442,12 +482,21 @@ from before that path existed, and it is not part of this demo.
 | `--udp-port` | 9999 | Port the CSI datagrams arrive on |
 | `--fps` | 30 | How often the page is pushed new data |
 | `--stale-ms` | 1500 | Dim an antenna's plots when its last update is older than this (section 5.1) |
-| `--mag-top` | 90 | Top of the fixed magnitude axis, in dB |
-| `--mag-span` | 40 | Height of the fixed magnitude axis, in dB below `--mag-top` |
+| `--mag-top` | the config's `dashboard_mag_top`, else 90 | Where each card's \|H\| axis starts, in dB; the axis then steps by 10 dB when the trace leaves it (section 5) |
+| `--mag-span` | 40 | Height of the \|H\| axis, in dB below its top |
 | `--csi-fps` | sounder default (30) | Per antenna stream rate out of the sounder |
+| `--launch` | off | Start the sounder in viewing mode on this host at once |
+| `--control` | off | Start, Stop, Restart and Check buttons and a config list (the sounder's `files/houdini*.json`) in the page header; section 4.4 |
+| `--conf` | none | The config to run (with `--launch` or `--control`), and the one the page's axes and subcarrier layout come from |
+| `--sounder-dir` | the checkout `csi_server.py` is in | Which checkout's `build/sounder` runs |
+| `--venv` | the activated venv, else `~/houdini_test` | The SoapySDR and Houdini plugin prefix the sounder runs with |
+| `--log-dir` | off | Write each start's sounder output to `<dir>/sounder_<UTC>.log` |
+| `--record` | `$HOUDINI_CSI_RECORD`, else off | Record every datagram to a new file for `replay_feed.py` (a name that exists is refused, never overwritten) |
+| `--record-max-mb` | 2048 | Stop recording at this size |
 | `--dest-host` | 127.0.0.1 | Where the sounder sends datagrams, when using `--launch` |
-| `--control` | off | Start, Stop and Restart buttons and a config list (the sounder's `files/houdini*.json`) in the page header; section 4.4 |
 | `--http-host` | 0.0.0.0, or 127.0.0.1 with `--control` | Web server bind address |
+
+`python3 csi_gui/csi_server.py --help` lists every option.
 
 Run the backend on the same host as the sounder unless you have a reason not
 to. If you split them, set `--dest-host` to the backend's address and make sure
@@ -512,27 +561,39 @@ The cards fill the width of the window and reflow as you resize it, so a wider
 window gives you more cards side by side rather than more empty space. The panels
 inside a card stretch with it, so making the window wider makes every plot bigger.
 
-Each receive antenna gets one card with four panels:
+Each receive antenna gets one card. Once the sounder's channel metadata
+arrives the card is titled by its band, for example
+`Sub-6 · 2425 MHz (RX ch 0, antenna 0)` or
+`X-band · IF 4380 MHz (RX ch 2, antenna 1)`. Its **Channel** tab carries:
 
-1. **Magnitude of H in dB** across subcarriers. This is the frequency response
-   of the channel. Nulls are real multipath fades, not faults.
-2. **Phase in radians**, as two stacked panels. The **raw** panel shows the
-   phase exactly as measured: the deliberate FFT window back-off inside the
-   cyclic prefix rides a steep linear ramp on it, which wraps every few
-   subcarriers and draws a sawtooth. The tooth spacing is a delay gauge: with
-   the shipped 8 sample back-off, expect a tooth every 8 subcarriers, plus or
-   minus the run's small extraction draw. The **corrected** panel removes
-   that known instrumental ramp and anchors the run's arbitrary common phase
-   to zero at the third displayed update (the first two settle), so what remains is physical: its tilt is the
-   run's residual timing (a fraction of a sample to a sample or two), and any
-   movement after the anchor lands is a real event. The common phase re-draws
-   every restart because the two nodes are frequency locked, not phase
-   locked; only the corrected panel hides that lottery, on purpose.
-3. **Waterfall of magnitude**, time running downward. This is the panel that
+1. **\|H\| in dB** across subcarriers. This is the frequency response of the
+   channel. Nulls are real multipath fades, not faults. The axis starts at the
+   config's `dashboard_mag_top` (or `--mag-top`) and moves in 10 dB steps, at
+   most once every 3 seconds, and only when the trace has left the axis or sat
+   in its bottom quarter for that whole time; a steady trace never moves it.
+   Between steps an `off scale` badge marks a trace outside the axis.
+2. **MER over the last 60 seconds**, on a fixed 0 to 40 dB axis, from the
+   card's one-second MER. It shows steering, fades and interference as they
+   happen; a gap in the line is a stretch with no constellation.
+3. **Phase shape** in degrees, on a fixed plus or minus 10 degree axis: each
+   frame's phase with its measured delay (a straight line across the band) and
+   its common phase removed, averaged over half a second. The removed delay is
+   printed beside the title. On a cable what remains is the filters' ripple.
+4. **Waterfall of \|H\|**, time running downward. This is the panel that
    shows stability: a steady link draws smooth vertical streaks, and a link
    that keeps re-locking draws horizontal tearing.
-4. **Constellation**, equalized uplink data. Only populated when you run
-   `houdini-ul.json`. Clean QPSK shows four tight clusters.
+5. **Constellation**, equalized uplink data. Only populated when the frame
+   carries an uplink data slot (`U` in the schedule). Clean QPSK shows four
+   tight clusters.
+6. **CIR**, the impulse response of the same H: dB relative to the strongest
+   tap on a fixed 0 to -60 dB axis, delay in ns from that tap. A clean cable
+   reads as one mainlobe about 2/B wide (the Hann window), not a single tap.
+
+Under the panels the quality line gives the lane's IF (NCO) and transmission
+bandwidth (in resource blocks when the tones make whole NR resource blocks),
+the MER and EVM (decision directed, averaged over about a second, over the
+tones within 8 dB of the median \|H\|), and the delay spread figures with
+their threshold and resolution.
 
 Guard band and DC null subcarriers are drawn as gaps in every per-subcarrier
 panel, never as zeros: nothing is transmitted there, so nothing is measured
@@ -592,14 +653,14 @@ predicts the beacon inside the read window, so seconds of silence between bursts
 are normal on a perfectly healthy link. The plot dims while quiet so you can see
 at a glance that you are looking at held data rather than live data.
 
-How long is normal changed on 2026-09-02. The client now looks at the beacon
-every 2.6 seconds by default rather than every 260 milliseconds, because the
-measured clock stability supports coasting far longer than the old cadence
-assumed. So a healthy link is quiet most of the time, and the badge only means
+How long is normal depends on the cadence. The client looks at the beacon only
+as often as its tracked clock needs (seconds apart on a steady link;
+`sync.resync.residual_ppm` and `sync.resync.sync_tol_samples` set it, section
+7.1), so a healthy link is quiet most of the time, and the badge only means
 something if it is much longer than the cadence. The page works this out for
 itself: it measures the interval between the reports it actually receives and
-marks the card quiet at three times that, so the badge keeps its meaning if the
-cadence is changed again. Nothing to configure.
+marks the card quiet at three times that, so the badge keeps its meaning
+whatever the cadence. Nothing to configure.
 
 The readout line carries three figures in ppm, and they are not three views of
 one number. Read them in this order.
@@ -675,7 +736,7 @@ clipping.
 The sounder prints one line when viewing mode initializes:
 
 ```
-CSI view mode: streaming to 127.0.0.1:9999 (64 subcarriers, ~30 fps/ant, rx_conj=1, sym_start=120, timing_fix=1)
+CSI view mode: streaming to 127.0.0.1:9999 (64 subcarriers, ~30 fps/ant, rx_conj=1, sym_start=120, timing_fix=1, phase_fix=1)
 ```
 
 Check each field:
@@ -684,9 +745,11 @@ Check each field:
 - `rx_conj=1` on Houdini hardware. The receive mixer delivers baseband
   conjugated, and this flag undoes it. If it were wrong, every channel estimate
   would land on the mirror subcarrier and the constellation would scramble.
-- `sym_start=120` for the shipped configs, which is the 128 sample prefix minus
-  half the 16 sample cyclic prefix. Section 7 explains why.
-- `timing_fix=1`, on by default for Houdini.
+- `sym_start` is the zero prefix minus half the cyclic prefix: 120 for the
+  legacy configs (128 minus half of 16), -112 for the dual-band configs (32
+  minus half of 288; negative is valid, the symbol body is read from the
+  window start plus the cyclic prefix). Section 7 explains why.
+- `timing_fix=1` and `phase_fix=1`, on by default for Houdini.
 
 Other sounder lines worth recognizing on a healthy run:
 
@@ -716,32 +779,34 @@ the two is dropping UDP.
 ## 7. Tuning knobs
 
 All of these are environment variables read by the sounder. Set them in the
-same shell that launches it.
+same shell that launches it. The sync knobs (the SNR floor, the beacon carrier
+log rate, the tracker and the steering) are config keys instead, in the
+config's `sync` block (section 7.1).
 
 | Variable | Default | What it does |
 |---|---|---|
-| `HOUDINI_CSI_SYM_START` | `prefix` minus half the cyclic prefix (120 here) | Where the FFT window starts inside a received slot. An integer, or `auto` for the energy edge detector. |
+| `HOUDINI_CSI_SYM_START` | the zero prefix minus half the cyclic prefix (section 6) | Where the FFT window starts inside a received slot. An integer, or `auto` for the energy edge detector. |
 | `HOUDINI_CSI_NO_TIMING_FIX` | unset | Set it to disable the per frame pilot re-alignment. |
 | `HOUDINI_CSI_FPS` | 30 | Per antenna datagram rate out of the sounder. |
 | `HOUDINI_MAX_FRAME` | from config `max_frame` | Frame count to run. Set large for continuous viewing. |
 | `HOUDINI_CSI_UDP` | `127.0.0.1:9999` with `--view` | Where datagrams go, as `host:port`. |
 | `HOUDINI_CSI_DUMP` | unset | One shot raw slot and H dump for offline analysis. |
-| `HOUDINI_SYNC_SNR_DB` | 30 | Sync SNR floor in dB. Detections below it are rejected during acquisition and re-sync. The metric reads true link SNR; a cabled bench measures the mid 40s. |
-| `HOUDINI_PILOT_HORIZON` | from config `ue_pilot_horizon` (96) | How many frames of client bursts are queued ahead of real time. Larger survives slower host loops; every extra frame delays a timing correction reaching the wire. |
-| `HOUDINI_BS_RX_DEBUG` | unset | Base station prints its rederivation of the client schedule: `pilot_grid_off` should sit within one sample of zero, and `clamped` (slots placed past the capture's edge) should read 0. |
+| `HOUDINI_PILOT_HORIZON` | from config `ue_pilot_horizon` (96 in the legacy configs, 10 in the dual-band ones) | How many frames of client bursts are queued ahead of real time. Larger survives slower host loops; every extra frame delays a timing correction reaching the wire. |
+| `HOUDINI_BS_RX_DEBUG` | unset | Base station prints its rederivation of the client schedule: `pilot_grid_off` should sit within a few samples of zero and hold steady through a run, and `clamped` (slots placed past the capture's edge) should read 0. |
 | `HOUDINI_UE_TX_DEBUG` | unset | Client prints its burst scheduling (frames queued, pad). |
 | `HOUDINI_CORE_MAP` | unset | Where the sounder pins its own threads: `main=<core>,recorder=<core>,bsrx=<core>,ue=<core>`, each the base core of that role (thread i on base + i); a role not named keeps the default layout. Logged at start. For CPU isolation experiments. |
 | `HOUDINI_TX_CPU_AFFINITY` | unset | `c0,c1,...`: the i-th live client TX stream gets the host plugin's `cpu_affinity=ci`, pinning its pacer worker (SH-427: keep the workers off the cores that take the data NIC's interrupts). Logged per stream at open. |
 | `HOUDINI_TX_STREAM_ARGS` | unset | Extra host-plugin arguments for the client's live TX streams, `key=value,key=value` (for example `tx_target_frac=0.75`), each logged at open; `tx_mode`, `tdd` and `mts` are refused. A diagnostic and tuning knob: set it only when the host plugin's owners ask. |
 | `HOUDINI_CSI_R_DEBUG` | unset | Recorder prints the per frame pilot re-alignment it chose (`r`, and the blind score behind it), one line per 30 corrections. |
-| `HOUDINI_CFO_LOG_EVERY` | 10 | How many beacon detections pass per `Beacon CFO` line. The default logs one in ten, so a quiet run is expected. Set it to 1 for a calibration run where you want every estimate. |
+| `HOUDINI_TX_HOST_STATUS` | unset | Set it to log the client host plugin's pacer state (`TX_HOST_STATUS`, `TX_BANK_STATUS`) every link-health period. Cheap; the demo runs with it. |
 | `HOUDINI_CNS_DUMP_LOW` | unset | Directory for autopsy dumps of the first few low scoring constellations. The directory must already exist. |
 
 ### 7.0 Choosing the beacon waveform
 
 The base station transmits a short burst at the top of every frame and the
-client finds it by correlation. Which burst it sends is a config field,
-`beacon_type`, in the `tdd_conf` block. Five are available:
+client finds it by correlation. Which burst it sends is the config key
+`sync.beacon.type` (the top-level `beacon_type` of older configs is still
+read, and the two may not disagree). Six are available:
 
 | value | what it is |
 | --- | --- |
@@ -750,20 +815,25 @@ client finds it by correlation. Which burst it sends is a config field,
 | `dot11` | The 802.11a/g/n legacy preamble as the standard defines it: the short training field, then the guard and two long training symbols. |
 | `nr` | The 5G NR primary synchronisation signal, then a guard and two repeats of a tracking symbol built from the NR reference sequence. The client finds it on the repeated tracking symbol. |
 | `nr_pss` | The same burst as `nr`, sample for sample, but the client finds it the way an NR handset does: a plain matched filter on the primary synchronisation signal, with no repeat check. The log says `threshold form forced to nolag` when this is in effect. |
+| `nr_pss_bl` | The band-limited beacon of the dual-band configs: the NR primary synchronisation signal, then a guarded pair of tracking symbols on the central 96 tones, all inside the sub-6 channel filter's plus or minus 24 MHz. |
 
 The first four were measured on the bench, four rounds each with the order
-rotated, about 8000 detections apiece, and all five have since been run end to
-end through the client (`nr_pss` on 2026-09-03, `DEMO_VERIFICATION.md` 8z). The margin figures below were measured with the older
-comparison rule, so read them as a ranking rather than as absolute numbers. **Timing is the same for all of them**, within
-measurement error. What separates them is detection margin: the worst detection
+rotated, about 8000 detections apiece; the first five have been run end to end
+through the client (`nr_pss` in `DEMO_VERIFICATION.md` 8.154 to 8.162), and
+`nr_pss_bl` is the beacon of every dual-band run (section 9 of the record).
+The margin figures below were measured with an earlier comparison rule, so
+read them as a ranking rather than as absolute numbers. **Timing is the same
+for all of them**, within measurement error. What separates them is detection margin: the worst detection
 of the run cleared the threshold by 12x for `legacy` and `legacy_guard`, 7x for
 `dot11`, and only 2.3x for `nr`.
 
-**Leave it at `legacy` unless you have a reason.** The margin is the best of the
-four, and it is the waveform every other measurement in this repository was
-taken against. If you set a value that is not in the table the client refuses to
-start rather than falling back, so a typo cannot quietly leave you on a
-different beacon than you think.
+**On the legacy configs, leave it at `legacy` unless you have a reason.** The
+margin is the best of the four, and it is the waveform every legacy
+measurement in this repository was taken against. **The dual-band configs need
+`nr_pss_bl`:** in mode V the sub-6 lanes are filtered to plus or minus 24 MHz,
+so the sounder refuses a wider beacon at load. If you set a value that is not
+in the table the client refuses to start rather than falling back, so a typo
+cannot quietly leave you on a different beacon than you think.
 
 The one thing the alternatives are better at is the beacon's own frequency
 estimate, where `dot11` is about a third more stable. That number is a
@@ -772,9 +842,9 @@ frequency with, so it does not currently justify the margin it costs.
 
 ### 7.1 Sync knobs: the `sync` block of the config
 
-These belong to the timing tracker, the beacon detector, its SNR confirm and the
-beacon's own frequency estimate. Since 2026-09-03 they live in ONE place: a
-`sync` object in the JSON config, loaded into one validated structure whose
+These belong to the timing tracker, the beacon detector, its SNR confirm, the
+beacon's own frequency estimate and the client's clock steering. They live in
+ONE place: a `sync` object in the JSON config, loaded into one validated structure whose
 every value is printed at startup with where it came from (`default`, `json`
 or `env`). Every default below is a measured value, not a guess, and the run
 is expected to be correct with all of them left alone.
@@ -802,15 +872,17 @@ Three things to know:
    `detector.first_path_floor_db`), which keep their default with a note.
    Bench sweeps go through the JSON: `run_shape_campaign.sh` merges
    `SYNC_OVERLAY` (a JSON object) into the `sync` block of every config it
-   writes. The environment path is removed next release.
+   writes. The environment path is kept only for old bench scripts.
 
-Example, in `files/houdini-ul.json`:
+Example, the block of the demo config
+`files/houdini-dualband-xw-steer-slots.json`:
 
 ```json
 "sync": {
-  "confirm":  { "snr_floor_db": 30 },
-  "resync":   { "scatter_tol_us": 2.0, "residual_ppm": 0.1 },
-  "tracker":  { "type": "alpha_beta", "alpha": 0.5, "beta": 0.1 }
+  "steer":    { "enable": true, "deadband_ppm": 0.12 },
+  "beacon":   { "type": "nr_pss_bl", "tx_full_scale": 0.34 },
+  "detector": { "pick": "argmax", "min_bar": 0.1 },
+  "confirm":  { "snr_floor_db": 25.0 }
 }
 ```
 
@@ -868,14 +940,14 @@ Diagnostics that dump files or print profiles (`HOUDINI_LOOP_PROFILE`,
 not configuration, and a dump switch in a shipped JSON is a trap. Every
 `HOUDINI_DUMP_*` file lands under `HOUDINI_DUMP_DIR` (default `/tmp`), so a
 bench can keep its dumps out of `/tmp` with one variable. View mode
-(`HOUDINI_CSI_UDP`, set by `--view`) writes NO HDF5 file and now says so at
+(`HOUDINI_CSI_UDP`, set by `--view`) writes NO HDF5 file and says so at
 startup, so a stray value in your shell cannot silently disable recording.
 
-
-The last four are the escalation net. Their defaults were tuned when the client
-grid drifted out of tolerance in about a second. With the clock steered it holds
-for minutes, so the defaults are conservative by a wide margin and are expected
-to be retuned. Change them one at a time against a known good baseline run, and
+`sync.resync.retry_max`, `sync.resync.escalate_episodes` and
+`sync.resync.hold_offgrid` are the escalation net. Their defaults were tuned
+for a client grid that drifts out of tolerance in about a second. With the
+clock steered it holds for minutes, so the defaults are conservative by a
+wide margin. Change them one at a time against a known good baseline run, and
 keep the net rather than removing it: it is what stands between a lost beacon
 and a client that flies on stale timing without saying so.
 
@@ -883,8 +955,8 @@ and a client that flies on stale timing without saying so.
 is one sided. A window placed early, still inside the prefix, is a valid
 circular shift and produces a pure phase ramp that the timing fix recovers. A
 window even one sample late pulls the next symbol into the FFT and produces
-inter symbol interference that no correction recovers. The old default sat
-exactly on that cliff edge, so beacon re-lock jitter tipped runs into
+inter symbol interference that no correction recovers. A window placed
+exactly on that cliff edge lets beacon re-lock jitter tip runs into
 interference at random. Backing the window off by half the cyclic prefix
 centers it in the guard and gives margin on both sides. Measured on a window
 interference run, this moved blind error vector magnitude from 19.8 percent to
@@ -912,28 +984,30 @@ If you are running several captures in a row, the first one that fails this way
 makes all the rest fail too.
 
 The usual cause is how the previous run ended. A sounder started by the
-launcher now ends when the launcher ends, however the launcher was killed, and
+launcher ends when the launcher ends, however the launcher was killed, and
 a sounder you started yourself releases both boards when you stop it. What can
 still hold a board is a sounder started some other way (another window, another
 user, a test harness) that is still running.
 
-Release it, from the rig, in the sounder directory:
+Release it, from `<host>`, in the sounder directory:
 
 ```sh
 python3 tools/rig_release_holders.py
-python3 csi_gui/teardown_framer.py
+python3 csi_gui/teardown_framer.py --topology <the config's serial_file>
 ```
 
-The first command finds and stops any leftover sounder on the rig host. The
-second confirms the boards are clear; it prints `all 2 radio(s) clear` when they
-are. Then start your run again.
+The first command stops EVERY sounder, dashboard backend and teardown on
+`<host>`, including a dashboard someone else left running, so ask first on a
+shared host. The second confirms the boards are clear; it prints
+`all 2 radio(s) clear` when they are (section 8.4 explains the topology
+argument). Then start your run again.
 
 If the release tool finds nothing and the boards are still held, something
 outside your session is holding them, and the board's own server has to be
-restarted:
+restarted, on each held board:
 
 ```sh
-sudo systemctl restart SoapySDRServer
+ssh <user>@<radio-ip> 'sudo systemctl restart SoapySDRServer'
 ```
 
 That needs a password, so on a shared bench it is worth asking whether a
@@ -950,32 +1024,32 @@ is set.
 ### 8.2 Panels appear but the waterfall tears horizontally
 
 The client is losing and re-acquiring the beacon. Confirm from the log before
-guessing: escalations print `re-sync escalation` with a reason, and the base
+guessing: escalations print `Re-sync ESCALATION` with a reason, and the base
 station prints `UE PILOT LOST` during the outage. Usual causes, most likely
-first: the two boards are not on a common reference clock (section 2.1), the
-RF level is wrong so detections fall under the sync SNR floor (the re-sync
-lines print the measured SNR; compare it against `HOUDINI_SYNC_SNR_DB`), or
-`corr_scale` needs adjusting for your path.
+first: the clock plan (section 2.1: no shared reference and no steering, or a
+board out of its calibrated hold, which the full setup check's `clock` line
+reports), the RF level is wrong so detections fall under the sync SNR floor
+(the re-sync lines print the measured SNR; compare it against the config's
+`sync.confirm.snr_floor_db`), or the detection bar (`corr_scale`) needs
+adjusting for your path.
 
 ### 8.3 Channel estimate looks fine but the constellation is a smear
 
-Confirm you are running `houdini-ul.json`, since the other config has no
-uplink data slot to equalize. If you are, work through the three causes below
-in order.
+Confirm the config's frame carries an uplink data slot (`U` in the schedule:
+`houdini-ul.json` or any dual-band config); without one there is nothing to
+equalize. If it does, work through the three causes below in order.
 
 **Cause 1: the FFT window is sitting late and taking in interference.** Try
 `HOUDINI_CSI_SYM_START` a few samples lower and watch the constellation
 tighten. Section 7 explains the asymmetry: early is recoverable, late is not.
 
 **Cause 2: dropped receive packets.** When a receive packet is lost,
-`Radio::recvHoudini` zero-pads the hole so the rest of the window keeps its
+`RadioHoudini::recv` zero-pads the hole so the rest of the window keeps its
 true timing. Those zeros are not signal, and an FFT taken across them produces
-a wrong channel estimate. Because the estimate is cached per antenna and reused
-to equalize every following uplink data slot, accepting one damaged pilot used
-to smear frames until the next clean pilot replaced it, so a single lost packet
-showed up as a burst of smearing plus a phase jump rather than one bad frame.
+a wrong channel estimate, which would then equalize every following uplink
+data slot until the next clean pilot.
 
-Viewing mode now refuses those slots instead of rendering them. When a slot
+Viewing mode therefore refuses those slots instead of rendering them. When a slot
 arrives carrying padded samples it is dropped, that antenna's card dims with a
 `stale` badge (section 5.1), and the sounder logs, at most once every five
 seconds:
@@ -987,14 +1061,11 @@ CSI view: dropped 12 slot(s) with RX gaps (latest 848 padded samples, ant 0)
 So the display holds its last good estimate rather than showing a false one,
 and marks it as old rather than passing it off as current. **A dimmed card plus
 that warning means the link is losing packets**, and the fix is on the link, not
-in the viewer. Recording mode is unchanged: it still
-keeps every sample and records the damaged ranges in the file's gap table.
-
-If you saw this before the fix landed, note that a clean recording was never
-evidence of a clean link. The recording is not cleaner; it just carries the gap
-table that makes the damage findable. To confirm the rate, record a capture
-over the same link and compare its gap table against how often the warning
-appears. Tracked as AP-10.
+in the viewer. Recording mode keeps every sample and records the damaged
+ranges in the file's gap table (`/Data/Gaps`), so a recording is not evidence
+of a clean link until its gap table is read. To confirm the loss rate, record
+a capture over the same link and compare its gap table against how often the
+warning appears.
 
 **Cause 3: a failed transmission at the client.** The pilot and the uplink
 data ride one composed burst per frame, and its transmit return is checked:
@@ -1004,10 +1075,11 @@ top-up, so a burst that was accepted but later reported late or dropped is
 surfaced rather than lost.
 
 If the constellation is a ring or smears differently from one restart to the
-next with none of the above logged, that class of fault was root caused and
-fixed in the 2026-08-30 campaign (timing offsets between the pilot and data
-paths; `DEMO_VERIFICATION.md` rows 4.36 to 4.48). On current code a persistent
-smear points at RF level, clipping, or receive gaps, not at restart luck.
+next with none of the above logged: that class of fault (timing offsets
+between the pilot and data paths) is fixed (`DEMO_VERIFICATION.md` rows 4.36
+to 4.48). A persistent smear points at RF level, clipping, receive gaps or,
+on the dual-band configs, the carrier offset (section 2.1), not at restart
+luck.
 
 ### 8.4 The sounder will not start, and discovery looks broken
 
@@ -1019,13 +1091,16 @@ Clear it:
 
 ```sh
 cd <path-to-HoudiniLab>/CC/Sounder
-python3 csi_gui/teardown_framer.py
+grep serial_file files/<config>.json          # the topology your config runs
+python3 csi_gui/teardown_framer.py --topology <that file>
 ```
 
-It reads the radio addresses from `files/topology-houdini.json`, opens each
-one, issues the framer abort, clears the transmit RAM, and releases the gate.
-Point it elsewhere with `--topology <file>`, or name radios directly with
-`--node <addr>` (repeatable).
+It reads the radio addresses from the topology file, opens each one, issues
+the framer abort, clears the transmit RAM, and releases the gate. Without
+`--topology` it reads `files/topology-houdini.json`, the legacy configs'
+topology, which is the wrong file for a dual-band config (their topology is
+`files/topology-houdini-dualband.json`). You can also name radios directly
+with `--node <addr>` (repeatable).
 
 Read the exit status, not just the output. It is 0 only when every radio was
 cleared, and non-zero when one could not be opened or torn down, which is
@@ -1083,14 +1158,15 @@ nothing here. The route existing is the check that matters.
 
 ### 8.6 Client never finds the beacon
 
-Check in this order: both boards on a common clock, the RF path is actually
+Check in this order: the clock plan (section 2.1), the RF path is actually
 connected and at a sane level, `frequency` and `nco_frequency` match each other
 in the config, and the beacon board is really the one named under
 `BaseStations` in the topology file.
 
 Acquisition requires more than a correlation peak: the detection must clear
-the sync SNR floor (`HOUDINI_SYNC_SNR_DB`, default 30 dB of true link SNR) and
-then repeat twice at exactly one frame spacing before the client anchors. A
+the sync SNR floor (`sync.confirm.snr_floor_db`: 30 dB of true link SNR by
+default, 25 dB in the dual-band configs for their beacon) and then repeat
+twice at exactly one frame spacing before the client anchors. A
 marginal RF path can therefore correlate occasionally yet never acquire. The
 re-sync and acquisition log lines print the measured SNR; on a cabled bench
 expect the mid 40s dB, and treat much less as an RF level or cabling problem
@@ -1098,25 +1174,29 @@ rather than a software one.
 
 ## 9. Clean up
 
-Press Ctrl+C in the backend terminal. In mode A it kills the whole sounder
-process group on the way out, so one Ctrl+C stops everything. In mode B stop
-the sounder in its own terminal as well.
+Press **Stop** on the page, or Ctrl+C in the backend terminal. In mode A the
+backend stops the sounder with SIGINT, the sounder's own stop: it ends its
+loop, prints its end-of-run checks and releases a steered clock, and anything
+still running after 10 seconds is killed. The sounder also dies with the
+backend however the backend ends. In mode B stop the sounder in its own
+terminal with Ctrl+C as well. A plain `kill` of the sounder skips its
+end-of-run checks and leaves the clock steered; send `kill -INT <pid>`
+instead, and `kill -9` only if it has not exited after 10 seconds.
 
-Stop the whole process group, not just the backend. `--launch` starts the
-sounder in a child shell that keeps running if you kill only `csi_server`; the
-orphan then starts a SECOND sounder against the same radios, both streaming to
-the same UDP port. The dashboard interleaves frames from both and the display
-cannot be trusted in either direction. If you started it detached, kill by
-group (`kill -- -<pgid>`), then confirm:
+Then confirm nothing is left:
 
 ```sh
 pgrep -cx sounder      # want 0 when stopped, exactly 1 while running
 ```
 
+Two sounders against the same radios both stream to the same UDP port, and the
+dashboard interleaves their frames, so the display cannot be trusted in either
+direction.
+
 After any run that ended abnormally, release the framer before starting again:
 
 ```sh
-python3 csi_gui/teardown_framer.py
+python3 csi_gui/teardown_framer.py --topology <the config's serial_file>
 ```
 
 A framer left armed is the most common reason the next run fails to start, and
