@@ -797,9 +797,14 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
         if (off > fr / 2) off -= fr;
         std::snprintf(where, sizeof where, "at %+lld samples from the scheduled pilot", off);
       }
+      // In slots mode the gate is the LTS check itself, so a burst above the
+      // bar whose pilot fails it lands here: interference or a corrupted
+      // pilot, not a UE that stopped transmitting.
+      const bool lts_fail = slots_mode && pilot_rms >= houdini::slotalign::kBurstMinRms;
       MLPD_WARN(
-          "BS: no UE burst in frame read (rms %.0f vs floor %.0f, pilot selfsim %.2f, occurrence "
+          "BS: %s in frame read (rms %.0f vs floor %.0f, pilot selfsim %.2f, occurrence "
           "%u; the read's loudest slot rms %.0f, %s) -- frame skipped\n",
+          lts_fail ? "a burst whose pilot failed the LTS check (interference or a corrupted pilot)" : "no UE burst",
           pilot_rms, floor_rms, ref.ss, qc, std::sqrt(whole_best / n), where);
     }
     return 0;

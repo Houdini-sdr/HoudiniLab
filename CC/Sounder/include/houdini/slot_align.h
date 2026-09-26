@@ -134,6 +134,9 @@ inline std::pair<long long, double> densestNear(const std::vector<double>& cse, 
 /// this a pilot slot is not trusted.
 constexpr double kLtsMinSelfsim = 0.4;
 
+/// The presence gate's absolute bar: a densest window under this rms is no burst.
+constexpr double kBurstMinRms = 120.0;
+
 /// The BS presence gate on one lane: a UE burst is there when the densest
 /// window's rms clears the absolute bar and four times the read's quietest
 /// slot-length window. In slots mode (`floorless`) the read has no noise-only
@@ -142,7 +145,7 @@ constexpr double kLtsMinSelfsim = 0.4;
 /// (self-similarity `ss` at least kLtsMinSelfsim) stands in for it, so a silent UE with
 /// interference above the absolute bar is a quiet frame, not a delivered one.
 inline bool lanePresent(double pilot_rms, double floor_rms, double ss, bool floorless) {
-  if (pilot_rms < 120.0) return false;
+  if (pilot_rms < kBurstMinRms) return false;
   return floorless ? ss >= kLtsMinSelfsim : pilot_rms >= 4.0 * floor_rms;
 }
 
