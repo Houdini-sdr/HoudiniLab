@@ -30,9 +30,12 @@ with open(out, "a") as fo:
                 tot = 10 * math.log10(sum(10 ** (x / 10) for x in inb))
                 fl = sorted(x for x, _ in oob)[len(oob) // 2] if oob else float("nan")
                 mx = max(oob) if oob else (float("nan"), 0)
-                fo.write("%s ant %s: in-band mean %.1f peak %.1f total %.1f dBFS | floor(median oob) %.1f | strongest oob %.1f at %+.1f MHz | MER %s | spc keys %s\n" % (
+                # The antenna's age and the spectrum's frame: a stalled stream
+                # still carries its last records, so a sample reads as current
+                # only with a small age.
+                fo.write("%s ant %s: in-band mean %.1f peak %.1f total %.1f dBFS | floor(median oob) %.1f | strongest oob %.1f at %+.1f MHz | MER %s | spc frame %s, age %s ms | spc keys %s\n" % (
                     time.strftime("%H:%M:%S", time.gmtime()), k, sum(inb) / len(inb), max(inb), tot, fl, mx[0], mx[1],
-                    (v.get("cns") or {}).get("mer_db"), sorted(x for x in s if x != "db")))
+                    (v.get("cns") or {}).get("mer_db"), s.get("frame"), v.get("age_ms"), sorted(x for x in s if x != "db")))
         except Exception as e:
             fo.write("sample failed: %r\n" % (e,))
         fo.flush()

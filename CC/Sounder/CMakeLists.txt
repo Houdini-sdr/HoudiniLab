@@ -376,6 +376,15 @@ add_test(NAME rung_report COMMAND python3 rung_report_test.py WORKING_DIRECTORY 
 add_test(NAME freeze_watch COMMAND python3 freeze_watch_test.py WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/tests/demo-verify)
 add_test(NAME pacer_core_check COMMAND python3 pacer_core_check_test.py WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/tests/demo-verify)
 add_test(NAME config_keys COMMAND python3 tests/config_keys_test.py WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME mer_sampler COMMAND python3 mer_sampler_test.py WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/tests/demo-verify)
+add_test(NAME syn1_wire COMMAND python3 syn1_wire_test.py WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/tests/demo-verify)
+# fstage_report needs numpy (the rig host's venv has it); registered only where it imports.
+execute_process(COMMAND python3 -c "import numpy" RESULT_VARIABLE HAVE_NUMPY_RC OUTPUT_QUIET ERROR_QUIET)
+if(HAVE_NUMPY_RC EQUAL 0)
+  add_test(NAME fstage_report COMMAND python3 fstage_report_test.py WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/tests/demo-verify)
+else()
+  message(STATUS "python3 has no numpy: the fstage_report test is not registered")
+endif()
 
 # AP-79: the link-health monitor port, pinned to the software lane's T0 cases
 # and to real captures from a streaming mode-V node.
