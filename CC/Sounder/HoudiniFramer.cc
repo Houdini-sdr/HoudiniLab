@@ -512,12 +512,6 @@ void HoudiniFramer::armTdd(void) {
 int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
                                long long& frameTime) {
   if (htdd_rx_slots_.empty()) return 0;
-  // Bound the BS capture run: loopRecv (unlike the client loop) doesn't stop at
-  // max_frame, and an unbounded frame_id would grow the recorder's HDF5 dataset
-  // without limit (-> extend crash at close). Returning <0 makes loopRecv set
-  // running(false) and shut down cleanly.
-  const long long max_frame = static_cast<long long>(cfg_->max_frame());
-  if (max_frame > 0 && htdd_frame_counter_ >= max_frame) return -1;
   Radio* r = radios_.at(0).at(radio_id).get();
   const int n = static_cast<int>(cfg_->samps_per_slot());
   const size_t K = htdd_rx_slots_.size();  // rx slots/frame (pilot P + uplink U...)
@@ -544,6 +538,21 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
     htdd_rx_cursor_ = (cur + 1) % K;
     frameTime = (htdd_cache_frame_ << 32) | (static_cast<long long>(slot) << 16);
     return n;
+  }
+
+  // Bound the BS capture run at a frame boundary, after the last frame's cached
+  // slots went out: loopRecv (unlike the client loop) does not stop at
+  // max_frame, and an unbounded frame_id would grow the recorder's HDF5 dataset
+  // without limit. loopRecv treats a negative return as a recoverable RX error
+  // and keeps calling, so stop the run here and hand back no slot. The counter
+  // counts frames that carried a UE pilot, and the UE stops at the same
+  // max_frame, so a run whose BS skipped a frame ends quiet below it; the
+  // run's timer or Stop ends that one.
+  const long long max_frame = static_cast<long long>(cfg_->max_frame());
+  if (max_frame > 0 && htdd_frame_counter_ >= max_frame) {
+    MLPD_INFO("BS: max_frame %lld reached, stopping the run\n", max_frame);
+    cfg_->running(false);
+    return 0;
   }
 
   // cursor 0: CONTINUOUS framer receive (the Iris model -- framer armed once, RX
