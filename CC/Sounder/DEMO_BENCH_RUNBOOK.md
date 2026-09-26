@@ -338,7 +338,7 @@ constellation, CIR, ADC, beacon sync).
 
    ```sh
    unset HOUDINI_CSI_RECORD    # the replay dashboard records nothing
-   python3 csi_gui/csi_server.py --conf files/houdini-dualband-xw.json &   # VL1_134.rec; files/houdini-dualband.json for FINAL.rec
+   python3 csi_gui/csi_server.py --conf files/houdini-dualband-xw.json &   # VL1_134.rec, FINAL_XW.rec; files/houdini-dualband.json for FINAL.rec
    python3 csi_gui/replay_feed.py ~/demo_rec/<name>.rec --loop
    ```
 
