@@ -55,10 +55,6 @@ class BeaconFramer {
   virtual int rx(size_t radio_id, void* const* buffs, long long& frameTime) = 0;
   /// Samples zero-padded into the frame the last rx() served (AP-10).
   virtual size_t framePad() const = 0;
-  /// Whether the frame the last rx() served refused one lane's pilot on its
-  /// own (the lane's samples are real; its channel estimate is not to be
-  /// trusted). False for a framer without lanes.
-  virtual bool laneRefusedAlone(size_t /*lane*/) const { return false; }
 
   /// The per-frame beacon transmission the receive loop asks for. A framer
   /// whose beacon plays from the device (Houdini replay) reports the slot as

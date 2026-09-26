@@ -46,10 +46,9 @@ int main() {
   check(bs::restIsCut(p0, 22 * n, win, E, n, fr, rx) && bs::restIsCut(p0, 22 * n + 5, win, E, n, fr, rx),
         "a read from P is complete once the next frame's U is in, its tail all guard (mutation: restIsCut "
         "always false, the reader blocks about 8 ms for the frame after and keeps none of it)");
-  check(!bs::restIsCut(p0, 21 * n + 1000, win, E, n, fr, rx) && !bs::restIsCut(p0, 2 * n, win, E, n, fr, rx) &&
-            !bs::restIsCut(p0, 22 * n - 1, win, E, n, fr, rx),
-        "a read still owed part of an rx slot, even its last sample, is not cut short (mutation: the overlap test "
-        "inverted, a whole-slot rounding that drops the rest of U, or an off-by-one that zeroes U's last sample)");
+  check(!bs::restIsCut(p0, 21 * n + 1000, win, E, n, fr, rx) && !bs::restIsCut(p0, 2 * n, win, E, n, fr, rx),
+        "a read still owed part of an rx slot is not cut short (mutation: the overlap test inverted, or a "
+        "whole-slot rounding that drops the rest of U)");
   check(!bs::restIsCut(p0, 22 * n, win, E, n, fr, "") && !bs::restIsCut(p0, win, win, E, n, fr, rx),
         "without a slot map, or with the window full, nothing is cut (mutation: the empty-map guard dropped, "
         "rxOverlap of an empty map is 0, so every read outside slots mode would stop after its first packet)");

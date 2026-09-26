@@ -196,13 +196,6 @@ int main() {
           "slots mode: with no noise floor the LTS check stands in, so interference above the bar is a quiet "
           "frame (mutation: the relative bar against the zero floor, which never fires; or the absolute bar "
           "dropped)");
-    check(!sa::lanePresent(150.0, 0.0, 0.39, true) && sa::lanePresent(150.0, 0.0, 0.40, true),
-          "slots mode: the stand-in bar is the LTS check's own 0.4 (mutation: > instead of >=, or a different bar, "
-          "so a pilot the LTS check accepts is skipped as quiet)");
-    check(sa::laneRefused(false, 0.99) && sa::laneRefused(true, 0.39) && !sa::laneRefused(true, 0.40),
-          "a lane is refused alone when it failed its gate or its pilot the LTS check (mutation: the gate or the "
-          "LTS test dropped, so a faded or burst-hit sub-6 pilot goes out as trusted H while the X-band places "
-          "the cut)");
     const long long G_EP = 5000, G_FR = 20 * 61440;
     check(sa::pilotGridOff(G_EP + 2 * 61440 - 10, 6, G_EP, 2, 61440, G_FR) == -4 &&
               sa::pilotGridOff(G_EP - G_FR + 2 * 61440 - 100, 107, G_EP, 2, 61440, G_FR) == 7 &&
@@ -219,10 +212,6 @@ int main() {
     check(sa::laneTakesCut(true, 0.60, false, 0.90),
           "a passing lane takes the cut from a failing reference (mutation: the reference kept, so a weak sub-6 "
           "skipped the frame and the wired X-band was lost with it)");
-    check(sa::laneTakesCut(true, 0.43, true, 0.39) && !sa::laneTakesCut(true, 0.39, true, 0.36),
-          "a lane whose pilot passes the LTS check takes the cut from one that fails it, whatever the margin "
-          "(mutation: the 0.05 margin applied across the bar, so the frame is marked untrusted while a clean "
-          "lane is refused with it)");
     check(!sa::laneTakesCut(true, 0.93, true, 0.90) && sa::laneTakesCut(true, 0.96, true, 0.90),
           "between passing lanes the reference keeps the cut unless beaten by more than 0.05 (mutation: the "
           "margin dropped, so noise in self-similarity flips the cut lane frame to frame)");

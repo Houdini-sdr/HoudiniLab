@@ -797,11 +797,8 @@ void Receiver::loopRecv(int tid, int core_id, SampleBuffer* rx_buffer) {
       const uint32_t rx_pad = static_cast<uint32_t>(
           this->base_radio_set_->lastRxPadSamples(radio_id, cell));
       for (size_t ch = 0; ch < num_packets; ++ch) {
-        // A gated framer also refuses one lane's pilot alone (the lane is
-        // channel ch: samp[ch] is the framer's buffs[ch]).
-        const uint32_t refused = this->base_radio_set_->lastRxLaneRefused(radio_id, cell, ch) ? 1u : 0u;
         // new (pkt[ch]) Packet(frame_id, slot_id, 0, ant_id + ch);
-        new (pkt[ch]) Packet(frame_id, slot_id, cell, ant_id + ch, rx_pad, refused);
+        new (pkt[ch]) Packet(frame_id, slot_id, cell, ant_id + ch, rx_pad);
         // push kEventRxSymbol event into the queue
         this->notifyPacket(kBS, frame_id, slot_id, ant_id + ch,
                            buffer_chunk_size, cursor + tid * buffer_chunk_size);

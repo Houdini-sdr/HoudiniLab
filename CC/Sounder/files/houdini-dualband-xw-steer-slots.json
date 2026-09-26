@@ -24,7 +24,7 @@
   "B": 4380000000.0,
   "C": 4380000000.0
  },
- "_width_note": "AP-85, HS-202 plan section 3.3: the X-band at 270 RB = 3240 subcarriers = 97.2 MHz (+-48.6 MHz, inside the RFDC decimator's 80 % passband, +-49.152), the sub-6 at 133 RB. Keyed per channel like channel_nco_frequency, and the channels on one NCO must agree (UE TX B, BS RX C). Each band has its own ZC pilot and QPSK data, each peak-normalized to half full scale, so the X-band carries 2.85 dB less per tone than at 133 RB. The UE's TX lane B takes the wide 47-tap halfband and no channel prefilter. The BS framer places the burst from the lane with the cleanest pilot (the lanes are sample-aligned), so tx_advance is unchanged.",
+ "_width_note": "AP-85, HS-202 plan section 3.3: the X-band at 270 RB = 3240 subcarriers = 97.2 MHz (+-48.6 MHz, inside the RFDC decimator's 80 % passband, +-49.152), the sub-6 at 133 RB. Keyed per channel like channel_nco_frequency, and the channels on one NCO must agree (UE TX B, BS RX C). Each band has its own ZC pilot and QPSK data, each peak-normalized to half full scale, so the X-band carries 2.85 dB less per tone than at 133 RB. The UE's TX lane B takes the wide 47-tap halfband and no channel prefilter. The BS framer places the burst on lane 0 (sub-6), so tx_advance is unchanged.",
  "channel_ofdm_data_num": {
   "B": 3240,
   "C": 3240

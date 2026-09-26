@@ -65,14 +65,9 @@ struct Packet {
   // a consumer that computes on the samples (the CSI/view path) must not treat them
   // as signal. Every buffer stride is sizeof(Packet)-derived, so widening is safe.
   uint32_t rx_pad;
-  // Nonzero when the BS framer refused this lane's pilot on its own (it failed
-  // its own presence gate or LTS check while another lane placed the cut). The
-  // samples are real, so the ADC and spectrum views still use them; only the
-  // channel estimate and the constellation must not.
-  uint32_t lane_refused;
   short data[];
-  Packet(int f, int s, int c, int a, uint32_t pad = 0, uint32_t refused = 0)
-      : frame_id(f), slot_id(s), cell_id(c), ant_id(a), rx_pad(pad), lane_refused(refused) {}
+  Packet(int f, int s, int c, int a, uint32_t pad = 0)
+      : frame_id(f), slot_id(s), cell_id(c), ant_id(a), rx_pad(pad) {}
 };
 
 struct Event_data {

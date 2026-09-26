@@ -524,9 +524,8 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
   // buffers and RadioHoudini::recv reads C lanes, so every read/cache/deliver here
   // must span all C -- a single-lane read hands the driver a null buffs[1] and its
   // null-lane guard rejects the whole read (-2 STREAM_ERROR). The pilot/timing is
-  // located on the lane with the cleanest pilot and applied to all lanes (they are
-  // sample-aligned by the combined stream). C==1 reduces to the original
-  // single-channel path. The cache
+  // located on lane 0 and applied to all lanes (they are sample-aligned by the
+  // combined stream). C==1 reduces to the original single-channel path. The cache
   // is laid out slot-major, lanes contiguous within a slot: [slot k][lane c].
   const size_t C = std::max<size_t>(1, cfg_->bs_rx_ch());
 
@@ -685,8 +684,8 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
     // pilot and equalization from the data.
     L.p_at = L.at;
     if (laneSelfsim(ls, L.at) < 0.5) {  // `at` is a data slot -> the pilot is `gap` earlier
-      if (laneSelfsim(ls, L.at - gap) >= houdini::slotalign::kLtsMinSelfsim) L.p_at = L.at - gap;
-      else if (laneSelfsim(ls, L.at + gap) >= houdini::slotalign::kLtsMinSelfsim) L.p_at = L.at + gap;
+      if (laneSelfsim(ls, L.at - gap) >= 0.4) L.p_at = L.at - gap;
+      else if (laneSelfsim(ls, L.at + gap) >= 0.4) L.p_at = L.at + gap;
     }
     L.ss = laneSelfsim(ls, L.p_at);
     L.pilot_rms = std::sqrt(L.best / n);
@@ -700,13 +699,8 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
   const int16_t* s0 = htdd_cap_buf_.data();
   LaneSearch ref = searchLane(s0);
   size_t ref_lane = 0;
-  // Each lane's own floor and densest-window rms, kept for the per-lane
-  // refusal and the quiet warning below.
-  std::vector<std::pair<double, double>> lane_rms(C);  // {pilot rms, floor rms}
-  lane_rms[0] = {ref.pilot_rms, ref.floor_rms};
   for (size_t c = 1; c < C; ++c) {
     LaneSearch L = searchLane(s0 + c * static_cast<size_t>(fn) * 2);
-    lane_rms[c] = {L.pilot_rms, L.floor_rms};
     if (houdini::slotalign::laneTakesCut(L.present, L.ss, ref.present, ref.ss)) {
       ref = std::move(L);
       ref_lane = c;
@@ -744,9 +738,9 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
   // skip silently.
   // With every lane failing, the reference is still lane 0, so the quiet
   // path's numbers are lane 0's as before.
-  constexpr size_t kQuietWarnFrames = 200;  // about 4 s at the BS's ~50 frames/s
   if (!ref.present) {
     ++htdd_quiet_streak_;
+    constexpr size_t kQuietWarnFrames = 200;  // ~0.2 s at 1 kHz frames
     if (htdd_frame_counter_ > 0 &&
         (htdd_quiet_streak_ == kQuietWarnFrames ||
          (htdd_quiet_streak_ > kQuietWarnFrames &&
@@ -779,14 +773,8 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
       }
       MLPD_WARN(
           "BS: no UE burst in frame read (rms %.0f vs floor %.0f, pilot selfsim %.2f, occurrence "
-          "%u; the read's loudest slot rms %.0f, %s) -- frame skipped%s\n",
-          pilot_rms, floor_rms, ref.ss, qc, std::sqrt(whole_best / n), where,
-          (slots_mode && std::any_of(lane_rms.begin(), lane_rms.end(),
-                                     [](const std::pair<double, double>& lr) {
-                                       return lr.first >= houdini::slotalign::kPresenceMinRms;
-                                     }))
-              ? " (slots mode: a burst above the bar whose pilot failed the LTS check)"
-              : "");
+          "%u; the read's loudest slot rms %.0f, %s) -- frame skipped\n",
+          pilot_rms, floor_rms, ref.ss, qc, std::sqrt(whole_best / n), where);
     }
     return 0;
   }
@@ -796,58 +784,11 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
     htdd_quiet_warned_ = false;
   }
   htdd_quiet_streak_ = 0;
-  // A lane that does not place the cut is refused on its own when its pilot,
-  // at the cut every lane is delivered at, fails the presence gate or the LTS
-  // check (slot_align.h laneRefused). Its packets carry lane_refused, so the
-  // view keeps its H and constellation stale while its ADC and spectrum, and
-  // the other lane, still draw. Over the air the wired X-band usually places
-  // the cut, and a faded or burst-hit sub-6 pilot would otherwise go out as
-  // trusted H (review). The cut lane's own failure acts on the whole frame
-  // (framePad below). The gap sink has no lane field, so recordings do not
-  // mark a lane refused alone.
-  htdd_lane_refused_.assign(C, false);
-  if (htdd_lane_streak_.size() != C) {
-    htdd_lane_streak_.assign(C, 0);
-    htdd_lane_warned_.assign(C, false);
-  }
-  for (size_t c = 0; c < C; ++c) {
-    bool refused = false;
-    if (c != ref_lane) {
-      const int16_t* lc = s0 + c * static_cast<size_t>(fn) * 2;
-      const int at_cut = ref.p_at;
-      double e = 0.0;
-      const bool inside = at_cut >= 0 && at_cut + n <= cg;
-      for (int m = 0; inside && m < n; ++m) {
-        const double re = lc[2 * (at_cut + m)], im = lc[2 * (at_cut + m) + 1];
-        e += re * re + im * im;
-      }
-      const double ss_cut = laneSelfsim(lc, at_cut);
-      refused = houdini::slotalign::laneRefused(
-          houdini::slotalign::lanePresent(std::sqrt(e / n), lane_rms[c].second, ss_cut, slots_mode), ss_cut);
-    }
-    htdd_lane_refused_[c] = refused;
-    if (refused) {
-      const size_t k = ++htdd_lane_streak_[c];
-      if (k == kQuietWarnFrames || (k > kQuietWarnFrames && k % 2000 == 0)) {
-        htdd_lane_warned_[c] = true;
-        MLPD_WARN("BS: lane %zu has had no usable pilot for %zu delivered frames (lane %zu places the cut) -- its "
-                  "H and constellation are held\n",
-                  c, k, ref_lane);
-      }
-    } else {
-      if (htdd_lane_warned_[c]) {
-        MLPD_WARN("BS: lane %zu pilot RETURNED after %zu frames (frame %lld)\n", c, htdd_lane_streak_[c],
-                  htdd_frame_counter_);
-        htdd_lane_warned_[c] = false;
-      }
-      htdd_lane_streak_[c] = 0;
-    }
-  }
   // The reference lane's pilot, found and identified in searchLane above.
   auto selfsim = [&](int off) -> double { return laneSelfsim(s, off); };
   const int p_at = ref.p_at;
   const double pilot_ss = ref.ss;
-  if (pilot_ss < houdini::slotalign::kLtsMinSelfsim) {
+  if (pilot_ss < 0.4) {
     htdd_frame_pad_ += static_cast<size_t>(n);
     // Recording mode ignores rx_pad (only the view refuses on it), so also
     // push the extent into the gap sink: the HDF5's /Data/Gaps then records
