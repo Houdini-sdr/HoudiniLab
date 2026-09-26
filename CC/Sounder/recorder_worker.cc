@@ -191,8 +191,8 @@ void RecorderWorker::streamCsi(Packet* pkt, NodeType node_type) {
     if (now - csi_drop_log_ns_ > 5000000000LL) {  // at most one line per 5 s
       csi_drop_log_ns_ = now;
       MLPD_WARN(
-          "CSI view: dropped %zu slot(s) with RX gaps (latest %u padded samples, "
-          "ant %u). The display is stale, not wrong; the link is losing packets.\n",
+          "CSI view: dropped %zu slot(s) with RX gaps or a refused lane pilot (latest %u padded samples, "
+          "ant %u). The display is stale, not wrong; the link is losing packets or that lane's pilot.\n",
           csi_slots_dropped_, pkt->rx_pad, pkt->ant_id);
     }
     return;
@@ -363,7 +363,6 @@ void RecorderWorker::sendSpectrum(Packet* pkt) {
   (void)::send(csi_sock_, buf.data(), buf.size(), 0);
 }
 
-// Pilot slot -> channel estimate H[k] (DC-centered), cached per antenna + streamed.
 // bs_cfo_pre_fft: the rotation can clamp a sample the ADC delivered within 3 dB
 // of full scale (houdini/pre_cfo.h derotate). Counted and warned, never silent.
 void RecorderWorker::notePreCfoSaturation(long long values, uint32_t ant) {
@@ -377,6 +376,7 @@ void RecorderWorker::notePreCfoSaturation(long long values, uint32_t ant) {
   }
 }
 
+// Pilot slot -> channel estimate H[k] (DC-centered), cached per antenna + streamed.
 void RecorderWorker::sendCsi(Packet* pkt) {
   const int N = static_cast<int>(cfg_->fft_size());
   const int cp = static_cast<int>(cfg_->cp_size());

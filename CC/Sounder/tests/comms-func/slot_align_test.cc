@@ -196,6 +196,13 @@ int main() {
           "slots mode: with no noise floor the LTS check stands in, so interference above the bar is a quiet "
           "frame (mutation: the relative bar against the zero floor, which never fires; or the absolute bar "
           "dropped)");
+    check(!sa::lanePresent(150.0, 0.0, 0.39, true) && sa::lanePresent(150.0, 0.0, 0.40, true),
+          "slots mode: the stand-in bar is the LTS check's own 0.4 (mutation: > instead of >=, or a different bar, "
+          "so a pilot the LTS check accepts is skipped as quiet)");
+    check(sa::laneRefused(false, 0.99) && sa::laneRefused(true, 0.39) && !sa::laneRefused(true, 0.40),
+          "a lane is refused alone when it failed its gate or its pilot the LTS check (mutation: the gate or the "
+          "LTS test dropped, so a faded or burst-hit sub-6 pilot goes out as trusted H while the X-band places "
+          "the cut)");
     const long long G_EP = 5000, G_FR = 20 * 61440;
     check(sa::pilotGridOff(G_EP + 2 * 61440 - 10, 6, G_EP, 2, 61440, G_FR) == -4 &&
               sa::pilotGridOff(G_EP - G_FR + 2 * 61440 - 100, 107, G_EP, 2, 61440, G_FR) == 7 &&

@@ -128,17 +128,32 @@ inline std::pair<long long, double> densestNear(const std::vector<double>& cse, 
   return best;
 }
 
+/// The LTS check: the pilot is identical repeated symbols, so its
+/// self-similarity at lag cp + fft is high; data and noise score low. Below
+/// this a pilot slot is not trusted.
+constexpr double kLtsMinSelfsim = 0.4;
+
 /// The BS presence gate on one lane: a UE burst is there when the densest
 /// window's rms clears the absolute bar and four times the read's quietest
 /// slot-length window. In slots mode (`floorless`) the read has no noise-only
 /// window: the guards are the device's cut, exact zeros, so the floor reads 0
 /// and the relative bar could never fire. There the pilot's own LTS check
-/// (self-similarity `ss` at least 0.4) stands in for it, so a silent UE with
-/// interference above the absolute bar is a quiet frame, not a delivered one.
+/// stands in for it, so a silent UE with interference above the absolute bar
+/// is a quiet frame, not a delivered one. (So in slots mode a delivered
+/// reference lane has always passed the LTS check, and a transmitting UE whose
+/// pilot fails it on every lane is logged as quiet. A steady narrowband signal
+/// above the bar is self-similar too and passes; the wired X-band makes that
+/// rare.)
 inline bool lanePresent(double pilot_rms, double floor_rms, double ss, bool floorless) {
   if (pilot_rms < 120.0) return false;
-  return floorless ? ss >= 0.4 : pilot_rms >= 4.0 * floor_rms;
+  return floorless ? ss >= kLtsMinSelfsim : pilot_rms >= 4.0 * floor_rms;
 }
+
+/// Whether one lane's slots are refused on their own: it failed its own
+/// presence gate or its pilot failed the LTS check. The frame still goes out
+/// for the lanes that pass; only a lane that does not place the cut is refused
+/// alone (the cut lane's own failure acts on the whole frame, as it placed it).
+inline bool laneRefused(bool present, double ss) { return !present || ss < kLtsMinSelfsim; }
 
 /// The placed pilot start against its scheduled slot boundary, folded into
 /// [-fr/2, fr/2]: HOUDINI_BS_RX's pilot_grid_off. `stamp_ticks` is the read's
