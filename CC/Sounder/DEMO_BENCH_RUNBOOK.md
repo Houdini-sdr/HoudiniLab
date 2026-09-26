@@ -204,7 +204,7 @@ the demo head, `houdini-dualband-xw-steer-slots.json`, steered, cabled):
 | MER (15 s samples) | sub-6 35.4-37.5 dB, X-IF 30.7-32.8 dB | a cold start (just after a node power cycle) swings for the first few minutes while the steering converges |
 | Constellation low | 0.0 % in every 300 s window | from the run report's CNS lines |
 | Beacon SNR at the UE | about 39-47 dB wired | the sync card's `beacon SNR`; over the air the detector floor is 25 dB |
-| Pilot seat at the BS (`pilot_grid_off`) | within a few samples, steady within a run | it moves by a few samples between sessions (9.70); the slot margin is +-32 |
+| Pilot seat at the BS (`pilot_grid_off`) | within a few samples, steady within a run | it moves by a few ticks at a PL load or fresh sync (the converters' MTS latency is not pinned, 9.70); the slot margin is +-32 |
 | BS frames per second | about 50 (slots config), about 57 (all-rx config) | from the HOUDINI_BS_RX lines |
 | End-of-run lines | `RX read check`: 0 lost in rx slots, 0 out of order, 0 time jumps; `AP-87 slot check`: 0 outside the rx slots; `RX_HOST_STATUS`: tdd_straddle 0, tdd_refused 0, and on fpga 1.34 tdd_drop 0 | anything nonzero is a finding, not noise |
 
