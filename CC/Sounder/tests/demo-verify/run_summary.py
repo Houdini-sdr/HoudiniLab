@@ -182,7 +182,12 @@ def summary(L):
         print(f"  pre-FFT Hz n={len(pre)} min {min(pre)} median {st.median(pre)} max {max(pre)}")
     if res:
         print(f"  post residual Hz n={len(res)} median {st.median(res):.1f} max|.| {max(abs(x) for x in res):.1f}")
-    print(f"  steering pushes: {sum(bool(re.search(r'steer.*(push|CLOCK_ADJ)', l)) for l in L)}")
+    print(f"  steering pushes: {steering_pushes(L)}")
+
+
+def steering_pushes(L):
+    """The CLOCK_ADJ pushes the steering made: its '-> push +1' lines only, not the config, ON or release lines."""
+    return sum(bool(re.search(r"Clock steering \[\d+\]: .*-> push [-+]\d", l)) for l in L)
 
 
 def main(path):

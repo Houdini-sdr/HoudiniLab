@@ -89,6 +89,14 @@ K2 = rs.alarm_kinds([
     "57:5 WARNG: UE x link health: [UE x] 5.0 s: irq 1/s, preflight FAIL TX1:late=11: preflight new FAIL TX1:late=11; tx1.late +3 | app: rx_err +0, rx_short +0, rx_pad +0, tx_short +0, tx_sat +0"])
 check(K2.get("preflight new FAIL TX1:late=11") == 2 and all(not k.endswith(" ") for k in K2),
       "one alarm counts under one key whatever follows it (mutation: keep the space before a pipe): %s" % dict(K2))
+STEER = [
+    "  steer.max_push = 2  [default]",
+    "37:958398 INFOR: Clock steering [0]: ON: CLOCK_ADJ holdover=1 man_dac=408 rb_dac=408 pll1_locked=0 ref=calibrated",
+    "58:429807 INFOR: Clock steering [0]: tracked eps -0.1951 ppm averaged over 20 s -> push -1: landed at 407, offset -1",
+    "80:992399 INFOR: Clock steering [0]: tracked eps +0.1597 ppm averaged over 20 s -> push +1: landed at 408, offset +0",
+    "32:165260 INFOR: Clock steering [0]: released to the calibrated hold after 2 push(es), offset was 0 counts"]
+check(rs.steering_pushes(STEER) == 2,
+      "the push count is the push lines only (mutation: the old 'steer.*(push|CLOCK_ADJ)' count, 5 here): %d" % rs.steering_pushes(STEER))
 # main: the exit status is the verdict's, read from a run directory's largest log
 d = tempfile.mkdtemp(prefix="run_summary_")
 open(os.path.join(d, "small_cpu.log"), "w").write("x\n")
