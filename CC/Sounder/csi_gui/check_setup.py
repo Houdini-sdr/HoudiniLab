@@ -227,7 +227,9 @@ def radios_of(pid):
 
 def check_no_sounder(rep, nodes):
     """A sounder on the same radios holds them; one on other radios (a shared
-    host, another bench) does not block this run."""
+    host, another bench) does not block this run. True when a sounder holds
+    these radios or might (its radios could not be read): the full form must
+    not open them then, or it disturbs that run."""
     held, unknown, other = [], [], []
     for pid in running_sounders():
         r = radios_of(pid)
@@ -250,6 +252,7 @@ def check_no_sounder(rep, nodes):
     else:
         rep.add("PASS", "radios free", "no other sounder on these radios"
                 + (" (pid %s runs on other radios)" % ", ".join(map(str, other)) if other else ""))
+    return bool(held or unknown)
 
 
 def check_servers(rep, nodes, port):
@@ -401,7 +404,7 @@ def main():
     check_plugin(rep, args.venv)
     check_examples(rep)
     nodes = list(dict.fromkeys(bs + ue))
-    check_no_sounder(rep, nodes)
+    held = check_no_sounder(rep, nodes)
     port = (cfg or {}).get("remote_port", "55132")  # config.cc's default
     if not isinstance(port, str) or not port.isdigit():
         # config.cc reads it as a string and throws on a number
@@ -409,9 +412,13 @@ def main():
                 "Write it as a quoted number in the config, e.g. \"remote_port\": \"55132\"")
         nodes = []  # no port to probe
     up = check_servers(rep, nodes, port)
-    if not args.quick and up == nodes and nodes:
+    if args.quick:
+        pass
+    elif held:
+        rep.add("INFO", "stack", "skipped: a sounder holds these radios, and opening them would disturb its run")
+    elif up == nodes and nodes:
         check_versions(rep, sd, nodes, port, plugin_env(args.venv))
-    elif not args.quick:
+    else:
         rep.add("INFO", "stack", "skipped: not every radio's server answers")
 
     if args.json:

@@ -182,6 +182,11 @@ rc, rep, lv = run("--quick"); check(rc == 1 and lv["radios free"] == "FAIL", "a 
 fix = [r for r in rep["results"] if r["what"] == "radios free"][0]["fix"]
 check("kill %d" % p.pid in fix and "rig_release_holders" not in fix,
       "its fix names that pid, not the tool that kills every sounder and dashboard")
+before = open(os.path.join(root, "unmade")).read()
+rc, rep, lv = run()
+check(rc == 1 and "stack match" not in lv and lv.get("stack") == "INFO"
+      and open(os.path.join(root, "unmade")).read() == before,
+      "full form with a sounder on these radios opens no radio (mutation: read the stacks whenever the servers answer)")
 os.killpg(p.pid, 9); p.wait()
 p = subprocess.Popen([snd, "--conf_file", "files/houdini-other.json"], cwd=sd, start_new_session=True); time.sleep(0.3)
 rc, rep, lv = run("--quick"); check(rc == 0 and lv["radios free"] == "PASS", "a sounder on other radios does not block")
