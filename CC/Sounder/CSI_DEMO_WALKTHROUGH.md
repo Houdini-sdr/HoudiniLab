@@ -335,7 +335,8 @@ shipped numbers are load bearing. In the legacy configs 30 slots of 4096
 samples is exactly 1 ms per frame at 122.88 MSPS, and `samps_per_slot` must
 stay at or below 4096 to fit the FPGA transmit RAM. In the dual-band configs
 20 slots of 61440 samples is exactly 10 ms, and every slot starts on the
-driver's 384-tick grid; each config's `_numerology_note` shows the arithmetic.
+driver's 384-tick grid (the `r1` and `r2` bring-up steps keep the legacy
+30 x 4096 frame); each config's `_numerology_note` shows the arithmetic.
 
 ## 3. Choose a config
 
@@ -384,7 +385,7 @@ In the schedule strings, `B` is the beacon, `P` is the pilot, `U` is uplink
 data, and `G` is a guard slot. `houdini-ul.json` places the pilot and data at
 slots 16 and 18 rather than early in the frame, which keeps them clear of
 beacon leakage at the base station; the dual-band configs put them in slots 2
-and 3 of their 20-slot frame.
+and 3.
 
 Pilot and data placement is sample exact: the client pads each burst so its
 start escapes the driver's 3125 ns scheduling grid, and `tx_advance` in the
@@ -758,7 +759,8 @@ Check each field:
 - `sym_start` is the zero prefix minus half the cyclic prefix: 120 for the
   legacy configs (128 minus half of 16), -112 for the dual-band configs (32
   minus half of 288; negative is valid, the symbol body is read from the
-  window start plus the cyclic prefix). Section 7 explains why.
+  window start plus the cyclic prefix), and 96 for their `r1` and `r2`
+  bring-up steps (128 minus half of 64). Section 7 explains why.
 - `timing_fix=1` and `phase_fix=1`, on by default for Houdini.
 
 Other sounder lines worth recognizing on a healthy run:
@@ -801,7 +803,7 @@ config's `sync` block (section 7.1).
 | `HOUDINI_MAX_FRAME` | from config `max_frame` | Frame count to run. Set large for continuous viewing. |
 | `HOUDINI_CSI_UDP` | `127.0.0.1:9999` with `--view` | Where datagrams go, as `host:port`. |
 | `HOUDINI_CSI_DUMP` | unset | One shot raw slot and H dump for offline analysis. |
-| `HOUDINI_PILOT_HORIZON` | from config `ue_pilot_horizon` (96 in the legacy configs, 10 in the dual-band ones) | How many frames of client bursts are queued ahead of real time. Larger survives slower host loops; every extra frame delays a timing correction reaching the wire. |
+| `HOUDINI_PILOT_HORIZON` | from config `ue_pilot_horizon` (96 in the legacy configs and the dual-band `r1` and `r2`, 10 in the other dual-band ones) | How many frames of client bursts are queued ahead of real time. Larger survives slower host loops; every extra frame delays a timing correction reaching the wire. |
 | `HOUDINI_BS_RX_DEBUG` | unset | Base station prints its rederivation of the client schedule: `pilot_grid_off` should sit within a few samples of zero and hold steady through a run, and `clamped` (slots placed past the capture's edge) should read 0. |
 | `HOUDINI_UE_TX_DEBUG` | unset | Client prints its burst scheduling (frames queued, pad). |
 | `HOUDINI_CORE_MAP` | unset | Where the sounder pins its own threads: `main=<core>,recorder=<core>,bsrx=<core>,ue=<core>`, each the base core of that role (thread i on base + i); a role not named keeps the default layout. Logged at start. For CPU isolation experiments. |
