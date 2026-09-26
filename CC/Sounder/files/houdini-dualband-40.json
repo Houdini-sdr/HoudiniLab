@@ -1,7 +1,7 @@
 {
- "_description": "Demo fallback at 40 MHz: sub-6 2420 MHz + X-band IF 4380 MHz, 4096 FFT, 30 kHz, 106 RB",
- "_comment": "AP-79 40 MHz rollback of the target (houdini-dualband.json) [user: 50 MHz target, 40 MHz rollback if the link at 50 disappoints on the bench]: sub-6 2400 to 2440 MHz at NCO 2420, 106 RB = 1272 subcarriers = 38.16 MHz. Everything else as the target.",
- "_status": "RAN on the rig 2026-09-23 (AP-79) and decodes, one run so far; the three-run set follows the SH-427 fix. Results: DEMO_VERIFICATION.md section 9. The replay strobe contract at vld 2 is confirmed by the software and fpga lanes.",
+ "_description": "R3-40, the 40 MHz rollback: sub-6 2420 MHz + X-band IF 4380 MHz, both at 106 RB, 4096 FFT, 30 kHz, unsteered",
+ "_comment": "AP-79's 40 MHz rollback of R3 (houdini-dualband.json), for when the link at 50 MHz disappoints: sub-6 2400 to 2440 MHz at NCO 2420 and the X-band IF at NCO 4380, both at 106 RB = 1272 subcarriers = 38.16 MHz. Everything else, cabling included, as R3 (see its _comment).",
+ "_status": "RAN once as R3-40 and decodes (DEMO_VERIFICATION 9.6; the seat 0.2 +- 0.7, 9.4); not run on the demo head. Use it only if the link at 50 MHz disappoints.",
  "serial_file": "files/topology-houdini-dualband.json",
  "radio_type": "houdini",
  "remote_port": "55132",
@@ -20,7 +20,7 @@
   "B": 4380000000.0,
   "C": 4380000000.0
  },
- "_gain_note": "Written explicitly on every opened channel: make() now resets RX DSA to 0 dB and TX VOP to 20 mA. TX 0 dB = maximum VOP, where the software lane measured linearity (W2). The ue_*_gain_* fields below are Iris units and inert on Houdini.",
+ "_gain_note": "houdini_rx_gain_db / houdini_tx_gain_db: one value per direction, written to every channel the radio opens and read back at start, so attenuating the sub-6 RX attenuates the X-band RX too. RX is minus the step attenuator's attenuation (0 = none); TX 0 dB = maximum VOP, where the software lane measured linearity (W2). The device's make() resets RX DSA to 0 dB and TX VOP to 20 mA before they are written. The ue_*_gain_* fields below are Iris units and inert on Houdini.",
  "houdini_tx_gain_db": 0.0,
  "houdini_rx_gain_db": 0.0,
  "channel": "A",
@@ -29,7 +29,7 @@
  "ue_channel": "A",
  "ue_tx_channel": "AB",
  "ue_rx_channel": "A",
- "_numerology_note": "5G-like, fixed CP [user; plan section 3.3]: SCS 30 kHz = 122.88 MHz / 4096, CP 288 (NR normal), symbol 4384 ticks. 14 symbols = 61376 ticks + zero prefix 32 + postfix 32 = 61440 ticks = exactly 0.5 ms (NR's slot) = 160 x 384, so every slot starts on the 384-tick TDD grid, as the old 1 ms frame did. 1596 data subcarriers = 133 RB = 47.88 MHz (+-23.94, inside the +-24 MHz filter passband). This IS the 40 MHz rollback: 1272 subcarriers = 106 RB = 38.16 MHz at NCO 2420.",
+ "_numerology_note": "5G-like, fixed CP (plan section 3.3): SCS 30 kHz = 122.88 MHz / 4096, CP 288 (NR normal), symbol 4384 ticks. 14 symbols = 61376 ticks + zero prefix 32 + postfix 32 = 61440 ticks = exactly 0.5 ms (NR's slot) = 160 x 384, so every slot starts on the 384-tick TDD grid. 1272 data subcarriers = 106 RB = 38.16 MHz (+-19.08, inside the +-24 MHz filter passband) on both bands; R3 (houdini-dualband.json) carries 1596 (133 RB).",
  "fft_size": 4096,
  "cp_size": 288,
  "ofdm_symbol_per_slot": 14,
@@ -61,7 +61,7 @@
  "max_frame": 2000,
  "beamsweep": false,
  "_carried_note": "tx_advance is re-measured at mode V (169, see _tx_advance_note). The detection thresholds are DERIVED for nr_pss_bl on a simulated link (tests/comms-func/detection_calibration_test.cc): corr_scale 5 (coherence bar 0.2; noise-only max 0.080 of 400 windows, a beacon 30 dB under bench level 0.90), snr_floor_db 25 (legacy's 30 shifted by the measured -5.2 dB for this beacon at 0.34 peak on the filtered lane, 16.6 dB margin). detector.min_bar 0.1 stops the resync retry relaxation (+1 on corr_scale per retry) from walking the bar into the noise (at corr_scale 5 it moves it 20% a retry). ue_pilot_horizon counts FRAMES.",
- "_tx_advance_note": "BENCH CALIBRATION, mode-V converter path (AP-79, 2026-09-23): 169 = 247 (the one-rate path's value) + the mean pilot_grid_off of -78 samples (sd 3.8, no drift over 80 s) measured at R1 with HOUDINI_BS_RX_DEBUG=1 once the BS framer placed the pilot by its leading edge (4e0fcbf). Mode V moves the pilot 78 samples EARLY against the one-rate path: the x24 DAC interpolation and x40 ADC decimation carry a different pipeline latency. The converter latency is the same at every mode-V rung, BUT the BS framer's pilot edge (the measurement) carries a bias that depends on the pilot waveform, and this rung's fft-4096 pilot differs from R1's: RE-MEASURE pilot_grid_off here before trusting 169 (an Opus review, L2). Re-derive after any cabling or converter change by the same procedure.",
+ "_tx_advance_note": "BENCH CALIBRATION, mode-V converter path: 169 = 247 (the one-rate path's value) + the mean pilot_grid_off of -78 samples (sd 3.8, no drift over 80 s) measured at R1 with HOUDINI_BS_RX_DEBUG=1 once the BS framer placed the pilot by its leading edge (DEMO_VERIFICATION 9.4). Mode V moves the pilot 78 samples EARLY against the one-rate path: the x24 DAC interpolation and x40 ADC decimation carry a different pipeline latency. With 169 the seat reads -2.2 +- 0.8 at R3a, -1.0 +- 0.9 at R3 and 0.2 +- 0.7 at R3-40 (9.4), -2/-3 cabled on fpga 1.33 and 0..+2 on 1.34 (9.69-9.71), inside the +-32 slot margin; it moves by a few samples between sessions, untraced (9.73). Re-derive after any cabling or converter change: run with HOUDINI_BS_RX_DEBUG=1 across a few restarts and shift tx_advance by the mean pilot_grid_off.",
  "tx_advance": [
   169
  ],

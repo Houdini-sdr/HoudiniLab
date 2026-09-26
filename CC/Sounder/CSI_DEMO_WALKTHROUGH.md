@@ -340,13 +340,13 @@ list shows. All of them run one client. Each names its own topology file in
 |---|---|
 | `files/houdini-dualband-xw-steer-slots.json` | **The demo.** Sub-6 2425 MHz at 133 RB plus the X-band IF at 4380 MHz at 270 RB (97.2 MHz), 4096 FFT, 30 kHz spacing; the UE's clock steered onto the beacon; the base station receives only its rx slots and removes the carrier offset before the FFT. Needs the slots host plugin (`HOUDINI_SOAPY_ROOT`, `DEMO_BENCH_RUNBOOK.md` A3) |
 | `files/houdini-dualband-xw-steer-slots-fe.json` | The demo through an X-band front end held in a static TX/RX state for the session |
-| `files/houdini-dualband-xw-steer.json` | The demo's widths and steering, receiving every slot, on the default plugin |
+| `files/houdini-dualband-xw-steer.json` | The demo's widths and steering, receiving every slot, on the default plugin (the frozen fallback build's config) |
 | `files/houdini-dualband-xw-steer-fe.json` | That, through the X-band front end |
 | `files/houdini-dualband-steer.json` | Both bands at 133 RB (48 MHz), steered: the fallback when the 97 MHz X-band is too weak |
-| `files/houdini-dualband-steer-fe.json` | That fallback through the X-band front end |
+| `files/houdini-dualband-steer-fe.json` | That fallback through the X-band front end (not yet run on a rig) |
 | `files/houdini-dualband-xw.json` | The 97 MHz X-band, unsteered |
-| `files/houdini-dualband.json` | Both bands at 133 RB, unsteered: the 5G-like numerology the demo builds on |
-| `files/houdini-dualband-40.json` | The demo at 40 MHz (106 RB) with sub-6 centred at 2420 MHz, the fallback if the 50 MHz link disappoints |
+| `files/houdini-dualband.json` | R3: both bands at 133 RB, unsteered: the 5G-like numerology the demo builds on |
+| `files/houdini-dualband-40.json` | R3 at 40 MHz: both bands at 106 RB with sub-6 centred at 2420 MHz, unsteered; the rollback if the 50 MHz link disappoints |
 | `files/houdini-dualband-r3a.json` | The demo numerology on sub-6 only |
 | `files/houdini-dualband-r2.json` | Both bands at 256 FFT, 480 kHz spacing |
 | `files/houdini-dualband-r1.json` | Sub-6 only at 256 FFT, 480 kHz spacing |
