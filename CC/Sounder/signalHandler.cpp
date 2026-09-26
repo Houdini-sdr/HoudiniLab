@@ -5,7 +5,9 @@
 #include <errno.h>
 #include <signal.h>
 
-bool SignalHandler::mbGotExitSignal = false;
+std::atomic<bool> SignalHandler::mbGotExitSignal{false};
+static_assert(std::atomic<bool>::is_always_lock_free,
+              "the exit flag is written in a signal handler, so it must be lock-free");
 
 /**
 * Default Contructor.

@@ -452,7 +452,7 @@ Config::Config(const std::string& jsonfile, const std::string& directory,
     corr_scale_.resize(num_cl_sdrs_, 1);
   } else {
     if (client_present_ && corr_scale.size() != num_cl_sdrs_) {
-      MLPD_ERROR("tx_advance size must be same as the number of clients!\n");
+      MLPD_ERROR("corr_scale size must match the number of clients!\n");
       exit(1);
     }
     corr_scale_.assign(corr_scale.begin(), corr_scale.end());
