@@ -321,16 +321,22 @@ def check_egress(rep, ip, raw):
         rep.add("FAIL", "egress %s" % ip, "the radio's data egress has stalled (%s); it will send no samples although its link is up" % raw,
                 "Reload the radio's gateware (PL) or reboot the radio. A bounce of this host's data port (a host reboot, a cable pull) causes it.")
     else:
-        # The per-port drop and mark counters saturate at 255 and only a reset
-        # of the radio's egress clears them: saturated, the run's link health
-        # cannot see a new egress drop (it reports them as blind).
-        full = ["%s %s" % (grp, port) for grp, body in re.findall(r"(drop|marked)=([^;]*)", raw or "")
-                for port, v in re.findall(r"(p\d+):(\d+)", body) if int(v) >= 255]
+        # The per-port drop counters and the one marked-frame counter saturate
+        # at 255 and only a node boot or a PL reload clears them: saturated,
+        # the run's link health cannot see a new egress drop (it reports them
+        # as blind). Older device builds printed marked per port.
+        full = []
+        for grp, body in re.findall(r"(drop|marked)=([^;]*)", raw or ""):
+            ports = re.findall(r"(p\d+):(\d+)", body)
+            if ports:
+                full += ["%s %s" % (grp, port) for port, v in ports if int(v) >= 255]
+            elif body.strip().isdigit() and int(body) >= 255:
+                full.append(grp)
         if full:
             rep.add("WARN", "egress %s" % ip, "no data-path stall recorded, but the egress counters %s are saturated "
                     "at 255, so a new egress drop in the run goes unseen" % ", ".join(full),
-                    "The run is not blocked. A reload of the radio's gateware (PL) clears them; ask whoever maintains "
-                    "the boards, and say which run or test drove the drops.")
+                    "The run is not blocked. A reboot of the radio, or a reload of its gateware (PL), clears them; ask "
+                    "whoever maintains the boards, and say which run or test drove the drops.")
         else:
             rep.add("PASS", "egress %s" % ip, "no data-path stall recorded")
 

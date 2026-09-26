@@ -97,8 +97,10 @@ inline Counters parseFlatCounts(const std::string& raw) {
   return out;
 }
 
-/// EGRESS_STATUS 'drop=p0:a,p1:b;stall_seen=s,stall_evt=e;marked=p0:..' ->
-/// {'drop_p0': a, .., 'stall_seen': s, 'stall_evt': e, 'marked_p0': ..}.
+/// EGRESS_STATUS 'drop=p0:a,p1:b;stall_seen=s,stall_evt=e;marked=m' ->
+/// {'drop_p0': a, .., 'stall_seen': s, 'stall_evt': e, 'marked': m}. The drop
+/// counters are per port; marked is one counter after the ports merge, which
+/// older device builds printed per port ('marked=p0:m,p1:0,..' -> 'marked_p0').
 inline Counters parseEgressStatus(const std::string& raw) {
   Counters out;
   for (const auto& group : detail::split(raw, ';')) {
@@ -276,7 +278,7 @@ inline std::vector<std::string> blindCounters(const Counters& cur) {
     if (k.rfind("egress.", 0) != 0) continue;
     if (k == "egress.stall_seen" && kv.second != 0) {
       out.push_back(k + "=1 (sticky: a stall happened; stall_evt no longer proves a new one)");
-    } else if ((k.rfind("egress.drop_", 0) == 0 || k.rfind("egress.marked_", 0) == 0) && kv.second >= kEgressSaturated) {
+    } else if ((k.rfind("egress.drop_", 0) == 0 || k.rfind("egress.marked", 0) == 0) && kv.second >= kEgressSaturated) {
       out.push_back(k + "=" + std::to_string(kv.second) + " (saturated: further drops cannot be counted)");
     }
   }

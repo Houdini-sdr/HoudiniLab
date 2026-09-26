@@ -110,6 +110,11 @@ int main(int argc, char** argv) {
                  "egress.marked_p2=255 (saturated: further drops cannot be counted)",
                  "egress.stall_seen=1 (sticky: a stall happened; stall_evt no longer proves a new one)"}),
           "saturated and sticky egress counters are flagged");
+    const auto g = parseEgressStatus("drop=p0:0,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marked=255");
+    check(g.at("marked") == 255 && g.at("drop_p3") == 0 && g.count("marked_p0") == 0,
+          "the device's single marked=N parses as one counter beside the per-port drops");
+    check(eq(blindCounters({{"egress.marked", 255}}), {"egress.marked=255 (saturated: further drops cannot be counted)"}),
+          "a saturated single marked counter is flagged (mutation: only the old per-port 'egress.marked_' prefix read)");
     FakeNode n;
     n.keys["EGRESS_STATUS"] = "drop=p0:255,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marked=p0:0,p1:0,p2:0,p3:0";
     LinkHealth h(n.read(), "bs", n.clock());
