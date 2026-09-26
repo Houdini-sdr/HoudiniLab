@@ -351,8 +351,8 @@ constellation, CIR, ADC, beacon sync).
 ## A8d. Over the air: antennas and the room (before the first run)
 
 The first sub-6 over-the-air runs lost about 20 dB to antenna placement and a
-quarter of the beacons to nearby emitters; both are fixed at the bench, not in
-software.
+quarter of the beacons to nearby emitters (`DEMO_VERIFICATION.md` 9.62 to
+9.65); both are fixed at the bench, not in software.
 
 1. Stand every stick vertical (same polarisation), each node's TX stick
    broadside to the other node's RX stick (sides facing, never end to end),

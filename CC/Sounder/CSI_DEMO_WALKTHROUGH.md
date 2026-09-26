@@ -40,6 +40,13 @@ display. Every command runs on `<host>` unless it says otherwise.
    cd <path-to-HoudiniLab>/CC/Sounder
    ```
 
+   For a slots config (the demo, section 3), also select the slots host
+   plugin in the same shell before steps 3 and 4:
+
+   ```sh
+   export HOUDINI_SOAPY_ROOT=<slots-plugin-prefix>
+   ```
+
 2. Pick a config from section 3, then put your two radios' addresses in the
    topology file it names. This prints the file name:
 
@@ -366,15 +373,18 @@ link and the stack, `r1` the converter clocks and the sub-6 band, `r2` adds the
 X-band IF, `r3a` the demo numerology on sub-6, and `houdini-dualband.json` both
 bands; the demo configs at the top of the table add the X-band's width, the
 clock steering and the slots mode. When a rung fails, the one below it passing
-tells you what changed. On the
+tells you what changed. `r0` runs at 500 MHz, so it is the control only while
+no sub-6 bandpass filter sits in the chain: a 2.4 GHz bandpass blocks its
+beacon and the client never acquires (`DEMO_VERIFICATION.md` 9.40). On the
 legacy bench roles, start with `houdini-1u.json` and move to `houdini-ul.json`
 once the channel estimate is clean: the constellation only has something to
 draw when the frame carries an uplink data slot.
 
 In the schedule strings, `B` is the beacon, `P` is the pilot, `U` is uplink
-data, and `G` is a guard slot. The uplink config places the pilot and data at
+data, and `G` is a guard slot. `houdini-ul.json` places the pilot and data at
 slots 16 and 18 rather than early in the frame, which keeps them clear of
-beacon leakage at the base station.
+beacon leakage at the base station; the dual-band configs put them in slots 2
+and 3 of their 20-slot frame.
 
 Pilot and data placement is sample exact: the client pads each burst so its
 start escapes the driver's 3125 ns scheduling grid, and `tx_advance` in the
