@@ -293,7 +293,10 @@ the demo head, `houdini-dualband-xw-steer-slots.json`, steered, cabled):
   the host's data ports can wedge a node's FPGA egress (HS-225), which fails the
   check's `egress` line; recover by reloading that node's PL or rebooting it.
 - A radio still held by an old sounder: the setup check names its pid; stop that
-  run or `kill <pid>`. `tools/rig_release_holders.py` also works but stops EVERY
+  run or `kill -INT <pid>`, the sounder's own stop (a plain `kill` skips its
+  end-of-run checks and leaves the clock steered). Only if it has not exited
+  after 10 s, `kill -9 <pid>`, then run the setup check again (it names a
+  steered clock and how to release it). `tools/rig_release_holders.py` also works but stops EVERY
   sounder and dashboard on the host, including a running `--control` backend.
 
 ## A8b. The canned-data fallback

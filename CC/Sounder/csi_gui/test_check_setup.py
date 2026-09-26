@@ -196,7 +196,7 @@ check(rc == 0 and lv["teardown"] == "WARN", "missing host examples is a WARN"); 
 held = fake_sounder(4242, ["./build/sounder", "--conf_file", "files/houdini-x.json"], sd)
 rc, rep, lv = run("--quick"); check(rc == 1 and lv["radios free"] == "FAIL", "a sounder on the same radios fails 'radios free'")
 fix = [r for r in rep["results"] if r["what"] == "radios free"][0]["fix"]
-check("kill 4242" in fix and "rig_release_holders" not in fix,
+check("kill -INT 4242" in fix and "rig_release_holders" not in fix,
       "its fix names that pid, not the tool that kills every sounder and dashboard")
 before = open(os.path.join(root, "unmade")).read()
 rc, rep, lv = run()

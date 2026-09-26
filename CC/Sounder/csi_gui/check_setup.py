@@ -247,7 +247,8 @@ def check_no_sounder(rep, nodes):
                 % ", ".join(map(str, held)),
                 # Name the pids: tools/rig_release_holders.py would also kill this
                 # dashboard and every sounder on the host, including other benches'.
-                "Stop the run that started it, or end it with: kill %s" % " ".join(map(str, held)))
+                "Stop the run that started it, or end it with: kill -INT %s (the sounder's own stop; a plain kill "
+                "leaves its clock steered)" % " ".join(map(str, held)))
     elif unknown:
         rep.add("WARN", "radios free", "a sounder is running (pid %s) and its radios could not be read"
                 % ", ".join(map(str, unknown)),
