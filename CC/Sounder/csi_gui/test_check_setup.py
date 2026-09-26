@@ -1,8 +1,12 @@
 # check_setup.py against a fake host: a stand-in SoapySDRUtil, a listening
-# socket for each radio's server, a process named `sounder`, and a stand-in
-# SoapySDR module that serves each radio's hardware info. Stdlib only; run
-# from csi_gui/ (ctest does).
+# socket for each radio's server, a process table of its own (--proc-root) with
+# processes named `sounder`, and a stand-in SoapySDR module that serves each
+# radio's hardware info. The host's own processes and plugin environment never
+# enter it, so it passes in an operator's shell mid-run. Stdlib only; run from
+# csi_gui/ (ctest does).
 import json, os, shutil, socket, subprocess, sys, tempfile, threading, time
+for k in ("HOUDINI_SOAPY_ROOT", "SOAPY_SDR_ROOT"):  # the runbook's A4 exports one
+    os.environ.pop(k, None)
 fails = 0
 def check(ok, what):
     global fails; print(("PASS " if ok else "FAIL ") + what, flush=True); fails += (not ok)
@@ -75,9 +79,17 @@ for k in ("SOAPY_SDR_PLUGIN_PATH", "LD_LIBRARY_PATH", "VIRTUAL_ENV"):  # the che
 open(os.path.join(sd, "files", "topo-other.json"), "w").write(
     '{"BaseStations": {"BS0": {"sdr": ["127.0.0.9"]}}, "Clients": {"sdr": ["127.0.0.8"]}}')
 json.dump({"serial_file": "files/topo-other.json"}, open(os.path.join(sd, "files", "houdini-other.json"), "w"))
+fproc = os.path.join(root, "proc"); os.makedirs(fproc)
+def fake_sounder(pid, argv, cwd):
+    """A process named `sounder` in the test's process table, as /proc shows one."""
+    d = os.path.join(fproc, str(pid)); os.makedirs(d)
+    open(os.path.join(d, "comm"), "w").write("sounder\n")
+    open(os.path.join(d, "cmdline"), "wb").write(b"\0".join(a.encode() for a in argv) + b"\0")
+    os.symlink(cwd, os.path.join(d, "cwd"))
+    return d
 def run(*extra, conf="files/houdini-x.json"):
     out = subprocess.run([sys.executable, os.path.abspath("check_setup.py"), "--sounder-dir", sd,
-                          "--venv", venv, "--conf", conf, "--json"] + list(extra),
+                          "--venv", venv, "--conf", conf, "--json", "--proc-root", fproc] + list(extra),
                          env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
     rep = json.loads(out.stdout)
     return out.returncode, rep, {r["what"]: r["level"] for r in rep["results"]}
@@ -87,9 +99,7 @@ check(rc == 0 and rep["ok"], "a ready host passes (rc 0)")
 check(lv.get("stack match") == "PASS" and lv.get("server 127.0.0.2") == "PASS", "full form: servers answer and stacks match")
 check(sorted(open(os.path.join(root, "unmade")).read().split()) == ["127.0.0.1", "127.0.0.2"],
       "each radio opened for its stack is closed exactly once, not dropped at exit (fails on a direct Device.unmake: the binding's __del__ repeats it)")
-# A real sounder on this host (a rig host mid-run) runs on other radios than the
-# fake 127.0.0.x ones, so it may add a note or, for another user's process, a WARN.
-check(all(l != "WARN" for w, l in lv.items() if w != "radios free"), "no warnings on a ready host: %s" % lv)
+check(all(l != "WARN" for l in lv.values()), "no warnings on a ready host: %s" % lv)
 # Fails under: never reading CLOCK_ADJ (both then report INFO 'not readable').
 check(all(r["level"] == "INFO" and "offset 0" in r["detail"] for r in rep["results"]
           if r["what"] in ("clock 127.0.0.1", "clock 127.0.0.2"))
@@ -174,23 +184,30 @@ rc, rep, lv = run("--quick"); check(rc == 1 and lv["plugin"] == "FAIL", "SoapySD
 open(util, "w").write("#!/bin/sh\necho 'Available factories... houdinisdr, remote'\n")
 env["HOUDINI_EXAMPLES"] = root; rc, rep, lv = run("--quick")
 check(rc == 0 and lv["teardown"] == "WARN", "missing host examples is a WARN"); env["HOUDINI_EXAMPLES"] = ex
-# A process named `sounder` (a script keeps its own name as comm) run from the
-# sounder directory with a --conf_file, as the real one is.
-snd = os.path.join(root, "sounder"); open(snd, "w").write("#!/bin/sh\nsleep 30\n"); os.chmod(snd, 0o755)
-p = subprocess.Popen([snd, "--conf_file", "files/houdini-x.json"], cwd=sd, start_new_session=True); time.sleep(0.3)
+# A sounder run from the sounder directory with a --conf_file, as the real one is.
+held = fake_sounder(4242, ["./build/sounder", "--conf_file", "files/houdini-x.json"], sd)
 rc, rep, lv = run("--quick"); check(rc == 1 and lv["radios free"] == "FAIL", "a sounder on the same radios fails 'radios free'")
 fix = [r for r in rep["results"] if r["what"] == "radios free"][0]["fix"]
-check("kill %d" % p.pid in fix and "rig_release_holders" not in fix,
+check("kill 4242" in fix and "rig_release_holders" not in fix,
       "its fix names that pid, not the tool that kills every sounder and dashboard")
 before = open(os.path.join(root, "unmade")).read()
 rc, rep, lv = run()
 check(rc == 1 and "stack match" not in lv and lv.get("stack") == "INFO"
       and open(os.path.join(root, "unmade")).read() == before,
       "full form with a sounder on these radios opens no radio (mutation: read the stacks whenever the servers answer)")
-os.killpg(p.pid, 9); p.wait()
-p = subprocess.Popen([snd, "--conf_file", "files/houdini-other.json"], cwd=sd, start_new_session=True); time.sleep(0.3)
-rc, rep, lv = run("--quick"); check(rc == 0 and lv["radios free"] == "PASS", "a sounder on other radios does not block")
-os.killpg(p.pid, 9); p.wait()
+shutil.rmtree(held)
+other = fake_sounder(4243, ["./build/sounder", "--conf_file=files/houdini-other.json"], sd)
+rc, rep, lv = run(); check(rc == 0 and lv["radios free"] == "PASS" and lv.get("stack match") == "PASS",
+                           "a sounder on other radios does not block, and the stacks are read (mutation: any sounder blocks)")
+shutil.rmtree(other)
+unknown = fake_sounder(4244, ["./build/sounder"], sd)  # no --conf_file: its radios cannot be read
+before = open(os.path.join(root, "unmade")).read()
+rc, rep, lv = run()
+check(rc == 0 and lv["radios free"] == "WARN" and "stack match" not in lv
+      and open(os.path.join(root, "unmade")).read() == before,
+      "a sounder whose radios cannot be read is a WARN, and the full form opens no radio then either "
+      "(mutation: skip the stack read only when held)")
+shutil.rmtree(unknown)
 srv.shutdown(socket.SHUT_RDWR); srv.close()
 rc, rep, lv = run(); check(rc == 1 and lv["server 127.0.0.1"] == "FAIL" and "stack match" not in lv,
                           "a server that does not answer fails, and the stack read is skipped")

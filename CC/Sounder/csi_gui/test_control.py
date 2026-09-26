@@ -3,6 +3,8 @@
 # HTTP route is exercised end to end. Stdlib only; run from csi_gui/ (ctest does).
 import json, os, sys, tempfile, threading, time, types, urllib.request, urllib.error
 sys.argv = ["x"]
+for k in ("HOUDINI_SOAPY_ROOT", "SOAPY_SDR_ROOT"):  # the runbook's A4 exports one; the venv's plugin is asserted
+    os.environ.pop(k, None)
 import importlib.util
 spec = importlib.util.spec_from_file_location("cs", "csi_server.py"); cs = importlib.util.module_from_spec(spec); spec.loader.exec_module(cs)
 fails = 0

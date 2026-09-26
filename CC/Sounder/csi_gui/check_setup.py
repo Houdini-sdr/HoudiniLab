@@ -188,14 +188,17 @@ def check_examples(rep):
                 "<path-to-SoapyHoudiniSDR>/host/examples (walkthrough section 2.4).")
 
 
+PROC = "/proc"  # the process table read below; --proc-root points the test at its own
+
+
 def running_sounders():
     """Local processes named `sounder`. By /proc comm, so this never matches itself."""
     found = []
-    for e in os.listdir("/proc"):
+    for e in os.listdir(PROC):
         if not e.isdigit():
             continue
         try:
-            with open("/proc/%s/comm" % e) as f:
+            with open(os.path.join(PROC, e, "comm")) as f:
                 if f.read().strip() == "sounder":
                     found.append(int(e))
         except OSError:
@@ -207,9 +210,9 @@ def radios_of(pid):
     """The radio addresses a running sounder uses, from its --conf_file and its
     working directory, or None when that cannot be read (another user's process)."""
     try:
-        with open("/proc/%d/cmdline" % pid, "rb") as f:
+        with open(os.path.join(PROC, str(pid), "cmdline"), "rb") as f:
             argv = f.read().decode("utf-8", "replace").split("\0")
-        cwd = os.readlink("/proc/%d/cwd" % pid)
+        cwd = os.readlink(os.path.join(PROC, str(pid), "cwd"))
         conf = None
         for i, a in enumerate(argv):
             if a == "--conf_file" and i + 1 < len(argv):
@@ -391,7 +394,10 @@ def main():
     ap.add_argument("--quick", action="store_true", help="skip check 7 (does not open the radios)")
     ap.add_argument("--json", action="store_true", help="print the report as JSON (for the dashboard)")
     ap.add_argument("--hwinfo", nargs=2, metavar=("IP", "PORT"), help=argparse.SUPPRESS)
+    ap.add_argument("--proc-root", default="/proc", help=argparse.SUPPRESS)  # the test's own process table
     args = ap.parse_args()
+    global PROC
+    PROC = args.proc_root
 
     if args.hwinfo:  # the child of check_versions
         print(json.dumps(hwinfo(*args.hwinfo)))
