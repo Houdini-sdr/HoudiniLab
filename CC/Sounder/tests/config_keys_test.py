@@ -2,8 +2,8 @@
 # reads the top level with json.value(key, default), so a misspelt key (say
 # "bs_rx_slot") is silently ignored and the run takes the default. The sync
 # block is exempt: SyncConfig already refuses an unknown key there
-# (sync_config.cc). Also exempt: "_" notes, the dashboard's own dashboard_*
-# keys, and the topology files, whose keys are names. A key is known when a
+# (sync_config.cc). Also exempt: "_" notes, the dashboard_* keys csi_gui
+# reads, and the topology files, whose keys are names. A key is known when a
 # sounder source names it as a string literal. Run from CC/Sounder (ctest does).
 # Mutation: rename a key in a demo config (bs_rx_slots -> bs_rx_slot); this fails.
 import glob, json, os, re, sys
@@ -14,13 +14,19 @@ for f in (glob.glob("*.cc") + glob.glob("sync/*.cc") + glob.glob("include/*.h")
     with open(f, errors="replace") as fh:
         src += fh.read()
 known = set(re.findall(r'"([A-Za-z_][A-Za-z0-9_]*)"', src))
+# the dashboard's own keys, as csi_gui names them (dashboard_mag_top)
+gui = ""
+for f in glob.glob("csi_gui/*.py"):
+    with open(f, errors="replace") as fh:
+        gui += fh.read()
+dashboard = set(re.findall(r'"(dashboard_[A-Za-z0-9_]*)"', gui))
 
 
 def unknown(o, path=""):
     out = []
     if isinstance(o, dict):
         for k, v in o.items():
-            if k.startswith("_") or (path == "" and (k == "sync" or k.startswith("dashboard_"))):
+            if k.startswith("_") or (path == "" and (k == "sync" or k in dashboard)):
                 continue
             if k not in known:
                 out.append(path + k)

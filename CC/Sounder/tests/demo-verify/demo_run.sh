@@ -29,7 +29,8 @@ pgrep -x sounder >/dev/null && { echo "a sounder is running on this host; stop i
 [ "$SECS" -gt 90 ] || { echo "secs must be over 90 (the samplers start 40 s in)"; exit 1; }
 S=$(mktemp -d /tmp/demo_run_XXXX)
 setsid nohup python3 "$HERE/freeze_watch.py" --run-dir "$D/ap79_runs" --tag "$TAG" > "$S/freeze.txt" 2>&1 < /dev/null &
-setsid nohup python3 "$HERE/mer_sampler.py" "$S/mer.txt" 15 $((SECS - 30)) 40 > /dev/null 2>&1 < /dev/null &
+# The MER every 15 s from 40 s in, the last about 20 s before the run ends.
+setsid nohup python3 "$HERE/mer_sampler.py" "$S/mer.txt" 15 $((SECS - 60)) 40 > /dev/null 2>&1 < /dev/null &
 setsid nohup python3 "$HERE/spc_sample.py" "$S/spc.txt" 60,$((SECS / 2)),$((SECS - 40)) > "$S/spc.err" 2>&1 < /dev/null &
 [ "$PLUG" = slots ] && export HOUDINI_SOAPY_ROOT=${HOUDINI_SLOTS_ROOT:-$HOME/houdini_slots}
 export SOUNDER_DIR=$D HEALTH_S=5 HOUDINI_TX_HOST_STATUS=1 FILTERS="$FILT"

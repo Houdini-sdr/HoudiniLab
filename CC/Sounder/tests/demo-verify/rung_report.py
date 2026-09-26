@@ -2,7 +2,9 @@
 """AP-79 rung report: every pass-criterion number from one sounder log.
 Throttled warnings (powers of two, or every Nth) are read by their LAST
 occurrence number, never by counting lines."""
-import re, sys, collections, statistics as st
+import os, re, sys, collections, statistics as st
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from run_summary import alarm_kinds  # noqa: E402  one alarm classifier, not two
 
 
 def acquisitions(L):
@@ -62,11 +64,7 @@ def main(path):
     # app counter moved (RadioHoudini's health thread): a line whose device
     # side reads "clean" can still carry app counters, so the level decides.
     alarms = [l for l in L if "WARNG" in l and "link health: [" in l]
-    kinds = collections.Counter()
-    for l in alarms:
-        for m in re.finditer(r"((?:tx|rx)\d\.\w+ \+\d+|(?:egress|host)\.\w+ \+\d+|preflight new FAIL [^|;]+"
-                             r"|(?:rx|tx)_\w+ \+[1-9]\d*|drift [^|;]+|blind [^|;]+)", l):
-            kinds[re.sub(r"\+\d+", "+N", m.group(1))] += 1
+    kinds = alarm_kinds(alarms)
     sat = sum("saturated" in l for l in alarms)
     print("health alarm lines %d (%d carry the standing egress-saturation item); kinds: %s" % (len(alarms), sat, dict(kinds)))
     print("UE tx0 totals: late %d, under %d, zerofill %d; TX status events %d" % (ue_tx0_totals(L) + (sum("TX status:" in l for l in L),)))

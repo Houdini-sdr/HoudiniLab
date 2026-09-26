@@ -55,6 +55,23 @@ lr = GOOD + ["57:%d INFOR: UE TX_HOST_STATUS release_late_ch0=0 release_late_ch1
 v = rs.verdict(lr)
 check([t for lv, t in v if lv == "WARN"] == ["late releases (host pacer): ch0 0, ch1 2"],
       "late releases are the cumulative counter's peak per channel, not its line count (mutation: count lines)")
+v = rs.verdict([l for l in GOOD if "RX_HOST_STATUS" not in l]
+               + ["57:1 WARNG: BS 192.168.10.22: RX_HOST_STATUS unreadable: RemoteError: unknown key"])
+check("FAIL" in [lv for lv, _ in v] and not any("counters 0" in t for _, t in v),
+      "an unreadable RX_HOST_STATUS fails instead of passing with no counters (mutation: match any line naming the key)")
+check("FAIL" in levels([l.replace(" tdd_refused=0", "") for l in GOOD]),
+      "an RX_HOST_STATUS without a judged counter fails (mutation: a missing key read as 0)")
+rnf = ["57:1 WARNG: Radios Not Found. Will attempt a retry"] + GOOD
+check("FAIL" not in levels(rnf) and any("retried" in t for lv, t in rs.verdict(rnf) if lv == "WARN"),
+      "a radio open that was retried and recovered is a warning, not a failure (mutation: Radios Not Found as an error)")
+K = rs.alarm_kinds([
+    "57:2 WARNG: BS x link health: [BS x] 5.0 s: irq 1/s, preflight ok: egress.stall_seen=1 (sticky: a stall happened;"
+    " stall_evt no longer proves a new one); config blocks: a -> b | app: rx_err +0, rx_short +0, rx_pad +0, tx_short +0, tx_sat +0",
+    "57:3 WARNG: BS x link health: [BS x] 5.0 s: irq 1/s, preflight ok: egress.drop_p0=255 (saturated: further drops"
+    " cannot be counted) | app: rx_err +0, rx_short +0, rx_pad +0, tx_short +0, tx_sat +0"])
+check(dict(K) == {"egress.stall_seen sticky": 1, "config blocks drift": 1, "egress.drop_p0 saturated": 1},
+      "blind and drift items get their kinds in link_health.h's own forms (mutation: the old 'drift ...' and "
+      "'blind ...' patterns, which match nothing): %s" % dict(K))
 # main: the exit status is the verdict's, read from a run directory's largest log
 d = tempfile.mkdtemp(prefix="run_summary_")
 open(os.path.join(d, "small_cpu.log"), "w").write("x\n")

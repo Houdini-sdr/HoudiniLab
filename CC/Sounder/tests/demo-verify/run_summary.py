@@ -16,7 +16,26 @@ windows and late releases are warnings to read. Exits 1 on FAIL.
 import glob, os, re, statistics as st, sys
 from collections import Counter
 
-ERRORS = r"what\(\)|terminate called|Radios Not Found|bs_rx_slots: TDD_RX_SLOTS|mode V bring-up:"
+# "Radios Not Found. Will attempt a retry" is the in-process retry of a slow or
+# refused open (8.127, 8.131): a warning when the run then closes cleanly; one
+# that never recovers has no end-of-run lines and fails on those.
+ERRORS = r"what\(\)|terminate called|bs_rx_slots: TDD_RX_SLOTS|mode V bring-up:"
+
+
+def alarm_kinds(lines):
+    """Counter of the alarm kinds in link-health lines, one entry per item, in
+    the forms link_health.h writes them: a counter rise '<name> +N', a blind
+    egress counter '<name>=N (sticky' or '(saturated', a new preflight FAIL, a
+    config drift 'config <section>: old -> new', and the app counters."""
+    pat = re.compile(r"((?:tx|rx)\d\.\w+ \+\d+|(?:egress|host)\.\w+ \+\d+|egress\.\w+=\d+ \((?:sticky|saturated)"
+                     r"|preflight new FAIL [^|;]+|config [^:|;]+:|(?:rx|tx)_\w+ \+[1-9]\d*)")
+    out = Counter()
+    for l in lines:
+        for m in pat.finditer(l):
+            k = re.sub(r"\+\d+", "+N", m.group(1))
+            k = re.sub(r"=\d+ \((sticky|saturated)$", r" \1", k)
+            out[k.rstrip(":") + (" drift" if k.startswith("config ") else "")] += 1
+    return out
 HOST_COUNTERS = ("tdd_straddle", "tdd_refused", "rxq_ovfl", "ring_ovfl")
 
 
@@ -28,10 +47,11 @@ def fpga_version(L):
 
 def read_log(path):
     if os.path.isdir(path):
+        own = os.path.join(path, os.path.basename(os.path.normpath(path)) + ".log")  # <TAG>_<T>/<TAG>_<T>.log
         logs = sorted(glob.glob(os.path.join(path, "*.log")), key=os.path.getsize)
-        if not logs:
+        if not os.path.isfile(own) and not logs:
             sys.exit("no log in " + path)
-        path = logs[-1]
+        path = own if os.path.isfile(own) else logs[-1]
     with open(path, errors="ignore") as f:
         # the config echo holds every key's text, so it would match anything
         return [re.sub(r"\x1b\[[0-9;]*m", "", l.rstrip("\n")) for l in f if "Config: {" not in l]
@@ -64,7 +84,10 @@ def verdict(L):
                 out.append(("PASS", "%s: RX read check clean" % role))
     if slots:
         sc = [l for l in L if "AP-87 slot check:" in l]
-        hs = [l for l in L if "RX_HOST_STATUS " in l]
+        hs = [l for l in L if re.search(r"RX_HOST_STATUS \w+=", l)]
+        for l in L:
+            if "RX_HOST_STATUS unreadable" in l:
+                out.append(("FAIL", "BS: " + l.split("BS", 1)[-1].strip()[:160]))
         if not sc:
             out.append(("FAIL", "BS: no AP-87 slot check line in a slots-mode run"))
         for l in sc:
@@ -77,17 +100,20 @@ def verdict(L):
             out.append(("FAIL", "BS: no RX_HOST_STATUS line in a slots-mode run"))
         for l in hs:
             kv = dict(re.findall(r"(\w+)=(\d+)", l))
-            bad = ["%s=%s" % (k, kv[k]) for k in host if int(kv.get(k, 0))]
+            gone = [k for k in host if k not in kv]
+            if gone:
+                out.append(("FAIL", "BS: RX_HOST_STATUS lacks %s (a host plugin other than the validated one?)"
+                            % ", ".join(gone)))
+                continue
+            bad = ["%s=%s" % (k, kv[k]) for k in host if int(kv[k])]
             out.append(("FAIL", "BS: RX_HOST_STATUS " + ", ".join(bad)) if bad
                        else ("PASS", "BS: RX_HOST_STATUS counters 0 (%s)" % ", ".join(k for k in host if k in kv)))
     alarms = [l for l in L if "WARNG" in l and "link health: [" in l]
     if alarms:
-        kinds = Counter(re.sub(r"\+\d+", "+N", m.group(1)) for l in alarms for m in re.finditer(
-            r"((?:tx|rx)\d\.\w+ \+\d+|(?:egress|host)\.\w+ \+\d+|preflight new FAIL [^|;]+|(?:rx|tx)_\w+ \+[1-9]\d*"
-            r"|drift [^|;]+|blind [^|;]+)", l))
-        out.append(("WARN", "%d link-health alarm lines: %s" % (len(alarms), dict(kinds))))
+        out.append(("WARN", "%d link-health alarm lines: %s" % (len(alarms), dict(alarm_kinds(alarms)))))
     for name, pat in [("UE PILOT LOST", r"UE PILOT LOST"), ("pilot failed the LTS check", r"failed the LTS check"),
-                      ("window marked untrusted", r"marked untrusted")]:
+                      ("window marked untrusted", r"marked untrusted"),
+                      ("a radio open retried (Radios Not Found)", r"Radios Not Found")]:
         n = sum(bool(re.search(pat, l)) for l in L)
         if n:
             out.append(("WARN", "%s: %d lines" % (name, n)))

@@ -39,11 +39,16 @@ def cpulist(text):
 
 def queue_cpus(interrupts, bdf, affinity):
     """{queue: CPUs} for one port's completion IRQs (mlx5_comp<N>@pci:<bdf> in
-    /proc/interrupts); `affinity(irq)` returns the IRQ's CPU list text."""
+    /proc/interrupts); `affinity(irq)` returns the IRQ's CPU list text. A queue
+    whose affinity cannot be read is left out, so it falls back to queue N on
+    CPU N (and is named as such) instead of mapping to no CPU and never being
+    flagged."""
     out = {}
     for irq, q, dev in re.findall(r"^\s*(\d+):.*\bmlx5_comp(\d+)@pci:(\S+)\s*$", interrupts, re.M):
         if dev == bdf:
-            out[int(q)] = cpulist(affinity(irq))
+            cpus = cpulist(affinity(irq))
+            if cpus:
+                out[int(q)] = cpus
     return out
 
 
@@ -108,8 +113,14 @@ def main():
             return 2
     time.sleep(a.secs)
     after = {p: read(p)[0] for p in ports}
+    # Queues with traffic counters but no readable IRQ affinity, on a port whose
+    # map was otherwise read: taken as CPU N, and said.
+    partial = ["%s queue %s" % (p, ",".join(map(str, qs))) for p in ports if qmap[p]
+               for qs in [sorted(q for q in after[p] if q not in qmap[p])] if qs]
     how = ("IRQ map read from /proc" if not identity
            else "queue N taken as CPU N for %s: its IRQ map was not readable" % ", ".join(identity))
+    if partial:
+        how += "; queue N taken as CPU N for %s (no readable IRQ affinity)" % "; ".join(partial)
     bad = ["%s queue %d (CPU %s): %.0f RX pkt/s" % (p, q, ",".join(map(str, c)), pps)
            for p in ports for q, pps, c in flows(before[p], after[p], cores, a.secs, qmap[p])]
     if bad:

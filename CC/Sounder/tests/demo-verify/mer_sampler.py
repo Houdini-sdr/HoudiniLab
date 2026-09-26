@@ -36,7 +36,11 @@ def one_event(url):
 time.sleep(args.first)
 t0 = time.time()
 last, bad, n = {}, 0, 0
-while time.time() - t0 < args.total:
+# Samples on a fixed grid, t0 + k * period while under the total: a sample's
+# own duration no longer pushes the next ones later, which carried the last
+# sample of a long run past the stream's end (a false STALE).
+while n * args.period < args.total:
+    time.sleep(max(0.0, t0 + n * args.period - time.time()))
     stamp = time.strftime("%H:%M:%S", time.gmtime())
     stale_any = False
     try:
@@ -61,7 +65,6 @@ while time.time() - t0 < args.total:
     bad += stale_any
     with open(args.out, "a") as f:
         f.write("%s UTC %s\n" % (stamp, msg))
-    time.sleep(args.period)
 with open(args.out, "a") as f:
     f.write("%d samples, %d stale, failed or empty\n" % (n, bad))
 sys.exit(1 if bad else 0)

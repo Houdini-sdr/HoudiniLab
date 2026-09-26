@@ -21,6 +21,10 @@ IRQ = ("           CPU0       CPU1\n"
 aff = {"396": "18\n", "397": "0-3,8\n", "398": "15\n"}
 qc = pc.queue_cpus(IRQ, "0000:01:00.0", lambda irq: aff[irq])
 check(qc == {7: {18}, 16: {0, 1, 2, 3, 8}}, "the port's own completion IRQs map its queues to their affinity CPUs, the other port's are not its (mutation: ignore the PCI address): %s" % qc)
+qu = pc.queue_cpus(IRQ, "0000:01:00.0", lambda irq: "" if irq == "397" else aff[irq])
+check(qu == {7: {18}} and pc.flows(a, b, [16], 3.0, qu) == [(16, 60000.0, [16])],
+      "an IRQ whose affinity cannot be read falls back to queue N on CPU N, so its flow is still flagged "
+      "(mutation: keep it with no CPUs, never flagged): %s" % qu)
 check(pc.flows(a, b, [18], 3.0, qc) == [(7, 60000.0, [18])] and pc.flows(a, b, [16], 3.0, qc) == [],
       "with the IRQ map a queue is judged by the CPU it interrupts, not by its number (mutation: queue N as CPU N)")
 print("%d failure(s)" % fails); sys.exit(1 if fails else 0)
