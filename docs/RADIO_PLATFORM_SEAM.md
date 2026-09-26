@@ -118,7 +118,7 @@ the build matrix.
 | S3 | an abstract set interface per role (the ten base-station and six client methods the receiver calls) with the Soapy sets and the native-UHD sets as implementations, chosen by a factory; the receiver's `#if USE_UHD` type switch goes. CORRECTED 2026-09-03 after reading the UHD sets: the native UHD base set holds ONE multi-board device object (`multi_usrp`, `get_num_mboards`), not one radio per board, so it cannot sit behind the per-radio `BaseRadioSet` as a `RadioUhd`; it is its own set, which is exactly Agora's `RadioSetUhd` shape (DONE `a3e6b2c`: `RadioSetInterfaces.h`, `RadioSetFactory.cc`; matrix green; review applied in the S4 commit) | matrix (compile-only for UHD); suites; 3 runs |
 | S4 | the receiver's remaining branches keyed on the sync model (`Config::sync_model()`), the recorder's Houdini fixes as `RxPathFixes` (`sync/rx_path_fixes.h`); `is_houdini()` only where the platform is defined (BUILT in the S4 commit; matrix green; 48 sites to 4) | same |
 
-Reviews: Opus after each step until a round reports nothing new, as for
+Reviews: an independent code review after each step until a round reports nothing new, as for
 the library. Retractions and corrections go in the ledger as before.
 
 ## 5. Out of scope here

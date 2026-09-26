@@ -183,7 +183,7 @@ Rules:
 | P4 numerology | rate and spacing as data; remove literals from tests and probes; rate-ladder test | ladder test; one run at the shipped rate unchanged |
 | P5 extend | `PhaseTracker` (AP-67), `SequenceConfirm` and `SymbolPairPhase` for SSB-lite (AP-68), behind configuration | their own pre-registered campaigns |
 
-Each phase ends with an Opus code review of the diff, repeated until a pass
+Each phase ends with an independent code review of the diff, repeated until a pass
 reports no new finding, before the silicon gate runs; a review finding that
 changes behaviour re-runs the offline suite first.
 
