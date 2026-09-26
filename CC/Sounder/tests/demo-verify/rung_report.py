@@ -58,10 +58,14 @@ def main(path):
     if seat: print("pilot seat: mean %.1f, sd %.1f, range %d..%d (n %d)" % (st.mean(seat), st.pstdev(seat), min(seat), max(seat), len(seat)))
     cfo = [l for l in L if "Beacon CFO frame" in l]
     if cfo: print("clock:", re.sub(r"^.*?Beacon CFO", "Beacon CFO", cfo[-1])[:160])
-    alarms = [l for l in L if "link health: [" in l and "clean |" not in l]
+    # The sounder raises a health line to WARN exactly when an item is new or an
+    # app counter moved (RadioHoudini's health thread): a line whose device
+    # side reads "clean" can still carry app counters, so the level decides.
+    alarms = [l for l in L if "WARNG" in l and "link health: [" in l]
     kinds = collections.Counter()
     for l in alarms:
-        for m in re.finditer(r"(tx\d\.\w+ \+\d+|preflight new FAIL [^|;]+|rx_\w+ \+[1-9]\d*|tx_\w+ \+[1-9]\d*|host\.\w+ \+\d+)", l):
+        for m in re.finditer(r"((?:tx|rx)\d\.\w+ \+\d+|(?:egress|host)\.\w+ \+\d+|preflight new FAIL [^|;]+"
+                             r"|(?:rx|tx)_\w+ \+[1-9]\d*|drift [^|;]+|blind [^|;]+)", l):
             kinds[re.sub(r"\+\d+", "+N", m.group(1))] += 1
     sat = sum("saturated" in l for l in alarms)
     print("health alarm lines %d (%d carry the standing egress-saturation item); kinds: %s" % (len(alarms), sat, dict(kinds)))

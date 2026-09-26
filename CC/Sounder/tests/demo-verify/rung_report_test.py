@@ -27,4 +27,21 @@ check("UE tx0 totals: late 7, under 2, zerofill 100" in out.getvalue() and "vs b
 # Fails under: reading the retired pu_spacing_err field (the line never prints).
 check("BS slots clamped past the capture edge: 1 of 2 sampled frames" in out.getvalue(),
       "the report counts the frames whose slots were clamped")
+# Real-format health lines (RadioHoudini's health thread, link_health.h line()):
+# an app-only alarm reads "clean" on the device side.
+H = ["57:000001 WARNG: BS 192.168.10.22 link health: [BS 192.168.10.22] 5.0 s: irq 12/s, preflight ok: clean"
+     " | app: rx_err +0, rx_short +0, rx_pad +7, tx_short +0, tx_sat +3",
+     "57:000002 WARNG: BS 192.168.10.22 link health: [BS 192.168.10.22] 5.0 s: irq 12/s, preflight ok: rx0.gated +4"
+     " | app: rx_err +0, rx_short +0, rx_pad +0, tx_short +0, tx_sat +0",
+     "57:000003 INFOR: BS 192.168.10.22 link health: [BS 192.168.10.22] 60.0 s: irq 12/s, preflight ok: clean"
+     " | app: rx_err +0, rx_short +0, rx_pad +0, tx_short +0, tx_sat +0"]
+log = tempfile.NamedTemporaryFile("w", suffix=".log", delete=False); log.write("\n".join(H) + "\n"); log.close()
+out = io.StringIO()
+with contextlib.redirect_stdout(out):
+    rr.main(log.name)
+os.remove(log.name)
+o2 = out.getvalue()
+check("health alarm lines 2 " in o2 and "'rx_pad +N': 1" in o2 and "'tx_sat +N': 1" in o2 and "'rx0.gated +N': 1" in o2,
+      "an app-only alarm and an rx bank alarm both count, the periodic clean line does not (mutation: drop lines "
+      "reading 'clean |', or no rx bank pattern): " + o2[o2.find("health alarm"):].split("\n")[0])
 print("%d failure(s)" % fails); sys.exit(1 if fails else 0)
