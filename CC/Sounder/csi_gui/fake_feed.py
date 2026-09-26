@@ -68,11 +68,10 @@ def send_csi(sock, dest, frame, ant, h, rate, reps, noise, legacy):
     head = struct.pack("<IIIIfI", MAGIC_CSI2, frame, ant, nsc, rate, 1)
     body = b"".join(struct.pack("<ff", z.real, z.imag) for z in h)
     # The CSI2 trailing block is the RAW phase (radians): arg(H) before the
-    # sounder's display de-ramp and per-run anchor. Emulate the instrumental
-    # ramp the real sounder carries there (8 samples of CP back-off -> pi/4
-    # per subcarrier, wrapped), so the "phase (raw)" panel exercises its
-    # sawtooth rendering honestly instead of drawing coherence values on a
-    # phase axis (Opus review H9).
+    # sounder's display de-ramp and per-run anchor, with the instrumental ramp
+    # the real sounder carries there (8 samples of CP back-off -> pi/4 per
+    # subcarrier, wrapped). The dashboard length-checks the block and does not
+    # draw it; it is sent so the datagram is the sounder's size.
     del reps, noise
     raw = []
     for k, z in enumerate(h):

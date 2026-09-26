@@ -149,15 +149,11 @@ def teardown_node(hs, teardown, ip, ch, passes):
     except Exception as e:  # noqa: BLE001
         if "stream is open" in str(e):
             # THE HOLDER IS USUALLY A LOCAL PROCESS, SO SAY THAT FIRST.
-            # Restarting the server was the only advice here, and it needs a
-            # sudo password this bench does not grant. In every case seen on
-            # 2026-09-02 the stream was held by an orphaned sounder on THIS
-            # host: csi_server.py --launch runs the sounder as a grandchild
-            # under a bash retry loop, so killing the server orphans the loop,
-            # the loop restarts a sounder, and that sounder holds both boards.
-            # Killing it releases the stream immediately -- no server restart.
-            # Six consecutive runs were refused that way before anyone noticed,
-            # because a refused run writes an EMPTY log rather than an error.
+            # Restarting the server needs a sudo password this bench does not
+            # grant, and in every case seen the stream was held by a sounder
+            # left running on THIS host; stopping it releases the stream at
+            # once, no server restart. A refused run writes an EMPTY log rather
+            # than an error, so this is where the operator hears about it.
             print("  %s: WARNING an RX stream is still open on the device.%s\n"
                   "      This teardown cannot close another process's stream, and "
                   "the next run will fail\n"
