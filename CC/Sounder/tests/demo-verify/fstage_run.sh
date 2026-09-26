@@ -31,6 +31,10 @@ R=$(cat "$D/$TAG.current"); T=${R#"${TAG}"_}
 O=$D/$ST/$R; mkdir -p "$O"
 mv "$D/$R.log" "$D/${TAG}_csi_$T.log" "$D/${TAG}_cpu_$T.log" "$D/${TAG}_threads_$T.log" "$O/" 2>/dev/null
 mv "$D"/cns_dump*.bin "$D/beacon_ram.bin" "$O/" 2>/dev/null
+# The per-node RFDC state records (RFDC_SNAPSHOT: the MTS and tile state,
+# written at stream start and at the end of the run under HOUDINI_DUMP_DIR):
+# a run that moves between sessions (a pilot seat, a level) is traced from them.
+mv "$D"/rfdc_*.txt "$O/" 2>/dev/null
 mv "$RW" "$O/resync"
 SYN1=$(nstat -az TcpExtTCPSynRetrans 2>/dev/null | awk '/SynRetrans/{print $2}')
 echo "stage $ST filters: ${FILTERS:-unset}" > "$O/stage.txt"
