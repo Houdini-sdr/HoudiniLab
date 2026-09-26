@@ -2,6 +2,26 @@
 
 [![Build Status](https://falcon.ecg.rice.edu:443/buildStatus/icon?job=github_public_renewlab%2Fmaster)](https://falcon.ecg.rice.edu:443/job/github_public_renewlab/job/master/)
 
+# HoudiniLab: the Houdini channel sounder
+
+This fork (HoudiniLab) extends the RENEWLab Sounder to drive two RFSoC
+"Houdini" radios, a base station and a client, through the SoapyHoudiniSDR
+driver, with a live web dashboard. Its current use is the dual-band demo:
+sub-6 at 2425 MHz beside an X-band IF at 4380 MHz, one 5G-like numerology on
+both bands. The rest of this README is the upstream RENEWLab one and describes
+the Iris hardware. Start here instead:
+
+- `CC/Sounder/CSI_DEMO_WALKTHROUGH.md`: install, build, point the sounder at
+  your two radios, run it and read the dashboard, step by step, on any bench.
+- `CC/Sounder/DEMO_BENCH_RUNBOOK.md`: the lab bench's own runbook (its hosts,
+  cabling, launch and demo-day bring-up).
+- `CC/Sounder/DEMO_VERIFICATION.md`: the record of every measurement the
+  docs and configs cite.
+- `CC/Sounder/files/houdini-*.json`: the configs; each says what it runs in its
+  `_description` and notes.
+- `BACKLOG.md`: the work tracker (`AP-###` rows).
+- `docs/`: design notes and investigation records.
+
 # Contents
  * [Description](#description)
  * [Components](#components)

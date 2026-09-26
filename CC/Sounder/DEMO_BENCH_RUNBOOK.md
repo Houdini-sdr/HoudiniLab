@@ -9,8 +9,10 @@ change this file in the same commit.
 Evidence for everything below lives in `DEMO_VERIFICATION.md`.
 
 Two benches are described. **Part A** is the dual-band demo (AP-79: sub-6 plus
-the X-band IF, HS-202 mode V) on the rig host `.26`, the current one. **Part B**
-is the earlier single-band CSI demo on rig B (`.64`), kept as it was.
+the X-band IF, HS-202 mode V) on the rig host `.26`, the current one, and the
+part operators follow. **Part B** is the earlier single-band CSI demo on rig B
+(`.64`), kept as a record of that bench; do not follow it for the dual-band
+demo.
 
 # Part A: the dual-band demo (AP-79)
 
@@ -51,10 +53,10 @@ B = ch1, C = ch2.
 | X-band IF uplink | `.21` TX ch1 (DAC_A) | VBFZ-4000-S+ at the DAC, and a second VBFZ-4000-S+ at the ADC | `.22` RX ch2 (ADC_B) |
 | HIL self-loop (unused by the demo) | `.22` TX ch1 (DAC_A) | none | `.22` RX ch1 (ADC_C) |
 
-There is no X-band IF downlink and no attenuator in the chain (F4a and F4b
-tried a 10 dB pad at each sub-6 receive end; it came out again). What each filter did to the levels, and why
-the in-channel "tilt" is cable ripple rather than the filters, is
-`DEMO_VERIFICATION.md` 9.15 to 9.24. The second sub-6 filter at each ADC
+There is no X-band IF downlink and no attenuator in the chain (a 10 dB pad at
+each sub-6 receive end was tried and removed, 9.23 and 9.24). What each filter
+did to the levels, and why the in-channel "tilt" is cable ripple rather than
+the filters, is `DEMO_VERIFICATION.md` 9.15 to 9.24. The second sub-6 filter at each ADC
 costs about 2 dB of level against the recorded wired baseline; compare a new
 cabled run's levels with 9.69 to 9.71, not with 9.60/9.61.
 
@@ -143,15 +145,14 @@ workers land on the cores that take the 100G data NIC's interrupts (about 61k
 completion IRQs a second on one core, 1-3k on several others), where receive
 softirq work preempts them for milliseconds and whole bursts go out late
 (`DEMO_VERIFICATION.md` 9.36). The dashboard passes the variables to the
-sounder it launches. **Today's values:** the main thread on isolated core 15
-and the pacers on isolated 18 and 19, all performance cores. The pacers moved
-from 16 and 17 when the NIC's receive hashing put a BS receive flow on queue 16
-(the hashing is re-drawn at every rig-host boot), so check it every power-up
-with `tests/demo-verify/pacer_core_check.py --cores 15,18,19` (A8c step 5).
-**History:** cores 10 and 11 (efficiency cores, no NIC interrupts) first
-stopped the late bursts (9.37-9.39); on isolated performance cores the
-pacer's worst wake over a 35 min run fell to about 0.28 ms against 10.5 ms on
-10 and 11 (9.41, 9.44).
+sounder it launches. **The values in force:** the main thread on isolated core
+15 and the pacers on isolated 18 and 19, all performance cores. The NIC's
+receive hashing is re-drawn at every rig-host boot and can put a BS receive
+flow on a pinned core (it once landed on 16, which is why the pacers left 16
+and 17), so check it every power-up with
+`tests/demo-verify/pacer_core_check.py --cores 15,18,19` (A8c step 5). On
+isolated performance cores the pacer's worst wake over a 35 min run is about
+0.28 ms, against 10.5 ms on the efficiency cores 10 and 11 (9.41, 9.44).
 
 The check's full form reads both radios' stacks and FAILs if they differ.
 Read the stack there, not from this file: it changes with every deploy. The
@@ -214,8 +215,9 @@ and press Start.
 
 ## A6. What good looks like
 
-From the validation runs on fpga 1.34 (`DEMO_VERIFICATION.md` 9.69 to 9.73:
-the demo head, `houdini-dualband-xw-steer-slots.json`, steered, cabled):
+From the validation runs of the demo head (`DEMO_VERIFICATION.md` 9.69 on
+fpga 1.33, 9.70 to 9.73 on fpga 1.34: `houdini-dualband-xw-steer-slots.json`,
+steered, cabled):
 
 | Where | Healthy | Note |
 |---|---|---|
@@ -226,7 +228,7 @@ the demo head, `houdini-dualband-xw-steer-slots.json`, steered, cabled):
 | BS frames per second | about 50 (slots config), about 57 (all-rx config) | from the HOUDINI_BS_RX lines |
 | End-of-run lines | `RX read check`: 0 lost in rx slots, 0 out of order, 0 time jumps; `AP-87 slot check`: 0 outside the rx slots; `RX_HOST_STATUS`: tdd_straddle 0, tdd_refused 0, and on fpga 1.34 tdd_drop 0 | anything nonzero is a finding, not noise |
 
-## A7. Known limits today
+## A7. Known limits
 
 - **Do not open a node from a second program while a run is live** (a manual
   `check_setup.py`, `SoapySDRUtil --probe`, a Python session). The sounder opens
@@ -238,23 +240,21 @@ the demo head, `houdini-dualband-xw-steer-slots.json`, steered, cabled):
   above: the pacer's worst wake over a 35 min run is about 0.3 ms (9.43-9.46).
   Read the installed host plugin's build id in the setup check before judging a
   run.
-- **The UE's TX playout could freeze (HS-227: a race in the TX pump present since
-  HS-146; FIXED from bitstream 1.32, no freeze in any demo-length run since,
-  9.57 to 9.71).** On 1.31, in two of
-  three demo-length runs on the HS-220 bitstream (9.44, 9.45) the UE's FPGA
-  stopped playing its TX bank at a random time (767 s, 1,979 s) and judged every
-  later packet late. The BS then loses the UE's pilots and the dashboard's cards
-  go stale. It does not recover within the run; a Stop and Start of the run
-  cleared it both times it was seen (no node reboot was needed).
-- **The rig host's management NIC (r8127, `enP7s7`).** During D7 its driver hung
-  in its ESD checker: new ssh sessions timed out until the sounder exited, the
-  control link to the nodes stalled, and host timing suffered (9.39). This NIC
-  carries ssh and every control call to the radios. It has not hung since, but
-  the driver is unchanged; check
+- **A UE TX playout freeze (HS-227)** is fixed from bitstream 1.32: no freeze
+  in any demo-length run on 1.32 or later (9.57 to 9.71). On an older
+  bitstream the UE's FPGA can stop playing its TX bank at a random time and
+  judge every later packet late (9.44, 9.45); the BS then loses the UE's
+  pilots and the dashboard's cards go stale. It does not recover within the
+  run; a Stop and Start clears it (no node reboot needed). The freeze watcher
+  (A4) reports it.
+- **The rig host's management NIC (r8127, `enP7s7`)** carries ssh to the host.
+  Its driver once hung in its ESD checker during a long run: new ssh sessions
+  timed out until the sounder exited and host timing suffered (9.39). The
+  driver is unchanged; check
   `journalctl -k | grep -E "rtl8127|blocked for more than"` after a long run.
-  The control calls have since moved to their own network (A1: a USB RTL8153B,
-  `enx00e04c242668`, driver r8152, which linked at 100 Mb/s); ssh to the host
-  still uses the r8127. Never copy large files off the host during a run.
+  The control calls to the radios run on their own network (A1: a USB
+  RTL8153B, `enx00e04c242668`, driver r8152, linked at 100 Mb/s). Never copy
+  large files off the host during a run.
 - **Radio opens that time out (SH-442).** A launch sometimes cannot open the BS
   within the device timeout (`SoapyRPCUnpacker::recv() TIMEOUT` in the log).
   The sounder retries the open itself ("Radios Not Found. Will attempt a
@@ -351,8 +351,8 @@ constellation, CIR, ADC, beacon sync).
 ## A8d. Over the air: antennas and the room (before the first run)
 
 The first sub-6 over-the-air runs lost about 20 dB to antenna placement and a
-quarter of the beacons to nearby emitters; both are fixed at the bench, not in
-software.
+quarter of the beacons to nearby emitters (`DEMO_VERIFICATION.md` 9.62 to
+9.65); both are fixed at the bench, not in software.
 
 1. Stand every stick vertical (same polarisation), each node's TX stick
    broadside to the other node's RX stick (sides facing, never end to end),
@@ -373,7 +373,7 @@ software.
 
 ## A8c. Demo day: bring-up at the venue (in order)
 
-**The demo build [user]:** the demo head `arc/dualband-demo` in
+**The demo build:** the demo head `arc/dualband-demo` in
 `~/repos/HoudiniLab-rxwin` (the X-band at 270 RB beside the sub-6 at 133 RB,
 steered, the BS receiving only its rx slots): cabled, config
 `files/houdini-dualband-xw-steer-slots.json`; through the XUD1A (A2b),
@@ -421,7 +421,8 @@ egress (HS-225). Do every step, every power-up.
    `AP-87 slot check`, `RX_HOST_STATUS`) land there at Stop.
 
 5. Within the first minute of a Start:
-   - the log shows `steer.enable = true [json]` and `Clock steering [0]: ON`;
+   - the log's sync configuration block lists `steer.enable = true` marked
+     `[json]`, and a `Clock steering [0]: ON` line follows;
    - the BS logs `receives only its rx slots (AP-87): TDD_RX_SLOTS active=1`;
    - with a `-fe` config, the `TDD_EXTPIN_SRC` lines of A2b step 3;
    - `python3 tests/demo-verify/pacer_core_check.py --cores 15,18,19` prints
@@ -442,6 +443,11 @@ cores (Cortex-A725, down to 338 MHz); 5-9 and 15-19 are performance cores
 (Cortex-X925). The plan isolates 15-19: the sounder's dispatch thread on 15,
 the UE's two TX pacer workers on 16 and 17, and 18 and 19 kept free for moving
 threads around. Steps marked (sudo) are the owner's.
+
+Status: stage 1 is in force on this host (9.43) and the isolated layout runs
+the demo (A4). The pacers have since moved to 18 and 19 (A4), so where this
+checklist says 16,17, use the cores `pacer_core_check.py` confirms. No stage 2
+arm has a record row yet; the steps stay here for when one is run.
 
 **Stage 1: the kernel command line (sudo, then one reboot).**
 
@@ -527,6 +533,13 @@ Record each arm as a `DEMO_VERIFICATION.md` section 9 row with its settings.
 
 # Part B: the single-band CSI demo on rig B
 
+A record of that bench, not a procedure to follow. The boards have since moved
+to the Part A roles and addresses, and two things below no longer hold on the
+current code: the sync knobs are config keys now (an exported
+`HOUDINI_CFO_LOG_EVERY` or `HOUDINI_SYNC_SNR_DB` is reported IGNORED unless the
+config sets `sync.allow_env_overrides`; walkthrough section 7.1), and the
+dashboard's datagram counter prints every five seconds.
+
 ## B1. The machines
 
 | Machine | Address | Role | What runs on it |
@@ -547,8 +560,8 @@ One sounder process drives BOTH radios. There is no per-board host process:
 `.22`) from the same process over the SoapyRemote control plane, and runs its
 own UDP data planes to each board.
 
-- Checkout: `~/repos/HoudiniLab`. Since 2026-08-31 the demo runs from this,
-  the main checkout, which is on `feat/csi-gui-tabler`. The `~/repos/HoudiniLab-rx`
+- Checkout: `~/repos/HoudiniLab`. The demo ran from this, the main checkout,
+  on `feat/csi-gui-tabler`. The `~/repos/HoudiniLab-rx`
   worktree also sits at the same commit and still works, but it is now detached
   (a branch cannot be checked out in two worktrees) so it does NOT advance on a
   pull. Whichever you use, `--sounder-dir` (section B3) is what selects the
@@ -613,7 +626,7 @@ banner, and a `[csi]` datagram counter about once a second. That is the walkthro
 mode A default and it is normal, not a fault. Add `HOUDINI_CFO_LOG_EVERY=1`
 when you want every beacon CFO estimate rather than the default one in ten.
 
-Measured 2026-09-01, two back to back runs on this bench: 6,189 lines in 60 s
+Two back to back runs on this bench measured 6,189 lines in 60 s
 with the three exports set, 342 lines in 85 s without them, and the `[csi]`
 datagram counter advancing by an identical 443 per reporting interval in both.
 The exports change the printing only. Judge run health by the datagram counter
@@ -656,13 +669,13 @@ SoapySDRUtil --find="remote=tcp://168.6.244.21:55132,show=1"
 
 ## B6. Stack identity this runbook was written against
 
-fpga 1.30 `c88e0b5f` (2026-08-28), device 0.2.2 `71bcbc6b`, host 0.2.2
+fpga 1.30 `c88e0b5f`, device 0.2.2 `71bcbc6b`, host 0.2.2
 `d2861dc1`, protocol 1.0, SoapySDR 0.8.1, SoapyRemote 0.6.0. Both boards
 report `clock_ref: external`. Config: `files/houdini-ul.json`
 (30 slots x 4096 samples = exactly 1 ms per frame, beacon slot 0, pilot slot
 16, uplink data slot 18, `tx_advance` 247).
 
-The host plugin was rebuilt from `d2861dc1` on 2026-08-31, replacing the
+The host plugin was rebuilt from `d2861dc1`, replacing the
 `c20d7975` build that the DEMO_VERIFICATION.md rows were taken against. The
 two are identical as compiled code: every commit between them touches only
 tracker files, `host/tests/bench/README.md`, and `host/tests/hil/test_tdd.py`,

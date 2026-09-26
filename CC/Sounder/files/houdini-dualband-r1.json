@@ -1,5 +1,6 @@
 {
  "_description": "R1: sub-6 2425 MHz only, 256 FFT, 480 kHz",
+ "_status": "PASS on three agreeing runs (DEMO_VERIFICATION 9.5). A ladder rung for bringing up a new bench (walkthrough section 3).",
  "serial_file": "files/topology-houdini-dualband.json",
  "radio_type": "houdini",
  "remote_port": "55132",
@@ -14,7 +15,7 @@
  "_frequency_note": "Sub-6 only: one NCO, 2425 MHz, on every channel (zone 1, cal Mode 1, RX filter on, all derived).",
  "frequency": 2425000000.0,
  "nco_frequency": 2425000000.0,
- "_gain_note": "Written explicitly on every opened channel: make() now resets RX DSA to 0 dB and TX VOP to 20 mA. TX 0 dB = maximum VOP, where the software lane measured linearity (W2). The ue_*_gain_* fields below are Iris units and inert on Houdini.",
+ "_gain_note": "houdini_rx_gain_db / houdini_tx_gain_db: one value per direction, written to every channel the radio opens and read back at start, so attenuating the sub-6 RX attenuates the X-band RX too. RX is minus the step attenuator's attenuation (0 = none); TX 0 dB = maximum VOP, where the software lane measured linearity (W2). The device's make() resets RX DSA to 0 dB and TX VOP to 20 mA before they are written. The ue_*_gain_* fields below are Iris units and inert on Houdini.",
  "houdini_tx_gain_db": 0.0,
  "houdini_rx_gain_db": 0.0,
  "channel": "A",
@@ -53,7 +54,7 @@
  "max_frame": 2000,
  "beamsweep": false,
  "_carried_note": "tx_advance is re-measured at mode V (169, see _tx_advance_note). The detection thresholds are DERIVED for nr_pss_bl on a simulated link (tests/comms-func/detection_calibration_test.cc): corr_scale 5 (coherence bar 0.2; noise-only max 0.080 of 400 windows, a beacon 30 dB under bench level 0.90), snr_floor_db 25 (legacy's 30 shifted by the measured -5.2 dB for this beacon at 0.34 peak on the filtered lane, 16.6 dB margin). detector.min_bar 0.1 stops the resync retry relaxation (+1 on corr_scale per retry) from walking the bar into the noise (at corr_scale 5 it moves it 20% a retry). ue_pilot_horizon counts FRAMES.",
- "_tx_advance_note": "BENCH CALIBRATION, mode-V converter path (AP-79, 2026-09-23): 169 = 247 (the one-rate path's value) + the mean pilot_grid_off of -78 samples (sd 3.8, no drift over 80 s) measured at R1 with HOUDINI_BS_RX_DEBUG=1 once the BS framer placed the pilot by its leading edge (4e0fcbf). Mode V moves the pilot 78 samples EARLY against the one-rate path: the x24 DAC interpolation and x40 ADC decimation carry a different pipeline latency. A latency property of the converters, so the same value holds at every mode-V rung. Re-derive after any cabling or converter change by the same procedure.",
+ "_tx_advance_note": "BENCH CALIBRATION, mode-V converter path: 169 = 247 (the one-rate path's value) + the mean pilot_grid_off of -78 samples (sd 3.8, no drift over 80 s) measured at R1 with HOUDINI_BS_RX_DEBUG=1 once the BS framer placed the pilot by its leading edge (DEMO_VERIFICATION 9.4; the seat then reads -0.5 +- 3.3). Mode V moves the pilot 78 samples EARLY against the one-rate path: the x24 DAC interpolation and x40 ADC decimation carry a different pipeline latency, a property of the converters, so the same value holds at every mode-V rung. Re-derive after any cabling or converter change: run with HOUDINI_BS_RX_DEBUG=1 across a few restarts and shift tx_advance by the mean pilot_grid_off.",
  "tx_advance": [
   169
  ],
