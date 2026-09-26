@@ -711,7 +711,7 @@ void Receiver::loopRecv(int tid, int core_id, SampleBuffer* rx_buffer) {
         if (rx_ret < 0) {
           static std::atomic<long long> negc{0};
           const long long n = negc.fetch_add(1);
-          if ((n % 200) == 0) {  // braces load-bearing: MLPD_WARN is multi-stmt
+          if ((n % 200) == 0) {
             MLPD_WARN(
                 "BS recv: radioRx returned %d (%s), occurrence %lld -- dropping "
                 "the round (recoverable; combined-RX realign or empty read)\n",
@@ -2338,9 +2338,6 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
               // the outer gate said so, and every counter below still clears --
               // it simply does not inform the state.
               houdini_grid_innov_rej++;
-              // Braces load-bearing: MLPD_WARN is three statements with no
-              // do/while wrapper, so unbraced the throttle governs only the
-              // header (the flood recorder_worker.cc already documented).
               if (houdini_grid_innov_rej == 1 ||
                   houdini_grid_innov_rej % 50 == 0) {
                 MLPD_WARN(
@@ -2361,10 +2358,6 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
               // one landing BEFORE the tracked reference, which is reachable
               // just after a re-anchor and means something quite else.
               houdini_grid_starved++;
-              // Braces are load-bearing: MLPD_WARN expands to three statements
-              // with no do/while wrapper, so unbraced only the header is
-              // throttled and the body prints on every pass (the flood this
-              // repo already hit at recorder_worker.cc's HOUDINI_CSI_R_DEBUG).
               if (houdini_grid_starved == 1 ||
                   houdini_grid_starved % 100 == 0) {
                 MLPD_WARN(

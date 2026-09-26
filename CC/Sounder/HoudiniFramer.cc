@@ -710,7 +710,7 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
   }
   if (ft > 0) {
     static std::atomic<bool> said{false};
-    if (!said.exchange(true)) {  // braces: MLPD_INFO is three statements (logger.h)
+    if (!said.exchange(true)) {
       MLPD_INFO("BS: the UE burst is searched only within +-%d samples of the scheduled pilot slot (SH-347 host half); "
                 "each lane is gated on its own and the cleanest lane with a UE burst places the cut\n",
                 n / 4);
@@ -830,7 +830,7 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
     if (houdini::slotalign::headAtSlotEdge(off, cfg_->prefix())) {
       static std::atomic<unsigned> edge_count{0};
       const unsigned ec = edge_count.fetch_add(1) + 1;
-      if ((ec & (ec - 1)) == 0) {  // braces: MLPD_WARN is several statements
+      if ((ec & (ec - 1)) == 0) {
         MLPD_WARN("BS: the UE burst starts at the pilot slot's edge (pilot_grid_off %lld, prefix %d, occurrence %u): "
                   "the slot cut takes its head if it is any earlier; recalibrate tx_advance with bs_rx_slots off\n",
                   off, static_cast<int>(cfg_->prefix()), ec);

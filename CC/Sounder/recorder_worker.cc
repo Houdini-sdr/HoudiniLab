@@ -369,7 +369,7 @@ void RecorderWorker::notePreCfoSaturation(long long values, uint32_t ant) {
   if (values <= 0) return;
   pre_cfo_saturated_ += values;
   const long long k = ++pre_cfo_sat_slots_;
-  if ((k & (k - 1)) == 0) {  // braces: MLPD_WARN is several statements
+  if ((k & (k - 1)) == 0) {
     MLPD_WARN("ant %u: the pre-FFT carrier rotation clamped %lld I/Q value(s) in this slot (%lld slots, %lld values "
               "so far): the ADC is within 3 dB of full scale\n",
               ant, values, k, pre_cfo_saturated_);

@@ -40,6 +40,10 @@
 //#define mlpd_trace_file_or_default_stream trace_file
 #define mlpd_trace_file_or_default_stream MLPD_LOG_DEFAULT_STREAM
 
+// Each MLPD_* macro is ONE statement (do { } while (0)), so an unbraced
+// `if (x) MLPD_INFO(...);` guards the whole line (AP-88: the old three-statement
+// form guarded only the header and printed the rest every time).
+
 // If MLPD_LOG_LEVEL is not defined, default to the highest level so that
 // YouCompleteMe does not report compilation errors
 #ifndef MLPD_LOG_LEVEL
@@ -47,58 +51,67 @@
 #endif
 
 #if MLPD_LOG_LEVEL >= MLPD_LOG_LEVEL_ERROR
-#define MLPD_ERROR(...)                                                  \
-  mlpd_output_log_header(MLPD_LOG_DEFAULT_STREAM, MLPD_LOG_LEVEL_ERROR); \
-  fprintf(MLPD_LOG_DEFAULT_STREAM, __VA_ARGS__);                         \
-  fflush(MLPD_LOG_DEFAULT_STREAM)
+#define MLPD_ERROR(...)  \
+  do {  \
+    mlpd_output_log_header(MLPD_LOG_DEFAULT_STREAM, MLPD_LOG_LEVEL_ERROR);  \
+    fprintf(MLPD_LOG_DEFAULT_STREAM, __VA_ARGS__);  \
+    fflush(MLPD_LOG_DEFAULT_STREAM);  \
+  } while (0)
 #else
 #define MLPD_ERROR(...) ((void)0)
 #endif
 
 #if MLPD_LOG_LEVEL >= MLPD_LOG_LEVEL_WARN
-#define MLPD_WARN(...)                                                  \
-  mlpd_output_log_header(MLPD_LOG_DEFAULT_STREAM, MLPD_LOG_LEVEL_WARN); \
-  fprintf(MLPD_LOG_DEFAULT_STREAM, __VA_ARGS__);                        \
-  fflush(MLPD_LOG_DEFAULT_STREAM)
+#define MLPD_WARN(...)  \
+  do {  \
+    mlpd_output_log_header(MLPD_LOG_DEFAULT_STREAM, MLPD_LOG_LEVEL_WARN);  \
+    fprintf(MLPD_LOG_DEFAULT_STREAM, __VA_ARGS__);  \
+    fflush(MLPD_LOG_DEFAULT_STREAM);  \
+  } while (0)
 #else
 #define MLPD_WARN(...) ((void)0)
 #endif
 
 #if MLPD_LOG_LEVEL >= MLPD_LOG_LEVEL_INFO
-#define MLPD_INFO(...)                                                  \
-  mlpd_output_log_header(MLPD_LOG_DEFAULT_STREAM, MLPD_LOG_LEVEL_INFO); \
-  fprintf(MLPD_LOG_DEFAULT_STREAM, __VA_ARGS__);                        \
-  fflush(MLPD_LOG_DEFAULT_STREAM)
+#define MLPD_INFO(...)  \
+  do {  \
+    mlpd_output_log_header(MLPD_LOG_DEFAULT_STREAM, MLPD_LOG_LEVEL_INFO);  \
+    fprintf(MLPD_LOG_DEFAULT_STREAM, __VA_ARGS__);  \
+    fflush(MLPD_LOG_DEFAULT_STREAM);  \
+  } while (0)
 #else
 #define MLPD_INFO(...) ((void)0)
 #endif
 
 #if MLPD_LOG_LEVEL >= MLPD_LOG_LEVEL_FRAME
-#define MLPD_FRAME(...)                                     \
-  mlpd_output_log_header(mlpd_trace_file_or_default_stream, \
-                         MLPD_LOG_LEVEL_FRAME);             \
-  fprintf(mlpd_trace_file_or_default_stream, __VA_ARGS__);  \
-  fflush(mlpd_trace_file_or_default_stream)
+#define MLPD_FRAME(...)  \
+  do {  \
+    mlpd_output_log_header(mlpd_trace_file_or_default_stream, MLPD_LOG_LEVEL_FRAME);  \
+    fprintf(mlpd_trace_file_or_default_stream, __VA_ARGS__);  \
+    fflush(mlpd_trace_file_or_default_stream);  \
+  } while (0)
 #else
 #define MLPD_FRAME(...) ((void)0)
 #endif
 
 #if MLPD_LOG_LEVEL >= MLPD_LOG_LEVEL_SYMBOL
-#define MLPD_SYMBOL(...)                                    \
-  mlpd_output_log_header(mlpd_trace_file_or_default_stream, \
-                         MLPD_LOG_LEVEL_SYMBOL);            \
-  fprintf(mlpd_trace_file_or_default_stream, __VA_ARGS__);  \
-  fflush(mlpd_trace_file_or_default_stream)
+#define MLPD_SYMBOL(...)  \
+  do {  \
+    mlpd_output_log_header(mlpd_trace_file_or_default_stream, MLPD_LOG_LEVEL_SYMBOL);  \
+    fprintf(mlpd_trace_file_or_default_stream, __VA_ARGS__);  \
+    fflush(mlpd_trace_file_or_default_stream);  \
+  } while (0)
 #else
 #define MLPD_SYMBOL(...) ((void)0)
 #endif
 
 #if MLPD_LOG_LEVEL >= MLPD_LOG_LEVEL_TRACE
-#define MLPD_TRACE(...)                                     \
-  mlpd_output_log_header(mlpd_trace_file_or_default_stream, \
-                         MLPD_LOG_LEVEL_TRACE);             \
-  fprintf(mlpd_trace_file_or_default_stream, __VA_ARGS__);  \
-  fflush(mlpd_trace_file_or_default_stream)
+#define MLPD_TRACE(...)  \
+  do {  \
+    mlpd_output_log_header(mlpd_trace_file_or_default_stream, MLPD_LOG_LEVEL_TRACE);  \
+    fprintf(mlpd_trace_file_or_default_stream, __VA_ARGS__);  \
+    fflush(mlpd_trace_file_or_default_stream);  \
+  } while (0)
 #else
 #define MLPD_TRACE(...) ((void)0)
 #endif

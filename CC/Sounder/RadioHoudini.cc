@@ -378,7 +378,7 @@ RadioHoudini::~RadioHoudini() {
   // closes them after this), so drift across the run is visible.
   if (dev_ != nullptr) writeStateRecord(params_.label, *dev_, kEndOfRunStage, params_.rx_channels, params_.tx_channels);
   // Every stamped read against the stream's count, for the whole run.
-  if (rd_reads_ > 0) {  // braces: MLPD_INFO is several statements
+  if (rd_reads_ > 0) {
     MLPD_INFO("%s: RX read check: %lld stamped reads, %lld on the count, %lld after a gap (%lld samples lost in rx "
               "slots, %lld the schedule's gaps), %lld out of order, %lld time jumps\n",
               params_.label.c_str(), rd_reads_, rd_on_count_, rd_gap_reads_, rd_gap_lost_, rd_gap_sched_,
@@ -704,7 +704,7 @@ int RadioHoudini::recv(void* const* buffs, int samples, long long& frameTime) {
       if (stray > 0) {
         slot_stray_ += stray;
         const long long k = ++slot_stray_reads_;
-        if ((k & (k - 1)) == 0) {  // braces: MLPD_WARN is several statements
+        if ((k & (k - 1)) == 0) {
           const auto p = houdini::bsslots::slotPos(tick, slot_epoch_, slot_n_, slot_fr_);
           MLPD_WARN("%s: a read of %d samples stamped at tick %lld (slot %lld, offset %lld) has %lld "
                     "outside the rx slots (occurrence %lld): the slot cut let them through\n",
@@ -725,7 +725,7 @@ int RadioHoudini::recv(void* const* buffs, int samples, long long& frameTime) {
         // consumers refuse) instead of used.
         long long& n_bad = gc.backward ? rd_backward_ : rd_resync_;
         const long long k = ++n_bad;
-        if ((k & (k - 1)) == 0) {  // braces: MLPD_WARN is several statements
+        if ((k & (k - 1)) == 0) {
           MLPD_WARN("%s: a read of %d samples stamped %lld samples %s the stream's count (%s, occurrence %lld): "
                     "this window is marked untrusted\n",
                     params_.label.c_str(), r, static_cast<long long>(gc.delta < 0 ? -gc.delta : gc.delta),
@@ -745,8 +745,6 @@ int RadioHoudini::recv(void* const* buffs, int samples, long long& frameTime) {
       // guess. Say so rather than degrading silently (AP-10).
       static std::atomic<int> unstamped{0};
       const int n_unstamped = unstamped.fetch_add(1);
-      // Braces are load-bearing: MLPD_WARN expands to several statements, so an
-      // unbraced guard would gate only the header and print the body every read.
       if ((n_unstamped % 200) == 0) {
         MLPD_WARN(
             "RX read without a usable timestamp (rate=%.0f, flags=0x%x), count "
@@ -813,7 +811,7 @@ int RadioHoudini::recv(void* const* buffs, int samples, long long& frameTime) {
     const double rms = std::sqrt(s / (got * 2));
     if (getenv("HOUDINI_CL_RX_DEBUG") != nullptr) {
       static std::atomic<int> cnt{0};
-      if ((cnt.fetch_add(1) % 40) == 0) {  // braces load-bearing: MLPD_INFO
+      if ((cnt.fetch_add(1) % 40) == 0) {
         MLPD_INFO("Houdini client RX dbg: got=%d rms=%.2f absmax=%d\n", got,
                   rms, amax);                 // is a multi-statement macro
       }
