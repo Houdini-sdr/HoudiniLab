@@ -29,6 +29,7 @@
 #include "include/utils.h"
 #include "include/houdini/pilot_slope_fit.h"
 #include "include/houdini/cns_sample.h"
+#include "include/houdini/pre_cfo.h"
 
 namespace Sounder {
 
@@ -106,6 +107,7 @@ void RecorderWorker::initCsi(void) {
   const houdini::sync::RxPathFixes fixes = cfg_->rx_path_fixes();
   rx_conj_ = fixes.conjugate;  // undo the R2C mixer's spectral inversion (RFSoC only)
   if (std::getenv("HOUDINI_RX_NOCONJ")) rx_conj_ = false;  // A/B override (before/after)
+  pre_fft_cfo_ = cfg_->bs_cfo_pre_fft();
   // Symbol-0 start: default the FFT window HALF A CP earlier than the nominal prefix.
   // The cyclic-prefix guard is one-sided -- a window placed early (within the CP) is a
   // valid circular shift (pure phase, recoverable), but one placed even 1 sample LATE
@@ -214,6 +216,23 @@ void RecorderWorker::streamCsi(Packet* pkt, NodeType node_type) {
     sendMeta(pkt->ant_id, std::chrono::duration_cast<std::chrono::nanoseconds>(
                             std::chrono::steady_clock::now().time_since_epoch())
                             .count());
+  // The BS refused this lane's pilot on its own (another lane placed the cut):
+  // its samples are real, so the ADC and spectrum above still draw, but its H
+  // would be built from a faded or hit pilot. Its H and constellation go
+  // stale instead (the frame's P and U carry the same flag).
+  if (pkt->lane_refused != 0) {
+    csi_lane_refused_++;
+    const long long now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                              std::chrono::steady_clock::now().time_since_epoch())
+                              .count();
+    if (now - csi_refused_log_ns_ > 5000000000LL) {  // at most one line per 5 s
+      csi_refused_log_ns_ = now;
+      MLPD_WARN("CSI view: kept %zu slot(s) out of H and the constellation, their lane's pilot refused by the BS "
+                "(latest ant %u); the ADC and spectrum still draw\n",
+                csi_lane_refused_, pkt->ant_id);
+    }
+    return;
+  }
   // H is estimated only for a pilot whose H will be USED: the CSI datagram
   // and the constellation are both throttled to csi_throttle_ns_, so an H for
   // every other pilot was computed and thrown away. At R3 (14 FFTs of 4096 per
@@ -361,6 +380,19 @@ void RecorderWorker::sendSpectrum(Packet* pkt) {
   (void)::send(csi_sock_, buf.data(), buf.size(), 0);
 }
 
+// bs_cfo_pre_fft: the rotation can clamp a sample the ADC delivered within 3 dB
+// of full scale (houdini/pre_cfo.h derotate). Counted and warned, never silent.
+void RecorderWorker::notePreCfoSaturation(long long values, uint32_t ant) {
+  if (values <= 0) return;
+  pre_cfo_saturated_ += values;
+  const long long k = ++pre_cfo_sat_slots_;
+  if ((k & (k - 1)) == 0) {  // braces: MLPD_WARN is several statements
+    MLPD_WARN("ant %u: the pre-FFT carrier rotation clamped %lld I/Q value(s) in this slot (%lld slots, %lld values "
+              "so far): the ADC is within 3 dB of full scale\n",
+              ant, values, k, pre_cfo_saturated_);
+  }
+}
+
 // Pilot slot -> channel estimate H[k] (DC-centered), cached per antenna + streamed.
 void RecorderWorker::sendCsi(Packet* pkt) {
   const int N = static_cast<int>(cfg_->fft_size());
@@ -369,6 +401,26 @@ void RecorderWorker::sendCsi(Packet* pkt) {
   const int slot = static_cast<int>(cfg_->samps_per_slot());
   const short* d = pkt->data;
   const int es = symStart(d, slot);  // symbol-0 start (fixed prefix by default; sym_start knob)
+  // bs_cfo_pre_fft (houdini/pre_cfo.h): this lane's carrier offset from its own
+  // pilot (identical symbols), rotated out of the samples BEFORE the FFT, so the
+  // leakage between subcarriers goes too and the data slot of the same frame
+  // gets the same correction (sendConstellation). Applied only when the repeats
+  // are coherent; otherwise the post-FFT per-symbol correction alone, as before.
+  std::vector<short> cfo_buf;
+  if (pre_fft_cfo_) {
+    const auto e = houdini::precfo::estimate(d, slot, es, cp + N, nsym, cfg_->rate());
+    PreCfo& pc = pre_cfo_[pkt->ant_id];
+    pc.frame = pkt->frame_id;
+    pc.slot = pkt->slot_id;
+    pc.hz = e.hz;
+    pc.coherence = e.coherence;
+    pc.use = e.coherence >= 0.5;
+    if (pc.use) {
+      cfo_buf.resize(2 * static_cast<size_t>(slot));
+      notePreCfoSaturation(houdini::precfo::derotate(d, cfo_buf.data(), slot, e.hz, cfg_->rate(), 0), pkt->ant_id);
+      d = cfo_buf.data();
+    }
+  }
   int s0 = nsym / 8, s1 = nsym - nsym / 8;
   if (s1 <= s0) { s0 = 0; s1 = nsym; }
   const auto& pilot_ref = pilotRef(pkt->ant_id);
@@ -564,6 +616,21 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
   const int slot = static_cast<int>(cfg_->samps_per_slot());
   const short* d = pkt->data;
   const int es = symStart(d, slot);  // symbol-0 start (fixed prefix by default; sym_start knob)
+  // bs_cfo_pre_fft: this frame's pilot measured the offset (sendCsi); the data
+  // slot continues its phase, a whole number of slots after the pilot.
+  std::vector<short> cfo_buf;
+  const PreCfo* pcu = nullptr;
+  if (pre_fft_cfo_) {
+    auto pc = pre_cfo_.find(pkt->ant_id);
+    if (pc != pre_cfo_.end() && pc->second.frame == pkt->frame_id && pc->second.use) {
+      pcu = &pc->second;
+      const long long t0 = (static_cast<long long>(pkt->slot_id) - static_cast<long long>(pcu->slot)) * slot;
+      cfo_buf.resize(2 * static_cast<size_t>(slot));
+      notePreCfoSaturation(houdini::precfo::derotate(d, cfo_buf.data(), slot, pcu->hz, cfg_->rate(), t0),
+                           pkt->ant_id);
+      d = cfo_buf.data();
+    }
+  }
   const OfdmBand& band = cfg_->bsRxBand(pkt->ant_id);  // this antenna's channel's band (AP-85)
   const auto& data_ind = band.data_ind;
   double fix_r = 0.0;  // the timing-fix r this frame, for the low-score autopsy
@@ -844,8 +911,12 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
           MLPD_INFO(
               "carrier health: per-symbol phase advance %+.3f deg/sym = "
               "%+.1f Hz residual across %d symbols (measured BEFORE the "
-              "correction, so it stays visible while corrected)\n",
-              slope * 180.0 / M_PI, hz, nph);
+              "per-symbol correction, so it stays visible while corrected)%s\n",
+              slope * 180.0 / M_PI, hz, nph,
+              pcu != nullptr ? (", after the pilot's pre-FFT " + std::to_string(std::lround(pcu->hz)) +
+                                " Hz (coherence " + std::to_string(pcu->coherence).substr(0, 4) + ", " +
+                                std::to_string(pre_cfo_saturated_) + " I/Q values clamped so far)").c_str()
+                             : "");
         }
       }
     }

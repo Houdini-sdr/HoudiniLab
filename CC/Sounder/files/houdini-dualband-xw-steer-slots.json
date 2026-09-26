@@ -1,13 +1,15 @@
 {
- "_description": "DEMO, wide X-band (AP-85): sub-6 2425 MHz at 133 RB + X-band IF 4380 MHz at 270 RB, 4096 FFT, 30 kHz",
+ "_description": "BS RX SLOTS ONLY (AP-87): houdini-dualband-xw-steer.json plus bs_rx_slots: the BS arms the pattern its schedule means (the beacon slot strobe only, P and U rx, guards closed) with the device's SH-347 slots mode, so only its rx slots reach the framer",
  "_comment": "AP-79 dual-band demo, HS-202 mode V: sub-6 ISM 2.4 (2400 to 2450 MHz, NCO 2425) both ways plus the X-band IF (NCO 4380) UE to BS, one numerology on both bands. Derived from houdini-2ch-decouple.json (the AP-78 two-channel demo) with the P + U schedule of houdini-ul.json. BS .22: TX ch0 (A, sub-6 beacon), RX ch0 (A, sub-6 uplink) + ch2 (C, X-IF uplink). UE .21: RX ch0 (A, sub-6 beacon), TX ch0 (A, sub-6) + ch1 (B, X-IF). Wiring per plan section 6: .22 DAC_B -> .21 ADC_D, .21 DAC_B -> .22 ADC_D, .21 DAC_A -> .22 ADC_B.",
- "_status": "NOT YET RUN on the rig. houdini-dualband.json with one key added (channel_ofdm_data_num); everything else is identical, so an A/B against that file isolates the X-band width. Design, tests and the registered rig predictions: PER_BAND_BW_DESIGN.md.",
+ "_status": "NOT YET RUN on the rig. Needs a device with SH-347 slots mode (arc/demo-release 70d266d or later) and its host plugin (the slots prefix), and packets that tile the slot (the BS opens with HOUDINI_MTU 7738). Otherwise identical to houdini-dualband-xw-steer.json.",
  "serial_file": "files/topology-houdini-dualband.json",
  "dashboard_mag_top": 115,
  "_dashboard_note": "The live dashboard's fixed |H| axis top in dB (csi_gui/csi_server.py reads it; --mag-top overrides; the span stays --mag-span, 40). At this numerology |H| read 97-104 dB on both antennas (DEMO_VERIFICATION 9.48), above the old default window of 50-90 dB.",
  "radio_type": "houdini",
  "remote_port": "55132",
  "bs_hw_framer": true,
+ "bs_rx_slots": true,
+ "bs_cfo_pre_fft": true,
  "ue_tdd_pilot": true,
  "ue_tx_advance_ticks": 0,
  "_rates_note": "sample_rate stays 122.88e6: it is the RX rate AND the device tick, and every slot/frame count below is in those ticks. The TX stream runs at tx_sample_rate; every TX waveform is generated at 122.88 and x2 interpolated at the radio boundary (include/dsp/band_filters.h). DAC 5898.24 / interpolation 24, ADC 4915.2 / decimation 40.",
@@ -53,6 +55,10 @@
  "ue_modulation": "QPSK",
  "_beacon_note": "nr_pss_bl: the band-limited beacon (AP-79): the 127-tone NR PSS at 240 kHz behind NR's 36-sample CP, then a guarded TRS pair on the central 96 tones (+-23 MHz); 1076 ticks. tx_full_scale 0.34 = -16 dBFS RMS at its 6.6 dB PAPR, the plan's DAC back-off. The argmax pick: the shipped first_path rule lands 2 samples early on this lobe (beacon_bandlimit_test).",
  "sync": {
+  "steer": {
+   "enable": true,
+   "deadband_ppm": 0.12
+  },
   "beacon": {
    "type": "nr_pss_bl",
    "tx_full_scale": 0.34

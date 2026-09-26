@@ -57,6 +57,18 @@ class RecorderWorker {
   // TX beacon to cancel). Sync uses raw samples, but CSI/constellation must undo it,
   // else H[k] lands on the mirror subcarrier (N-k) and the constellation scrambles.
   bool rx_conj_ = false;
+  bool pre_fft_cfo_ = false;  // bs_cfo_pre_fft: the pilot-measured carrier offset removed before the FFT
+  struct PreCfo {
+    uint32_t frame = 0;
+    uint32_t slot = 0;
+    double hz = 0.0;
+    double coherence = 0.0;
+    bool use = false;
+  };
+  std::unordered_map<uint32_t, PreCfo> pre_cfo_;  // per antenna, from its latest pilot
+  long long pre_cfo_saturated_ = 0;  // I/Q values the rotation clamped (pre_cfo.h derotate), this worker
+  long long pre_cfo_sat_slots_ = 0;  // slots with any
+  void notePreCfoSaturation(long long values, uint32_t ant);
   int csi_sock_ = -1;
   // DC-centered freq-domain pilot per RX lane (lane = ant % bs_rx_ch): each
   // antenna's own channel's band (AP-85).
@@ -93,6 +105,10 @@ class RecorderWorker {
   // (AP-10), plus a throttle so the warning cannot flood a lossy run.
   size_t csi_slots_dropped_ = 0;
   long long csi_drop_log_ns_ = 0;
+  // Slots kept out of H and the constellation because the BS refused their
+  // lane's pilot alone (Packet::lane_refused), and that warning's throttle.
+  size_t csi_lane_refused_ = 0;
+  long long csi_refused_log_ns_ = 0;
   // Latest channel estimate H[k] per antenna (DC-centered), cached from the pilot
   // slot and used to equalize that antenna's uplink-data (U) slot.
   std::unordered_map<uint32_t, std::vector<std::complex<float>>> csi_h_;

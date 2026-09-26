@@ -185,6 +185,48 @@ int main() {
               sa::densestNear(std::vector<double>(N / 2, 0.0), 0, N / 4, N, 128).first == -1,
           "densestNear clamps to the capture and returns -1 when no window fits (mutation: no clamp)");
   }
+  {
+    namespace sa = houdini::slotalign;
+    check(!sa::lanePresent(119.0, 0.0, 0.9, false) && sa::lanePresent(121.0, 0.0, 0.0, false) &&
+              !sa::lanePresent(200.0, 51.0, 0.9, false) && sa::lanePresent(200.0, 49.0, 0.0, false),
+          "the presence gate needs rms 120 and 4x the floor, whatever the pilot's shape (mutation: either bar "
+          "dropped, the floor factor changed, or the LTS stand-in applied outside slots mode)");
+    check(!sa::lanePresent(500.0, 0.0, 0.30, true) && sa::lanePresent(150.0, 0.0, 0.85, true) &&
+              !sa::lanePresent(110.0, 0.0, 0.95, true),
+          "slots mode: with no noise floor the LTS check stands in, so interference above the bar is a quiet "
+          "frame (mutation: the relative bar against the zero floor, which never fires; or the absolute bar "
+          "dropped)");
+    check(!sa::lanePresent(150.0, 0.0, 0.39, true) && sa::lanePresent(150.0, 0.0, 0.40, true),
+          "slots mode: the stand-in bar is the LTS check's own 0.4 (mutation: > instead of >=, or a different bar, "
+          "so a pilot the LTS check accepts is skipped as quiet)");
+    check(sa::laneRefused(false, 0.99) && sa::laneRefused(true, 0.39) && !sa::laneRefused(true, 0.40),
+          "a lane is refused alone when it failed its gate or its pilot the LTS check (mutation: the gate or the "
+          "LTS test dropped, so a faded or burst-hit sub-6 pilot goes out as trusted H while the X-band places "
+          "the cut)");
+    const long long G_EP = 5000, G_FR = 20 * 61440;
+    check(sa::pilotGridOff(G_EP + 2 * 61440 - 10, 6, G_EP, 2, 61440, G_FR) == -4 &&
+              sa::pilotGridOff(G_EP - G_FR + 2 * 61440 - 100, 107, G_EP, 2, 61440, G_FR) == 7 &&
+              sa::pilotGridOff(G_EP + 13 * 61440, 0, G_EP, 2, 61440, G_FR) == 11 * 61440 - G_FR,
+          "pilotGridOff: the placed start against the scheduled pilot, a stamp before the epoch folded, the "
+          "far side of the frame negative (mutation: no fold, or the pilot slot not subtracted)");
+    check(sa::headAtSlotEdge(-32, 32) && sa::headAtSlotEdge(-30, 32) && !sa::headAtSlotEdge(-29, 32) &&
+              !sa::headAtSlotEdge(-4, 32),
+          "a start pinned at -prefix (the cut edge) flags, the wired -4 does not (mutation: compared against 0, "
+          "or the sign flipped)");
+    check(!sa::laneTakesCut(false, 0.99, true, 0.50),
+          "a lane that fails the gate never takes the cut, however clean (mutation: the pre-review rule on "
+          "self-similarity alone, where a weak clean X-band won and then skipped a frame the sub-6 carried)");
+    check(sa::laneTakesCut(true, 0.60, false, 0.90),
+          "a passing lane takes the cut from a failing reference (mutation: the reference kept, so a weak sub-6 "
+          "skipped the frame and the wired X-band was lost with it)");
+    check(sa::laneTakesCut(true, 0.43, true, 0.39) && !sa::laneTakesCut(true, 0.39, true, 0.36),
+          "a lane whose pilot passes the LTS check takes the cut from one that fails it, whatever the margin "
+          "(mutation: the 0.05 margin applied across the bar, so the frame is marked untrusted while a clean "
+          "lane is refused with it)");
+    check(!sa::laneTakesCut(true, 0.93, true, 0.90) && sa::laneTakesCut(true, 0.96, true, 0.90),
+          "between passing lanes the reference keeps the cut unless beaten by more than 0.05 (mutation: the "
+          "margin dropped, so noise in self-similarity flips the cut lane frame to frame)");
+  }
   if (failures) std::printf("FAILED: %d failure(s)\n", failures);
   return failures ? 1 : 0;
 }

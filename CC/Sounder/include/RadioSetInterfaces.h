@@ -33,6 +33,10 @@ class IBaseRadioSet {
   /// Samples zero-padded into the window backing the LAST radioRx (0 = clean,
   /// and 0 always for a set without a gap ledger). See AP-10.
   virtual size_t lastRxPadSamples(size_t radio_id, size_t cell_id) const = 0;
+  /// Whether the slot backing the LAST radioRx refused one channel's (lane's)
+  /// pilot on its own: real samples, an untrusted channel estimate (a gated
+  /// framer judges each lane's pilot).
+  virtual bool lastRxLaneRefused(size_t /*radio_id*/, size_t /*cell_id*/, size_t /*lane*/) const { return false; }
   virtual void radioStart() = 0;
   virtual void radioStop() = 0;
   virtual bool getRadioNotFound() = 0;

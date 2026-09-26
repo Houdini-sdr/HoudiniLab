@@ -52,7 +52,12 @@ if(${CMAKE_C_COMPILER_ID} STREQUAL "GNU")
   # on here to keep a shadowed declaration from silently hiding an outer one:
   # the tree was clean of all 7 when it was turned on, and third_party/ is a
   # SYSTEM include below, so it contributes no noise.
-  set(CMAKE_CXX_FLAGS "-std=c++17 -Wall -Wextra -Wshadow ${ARCH_FLAGS}")
+  # -Wno-psabi: GCC's x86 note that passing a struct with a std::complex<float>
+  # member (the detector's Detection) "changed ABI in GCC 4.4" matters only when
+  # linking against objects built with a GCC older than 4.4; it printed once per
+  # call site on every x86 build and buried real warnings. The ARM build never
+  # printed it.
+  set(CMAKE_CXX_FLAGS "-std=c++17 -Wall -Wextra -Wshadow -Wno-psabi ${ARCH_FLAGS}")
   set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -O0")
 else()
   message(FATAL_ERROR "Unsupported version of compiler")
@@ -388,6 +393,15 @@ add_test(NAME pilot_ladder COMMAND pilot_ladder_test)
 add_executable(slot_align_test tests/comms-func/slot_align_test.cc)
 target_include_directories(slot_align_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 add_test(NAME slot_align COMMAND slot_align_test)
+add_executable(grid_check_test tests/comms-func/grid_check_test.cc)
+target_include_directories(grid_check_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME grid_check COMMAND grid_check_test)
+add_executable(pre_cfo_test tests/comms-func/pre_cfo_test.cc)
+target_include_directories(pre_cfo_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_test(NAME pre_cfo COMMAND pre_cfo_test)
+add_executable(bs_slots_test tests/comms-func/bs_slots_test.cc)
+target_include_directories(bs_slots_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_test(NAME bs_slots COMMAND bs_slots_test)
 add_executable(rx_packet_test tests/comms-func/rx_packet_test.cc)
 target_include_directories(rx_packet_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 add_test(NAME rx_packet COMMAND rx_packet_test)
