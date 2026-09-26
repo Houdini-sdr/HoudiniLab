@@ -29,9 +29,9 @@ int pin_thread_to_core(int core_id, pthread_t& thread_to_pin) {
 
 std::vector<size_t> Utils::strToChannels(const std::string& channel) {
   // Each letter A-D maps to converter channel 0-3, in the order written, so any
-  // subset works (e.g. "BC" -> {1,2}, "AC" -> {0,2}). This generalises the old
-  // fixed set (A/B/AB/C/D/CD/ABCD) so TX and RX channel sets can differ; an
-  // unrecognised character yields an empty vector, which the caller rejects.
+  // subset works (e.g. "BC" -> {1,2}, "AC" -> {0,2}) and the TX and RX channel
+  // sets can differ; an unrecognised character yields an empty vector, which
+  // the caller rejects.
   std::vector<size_t> channels;
   for (char c : channel) {
     if (c >= 'A' && c <= 'D') {
@@ -133,68 +133,6 @@ std::vector<std::vector<size_t>> Utils::loadSlots(
   return slot_id;
 }
 
-void Utils::loadDevices(const std::string& filename,
-                        std::vector<std::string>& data) {
-  std::string line;
-  std::ifstream myfile(filename, std::ifstream::in);
-  if (myfile.is_open()) {
-    size_t num_dev = 0;
-    while (getline(myfile, line)) {
-      std::string item;
-      bool word_found = false;
-      for (char const& ch : line) {
-        if (!word_found && ch == ' ')
-          continue;
-        else if (word_found && ch == ' ')
-          break;
-        else {
-          word_found = true;
-          item += ch;
-        }
-      }
-      if (item.empty() || item.at(0) == '#') {
-        continue;
-      }
-      data.push_back(item);
-      std::cout << item << '\n';
-      num_dev++;
-    }
-    std::cout << "Number of valid devices loaded from " << filename << ": "
-              << num_dev << std::endl;
-    myfile.close();
-  }
-
-  else {
-    std::cerr << "Unable to open device file " << filename << std::endl;
-    exit(1);
-  }
-}
-
-void Utils::loadData(const char* filename,
-                     std::vector<std::complex<int16_t>>& data, int samples) {
-  FILE* fp = fopen(filename, "r");
-  data.resize(samples);
-  float real, imag;
-  for (int i = 0; i < samples; i++) {
-    if (2 != fscanf(fp, "%f %f", &real, &imag)) break;
-    data[i] =
-        std::complex<int16_t>(saturateToInt16(real), saturateToInt16(imag));
-  }
-
-  fclose(fp);
-}
-
-void Utils::loadData(const char* filename, std::vector<unsigned>& data,
-                     int samples) {
-  FILE* fp = fopen(filename, "r");
-  data.resize(samples);
-  for (int i = 0; i < samples; i++) {
-    if (1 != fscanf(fp, "%u", &data[i])) break;
-  }
-
-  fclose(fp);
-}
-
 void Utils::loadTDDConfig(const std::string& filename, std::string& jconfig) {
   std::string line;
   std::ifstream configFile(filename);
@@ -219,12 +157,6 @@ std::vector<std::string> Utils::split(const std::string& s, char delimiter) {
     tokens.push_back(token);
   }
   return tokens;
-}
-
-void Utils::printVector(std::vector<std::complex<int16_t>>& data) {
-  for (size_t i = 0; i < data.size(); i++) {
-    std::cout << real(data.at(i)) << " " << imag(data.at(i)) << std::endl;
-  }
 }
 
 void Utils::WriteVector(const std::string filename, const std::string desc,
