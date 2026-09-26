@@ -61,7 +61,7 @@ def alarm_kinds(lines):
     out = Counter()
     for l in lines:
         for m in ALARM_ITEM.finditer(l):
-            k = re.sub(r"\+\d+", "+N", m.group(1))
+            k = re.sub(r"\+\d+", "+N", m.group(1)).strip()  # an item before ' |' keeps no trailing space
             k = re.sub(r"=\d+ \((sticky|saturated)$", r" \1", k)
             out[k.rstrip(":") + (" drift" if k.startswith("config ") else "")] += 1
     return out

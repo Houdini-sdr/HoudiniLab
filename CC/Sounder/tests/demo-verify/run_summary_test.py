@@ -84,6 +84,11 @@ check(any("refused by the host" in t and "ch0 2" in t for t in w) and any("Write
       and "FAIL" not in levels(lr2),
       "late TX writes the host refused and the plugin's Write rejected lines are warnings for the software lane "
       "(mutation: late_refusals not read)")
+K2 = rs.alarm_kinds([
+    "57:4 WARNG: UE x link health: [UE x] 5.0 s: irq 1/s, preflight FAIL TX1:late=11: preflight new FAIL TX1:late=11 | app: rx_err +0, rx_short +0, rx_pad +0, tx_short +0, tx_sat +0",
+    "57:5 WARNG: UE x link health: [UE x] 5.0 s: irq 1/s, preflight FAIL TX1:late=11: preflight new FAIL TX1:late=11; tx1.late +3 | app: rx_err +0, rx_short +0, rx_pad +0, tx_short +0, tx_sat +0"])
+check(K2.get("preflight new FAIL TX1:late=11") == 2 and all(not k.endswith(" ") for k in K2),
+      "one alarm counts under one key whatever follows it (mutation: keep the space before a pipe): %s" % dict(K2))
 # main: the exit status is the verdict's, read from a run directory's largest log
 d = tempfile.mkdtemp(prefix="run_summary_")
 open(os.path.join(d, "small_cpu.log"), "w").write("x\n")
