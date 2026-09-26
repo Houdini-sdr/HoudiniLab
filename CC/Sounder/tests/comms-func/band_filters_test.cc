@@ -24,9 +24,9 @@
  * and print the measured value so the margin is visible.
  *
  * EVERY ASSERTION NAMES THE MUTATION THAT BREAKS IT, AND THAT MUTATION IS
- * BUILT (the lane rule from the AP-72 review). The mutation matrix at the end
- * runs each named mutant through the same measurement and requires it to
- * FAIL; a check that no mutant can fail is not a check.
+ * BUILT. The mutation matrix at the end runs each named mutant through the
+ * same measurement and requires it to FAIL; a check that no mutant can fail
+ * is not a check.
  *
  * Build: CMake target band_filters_test. Run: ./band_filters_test (or ctest).
  */
@@ -84,8 +84,38 @@ double db(double x) { return 20.0 * std::log10(std::max(x, 1e-15)); }
 // 2N-sample output; the real one is runCircular, the mutants wrap it.
 using Interp = std::function<std::vector<cf>(const std::vector<cf>&)>;
 
+// `hb` over one period of a periodic input (runCircular). `hb` must outlive
+// the returned function.
+Interp circular(const HalfbandInterp2& hb) {
+  return [&hb](const std::vector<cf>& x) {
+    std::vector<cf> y(2 * x.size());
+    hb.runCircular(x.data(), x.size(), y.data());
+    return y;
+  };
+}
+
+// `interp` with its output delayed one TX sample (circularly): the phase and
+// passthrough mutant.
+Interp delayedOneTx(const Interp& interp) {
+  return [interp](const std::vector<cf>& x) {
+    auto y = interp(x);
+    std::vector<cf> d(y.size());
+    for (size_t k = 0; k < y.size(); ++k) d[k] = y[(k + y.size() - 1) % y.size()];
+    return d;
+  };
+}
+
 constexpr size_t kN = 4096;                 // input samples, one period
 constexpr double kBinIn = kRx / kN;         // 30 kHz: tones on this grid are exact
+
+// Passthrough: out[2k] == in[k] bit-exact for a tone at `f`.
+bool passthroughExact(const Interp& interp, double f) {
+  const auto x = tone(kN, f, kRx);
+  const auto y = interp(x);
+  bool exact = true;
+  for (size_t k = 0; k < kN; ++k) exact = exact && (y[2 * k] == x[k]);
+  return exact;
+}
 
 struct InterpResult {
   double worst_image_db = -999.0;  // image relative to the wanted tone, worst over the band
@@ -124,6 +154,15 @@ InterpResult measureInterp(const Interp& interp, long edge = 833, long step = 33
 // well inside so the zero-outside edges do not reach it.
 using Filt = std::function<std::vector<cf>(const std::vector<cf>&)>;
 
+// `ch` over a linear buffer. `ch` must outlive the returned function.
+Filt linear(const ChannelFilter& ch) {
+  return [&ch](const std::vector<cf>& x) {
+    std::vector<cf> y(x.size());
+    ch.run(x.data(), x.size(), y.data());
+    return y;
+  };
+}
+
 constexpr size_t kLen = 8192, kWin = 4096, kW0 = 2048;
 constexpr double kBinCh = kRx / kWin;  // 30 kHz
 
@@ -158,25 +197,25 @@ ChanResult measureChan(const Filt& filt) {
 // The edge contract: content inside the stated zero margins matches the
 // unbounded filter.
 bool edgeMatches(const HalfbandInterp2& hb, size_t margin_before, size_t margin_after) {
-    const size_t body = 64;
-    const auto t = tone(body, 3.3e6, kRx);
-    std::vector<cf> tight(margin_before + body + margin_after, cf(0, 0));
-    std::vector<cf> wide(tight.size() + 64, cf(0, 0));
-    for (size_t k = 0; k < body; ++k) { tight[margin_before + k] = t[k]; wide[32 + margin_before + k] = t[k]; }
-    std::vector<cf> yt(2 * tight.size()), yw(2 * wide.size());
-    hb.run(tight.data(), tight.size(), yt.data());
-    hb.run(wide.data(), wide.size(), yw.data());
-    // The tight output must equal the wide one where they overlap AND the
-    // wide output must be zero everywhere the tight buffer does not reach:
-    // a margin that is too small loses the tail off the end, which an
-    // overlap-only comparison cannot see.
-    for (size_t k = 0; k < yw.size(); ++k) {
-      const bool inside = k >= 64 && k < 64 + yt.size();
-      const cf ref = inside ? yt[k - 64] : cf(0, 0);
-      if (std::abs(ref - yw[k]) > 1e-6f) return false;
-    }
-    return true;
+  const size_t body = 64;
+  const auto t = tone(body, 3.3e6, kRx);
+  std::vector<cf> tight(margin_before + body + margin_after, cf(0, 0));
+  std::vector<cf> wide(tight.size() + 64, cf(0, 0));
+  for (size_t k = 0; k < body; ++k) { tight[margin_before + k] = t[k]; wide[32 + margin_before + k] = t[k]; }
+  std::vector<cf> yt(2 * tight.size()), yw(2 * wide.size());
+  hb.run(tight.data(), tight.size(), yt.data());
+  hb.run(wide.data(), wide.size(), yw.data());
+  // The tight output must equal the wide one where they overlap AND the
+  // wide output must be zero everywhere the tight buffer does not reach:
+  // a margin that is too small loses the tail off the end, which an
+  // overlap-only comparison cannot see.
+  for (size_t k = 0; k < yw.size(); ++k) {
+    const bool inside = k >= 64 && k < 64 + yt.size();
+    const cf ref = inside ? yt[k - 64] : cf(0, 0);
+    if (std::abs(ref - yw[k]) > 1e-6f) return false;
   }
+  return true;
+}
 
 // The requirement predicates, shared by the real filters and the mutants so a
 // mutant is judged by exactly the rule it must break.
@@ -194,11 +233,7 @@ int main() {
   const ChannelFilter ch;
 
   // ---- interpolator --------------------------------------------------------
-  const Interp real_interp = [&hb](const std::vector<cf>& x) {
-    std::vector<cf> y(2 * x.size());
-    hb.runCircular(x.data(), x.size(), y.data());
-    return y;
-  };
+  const Interp real_interp = circular(hb);
   const auto ir = measureInterp(real_interp);
   std::printf("interp: worst image %.1f dB, ripple %.5f dB, worst phase %.2e rad\n",
               ir.worst_image_db, ir.ripple_db, ir.worst_phase_rad);
@@ -206,13 +241,8 @@ int main() {
   check(interpFlat(ir), "interp passband ripple <= 0.01 dB [mutation: beta 3 halfband]");
   check(interpZeroPhase(ir), "interp zero phase [mutation: output delayed one TX sample]");
 
-  {  // passthrough is bit-exact: out[2k] == in[k]
-    const auto x = tone(kN, 7.0 * kBinIn * 101, kRx);
-    const auto y = real_interp(x);
-    bool exact = true;
-    for (size_t k = 0; k < kN; ++k) exact = exact && (y[2 * k] == x[k]);
-    check(exact, "interp out[2k] == in[k] bit-exact [mutation: output delayed one TX sample]");
-  }
+  check(passthroughExact(real_interp, 7.0 * kBinIn * 101),
+        "interp out[2k] == in[k] bit-exact [mutation: output delayed one TX sample]");
 
   {  // edge contract: content inside the stated zero margin matches the
      // unbounded filter; one sample closer to the edge and it must not.
@@ -265,11 +295,7 @@ int main() {
   // (0.4 x 122.88): its images start at 73.73 MHz.
   const HalfbandInterp2 hbw = HalfbandInterp2::wide();
   constexpr long kWideEdge = 1638, kWideStep = 13;
-  const Interp wide_interp = [&hbw](const std::vector<cf>& x) {
-    std::vector<cf> y(2 * x.size());
-    hbw.runCircular(x.data(), x.size(), y.data());
-    return y;
-  };
+  const Interp wide_interp = circular(hbw);
   const auto iw = measureInterp(wide_interp, kWideEdge, kWideStep);
   std::printf("wide interp: worst image %.1f dB, ripple %.5f dB, worst phase %.2e rad over +-49.14 MHz\n",
               iw.worst_image_db, iw.ripple_db, iw.worst_phase_rad);
@@ -278,11 +304,8 @@ int main() {
   check(interpFlat(iw), "wide interp passband ripple <= 0.01 dB [mutation: beta 3 wide halfband]");
   check(interpZeroPhase(iw), "wide interp zero phase [mutation: output delayed one TX sample]");
   {
-    const auto x = tone(kN, 7.0 * kBinIn * 211, kRx);
-    const auto y = wide_interp(x);
-    bool exact = true;
-    for (size_t k = 0; k < kN; ++k) exact = exact && (y[2 * k] == x[k]);
-    check(exact, "wide interp out[2k] == in[k] bit-exact [mutation: output delayed one TX sample]");
+    check(passthroughExact(wide_interp, 7.0 * kBinIn * 211),
+          "wide interp out[2k] == in[k] bit-exact [mutation: output delayed one TX sample]");
     std::printf("wide interp context: %zu before, %zu after\n", hbw.contextBefore(), hbw.contextAfter());
     check(edgeMatches(hbw, hbw.contextBefore(), hbw.contextAfter()) &&
               !edgeMatches(hbw, hbw.contextBefore(), hbw.contextAfter() - 1) &&
@@ -293,11 +316,7 @@ int main() {
   }
 
   // ---- channel filter ------------------------------------------------------
-  const Filt real_chan = [&ch](const std::vector<cf>& x) {
-    std::vector<cf> y(x.size());
-    ch.run(x.data(), x.size(), y.data());
-    return y;
-  };
+  const Filt real_chan = linear(ch);
   const auto cr = measureChan(real_chan);
   std::printf("channel: ripple %.4f dB over +-24 MHz, worst stop %.1f dB from +-40.2 MHz, worst phase %.2e rad\n",
               cr.ripple_db, cr.worst_stop_db, cr.worst_phase_rad);
@@ -320,43 +339,24 @@ int main() {
   std::printf("-- mutation matrix (each line must read PASS: the mutant was caught) --\n");
   {
     const HalfbandInterp2 short_hb(7, 9.0);
-    const Interp m = [&short_hb](const std::vector<cf>& x) {
-      std::vector<cf> y(2 * x.size()); short_hb.runCircular(x.data(), x.size(), y.data()); return y; };
-    check(!imagesOk(measureInterp(m)), "mutant 7-tap halfband fails the image check");
+    check(!imagesOk(measureInterp(circular(short_hb))), "mutant 7-tap halfband fails the image check");
   }
   {
     const HalfbandInterp2 soft_hb(HalfbandInterp2::kTaps, 3.0);
-    check(!interpFlat(measureInterp([&soft_hb](const std::vector<cf>& x) {
-            std::vector<cf> y(2 * x.size()); soft_hb.runCircular(x.data(), x.size(), y.data()); return y; })),
-          "mutant beta-3 halfband fails the ripple check");
+    check(!interpFlat(measureInterp(circular(soft_hb))), "mutant beta-3 halfband fails the ripple check");
   }
   {
-    const Interp delayed = [&real_interp](const std::vector<cf>& x) {
-      auto y = real_interp(x);
-      std::vector<cf> d(y.size());
-      for (size_t k = 0; k < y.size(); ++k) d[k] = y[(k + y.size() - 1) % y.size()];
-      return d;
-    };
+    const Interp delayed = delayedOneTx(real_interp);
     check(!interpZeroPhase(measureInterp(delayed)), "mutant one-sample-delayed interp fails the phase check");
-    const auto x = tone(kN, 7.0 * kBinIn * 101, kRx);
-    const auto y = delayed(x);
-    bool exact = true;
-    for (size_t k = 0; k < kN; ++k) exact = exact && (y[2 * k] == x[k]);
-    check(!exact, "mutant one-sample-delayed interp fails the passthrough check");
+    check(!passthroughExact(delayed, 7.0 * kBinIn * 101), "mutant one-sample-delayed interp fails the passthrough check");
   }
   {
     const ChannelFilter short_ch(15, ChannelFilter::kBeta);
-    check(!chanStopOk(measureChan([&short_ch](const std::vector<cf>& x) {
-            std::vector<cf> y(x.size()); short_ch.run(x.data(), x.size(), y.data()); return y; })),
-          "mutant 15-tap channel filter fails the stopband check");
+    check(!chanStopOk(measureChan(linear(short_ch))), "mutant 15-tap channel filter fails the stopband check");
     const ChannelFilter wide_ch(ChannelFilter::kTaps, ChannelFilter::kBeta, 38.0e6);
-    check(!chanStopOk(measureChan([&wide_ch](const std::vector<cf>& x) {
-            std::vector<cf> y(x.size()); wide_ch.run(x.data(), x.size(), y.data()); return y; })),
-          "mutant 38 MHz-cutoff channel filter fails the stopband check");
+    check(!chanStopOk(measureChan(linear(wide_ch))), "mutant 38 MHz-cutoff channel filter fails the stopband check");
     const ChannelFilter narrow_ch(ChannelFilter::kTaps, ChannelFilter::kBeta, 24.0e6);
-    check(!chanFlat(measureChan([&narrow_ch](const std::vector<cf>& x) {
-            std::vector<cf> y(x.size()); narrow_ch.run(x.data(), x.size(), y.data()); return y; })),
-          "mutant 24 MHz-cutoff channel filter fails the ripple check");
+    check(!chanFlat(measureChan(linear(narrow_ch))), "mutant 24 MHz-cutoff channel filter fails the ripple check");
     const Filt delayed = [&real_chan](const std::vector<cf>& x) {
       auto y = real_chan(x);
       std::vector<cf> d(y.size(), cf(0, 0));
@@ -368,33 +368,18 @@ int main() {
 
   {  // AP-85: the wide design's mutants, through the wide band's measurement
     const HalfbandInterp2 narrow;
-    check(!imagesOk(measureInterp([&narrow](const std::vector<cf>& x) {
-            std::vector<cf> y(2 * x.size()); narrow.runCircular(x.data(), x.size(), y.data()); return y; },
-                                  kWideEdge, kWideStep)),
+    check(!imagesOk(measureInterp(circular(narrow), kWideEdge, kWideStep)),
           "mutant: the 23-tap halfband over +-49.14 MHz fails the image check");
     const HalfbandInterp2 short_wide(43, 6.5);  // the sweep's best at 43 taps
-    check(measureInterp([&short_wide](const std::vector<cf>& x) {
-            std::vector<cf> y(2 * x.size()); short_wide.runCircular(x.data(), x.size(), y.data()); return y; },
-                        kWideEdge, kWideStep).worst_image_db > -70.0,
+    check(measureInterp(circular(short_wide), kWideEdge, kWideStep).worst_image_db > -70.0,
           "mutant: a 43-tap wide halfband misses the 10 dB margin");
     const HalfbandInterp2 soft(HalfbandInterp2::kWideTaps, 3.0);
-    check(!interpFlat(measureInterp([&soft](const std::vector<cf>& x) {
-            std::vector<cf> y(2 * x.size()); soft.runCircular(x.data(), x.size(), y.data()); return y; },
-                                    kWideEdge, kWideStep)),
+    check(!interpFlat(measureInterp(circular(soft), kWideEdge, kWideStep)),
           "mutant: the beta-3 wide halfband fails the ripple check");
-    const Interp delayed = [&wide_interp](const std::vector<cf>& x) {
-      auto y = wide_interp(x);
-      std::vector<cf> d(y.size());
-      for (size_t k = 0; k < y.size(); ++k) d[k] = y[(k + y.size() - 1) % y.size()];
-      return d;
-    };
+    const Interp delayed = delayedOneTx(wide_interp);
     check(!interpZeroPhase(measureInterp(delayed, kWideEdge, kWideStep)),
           "mutant: the one-sample-delayed wide interp fails the phase check");
-    const auto x = tone(kN, 7.0 * kBinIn * 211, kRx);
-    const auto y = delayed(x);
-    bool exact = true;
-    for (size_t k = 0; k < kN; ++k) exact = exact && (y[2 * k] == x[k]);
-    check(!exact, "mutant: the one-sample-delayed wide interp fails the passthrough check");
+    check(!passthroughExact(delayed, 7.0 * kBinIn * 211), "mutant: the one-sample-delayed wide interp fails the passthrough check");
   }
 
   std::printf("%s: %d failure(s)\n", g_fail == 0 ? "ALL PASS" : "FAILED", g_fail);

@@ -1,38 +1,36 @@
 /**
  * @file beacon_geometry_test.cc
  * @brief Where the detector's index lands, for each candidate beacon, as a
- *        function of RECEIVED LEVEL. NO hardware.
+ *        function of received level, channel and fractional delay. NO hardware.
  *
- * AP-34(a) added an 802.11 GI2 guard to the beacon, shipped it to silicon, and
- * had to revert: the guard moved `find_beacon`'s returned index by a measured
- * -274 samples, which broke the invariant the entire timing chain rests on --
+ * THE INVARIANT the whole timing chain rests on:
  *
  *     sync_index == houdiniBeaconEnd() == strobe + beacon_size
  *
- * -- so `beaconSnrDb()` measured a window of pre-beacon noise, reported 10.5 dB
- * against a true 48.3, and the 30 dB floor rejected every resync detection.
- * Acquisition still worked, so the demo came up and looked healthy while the
- * liveness path was dead. That cost a bench session.
+ * If the returned index moves, `beaconSnrDb()` measures a window of
+ * pre-beacon noise and the SNR floor rejects every resync detection, while
+ * acquisition still works: the link looks healthy with its liveness path dead
+ * (AP-34(a): an index moved -274 samples read 10.5 dB against a true 48.3).
  *
- * THE GUARD WAS NOT THE CAUSE. This test found the real one, offline, in
- * minutes. The resync path selected the EARLIEST threshold crossing in its
- * search window. The beacon's own STS preamble is 16-periodic and 16 divides the
- * 128-sample correlator lag, so the STS field is perfectly lag-128 self-coherent
- * and manufactures crossings a few hundred samples before the true peak. Whether
- * those crossings win is a function of received level, because the threshold
- * test `corr_scale * |gc[i]|^2 |gc[i-L]|^2 > sum |gc|^2` compares a 4th-order
- * quantity to a 2nd-order one and is therefore NOT scale invariant. The guard
- * did not introduce the fault; it lowered the level at which the fault appears,
- * from ~3200 counts peak to ~400.
+ * THE MECHANISM. A rule that picks the EARLIEST threshold crossing in the
+ * search window is level-dependent. The legacy STS preamble is 16-periodic and
+ * 16 divides the 128-sample correlator lag, so the STS field is perfectly
+ * lag-128 self-coherent and manufactures crossings a few hundred samples before
+ * the true peak. Whether those crossings win is a function of received level,
+ * because the power-ratio test `corr_scale * |gc[i]|^2 |gc[i-L]|^2 > sum |gc|^2`
+ * compares a 4th-order quantity to a 2nd-order one and is NOT scale invariant.
+ * A guard field in front of the gold does not cause the fault; it lowers the
+ * level at which it appears, from ~3200 counts peak to ~400.
  *
- * So the sweep below is the actual regression test, and it is a two-sided one:
- *   - with the shipped kFirstCrossing rule EVERY candidate beacon false-locks
- *     somewhere in the level range a real link spans;
+ * So the level sweep below is a two-sided regression test:
+ *   - with kFirstCrossing EVERY candidate beacon false-locks somewhere in the
+ *     level range a real link spans;
  *   - with kTargetedArgmax -- legal only because the resync slice is ~812
- *     samples against a beacon copy spacing of one full frame -- every candidate
- *     lands
- *     on the beacon end at every level.
- * If a future change reintroduces a level-dependent index, this fails.
+ *     samples against a beacon copy spacing of one full frame -- every
+ *     candidate lands on the beacon end at every level.
+ * If a change reintroduces a level-dependent index, this fails. Sections
+ * marked "reported, not gated" print the tables behind the DEMO_VERIFICATION
+ * rows they cite rather than asserting a requirement.
  *
  * WHAT THIS TEST DOES NOT ESTABLISH. The bursts are synthesised from
  * beacon_shapes.h, not captured from the TX RAM, so they carry neither the
@@ -75,10 +73,10 @@ void check(bool ok, const std::string& what) {
   if (!ok) ++g_fail;
 }
 
-/// Place `core` so its END sits at `end`, in a noise buffer, and ask the real
-/// detector -- not a replica. A replica would agree with itself and prove
-/// nothing, which is the whole reason AP-34(a) needed silicon to find its bug.
-/// Returns the returned index MINUS the true beacon end, or kMiss.
+/// The residual functions below place `core` so its END sits at `end` in a
+/// noise buffer and ask the real detector, not a re-implementation of it (one
+/// would agree with itself and prove nothing). They return the detector's
+/// index MINUS the true beacon end, or kMiss.
 constexpr long long kMiss = -1000000;
 
 constexpr double kRate = houdini::sync::Numerology::houdiniDefault().rate_hz;
@@ -147,12 +145,12 @@ long long residual(const Desc& b, double peak_counts, double snr_db,
   return idx < 0 ? kMiss : s0 + idx + rep_tail - end;
 }
 
-// The shipped resync slice at 122.88 MSPS with the 2026-09-02 defaults
-// (scatter_tol 246): lead = 246 + 256, tail = 246 + 64. sync_geometry.h owns the
+// The shipped resync slice at 122.88 MSPS (scatter_tol 246 samples, the 2.0 us
+// default): lead = 246 + 256, tail = 246 + 64. sync_geometry.h owns the
 // derivation; these are the values it produces, restated so this test says what
 // geometry it is testing rather than pulling in the whole header.
 constexpr long long kLead = 502, kTail = 310;
-constexpr float kResyncCorrScale = 100.0f;  // files/houdini-*.json corr_scale
+constexpr float kResyncCorrScale = 100.0f;  // corr_scale of the legacy-beacon configs (houdini-ul, -1u, -r0)
 constexpr double kSnrDb = 45.0;             // measured in-window beacon SNR
 // The detector reports the last sample of the matched field, so the true beacon
 // end lands one sample later than the returned index.
@@ -192,8 +190,8 @@ void cell(const Row& r) {
 
 /// The first-path back-scan window SyncConfig::resolve() derives for a shape:
 /// half its replica (sync_config.cc), 64 for a 128-tap replica and 32 for a
-/// 64-tap one. Measuring at one fixed width instead read dot11 as 64 samples
-/// biased, which is this test's error and not the detector's.
+/// 64-tap one. One fixed width would read dot11 as 64 samples biased: an error
+/// of the measurement, not of the detector.
 int shippedWindow(const Desc& b) {
   return static_cast<int>(b.replica.size() / 2);
 }
@@ -221,6 +219,22 @@ long long runAt(const Desc& b, double frac, unsigned seed,
       CommsLib::kDefaultFirstPathFloorDb, guard);
   const long long rep_tail = static_cast<long long>(b.replica_tail());
   return r.index < 0 ? kMiss : s0 + r.index + rep_tail - end;
+}
+
+/// One noise-only hunt window: 12288 samples of complex Gaussian noise, 20
+/// counts per component, from raw mt19937 output (bit-specified, unlike the
+/// std distributions) seeded with `seed`.
+std::vector<std::complex<int16_t>> noiseWindow(unsigned seed) {
+  std::mt19937 g(seed);
+  auto u01 = [&g]() { return (static_cast<double>(g()) + 0.5) / 4294967296.0; };
+  std::vector<std::complex<int16_t>> buf(12288);
+  for (auto& v : buf) {
+    const double a = std::sqrt(-2.0 * std::log(u01()));
+    const double ph = 2.0 * M_PI * u01();
+    v = std::complex<int16_t>(static_cast<int16_t>(20.0 * a * std::cos(ph)),
+                              static_cast<int16_t>(20.0 * a * std::sin(ph)));
+  }
+  return buf;
 }
 
 }  // namespace
@@ -259,14 +273,11 @@ int main() {
 
   for (const auto pick : {Pick::kFirstCrossing, Pick::kTargetedArgmax}) {
     const bool argmax = pick == Pick::kTargetedArgmax;
-    // NB both rows below use the POWER-RATIO threshold, which is no longer the
-    // shipped one -- they compare PICK RULES with the threshold held fixed at
-    // the historical form, which is what makes the pre/post comparison honest.
-    // The shipped combination is xcorr + first-path and it is exercised by the
-    // matrix further down, not here.
+    // Both rows use the POWER-RATIO threshold, not the shipped form: they
+    // compare PICK RULES with the threshold held fixed. The shipped
+    // combination, xcorr + first-path, is exercised by the matrix further down.
     std::printf("\n=== %s (power-ratio threshold) ===\n",
-                argmax ? "kTargetedArgmax (resync, 2026-09-02 morning)"
-                       : "kFirstCrossing (resync, before 2026-09-02)");
+                argmax ? "kTargetedArgmax (resync)" : "kFirstCrossing (resync)");
     std::printf("%-12s", "peak counts");
     for (const auto& b : ds) std::printf(" %13s", b.name.c_str());
     std::printf("\n");
@@ -285,12 +296,12 @@ int main() {
       check(level_dependent == 0,
             "  every candidate lands on the beacon end at EVERY level");
     } else {
-      // Not a defect being tolerated: this asserts the OLD rule really is
-      // broken, so the test above is measuring a fix rather than a no-op. If
-      // this ever passes cleanly, the mechanism changed and both branches need
-      // re-deriving before the argmax result can be trusted.
+      // Not a defect being tolerated: this asserts the first-crossing rule
+      // really is level-dependent, so the argmax row measures a fix rather
+      // than a no-op. If this ever passes cleanly, the mechanism changed and
+      // both rows need re-deriving before the argmax result can be trusted.
       check(level_dependent > 0,
-            "  the old rule DOES false-lock somewhere (the fix is not a no-op)");
+            "  first-crossing DOES false-lock somewhere (the argmax row is not a no-op)");
     }
   }
 
@@ -299,20 +310,19 @@ int main() {
   // undetectable. Checked with the rule we actually ship.
   std::printf("\n");
   for (const auto& b : ds) {
-    // Sensitivity floor under the SHIPPED combination, not the historical one.
+    // Sensitivity floor under the SHIPPED combination, not the power-ratio one.
     const Row r = sweepAt(b, 200.0, Pick::kFirstPath, Thr::kNormalizedXCorr);
     check(r.miss == 0 && r.lo == kEndConvention && r.hi == kEndConvention,
           "  " + b.name + ": detected at 200 counts peak, index exact");
   }
 
-  // THE CHECK THAT WOULD HAVE PREVENTED AP-34(a). beacon_shapes.h is about to
-  // become the thing Config::genPilots builds from, and the bench probes already
-  // read its dumped waveforms. If the header's `legacy` ever stops being the
-  // beacon config actually transmits, the bench measures one waveform and the
-  // build ships another -- which is exactly how a guard variant reached silicon
-  // with nobody having derived its index convention. So rebuild config.cc's
-  // beacon here, by its own recipe (genPilots: 15 x STS(16) then 2 x gold(128),
-  // each through Utils::float_to_cint16), and require sample equality.
+  // `legacy` MUST STAY THE ORIGINAL BEACON. Config::genPilots builds the beacon
+  // from beacon_shapes.h and the bench probes read its dumped waveforms, so the
+  // header is the one definition, and every result taken on the legacy beacon
+  // rests on it being sample-identical to the original recipe: 15 x STS(16)
+  // then 2 x gold(128), each through Utils::float_to_cint16. Rebuild that
+  // recipe here and require sample equality (AP-34(a) is what a bench and a
+  // build disagreeing about a beacon costs).
   {
     auto sts_ci16 = Utils::float_to_cint16(CommsLib::getSequence(CommsLib::STS_SEQ));
     auto gold_ci16 = Utils::float_to_cint16(CommsLib::getSequence(CommsLib::GOLD_IFFT));
@@ -341,16 +351,15 @@ int main() {
                   want[first_diff].real(), want[first_diff].imag(),
                   got[first_diff].real(), got[first_diff].imag());
     check(same,
-          "  beacon_shapes 'legacy' is sample-identical to Config::genPilots");
+          "  beacon_shapes 'legacy' is sample-identical to the original genPilots recipe");
   }
 
-  // NO TWO TONES ON ONE BIN. The NR fields are built in the frequency domain,
-  // and the first version of toneIfft "parked" a DC-landing tone at a bin that
-  // was already occupied, so the tracking symbol shipped with one tone doubled
-  // and one missing. Nothing failed: transmit and correlator shared the same
-  // malformed symbol, so it detected fine and merely measured a beacon nobody
-  // designed. Check the property directly -- every field must occupy as many
-  // distinct non-DC bins as it has tones.
+  // NO TWO TONES ON ONE BIN. The NR fields are built in the frequency domain; a
+  // DC-landing tone parked on a bin already occupied doubles one tone and drops
+  // another, and nothing else fails: transmit and correlator share the same
+  // malformed symbol, so it detects fine and measures a beacon nobody designed.
+  // Check the property directly -- every field must occupy as many distinct
+  // non-DC bins as it has tones.
   {
     const auto nr = houdini::sync::shapes::make(Shape::kNr);
     // The tracking symbol is the last fine_len samples of the core.
@@ -375,25 +384,25 @@ int main() {
   // THE THRESHOLD FORM, WHICH IS THE STRUCTURAL HALF OF THE SAME DEFECT.
   //
   // kTargetedArgmax above fixes WHICH crossing is returned. It does not fix
-  // what the threshold MEANS: the shipped statistic is 4th order in received
-  // amplitude over 2nd, so `corr_scale` is a different test at every level.
-  // Measured separately: the statistic at the true peak runs 0.0777 to 321.4
-  // across a 64x level sweep, a spread of 4136 (= 64^2). Normalised -- divide
-  // by the energy term squared, Schmidl & Cox 1997 -- it runs 0.9845 to 0.9843.
+  // what the threshold MEANS: the power-ratio statistic is 4th order in
+  // received amplitude over 2nd, so `corr_scale` is a different test at every
+  // level (at the true peak it spans 4136 = 64^2 across a 64x level sweep).
+  // Normalised -- divided by the energy term squared, Schmidl & Cox 1997 -- it
+  // is level-invariant.
   //
-  // The prediction under test, stated before the numbers: with the normalised
-  // statistic the preamble plateau sits at 1/L^2, which is level-INDEPENDENT
-  // and far below any sensible bar, so EVEN THE OLD earliest-crossing rule
-  // should land on the beacon end at every level. If that holds, the
-  // normalisation subsumes the selection fix rather than merely complementing
-  // it. If it does not, the two are independent and both are needed.
+  // The question the matrix answers (the xcorr + FIRST-crossing line is
+  // reported, not gated): with the normalised statistic the preamble plateau
+  // sits at 1/L^2, level-independent and far below any sensible bar, so the
+  // earliest-crossing rule might land on the beacon end at every level too. If
+  // it does, the normalisation subsumes the selection fix; if not, both are
+  // needed.
   std::printf("\n=== threshold form x pick rule, over the level sweep ===\n");
   std::printf("cells: levels (of %zu) whose index is exact / levels that MISS\n",
               sizeof(kLevels) / sizeof(*kLevels));
   std::printf("%-13s %11s %11s %11s %11s %11s %11s %11s %11s\n", "shape",
               "pow+first", "pow+argmx", "pow+1stpth", "xc+first",
               "xc+argmx", "xc+1stpth", "nolag+frst", "nolag+1stp");
-  int norm_first_bad = 0, norm_argmax_bad = 0, power_first_bad = 0;
+  int norm_first_bad = 0, norm_firstpath_bad = 0, power_first_bad = 0;
   int nolag_bad = 0, nrpss_bad = 0;
   for (const auto& b : ds) {
     std::printf("%-14s", b.name.c_str());
@@ -425,7 +434,7 @@ int main() {
         if (tf == Thr::kNormalizedXCorr && pk == Pick::kFirstCrossing)
           norm_first_bad += nlev - exact;
         if (tf == Thr::kNormalizedXCorr && pk == Pick::kFirstPath)
-          norm_argmax_bad += nlev - exact;
+          norm_firstpath_bad += nlev - exact;
         if (tf == Thr::kPowerRatio && pk == Pick::kFirstCrossing)
           power_first_bad += nlev - exact;
         // nr_pss runs nolag in EVERY column (residual() forces it), so it must
@@ -443,25 +452,22 @@ int main() {
   }
   check(power_first_bad > 0,
         "  power+first still fails somewhere (the comparison is not a no-op)");
-  check(norm_argmax_bad == 0,
+  check(norm_firstpath_bad == 0,
         "  xcorr + FIRST-PATH is exact at every level, every shape");
-  // THE NR-STYLE DETECTOR IS MEASURABLY WORSE HERE, AND THAT IS THE RESULT.
-  // Dropping the lag product removes the repeat check, which is what rejects a
-  // lone noise spike or sidelobe. Measured at corr_scale 100, 8 noise draws:
-  // legacy and legacy_guard each lose one draw (-190 and -129 samples), dot11
-  // loses six of eight, nr four of eight; xcorr+first-path is exact on all 32.
-  // NR uses a plain matched filter because PSS does NOT repeat. Our beacon DOES
-  // have a repeated field, so using it buys real robustness -- follow NR's
-  // ARCHITECTURE (acquisition field, then pilots for fine tracking) and keep the
-  // 802.11-style detector that the waveform actually supports.
+  // THE NR-STYLE (NO-LAG) DETECTOR IS WORSE ON A REPEATED REPLICA, AND THAT IS
+  // THE RESULT. Dropping the lag product removes the repeat check, which is
+  // what rejects a lone noise spike or sidelobe (the nolag+1stp column above
+  // shows the draws it loses). NR uses a plain matched filter because its PSS
+  // does NOT repeat; a beacon with a repeated field keeps the 802.11-style
+  // detector the waveform supports, and follows NR's ARCHITECTURE (acquisition
+  // field, then pilots for fine tracking).
   check(nolag_bad > 0,
         "  no-lag on a REPEATED replica is worse: the repeat check is load-bearing");
-  // AP-66, THE OTHER HALF OF NR, STATED BEFORE THE NUMBERS. The rows above
-  // measured NR's detector on a replica that appears twice and found the
-  // rep1/rep2 ambiguity (-129 = one fine_len on legacy_guard). NR's PSS
-  // appears once. PREDICTION: with the PSS as the replica the plain matched
-  // filter has nothing to be ambiguous about and is exact at every level; if
-  // it is not, the failure is in the code and not in the architecture.
+  // AP-66, THE OTHER HALF OF NR. On a replica that appears twice the no-lag
+  // detector has a rep1/rep2 ambiguity (-129 = one fine_len on legacy_guard).
+  // NR's PSS appears once, so with the PSS as the replica the plain matched
+  // filter has nothing to be ambiguous about and must be exact at every level;
+  // if it is not, the failure is in the code, not in the architecture.
   check(nrpss_bad == 0,
         "  nr_pss: the PSS matched filter (no repeat check) is exact at every level");
   // Reported, not gated, because it is the claim under test rather than a
@@ -517,7 +523,7 @@ int main() {
   }
   std::printf("\nA constant row means one threshold works at every level.\n");
   std::printf("A row falling as 1/level^2 means the knob is a different test\n");
-  std::printf("at every level, which is what the shipped form does.\n");
+  std::printf("at every level, which is what the power-ratio form does.\n");
 
   // ---------------------------------------------------------------------
   // OVER THE AIR: MULTIPATH AND A CARRIER OFFSET.
@@ -531,11 +537,11 @@ int main() {
   //
   // CFO here is 4.25 kHz = 8.5 ppm of 500 MHz, the measured free-running offset
   // between these two boards on internal clocks.
-  // Run for the shipped beacon under the shipped threshold, then for nr_pss,
-  // whose threshold is necessarily the plain matched filter. PREDICTION for
-  // nr_pss: first-path exact on every channel, argmax biased on the stronger
-  // echoes just as it is for legacy -- the pick rule is a property of the
-  // channel, not of the replica.
+  // Run for the legacy beacon under the shipped xcorr threshold, then for
+  // nr_pss, whose single-copy replica forces the plain matched filter. Both
+  // must show the same thing, first-path exact on every channel and argmax
+  // biased on the stronger echoes: the pick rule is a property of the channel,
+  // not of the replica.
   struct Ota { Shape shape; Thr tf; const char* label; };
   const Ota otas[] = {{Shape::kLegacy, Thr::kNormalizedXCorr, "legacy beacon, xcorr threshold"},
                       {Shape::kNrPss, Thr::kCoherence, "nr_pss beacon, nolag threshold"}};
@@ -582,11 +588,9 @@ int main() {
         std::printf(" %13s", c);
         const long long worst = std::max(std::llabs(lo - kEndConvention),
                                          std::llabs(hi - kEndConvention));
-        // COUNT THE SHAPE'S OWN THRESHOLD FORM ONLY. Keying on the pick rule
-        // alone lumped xcorr+first-path together with nolag+first-path, and
-        // since the shipped column is exact on every channel it contributed
-        // nothing -- so the gate below was silently a statement about the
-        // NO-LAG rule.
+        // COUNT THE SHAPE'S OWN THRESHOLD FORM ONLY. Keyed on the pick rule
+        // alone, the extra nolag+1stpath column would be counted too, and the
+        // checks below would silently be statements about the no-lag rule.
         if (miss < 6 && worst > 4 && mc.tf == ota.tf) {
           if (pk == Pick::kTargetedArgmax) ++argmax_bias;
           if (pk == Pick::kFirstPath) ++firstpath_bias;
@@ -605,18 +609,15 @@ int main() {
   }
 
   // ---------------------------------------------------------------------
-  // TIMING JITTER AGAINST SNR, FOR THE 8.160 OBSERVATION. On silicon at
-  // reduced transmit level nr_pss's adjacent-difference jitter read 1.3-2.2x
-  // legacy's while at full level the two were indistinguishable. The mechanism
-  // offered there, BEFORE this ran: the first-path walk-back applies its
-  // fraction to a 2nd-order statistic whose near-peak skirt is wider than the
-  // lag product's 4th-order one, so at lower SNR it lands a sample EARLY more
-  // often. PREDICTION, stated first: if that is the mechanism, nr_pss's
-  // residual spread grows faster than legacy's as SNR falls AND its errors are
-  // biased negative (early). If the spread grows but stays symmetric about the
-  // true end, it is plain matched-filter timing noise and the story is wrong.
-  // Reported, not gated: this section exists to test a mechanism, not a
-  // requirement.
+  // TIMING JITTER AGAINST SNR (reported, not gated; DEMO_VERIFICATION 8.160).
+  // Tests a mechanism offered for nr_pss's higher silicon jitter at reduced
+  // level: the first-path walk-back applies its fraction to a 2nd-order
+  // statistic whose near-peak skirt is wider than the lag product's 4th-order
+  // one, so at lower SNR it would land a sample EARLY more often. If so,
+  // nr_pss's residual spread grows faster than legacy's as SNR falls AND is
+  // biased negative; a spread that stays symmetric about the true end is plain
+  // matched-filter timing noise. 8.160 records the outcome: every shape exact
+  // down to 10 dB, the mechanism withdrawn.
   std::printf("\n=== residual spread against SNR (1600 counts, first-path, 16 draws) ===\n");
   std::printf("%-8s", "SNR dB");
   for (const auto& b : ds) std::printf(" %22s", b.name.c_str());
@@ -655,18 +656,14 @@ int main() {
   }
   std::printf("(* = some draws missed; nr_pss runs nolag in every column)\n");
 
-  // FRACTIONAL TIMING. The sweep above came back exact for every shape down to
-  // 10 dB, so detector noise is NOT the source of the silicon jitter and the
-  // 8.160 mechanism is wrong as stated. What that sweep never exercised is a
-  // beacon that arrives BETWEEN samples, which a real link always does and
-  // which the free-running clock walks through continuously. PREDICTION,
-  // stated first: every shape's integer index must flip between two adjacent
-  // values somewhere in tau = 0..1 (that is what rounding is); the mechanism
-  // that would explain nr_pss reading more jitter on silicon is a flip that
-  // happens at a DIFFERENT tau than legacy's, or a three-value spread, or a
-  // flip that depends on the noise draw over a wide band of tau (dither).
-  // Same flip point and two clean values for all shapes means the silicon
-  // difference is not in the detector either.
+  // FRACTIONAL TIMING (reported, not gated; 8.160). A real link's beacon
+  // arrives BETWEEN samples, and a free-running clock walks it through every
+  // phase. Every shape's integer index flips between two adjacent values
+  // somewhere in tau = 0..1 (that is what rounding is); a detector-side cause
+  // for a shape's extra jitter would show as a flip at a DIFFERENT tau than
+  // legacy's, a three-value spread, or a flip that depends on the noise draw
+  // over a wide band of tau (dither). The same flip point and two clean values
+  // for all shapes put the difference outside the detector.
   std::printf("\n=== returned index against fractional delay (1600 counts, "
               "first-path, 8 draws; cell = residual min..max) ===\n");
   for (const double snr : {45.0, 27.0}) {
@@ -706,21 +703,20 @@ int main() {
   // floor, so on a clean link the rule reports a path one sample before the
   // arrival for a band of tau. `first_path_guard` skips exactly that tap.
   //
-  // THREE EARLIER VERSIONS OF THIS MEASUREMENT WERE WRONG AND THE ERRORS ARE
-  // WORTH KEEPING (review, 8aj):
-  //   - a "lobe reach" table that varied the back-scan window measured the
+  // THREE WAYS TO MISMEASURE THIS (DEMO_VERIFICATION 8aj):
+  //   - a "lobe reach" table that varies the back-scan window measures the
   //     -9 dB FLOOR, not any lobe: one more dB of floor, or 20 dB SNR, moves
   //     the reach from 1 to 2 on four of five shapes;
-  //   - an adjacent-difference "jitter along tau" was 1/sqrt(N-1) of the
-  //     sweep's own grid, not a jitter, and was compared against the rig's
-  //     frame-to-frame figure as though the two were the same statistic;
-  //   - a dither table counting DISTINCT indices over 32 draws on a tau grid
-  //     of 0.1 landed exactly on the argmax's undecided point (tau = 0.5) and
-  //     stepped over the rule's own, which for legacy is at tau = 0.74. It
-  //     concluded the rule was a stabiliser. It is not.
-  // What follows uses the sd of the returned index across draws, on a grid
-  // fine enough to find either rule's transition, and reports the RMS against
-  // the true arrival beside it.
+  //   - an adjacent-difference "jitter along tau" is 1/sqrt(N-1) of the
+  //     sweep's own grid, not a jitter, and not the statistic the rig's
+  //     frame-to-frame figure is;
+  //   - counting DISTINCT indices on a tau grid of 0.1 lands exactly on the
+  //     argmax's undecided point (tau = 0.5) and steps over the rule's own
+  //     (tau = 0.74 for legacy), which makes the rule look like a stabiliser.
+  //     It is not.
+  // What follows uses the spread of the returned index across draws, on a
+  // grid fine enough to find either rule's transition, and reports the RMS
+  // against the true arrival beside it.
   std::printf("\n=== AP-72: first-path rule against the argmax, single path, "
               "and what guard 1 recovers ===\n");
   std::printf("%-14s %5s %7s %7s %7s %14s %14s %14s\n", "shape", "SNR",
@@ -741,13 +737,11 @@ int main() {
         for (int rule = 0; rule < 3; ++rule) {
           const int win = rule == 0 ? 0 : w;
           const int guard = rule == 2 ? 1 : 0;
-          // ONE PASS AT 48 DRAWS, NOT A SCREEN AND A REFINEMENT. The two-pass
-          // version could not be made safe by raising the screen: a real
-          // minority share of 0.008 is missed by a 48-draw screen 68 % of the
-          // time and then prints 0.000, the value a decided rule prints
-          // (review round 5). One pass has a floor instead of a blind spot:
-          // the resolution is 1/48 = 0.021 and anything under that reads as 0,
-          // which the header says.
+          // ONE PASS AT 48 DRAWS, NOT A SCREEN AND A REFINEMENT. A screen
+          // misses a real minority share of 0.008 most of the time and then
+          // prints 0.000, the value a decided rule prints. One pass has a
+          // floor instead of a blind spot: the resolution is 1/48 = 0.021 and
+          // anything under that reads as 0, which the header says.
           //
           // The statistic is the fraction of draws NOT returning the modal
           // index. Unlike a count of distinct values or an sd on integers it
@@ -764,13 +758,11 @@ int main() {
             ++kept;
           }
           if (kept == 0) continue;
-          idx[rule] = hist.begin()->first;  // the modal index is enough here
+          // The modal index (the lowest one on a tie) and its count.
           int best_n = 0;
           for (const auto& kv : hist)
             if (kv.second > best_n) { best_n = kv.second; idx[rule] = kv.first; }
-          int mode = 0;
-          for (const auto& kv : hist) mode = std::max(mode, kv.second);
-          const double m = 1.0 - static_cast<double>(mode) / static_cast<double>(kept);
+          const double m = 1.0 - static_cast<double>(best_n) / static_cast<double>(kept);
           if (m > minority[rule]) { minority[rule] = m; at[rule] = tau; }
         }
         // Per-phase comparisons on the modal index of each rule.
@@ -783,35 +775,30 @@ int main() {
       std::printf("%-14s %5.0f", b.name.c_str(), snr);
       for (int r = 0; r < 3; ++r)
         std::printf(" %7.3f", nq[r] ? std::sqrt(sq[r] / nq[r]) : 999.0);
-      // THE PHASE IS PRINTED BESIDE THE SHARE, because the share alone repeats
-      // the error 8ah was retracted for: the same number means opposite things
-      // depending on where it sits. The argmax's and guard 1's worst share is
-      // always at phase 0.50, where the truth is exactly between two samples
-      // and both answers are equally right. Guard 0's lands at 0.73, 0.74,
-      // 0.85 or 0.49 depending on the shape -- MOSTLY at its own transition,
-      // where one answer is much further from the truth than the other, but
-      // `nr` at 30 dB puts its largest share at 0.49, which is the harmless
-      // point. So the phase does not by itself separate the harmful case from
-      // the harmless one either; it is printed so a reader can tell which is
-      // which instead of being told a rule that has an exception (round 7).
+      // THE PHASE IS PRINTED BESIDE THE SHARE, because the share alone means
+      // opposite things depending on where it sits (the error DEMO_VERIFICATION
+      // 8ah was retracted for). At phase 0.50 the truth is exactly between two
+      // samples and both answers are equally right; at a rule's own transition
+      // one answer is much further from the truth than the other. Guard 0's
+      // worst share mostly sits at its transition, but not always (`nr` at
+      // 30 dB puts it at 0.49), so the phase is printed for the reader rather
+      // than reduced to a rule.
       for (int r = 0; r < 3; ++r)
         std::printf(" %8.3f@%.2f", minority[r], at[r]);
       std::printf("\n");
-      // EVERY POINT MUST HAVE BEEN DETECTED, not merely one of them. `nq > 0`
-      // was satisfied by a single detection in 4800 and a build dropping half
-      // of them passed all thirty checks with the RMS columns unmoved, because
-      // the survivors were a biased subset (review round 6).
+      // EVERY POINT MUST HAVE BEEN DETECTED, not merely one of them: a build
+      // dropping half the detections leaves the RMS columns unmoved, because
+      // the survivors are a biased subset.
       const int expect = 100 * 48;
       // Fails under: any dropped detection, biased or not.
       check(nq[0] == expect && nq[1] == expect && nq[2] == expect,
             std::string("every phase and draw detected on ") + b.name + " (" +
                 std::to_string(nq[0]) + "/" + std::to_string(nq[1]) + "/" +
                 std::to_string(nq[2]) + " of " + std::to_string(expect) + ")");
-      // GUARD 1 AGAINST THE ARGMAX, AS AN EXACT PER-POINT CLAIM. An RMS form of
-      // this was asserted for one round and was true by construction on four
-      // of the five shapes: with the split partner excluded there is usually
-      // no other candidate above the floor, so guard 1 simply IS the argmax
-      // and the inequality cannot fail (review round 6). It was deleted.
+      // GUARD 1 AGAINST THE ARGMAX, AS AN EXACT PER-POINT CLAIM. An RMS
+      // comparison would be true by construction on four of the five shapes:
+      // with the split partner excluded there is usually no other candidate
+      // above the floor, so guard 1 simply IS the argmax.
       // THE GUARD'S CONTRACT, ASSERTED LITERALLY: it must never return the tap
       // IMMEDIATELY before the argmax, because that tap is the split partner
       // of the same arrival. Guard 0 does return it, often, which is the whole
@@ -820,10 +807,7 @@ int main() {
       //
       // It deliberately does NOT bound how far guard 1 may sit from the
       // argmax: `nr` has a second tap above the floor on about 1 % of phases
-      // and legitimately lands TWO samples early there. A first version of
-      // this check asserted "within one sample" without measuring first and
-      // duly failed on `nr` -- the same error, made once more, caught by the
-      // test rather than by a reviewer this time.
+      // and legitimately lands TWO samples early there.
       // Fails under: the guard off (10 rows), or inverted (10 rows).
       check(g1_at_am_minus_1 == 0,
             std::string("guard 1 never returns the tap immediately before the "
@@ -834,12 +818,11 @@ int main() {
             std::string("guard 0 DOES return that tap, so the guard has "
                         "something to prevent: ") + b.name + " " +
                 std::to_string(g0_at_am_minus_1) + " of " + std::to_string(100));
-      // POSITIVE CONTROL, ON REACHABILITY RATHER THAN ON QUALITY. An earlier
-      // version asserted that guard 0 is measurably WORSE than the argmax,
-      // which ties the suite to the shipped rule's quality: a legitimate
-      // improvement to the unguarded rule would have broken ten rows. What
-      // must be true for the knob to mean anything is only that the two
-      // settings differ somewhere.
+      // POSITIVE CONTROL, ON REACHABILITY RATHER THAN ON QUALITY. Asserting
+      // guard 0 measurably WORSE than the argmax would tie the suite to the
+      // unguarded rule's quality, and a legitimate improvement to it would
+      // break ten rows. What must be true for the knob to mean anything is
+      // only that the two settings differ somewhere.
       // Fails under: the knob never reaching the correlator.
       check(g0_vs_g1_diff > 0,
             std::string("the two guard settings differ somewhere on ") + b.name +
@@ -852,12 +835,11 @@ int main() {
   // arrival, not the strongest one. A guard that bought single-path accuracy
   // by blinding the rule to real echoes would be a bad trade.
   //
-  // AT FOUR FRACTIONAL DELAYS, NOT ONLY AT ZERO. An earlier version of this
-  // block ran every channel at tau = 0, where no split peak exists and the
-  // guarded tap is therefore never the one the rule wants: both columns read
-  // the same value and the check compared 0 with 0 (review round 3). With tau
-  // swept the guarded tap is live, and the comparison has something to fail.
-  // All five shapes, including dot11, whose lobe is the widest.
+  // SWEPT OVER FRACTIONAL DELAY, NOT ONLY AT ZERO. At tau = 0 no split peak
+  // exists, so the guarded tap is never the one the rule wants and both
+  // columns read the same value: the comparison could not fail. With tau
+  // swept the guarded tap is live. All five shapes, including dot11, whose
+  // lobe is the widest.
   std::printf("\n=== AP-72: the guard against genuine multipath (phase grid "
               "0.02, 4 draws; err = worst |residual - truth|) ===\n");
   std::printf("%-32s %-14s %8s %8s %9s %9s %9s\n", "channel", "shape",
@@ -880,19 +862,15 @@ int main() {
         std::printf("%-32s %-14s", ch.name, b.name.c_str());
         double worst[2] = {0.0, 0.0};
         int differed = 0, g1_worse = 0, g1_better = 0, points = 0, found = 0;
-        // A GRID OF 0.02, NOT 0.25 AND NOT 0.05. At 0.25 the +2 echo read "no
-        // point differs" and the test asserted it; the settings in fact differ
-        // over a band roughly [0.34, 0.43] that a quarter-sample grid steps
-        // over (review round 5). A 0.05 grid caught that band by a single
-        // point, so a small shift would have made the assertion vacuous again
-        // without anything noticing (review round 6). The band is where guard
-        // 1 is BETTER, so the coarse grids hid a benefit while asserting a
-        // falsehood.
-        // TWO SIGNAL LEVELS, because the claim in comms-lib.h and in 8aj is
-        // that the guard changes nothing "over a sweep of arrival phase, noise
-        // draw and signal level" and only the first two were ever swept here
-        // (review round 7). The reported-only channels stay at one level to
-        // keep the suite's runtime honest.
+        // A GRID OF 0.02, NOT 0.25 AND NOT 0.05. On the +2 echo the settings
+        // differ over a band of roughly [0.34, 0.43], where guard 1 is BETTER:
+        // a quarter-sample grid steps over it and reads "no point differs",
+        // and a 0.05 grid catches it by a single point, one small shift from
+        // vacuous.
+        // TWO SNRs (45 and 30 dB on alternate draws), because the claim in
+        // comms-lib.h and 8aj is that the guard changes nothing over a sweep
+        // of arrival phase, noise draw and SNR. The reported-only channels
+        // stay at one SNR to bound the runtime.
         const bool asserted = std::string(ch.name).find("UNRESOLVABLE") == std::string::npos &&
                               std::string(ch.name).find("weak direct") == std::string::npos;
         for (int t = 0; t < 50; ++t) {
@@ -924,7 +902,7 @@ int main() {
         control_differed += differed;
         // A DETECTION FLOOR FIRST. Every statistic here reads perfectly when
         // nothing is detected: `differed` counts agreement, so two settings
-        // that both find nothing agree on everything (review round 5).
+        // that both find nothing agree on everything.
         // Fails under: a correlator returning kMiss on any phase.
         check(found == points,
               std::string("both settings detect at every point on ") + ch.name +
@@ -936,10 +914,10 @@ int main() {
         // construction the way the single-path version was: guard 1 falls back
         // to the argmax, which on multipath is the ECHO, so a guard that
         // reached too far would fail here.
-        // Which channels are asserted is decided by `asserted` above, computed
-        // once from the name; a rename silently turning an assertion off is
-        // the hazard, and the two reported-only channels say why in the
-        // comment below rather than only in a string match (round 7).
+        // `asserted` above exempts the two reported-only channels by name: the
+        // one-sample echo, which no rule can separate from a split peak in one
+        // window (comms-lib.h), and the weak direct path at the floor's
+        // margin. Renaming either channel changes what is asserted.
         if (asserted)
           // Fails under: guard forced to 2 (5 shapes fail on this channel).
           check(g1_worse == 0 && g1_better == differed,
@@ -951,9 +929,9 @@ int main() {
       }
     }
     // POSITIVE CONTROL. Without this the whole block passes on a build that
-    // ignores the knob and applies the guard unconditionally -- measured: such
-    // a build scores 0 failures here and its table reads as an improvement
-    // (review round 5). The +1 echo is where the two settings must differ.
+    // ignores the knob and applies the guard unconditionally, its table
+    // reading as an improvement. The +1 echo is where the two settings must
+    // differ.
     // Fails under: the knob ignored, so both settings behave identically.
     check(control_differed > 0,
           "the two guard settings differ somewhere: " +
@@ -962,12 +940,11 @@ int main() {
   }
 
   // WHAT A 60 s SILICON LEG WOULD SEE, SIMULATED, BECAUSE THE GATE RESTS ON IT.
-  // DEMO_VERIFICATION 8ak claims its own PASS statistics are blind to the
-  // guard: the guard moves the rounding threshold in arrival phase rather than
-  // adding a toggle, so both settings step once per cycle and an adjacent-
-  // difference jitter differences it away. That claim decided the gate's
-  // design, it came from a reviewer's scratch probe, and nothing in the tree
-  // regenerated it (review round 6). It does now.
+  // DEMO_VERIFICATION 8ak's gate design rests on its PASS statistics being
+  // blind to the guard: the guard moves the rounding threshold in arrival
+  // phase rather than adding a toggle, so both settings step once per cycle
+  // and an adjacent-difference jitter differences it away. This block
+  // regenerates that claim.
   //
   // The model, and why it is the right one: the shipped resync cadence is
   // 2604 ms, and at the measured clock rate the arrival phase advances tens of
@@ -983,9 +960,9 @@ int main() {
     const int w = shippedWindow(b);
     double jit[2] = {0.0, 0.0}, sd[2] = {0.0, 0.0};
     int legs = 0, arms_differed = 0;
-    // One master seed is one realisation: the difference between the two
-    // settings changes sign between seeds (+0.018, -0.007, +0.003 measured),
-    // so the block reports the span over three and the check is on the span.
+    // One master seed is one realisation, and the difference between the two
+    // settings changes sign between seeds (+0.018, -0.007, +0.003 over three),
+    // so the check bounds its magnitude, not its sign.
     std::mt19937 phase_rng(20260904u);
     for (int leg = 0; leg < 40; ++leg) {
       std::vector<double> res[2];
@@ -1002,11 +979,9 @@ int main() {
         }
         if (got[0] != kMiss && got[1] != kMiss && got[0] != got[1]) ++arms_differed;
       }
-      // EVERY DETECTION, NOT MERELY TWO. Without this a build that drops most
-      // detections still reports 39 of 40 legs and prints a jitter four times
-      // off the number the gate rests on, passing (review round 7 -- the third
-      // block in this file to need the same floor, and the one written by the
-      // round that added it to the other two).
+      // EVERY DETECTION, NOT MERELY TWO. Without this floor a build that drops
+      // most detections still reports 39 of 40 legs and prints a jitter four
+      // times off the number the gate rests on.
       // Fails under: a correlator that returns kMiss on any phase.
       if (res[0].size() != 23 || res[1].size() != 23) continue;
       ++legs;
@@ -1014,9 +989,7 @@ int main() {
         // EXACTLY WHAT shape_campaign_summary.py REPORTS, so the number is
         // comparable with the rig's: the SD of the adjacent differences (mean
         // removed, divided by n-1 of the DIFFERENCES), then divided by root
-        // two. A first version took the RMS about zero and divided by the
-        // count of samples rather than of differences, which read 2.3 % low
-        // (review round 7).
+        // two. The RMS about zero over the count of SAMPLES reads 2.3 % low.
         std::vector<double> d;
         for (size_t i = 1; i < res[g].size(); ++i) d.push_back(res[g][i] - res[g][i - 1]);
         double dm = 0.0;
@@ -1036,16 +1009,14 @@ int main() {
     std::printf("%-10s %14s %14s\n", "setting", "mean jitter", "mean sd");
     for (int g = 0; g < 2; ++g)
       std::printf("guard %-4d %14.3f %14.3f\n", g, jit[g] / n, sd[g] / n);
-    // The prediction the gate rests on: the two settings are indistinguishable
+    // The premise the gate rests on: the two settings are indistinguishable
     // in these statistics. A tenth of a sample is far inside the 1.3 the gate
     // allows and inside the leg-to-leg spread of the bench itself.
-    // POSITIVE CONTROL FIRST, because the claim below is an EQUALITY and an
-    // equality passes vacuously when both arms are the same configuration.
-    // Measured: this block alone passed under all six guard mutations,
-    // including the knob ignored, printing the two arms as one number with
-    // nothing objecting (review round 8). On a clean single path guard 0
-    // returns the earlier tap on about a quarter of phases, so the two arms'
-    // residual sequences must differ even though their jitter does not.
+    // POSITIVE CONTROL FIRST, because that claim is an EQUALITY, and an
+    // equality passes vacuously when both arms are the same configuration
+    // (each guard mutation named below makes them so). On a clean single path
+    // guard 0 returns the earlier tap on about a quarter of phases, so the two
+    // arms' residual sequences must differ even though their jitter does not.
     // Fails under: the knob ignored, the guard off, or the guard applied
     // unconditionally.
     check(arms_differed > 0,
@@ -1061,16 +1032,15 @@ int main() {
               std::to_string(legs) + " of 40");
   }
 
-  // THE SHAPE OF THE CORRELATION LOBE, WHICH IS THE SPECIFICATION FOR AP-75.
-  // A sub-sample estimator was built on this branch and WITHDRAWN: two
-  // three-point estimators in a row were defeated by what this table shows.
-  // A parabola assumes a smooth lobe and the lobe is nearly a delta; a ratio
-  // of the bracketing pair assumes the neighbours are SYMMETRIC at zero delay
-  // and they are not (at the DETECTED index legacy reads 0.0079 one side and
-  // 0.0024 the other, and `nr` 0.0157 and 0.0305; the table below prints
-  // them), so near a whole-sample arrival the fixed asymmetry outweighs the
-  // delay's and the estimate takes the wrong sign. Any replacement has to use
-  // the replica's own autocorrelation, which is what this table measures.
+  // THE SHAPE OF THE CORRELATION LOBE, THE SPECIFICATION FOR AP-75's
+  // sub-sample estimator (DEMO_VERIFICATION 8al records the withdrawn one).
+  // Three-point estimators fail on it: a parabola assumes a smooth lobe and
+  // the lobe is nearly a delta; a ratio of the bracketing pair assumes the
+  // neighbours are SYMMETRIC at zero delay and they are not (the table prints
+  // them at the detected index), so near a whole-sample arrival the fixed
+  // asymmetry outweighs the delay's and the estimate takes the wrong sign. An
+  // estimator has to use the replica's own autocorrelation, which is what
+  // this table measures.
   std::printf("\n=== AP-72: the correlation lobe at zero fractional delay "
               "(amplitude relative to the peak) ===\n");
   std::printf("%-14s %9s %9s %9s %9s\n", "shape", "peak-2", "peak-1", "peak+1",
@@ -1090,8 +1060,7 @@ int main() {
         CommsLib::correlate_mt(raw, b.replica);
     // AT THE INDEX THE DETECTOR REPORTS, NOT AT THE GLOBAL ARGMAX. A repeated
     // preamble has several equal correlation peaks, so the argmax over the
-    // whole window lands on a different copy from seed to seed (measured:
-    // legacy returned 373, 501, 373, 373 over four seeds) and the printed
+    // whole window lands on a different copy from seed to seed and the printed
     // neighbours then belong to whichever copy happened to win. The detector's
     // own index is the one every other number here is about.
     const CommsLib::BeaconResult det = CommsLib::find_beacon_ex(
@@ -1114,28 +1083,22 @@ int main() {
       std::printf(" %9.4f", a);
     }
     std::printf("\n");
-    // Informational, deliberately not a threshold. THE ASYMMETRY IS THE POINT:
-    // peak-1 and peak+1 are not equal at zero delay, and a three-point
-    // estimator that decides which side the top lies on by comparing them
-    // takes the wrong side whenever the fixed asymmetry outweighs the one the
-    // delay creates. That is what defeated the withdrawn estimator, and it is
-    // why AP-75 needs the replica's own autocorrelation rather than three
-    // samples of it.
+    // Informational, deliberately not a threshold: the asymmetry of peak-1
+    // and peak+1 at zero delay is the point (see the block's header).
   }
 
   // ---------------------------------------------------------------------
-  // THE NO-LAG FALSE-CROSSING RATE ON NOISE, MEASURED AGAINST ITS PREDICTION.
-  // 8.155/8.159 saw one rejected noise-window crossing per acquisition hunt on
-  // nr_pss and predicted it from the statistic: the coherence of a pure-noise
-  // window against an L-tap replica is Beta(1, L-1), so P(coh > bar) per index
-  // is (1 - bar)^(L-1) = 0.9^127 = 1.5e-6 at bar 0.1, and the lag product's
-  // (coh1 * coh2) is far rarer. PREDICTION, stated first: over 16 noise-only
-  // hunt windows of 12288 samples (196608 indices) at bar 0.1 the no-lag
-  // detector crosses about 0.3 times in total and the xcorr form about 0;
-  // at bar 0.01 (corr_scale 100, the resync retry ladder's reach) no-lag
-  // crosses in nearly EVERY window (0.99^127 = 0.28 per index) and xcorr in
-  // almost none. A no-lag rate an order of magnitude off either way means
-  // the mechanism in 8.155 is wrong and the row must be corrected.
+  // THE NO-LAG FALSE-CROSSING RATE ON NOISE, AGAINST ITS MODEL (reported;
+  // DEMO_VERIFICATION 8.155, 8.159: one rejected noise-window crossing per
+  // acquisition hunt on nr_pss). The coherence of a pure-noise window against
+  // an L-tap replica is Beta(1, L-1), so P(coh > bar) per index is
+  // (1 - bar)^(L-1) = 0.9^127 = 1.5e-6 at bar 0.1, and the lag product's
+  // (coh1 * coh2) is far rarer. Over 16 noise-only hunt windows of 12288
+  // samples (196608 indices) the model gives about 0.3 no-lag crossings in
+  // total at bar 0.1 and about 0 for xcorr; at bar 0.01 (corr_scale 100, the
+  // resync retry ladder's reach) no-lag crosses in nearly EVERY window
+  // (0.99^127 = 0.28 per index) and xcorr in almost none. A no-lag rate an
+  // order of magnitude off either way means 8.155's mechanism is wrong.
   std::printf("\n=== noise-only hunt windows: how often each form crosses ===\n");
   std::printf("%-10s %-8s %10s %10s\n", "corr_scale", "form", "windows", "crossed");
   {
@@ -1147,15 +1110,7 @@ int main() {
         int crossed = 0;
         const int nwin = 16;
         for (int w = 0; w < nwin; ++w) {
-          std::mt19937 g(9000u + w);
-          auto u01 = [&g]() { return (static_cast<double>(g()) + 0.5) / 4294967296.0; };
-          std::vector<std::complex<int16_t>> buf(12288);
-          for (auto& v : buf) {
-            const double a = std::sqrt(-2.0 * std::log(u01()));
-            const double ph = 2.0 * M_PI * u01();
-            v = std::complex<int16_t>(static_cast<int16_t>(20.0 * a * std::cos(ph)),
-                                      static_cast<int16_t>(20.0 * a * std::sin(ph)));
-          }
+          const std::vector<std::complex<int16_t>> buf = noiseWindow(9000u + w);
           const ssize_t idx = CommsLib::find_beacon_avx(
               buf.data(), nolag ? pss.replica : leg.replica, buf.size(), cs,
               Pick::kFirstClusterRefined,
@@ -1170,22 +1125,13 @@ int main() {
     // At pfa 0.1 over 12288 samples the coherence bar is 0.088 for 128 taps
     // (1 - (0.1/12288)^(1/127)), and the expected crossings over 16 windows
     // are ~1.6; the corr_scale 100 bar (0.01) above crosses on every window.
-    // PREDICTION stated first: crossed <= 4 (a 2.5x allowance on a Poisson
-    // mean of 1.6). Measured 3 on the first run.
+    // Asserted: crossed <= 4 (a 2.5x allowance on a Poisson mean of 1.6).
     {
       const double pfa = 0.1;
       const double bar = houdini::sync::ThresholdPolicy::coherenceBar(pss.replica.size(), pfa, 12288);
       int crossed = 0;
       for (int w = 0; w < 16; ++w) {
-        std::mt19937 g(9000u + w);
-        auto u01 = [&g]() { return (static_cast<double>(g()) + 0.5) / 4294967296.0; };
-        std::vector<std::complex<int16_t>> buf(12288);
-        for (auto& v : buf) {
-          const double a = std::sqrt(-2.0 * std::log(u01()));
-          const double ph = 2.0 * M_PI * u01();
-          v = std::complex<int16_t>(static_cast<int16_t>(20.0 * a * std::cos(ph)),
-                                    static_cast<int16_t>(20.0 * a * std::sin(ph)));
-        }
+        const std::vector<std::complex<int16_t>> buf = noiseWindow(9000u + w);
         const ssize_t idx = CommsLib::find_beacon_avx(buf.data(), pss.replica, buf.size(),
                                                       static_cast<float>(1.0 / bar),
                                                       Pick::kFirstClusterRefined, Thr::kCoherence);
@@ -1198,35 +1144,30 @@ int main() {
   }
 
   // ---------------------------------------------------------------------
-  // THE BEACON CFO ESTIMATOR AGAINST FRACTIONAL DELAY, FOR 8.114. The
-  // per-detection beacon CFO scatter on silicon is 2-10x its thermal floor and
-  // its ordering across shapes is unexplained. One thing the estimator sees on
-  // a real link that the offline model never gave it: a beacon that sits
-  // BETWEEN samples. Then the samples after the last repetition are not zero
-  // but the interpolation tail of the beacon's edge, and any estimator window
-  // that touches that edge multiplies real beacon samples by that tail.
+  // THE BEACON CFO ESTIMATOR AGAINST FRACTIONAL DELAY (reported, not gated;
+  // DEMO_VERIFICATION 8.114 the silicon scatter, 8.164 what this table shows).
+  // On a real link the beacon sits BETWEEN samples, so the samples after the
+  // last repetition are not zero but the interpolation tail of the beacon's
+  // edge, and any estimator window that touches that edge multiplies real
+  // beacon samples by that tail.
   //
-  // Three window placements, all Receiver::estimateCFO's arithmetic (rep2
-  // against rep1 at lag fine_len) rebuilt on the shape geometry:
+  // Window placements, all Receiver::estimateCFO's arithmetic (rep2 against
+  // rep1 at lag fine_len) rebuilt on the shape geometry:
   //   guard 0   windows exactly on the fine field, index from the detector
-  //   guard +8  the shipped placement (AP-39, HOUDINI_CFO_INDEX_GUARD): both
+  //   guard +8  the shipped placement (sync.cfo.index_guard 8, AP-39): both
   //             windows slid 8 samples LATER, derived on an integer-delay model
-  //             where the trailing samples were exactly zero
-  //   margin 4  windows shrunk 4 samples at BOTH ends, so neither touches an
+  //             where the trailing samples are exactly zero
+  //   margin N  windows shrunk N samples at BOTH ends, so neither touches an
   //             edge; the NR/802.11 way of using a cyclic field
-  // PREDICTIONS, stated first. (1) At true CFO 0 the error under "guard +8"
-  // grows with tau and is largest for the short-field shapes (nr, dot11: L 64),
-  // because eight edge samples out of 64 is 1/8 of the sum. (2) "margin 4" is
-  // within the thermal floor at every tau for every shape. (3) If instead all
-  // three read alike, fractional timing is not the 8.114 mechanism. Mean and
-  // sd over 8 noise draws so a bias can be told from the floor.
+  // Eight edge samples are 1/8 of the sum for the short-field shapes (nr,
+  // dot11: L 64), so "guard +8" is worst there. Mean and sd over 8 noise draws
+  // so a bias can be told from the floor.
   std::printf("\n=== beacon CFO error at true CFO 0 vs fractional delay "
               "(45 dB, 8 draws, mean/sd Hz) ===\n");
   // Two interpolation kernels: a 33-tap Hann-windowed sinc (smooth edges, the
   // gentlest case) and a 129-tap one (a sharper band edge whose ringing
   // reaches further, closer to what the RFDC decimation filter does to a
-  // hard-edged burst). PREDICTION for the second kernel: the errors grow for
-  // every shape, most for the placements whose windows touch the edge.
+  // hard-edged burst).
   struct Win { const char* name; int shift; int margin; int R; };
   const Win wins[] = {{"guard 0, 33-tap", 0, 0, 16}, {"guard +8, 33-tap", 8, 0, 16},
                       {"margin 4, 33-tap", 0, 4, 16}, {"guard +8, 129-tap", 8, 0, 64},

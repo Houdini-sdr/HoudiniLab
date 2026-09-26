@@ -2,20 +2,20 @@
  * @file sync/cfo_estimator.h
  * @brief The beacon's own carrier-offset estimate from its repeated field.
  *
- * Receiver::estimateCFO, moved. Two repetition correlations on the shape's
- * geometry: the fine field (rep2 against rep1 at lag fine_len) gives the
- * estimate, the coarse field (consecutive short symbols) unwraps it when the
- * shape has one. Both are the plain repetition-phase estimator: for
- * x[n] = s[n] exp(j 2 pi f n) with s[n+N] = s[n], sum conj(x[n]) x[n+N] has
- * argument 2 pi f N.
+ * Two repetition correlations on the shape's geometry: the fine field (rep2
+ * against rep1 at lag fine_len) gives the estimate, the coarse field
+ * (consecutive short symbols) unwraps it when the shape has one. Both are the
+ * plain repetition-phase estimator: for x[n] = s[n] exp(j 2 pi f n) with
+ * s[n+N] = s[n], sum conj(x[n]) x[n+N] has argument 2 pi f N.
  *
  * WHAT THE WINDOWS MUST NOT TOUCH. DEMO_VERIFICATION 8.164: on a real link the
  * beacon sits between samples, so the samples after its last repetition are
  * the interpolation tail of the edge, not zero, and a window that reaches them
  * multiplies real samples by that tail -- up to 4.9 kHz of bias for a
  * 64-sample field. `margin` shrinks both windows away from both edges; the
- * durable fix is a cyclic postfix in the waveform (AP-69). `guard` is the
- * older +8 slide of AP-39, kept so the shipped behaviour is reproducible.
+ * durable fix is a cyclic postfix in the waveform (AP-69). The caller's
+ * `cfo.index_guard` (the +8 slide of AP-39) is separate: it moves end_index
+ * later before the call.
  *
  * EVERY FAILURE PATH RETURNS NaN, NOT ZERO. A failed estimate is not a
  * measurement of zero offset, and the SYN1 wire drops a NaN rather than
@@ -46,7 +46,7 @@ struct FieldGeometry {
 
 class RepetitionPhaseEstimator {
  public:
-  /// @param g             the shape's fields (Config::beacon_* accessors)
+  /// @param g             the shape's fields (BeaconShape::geometry)
   /// @param margin        samples shrunk from both ends of each window
   /// @param conjugated    true when the receive path delivers baseband
   ///                      conjugated (Houdini's matched-NCO R2C mixer), so a

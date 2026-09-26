@@ -5,25 +5,24 @@
  *        ClockSteerSession drives the actuator and releases the node.
  *
  * WHY IN THE SOUNDER. The rig's clocks run a calibrated hold: an open-loop
- * VCXO at a fixed DAC code, so its frequency follows temperature. A session
- * warms the boards 2-3 C and moved the pair 0.3-0.4 ppm in five minutes (AP-79
- * R1/R2). The grid tracker updates once per targeted re-sync, about every
- * 2.6 s, and lags a ramp: the re-sync residual held a -5..-14 sample bias with -46 at the onset,
- * and once the pilot seat walked 272 samples before a re-anchor. R3's zero
- * prefix is 32 samples. clock_steer_loop.py (AP-47) closed this loop from
- * outside, but it opens its own device connection, which resets a running
- * session. Inside the sounder the loop also gets the one thing the separate
- * script could not do: FEED-FORWARD. A push is a known frequency step
- * (k x 0.1251 ppm), so the caller moves the tracked period by the same step at
- * the moment of the push, and the tracker never has to chase it.
+ * VCXO at a fixed DAC code, so its frequency follows temperature, and a
+ * session's warm-up moves the pair by tenths of a ppm within minutes (AP-79).
+ * The grid tracker updates once per targeted re-sync, about every 2.6 s, and
+ * lags such a ramp by several samples (DEMO_VERIFICATION 9.10), against a
+ * zero prefix that is 32 samples in the R3 configs. An external loop
+ * (clock_steer_loop.py, AP-47) opens its own device connection, which resets
+ * a running session. Inside the sounder the loop also gets FEED-FORWARD: a
+ * push is a known frequency step (k x 0.1251 ppm), so the caller moves the
+ * tracked period by the same step at the moment of the push, and the tracker
+ * never has to chase it.
  *
  * WHERE. The DECISION and the feed-forward are in the UE's sync thread, which
  * owns the tracked period, so they need no lock. The ACTUATOR write is not: a
  * CLOCK_ADJ write holds the device's stream lock about 200 ms, longer than the
  * pilot horizon, so ClockSteerSession runs it as a job the sync thread polls
- * once a frame. The same lock is what every other RPC on
- * that handle waits behind (the host pacer's time polls among them), and each
- * push is a rate step the pacer re-learns: steering stays off by default.
+ * once a frame. The same lock is what every other RPC on that handle waits
+ * behind (the host pacer's time polls among them), and each push is a rate
+ * step the pacer re-learns: steering stays off by default.
  *
  * SIGN, the thing most likely to be got backwards (the Python loop says the
  * same): eps = (f_BS - f_UE) / f_UE, which receiver.cc computes as

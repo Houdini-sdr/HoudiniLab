@@ -41,7 +41,7 @@ constexpr double kFrame = static_cast<double>(houdini::sync::Numerology::houdini
 constexpr double kEpsPpm = 8.52;           // the measured pair
 constexpr double kTruePeriod = kFrame * (1.0 + kEpsPpm * 1e-6);
 constexpr double kScatterSd = 0.70;        // measured sync residual sd, samples
-constexpr long long kScatterTol = 1024;    // the outer alive/moved gate
+constexpr long long kScatterTol = 1024;    // the outer alive/moved gate at 8.3333 us (2.0 us ships: 246)
 // The +-100 ppm plausibility band, applied by the harness because the caller
 // owns it (see grid_tracker.h).
 constexpr double kPeriodLo = kFrame * (1.0 - 100e-6);
@@ -97,7 +97,7 @@ Trace makeTrace(unsigned seed, int n, bool irregular, double outlier_rate,
     t.gaps.push_back(g);
     t.noise.push_back(kScatterSd * gauss(rng));
     // An occasional edge-of-gate detection: inside the +-1024 alive/moved gate,
-    // so the shipped code ACCEPTS it, which is exactly the case 8.56 is about.
+    // so the caller ACCEPTS it, which is exactly the case 8.56 is about.
     t.outlier.push_back(u01(rng) < outlier_rate ? 900.0 : 0.0);
     t.drift.push_back(period);
   }
@@ -126,10 +126,10 @@ Result run(const Trace& t, houdini::sync::TrackerConfig cfg) {
   auto gridStart = [&](long long n) {
     return ref + std::llround(static_cast<double>(n) * period);
   };
-  // EVERYTHING stays in ABSOLUTE sample coordinates. (An earlier cut of this
-  // harness reset the truth origin after each update, which walked truth and
-  // estimate apart immediately and left the outer gate rejecting all but the
-  // first of 400 detections. The estimators were fine; the instrument was not.)
+  // EVERYTHING stays in ABSOLUTE sample coordinates: resetting the truth
+  // origin after each update walks truth and estimate apart immediately and
+  // leaves the outer gate rejecting all but the first of 400 detections, a
+  // fault of the instrument that reads as one of the estimators.
   double beacon_abs = 0.0;
   double rate_se = 0.0, time_se = 0.0;
   size_t n = 0, gated = 0;
@@ -175,7 +175,7 @@ houdini::sync::TrackerConfig ab() {
   c.type = houdini::sync::TrackerType::kAlphaBeta;
   c.alpha = 0.5;
   c.beta = 0.1;
-  c.step_limit = 0.5e-6 * kFrame;   // HOUDINI_GRID_STEP_PPM default
+  c.step_limit = 0.5e-6 * kFrame;   // sync.tracker.step_ppm default
   return c;
 }
 
@@ -244,14 +244,14 @@ int main() {
 
   // ---- 3. outliers inside the alive/moved gate -------------------------
   // 8.56's case: a detection at 900 samples is INSIDE the +-1024 gate, so the
-  // shipped code accepts it and it reaches the estimator.
+  // caller accepts it and it reaches the estimator.
   //
-  // COMPARE LIKE WITH LIKE. An earlier cut of this leg put alpha-beta WITH its
-  // slew limit against a BARE kalman and reported the kalman 4x worse, which
-  // says nothing about the estimators: it compares one that was robustified
-  // against one that was not. Alpha-beta's slew limit and the kalman's
-  // innovation gate are the same idea reached two ways, so the honest table is
-  // bare against bare and robust against robust.
+  // COMPARE LIKE WITH LIKE. Alpha-beta WITH its slew limit against a BARE
+  // kalman reads the kalman 4x worse, which says nothing about the
+  // estimators: it compares one that was robustified against one that was
+  // not. Alpha-beta's slew limit and the kalman's innovation gate are the same
+  // idea reached two ways, so the honest table is bare against bare and robust
+  // against robust.
   //
   // Bare against bare, the two are close for a reason worth stating: at the
   // median 179-frame gap the kalman's rate gain works out near beta/dk, so
@@ -314,7 +314,7 @@ int main() {
   std::printf("  On this bench's spacing the kalman's rate error is %.2fx\n",
               a_irr > 0 ? k_irr / a_irr : 0.0);
   std::printf("  alpha-beta's. That is a PREDICTION from a chosen noise model,\n");
-  std::printf("  not a result. HOUDINI_TRACKER=kf runs the same comparison on\n");
+  std::printf("  not a result. sync.tracker.type kalman runs the same comparison on\n");
   std::printf("  silicon; if the bench disagrees with this, the bench is right.\n");
 
   std::printf("\nRESULT: %s (%d failure(s))\n", g_fail ? "FAIL" : "PASS", g_fail);

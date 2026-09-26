@@ -18,7 +18,7 @@ static size_t distinct(size_t syms, size_t tones, size_t stride) {
 int main() {
   const size_t s270 = houdini::cnsStride(12 * 2970, 600, 2970);
   check(s270 == 61, "270 RB: 60 shares a factor with 2970, so the stride moves to 61 (mutation: drop the gcd loop)");
-  check(distinct(12, 2970, s270) > 500, "270 RB: one frame spans more than 500 distinct tones (99 with the old stride 60)");
+  check(distinct(12, 2970, s270) > 500, "270 RB: one frame spans more than 500 distinct tones (stride 60 gives 99)");
   check((12 * 2970 + s270 - 1) / s270 <= 600, "270 RB: still at most 600 points a frame (mutation: step the stride down)");
   const size_t s133 = houdini::cnsStride(12 * 1463, 600, 1463);
   check(s133 == 30, "133 RB: 30 is already coprime with 1463, so the demo's sampling is unchanged (mutation: always add one)");

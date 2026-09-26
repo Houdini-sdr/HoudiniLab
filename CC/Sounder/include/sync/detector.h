@@ -4,7 +4,7 @@
  *        and first-path knobs, resolved once.
  *
  * Wraps the correlator (CommsLib::find_beacon_ex, or find_beacon_cuda under
- * USE_CUDA) with the decisions receiver.cc used to make at its call sites
+ * USE_CUDA) with the decisions no call site should make on its own
  * (DEMO_VERIFICATION 8.138 to 8.154): which threshold form the replica
  * supports, which crossing to return, how far the first-path search looks
  * back and how much weaker a path may be. The index convention belongs to the
@@ -42,8 +42,9 @@ struct Detection {
   double statistic = 0.0;
   double bar = 0.0;
   ThresholdForm form = ThresholdForm::kAuto;
-  /// The correlator output at the index: the matched field's complex peak,
-  /// which a phase tracker reads (architecture plan, P5).
+  /// The correlator output at the index: the matched field's complex peak.
+  /// No sounder consumer yet; reserved for the phase tracker (AP-67,
+  /// docs/SYNC_LIBRARY_ARCHITECTURE.md P5).
   std::complex<float> peak{0.0f, 0.0f};
   bool found() const { return end_index >= 0; }
 };

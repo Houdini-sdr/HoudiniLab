@@ -6,9 +6,9 @@
  *
  * The burst is the demo's: a pad, the P slot and the adjacent U slot (two
  * 61440-sample slots at fft 4096, CP 288, 14 symbols, 32-sample zero prefix
- * and postfix each), noise-like content. Three costs, per lane:
- *   - prefilter + 23-tap halfband: today's path, the sub-6 lane and, until
- *     AP-85, the X-band lane;
+ * and postfix each), noise-like content. Four costs, per lane:
+ *   - prefilter + 23-tap halfband: a lane inside the channel filter's
+ *     passband (the sub-6);
  *   - 47-tap wide halfband alone: the X-band lane at 270 RB;
  *   - 23-tap halfband alone: the reference the wide design is compared with;
  *   - the placement hit: the steady state of either lane. The UE re-sends
@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <chrono>
 #include <complex>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
@@ -99,7 +100,7 @@ int main(int argc, char** argv) {
   const double pre = median(t_pre), wide = median(t_wide), narrow = median(t_hb23), h = median(t_hit);
   std::printf("tx_interp_bench: one lane, burst of %zu input samples (pad + P + U at fft 4096), %d rounds interleaved\n",
               n, rounds);
-  std::printf("  prefilter + 23-tap halfband (sub-6; the X-band before AP-85): %8.2f ms median\n", pre);
+  std::printf("  prefilter + 23-tap halfband (the sub-6 lane):                  %8.2f ms median\n", pre);
   std::printf("  47-tap wide halfband alone (the X-band at 270 RB):              %8.2f ms median\n", wide);
   std::printf("  23-tap halfband alone (reference):                             %8.2f ms median\n", narrow);
   std::printf("  placement hit (steady state, either lane):                      %8.3f ms median\n", h);

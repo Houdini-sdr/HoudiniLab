@@ -47,9 +47,9 @@ int main(int argc, char* argv[]) {
   }
   // A BAD CONFIG SHOULD SAY SO, NOT ABORT. Config's constructor throws on
   // invalid input by design (an unknown `beacon_type` must not silently fall
-  // back to the old beacon), but an exception escaping main is std::terminate --
-  // the operator sees "Aborted" and a core, not the sentence explaining what to
-  // fix. Catch here so the design choice reaches the person who has to act on it.
+  // back to the default beacon), but an exception escaping main is
+  // std::terminate: the operator sees "Aborted" and a core, not the sentence
+  // explaining what to fix. Catch here so the reason reaches the operator.
   std::unique_ptr<Config> config;
   try {
     config =
@@ -68,7 +68,7 @@ int main(int argc, char* argv[]) {
     // The calibration run: the set this build provides, constructed in its
     // calibration mode (the Iris sample-offset procedure), through the
     // factory. A build with no procedure refuses; the reason reaches the
-    // operator here instead of escaping main (S4 review, item 3).
+    // operator here instead of escaping main.
     try {
       auto base_radio_set_ = makeBaseRadioSet(config.get(), true);
     } catch (const std::exception& e) {

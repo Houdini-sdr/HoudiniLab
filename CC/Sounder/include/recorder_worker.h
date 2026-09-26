@@ -3,7 +3,9 @@
  RENEW OPEN SOURCE LICENSE: http://renew-wireless.org/license
  
 ----------------------------------------------------------------------
- Class to handle writting data to an hdf5 file
+ Per-thread handler of received slots: writes them to HDF5 (recording mode)
+ or computes the live view and streams it to the dashboard over UDP (view
+ mode, HOUDINI_CSI_UDP set).
 ---------------------------------------------------------------------
 */
 #ifndef SOUNDER_RECORDER_WORKER_H_
@@ -46,11 +48,13 @@ class RecorderWorker {
   size_t antenna_offset_;
   size_t num_antennas_;
 
-  // --- Viewing mode (HOUDINI_CSI_UDP=host:port set): compute per-antenna CSI from
-  // each received pilot (pilot-agnostic -- uses the config's freq-domain reference,
-  // so LTS / Zadoff-Chu / any pilot works) and stream it to the GUI over UDP INSTEAD
-  // of writing HDF5. One datagram per (frame, antenna); the GUI scales to whatever
-  // antennas appear. ---
+  // --- View mode (HOUDINI_CSI_UDP=host:port set): no HDF5 file. Per antenna,
+  // the pilot slot gives H (against the config's frequency-domain pilot, so any
+  // pilot sequence works) and the uplink-data slot the equalized constellation;
+  // both, the raw-ADC envelope, the spectrum, the impulse response and the
+  // channel constants go to the dashboard as UDP datagrams (CSI2, CNS1, ADC2,
+  // SPC1, CIR1, MET1; the layouts are at their senders), each kind on its own
+  // per-antenna throttle. ---
   bool view_mode_ = false;
   // Houdini RFSoC only: the matched-NCO R2C RX mixer delivers baseband CONJUGATED
   // (a +f tone returns at -f -- same inversion buildHoudiniBeacon pre-conjugates the
@@ -82,16 +86,17 @@ class RecorderWorker {
   std::unordered_map<uint32_t, long long> met_last_ns_;  // channel-info send timer
   void sendMeta(uint32_t ant, long long now_ns);
   double csi_throttle_ns_ = 0.0;                // per-antenna min send interval
-  // OFDM symbol-0 start within a received slot. Default = the nominal prefix (a fixed,
-  // manually-tunable offset via HOUDINI_CSI_SYM_START); the energy-edge auto-detector
-  // slotEnergyStart() is opt-in only (HOUDINI_CSI_SYM_START=auto) because its 15%
-  // threshold can mis-trigger on pre-symbol leakage and mis-align the FFT windows.
-  int csi_sym_start_ = 0;       // may be negative (see recorder_worker.cc)
+  // OFDM symbol-0 start within a received slot: the zero prefix less half a CP
+  // (initCsi says why), or an integer from HOUDINI_CSI_SYM_START. The energy-edge
+  // detector slotEnergyStart() is opt-in only (HOUDINI_CSI_SYM_START=auto): its 15%
+  // threshold can trigger on pre-symbol leakage and mis-align the FFT windows.
+  int csi_sym_start_ = 0;       // may be negative (see initCsi)
   bool csi_sym_auto_ = false;   // HOUDINI_CSI_SYM_START=auto: the energy-edge detector
-  // Houdini: unstable beacon re-locks leave the pilot slot ~1 sample off the data on
-  // ~40% of frames, ramping H and ringing the (otherwise-fine) data. Per constellation
-  // frame, pick the integer pilot re-align (a ramp on the cached H) that maximizes the
-  // QPSK 4th-power concentration. On by default for is_houdini; HOUDINI_CSI_NO_TIMING_FIX.
+  // Pilot-to-data timing re-align: the data slot can sit a few samples off the
+  // pilot the cached H came from, which ramps H across the band and rings the
+  // constellation. Per constellation frame, an integer search then a fractional
+  // fit from the data slot's own pilot tones (sendConstellation). Default from
+  // the platform (sync/rx_path_fixes.h); HOUDINI_CSI_NO_TIMING_FIX turns it off.
   bool csi_timing_fix_ = false;
   // AP-38: per-symbol common-phase correction from the pilot tones. Tier 2
   // of the standard OFDM receiver, and the only correction that follows a
@@ -108,10 +113,12 @@ class RecorderWorker {
   // Latest channel estimate H[k] per antenna (DC-centered), cached from the pilot
   // slot and used to equalize that antenna's uplink-data (U) slot.
   std::unordered_map<uint32_t, std::vector<std::complex<float>>> csi_h_;
-  // Per-run display phase anchor (unit phasor from the first datagram's mean
-  // H phase): the two nodes are frequency-locked but not phase-locked, so
-  // the common phase re-draws per restart; anchoring the display at run
-  // start keeps within-run drift visible while every run starts at 0.
+  // Per-run display phase anchor (unit phasor from the third CSI datagram's
+  // mean H phase): the two nodes are frequency-locked but not phase-locked, so
+  // the common phase re-draws per restart; anchoring the display at run start
+  // keeps within-run drift visible while every run starts at 0. The dashboard's
+  // phase panel removes its own common phase, so it does not show the anchor's
+  // effect (AP-99).
   std::unordered_map<uint32_t, std::complex<float>> csi_phase_anchor_;
   std::unordered_map<uint32_t, int> csi_sent_count_;  // anchor settle gate
   void initCsi(void);

@@ -1,14 +1,12 @@
 /**
  * @file houdini/dc_fft.h
- * @brief The CSI view's per-symbol spectrum as an FFT (AP-79): the same
- *        DC-centred forward transform the recorder built as an explicit N x N
- *        DFT matrix, in O(N log N) with a plan made once.
+ * @brief The CSI view's per-symbol spectrum as an FFT (AP-79): the
+ *        DC-centred forward DFT, in O(N log N) with a plan made once.
  *
- * WHY. RecorderWorker::symbolFft multiplied every symbol by an N x N matrix.
- * At the old fft 64 that was 4096 multiply-adds a symbol; at the 5G-like
- * fft 4096 it is 16.7 M a symbol and a 134 MB matrix, about 14 G multiply-adds
- * a second at the dashboard's 30 fps on two antennas, which the view cannot
- * keep up with.
+ * WHY NOT THE EXPLICIT DFT. An N x N matrix is 4096 multiply-adds a symbol
+ * at fft 64, but at the 5G-like fft 4096 it is 16.7 M a symbol and a 134 MB
+ * matrix, about 14 G multiply-adds a second at the dashboard's 30 fps on two
+ * antennas, which the view cannot keep up with.
  *
  * THE DEFINITION IT KEEPS, exactly: Xs[k] = sum_n x[n] exp(-j 2 pi m n / N)
  * with m = (k + N/2) mod N, i.e. the forward DFT rotated so DC sits at index
