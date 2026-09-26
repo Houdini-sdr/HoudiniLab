@@ -151,6 +151,56 @@ int main(int argc, char** argv) {
               !g.count("host.rxq_ovfl_ch0") && g.at("egress.stall_evt") == 0,
           "collect takes only the alarm fields");
   }
+  {  // every TX alarm field is collected, each under its own name (link_health.py's set)
+    std::map<std::string, std::string> k;
+    Read rd = [&k](const std::string& key) { return k.count(key) != 0u ? k.at(key) : std::string(); };
+    k["TX_BANK_STATUS"] =
+        "ch0:drops=1,late=2,under=3,seqerr=4,zerofill=5,efault=6,smiss=7,clkerr=8,aclose=9,malformed=10,acked=11";
+    const auto g = collectCounters(rd);
+    const std::vector<std::pair<std::string, long long>> want = {
+        {"drops", 1}, {"late", 2},   {"under", 3},  {"seqerr", 4}, {"zerofill", 5},
+        {"efault", 6}, {"smiss", 7}, {"clkerr", 8}, {"aclose", 9}, {"malformed", 10}};
+    for (const auto& w : want) {
+      const auto it = g.find("tx0." + w.first);
+      check(it != g.end() && it->second == w.second,
+            "TX alarm field " + w.first + " is collected (mutation: " + w.first + " dropped from txAlarmFields)");
+    }
+    // End to end: a malformed-packet rise is an alarm, not a silent count.
+    FakeNode n;
+    n.keys["TX_BANK_STATUS"] += ",malformed=0";
+    LinkHealth h(n.read(), "bs", n.clock());
+    const bool quiet = h.check().alarms().empty();
+    n.keys["TX_BANK_STATUS"] = replaceAll(n.keys["TX_BANK_STATUS"], "malformed=0", "malformed=2");
+    check(quiet && eq(h.check().alarms(), {"tx0.malformed +2"}),
+          "a malformed rise alarms as tx0.malformed +2 (mutation: malformed dropped from txAlarmFields)");
+  }
+  {  // HS-220: which TX counters wrap mod 2^16, field by field
+    // Fails under: a wrapping counter dropped from txWrapsMod16 (65530 -> 4 then
+    // reads as a clear, a lost event count).
+    for (const char* f : {"drops", "late", "under", "seqerr", "aclose", "malformed", "gated", "acked", "played"}) {
+      const std::string key = std::string("tx0.") + f;
+      check(counterIncreases({{"tx0.epoch", 3}, {key, 65530}}, {{"tx0.epoch", 3}, {key, 4}}) == Counters{{key, 10}},
+            std::string("HS-220: ") + f + " wraps mod 2^16 within an epoch, 65530 -> 4 is +10 (mutation: " + f +
+                " dropped from txWrapsMod16)");
+    }
+    // Fails under: a saturating or sticky field added to txWrapsMod16 (a clear,
+    // 65530 -> 4, would then read as +10 events).
+    for (const char* f : {"zerofill", "efault", "smiss", "clkerr"}) {
+      const std::string key = std::string("tx0.") + f;
+      check(counterIncreases({{"tx0.epoch", 3}, {key, 65530}}, {{"tx0.epoch", 3}, {key, 4}}).empty(),
+            std::string("HS-220: ") + f + " keeps the plain rule, a fall is a clear (mutation: " + f +
+                " added to txWrapsMod16)");
+    }
+    // A torn poll (the two epoch reads differ) drops the wrapping counters and
+    // keeps the others.
+    std::map<std::string, std::string> k;
+    Read rd = [&k](const std::string& key) { return k.count(key) != 0u ? k.at(key) : std::string(); };
+    k["TX_BANK_STATUS"] = "ch0:aclose=3,malformed=4,zerofill=5,epoch=7:8";
+    const auto torn = collectCounters(rd);
+    check(!torn.count("tx0.aclose") && !torn.count("tx0.malformed") && torn.at("tx0.zerofill") == 5,
+          "HS-220: a torn poll drops aclose and malformed, keeps zerofill (mutation: aclose or malformed dropped from "
+          "txWrapsMod16)");
+  }
   {  // HS-220: the TX event counters wrap mod 2^16 under the CLEAR_EPOCH read protocol
     // Fails under: the plain rule for a wrapping counter (65530 -> 4 reads as no rise).
     check(counterIncreases({{"tx0.epoch", 3}, {"tx0.late", 65530}}, {{"tx0.epoch", 3}, {"tx0.late", 4}}) ==
