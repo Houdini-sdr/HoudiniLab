@@ -16,7 +16,7 @@ What it checks, in order:
   2. the sounder binary exists (and is not older than its sources);
   3. the host plugin: the venv, the Houdini module, and SoapySDR loading it;
   4. the SoapyHoudiniSDR host examples the framer teardown imports;
-  5. no other sounder is running on this host (it would hold the radios);
+  5. no other sounder on this host holds these radios (one on other radios is named);
   6. each radio's server answers on the config's remote port;
   7. (full form only) each radio's stack: gateware, firmware, plugin and protocol
      versions, which must agree between the nodes; each radio's data egress,

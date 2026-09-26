@@ -122,7 +122,7 @@ SYN_HDR = struct.Struct("<IIIIiffiIfIf")  # ... + samps_per_frame, carrier_hz, s
 _lock = threading.Lock()
 _latest = {}   # ant_id -> {"csi": {...}, "cns": {...}}
 _seq = 0       # bumps on every new datagram so the SSE loop knows there's fresh data
-_stats = {"pkts": 0, "t0": time.time()}
+_stats = {"pkts": 0}
 # Sync/CFO history is a TIME SERIES, not a latest-value, so it lives beside the
 # per-antenna state rather than in it. maxlen caps memory on a long run; the page
 # shows a shorter window than this.
@@ -1553,7 +1553,7 @@ function makeCard(ant){
               headBar:wrap.querySelector('.csi-head-bar'),
               xax:wrap.querySelectorAll('.csi-view[data-view=channel] .csi-x-axis'),
               lastCsi:-1,lastCns:-1,lastAdc:-1,lastCir:-1,lastSpc:-1,
-              csiRec:null,cnsRec:null,adcRec:null,cirRec:null,spcRec:null,metRec:null,frame:0};
+              csiRec:null,cnsRec:null,adcRec:null,cirRec:null,spcRec:null,metRec:null};
   // Tabs are per card so you can watch one antenna's ADC while another shows its
   // channel, which is how you find the one converter that is actually clipping.
   // Measure once the card is in the document, and again whenever the grid reflows.
@@ -1811,7 +1811,7 @@ function setScAxis(card,nsc){
 }
 
 function drawCsi(card,c,advance){
-  card.frame=c.frame; card.csiRec=c;
+  card.csiRec=c;
   setScAxis(card,c.sc);
   // Magnitude: this card's STEPPED axis (nextMagTop), fixed between steps; it
   // starts at --mag-top and keeps --mag-span. A repaint never moves it.

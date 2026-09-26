@@ -16,9 +16,8 @@ Do not read it as expected hardware behaviour.
 
 Failure modes worth reproducing on purpose:
 
-    python3 fake_feed.py --clip           # ADC hard against the rail, clipping badge
-                                          #   reports "not measurable" instead of 1.0
-    python3 fake_feed.py --legacy         # emit CSI1, as an un-rebuilt sounder would
+    python3 fake_feed.py --clip           # ADC hard against the rail: the clipping badge
+    python3 fake_feed.py --legacy         # emit CSI1 and ADC1, as an older sounder would
     python3 fake_feed.py --antennas 4     # more cards
     python3 fake_feed.py --stall-after 60 # stop sending, to watch the stale badges
 """
@@ -179,17 +178,16 @@ def main():
     ap.add_argument("--fps", type=float, default=30.0, help="frames per second")
     ap.add_argument("--frames", type=int, default=0, help="0 = run until interrupted")
     ap.add_argument("--reps", type=int, default=6,
-                    help="pilot symbols averaged per slot; below 2 the quality panel "
-                         "reports that it cannot measure")
+                    help="ignored: the retired quality panel's input, kept so old command lines run")
     ap.add_argument("--noise", type=float, default=0.05,
-                    help="per-symbol noise, drives the repeat coherence down")
+                    help="ignored: the retired quality panel's input, kept so old command lines run")
     ap.add_argument("--evm", type=float, default=0.08, help="constellation cloud size")
     ap.add_argument("--mod", type=int, default=2, help="bits/symbol: 2 QPSK, 4 16QAM")
     ap.add_argument("--samps", type=int, default=4096, help="samples per slot")
     ap.add_argument("--clip", action="store_true",
                     help="drive the ADC into the rail, to see the clipping badge")
     ap.add_argument("--legacy", action="store_true",
-                    help="send CSI1, as a sounder built before the quality panel does")
+                    help="send CSI1 and ADC1, as an older sounder does")
     ap.add_argument("--stall-after", type=int, default=0, metavar="N",
                     help="stop sending after N frames, to watch the stale badges")
     args = ap.parse_args()
