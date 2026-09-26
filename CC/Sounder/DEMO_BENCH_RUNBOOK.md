@@ -92,9 +92,7 @@ It needs:
 
 - **Checkouts.** `~/repos/HoudiniLab` belongs to its owner: do not change it.
   The demo runs from `~/repos/HoudiniLab-rxwin`, the demo head
-  (`arc/dualband-demo`, checked out there as `fix/bs-rx-window`).
-  `~/repos/HoudiniLab-demoxw` holds the frozen fallback build (`demo-xw`, the
-  code validated on fpga 1.32 in 9.57 to 9.59). `--sounder-dir` and the
+  (`arc/dualband-demo`, checked out there under that name). `--sounder-dir` and the
   checkout the dashboard lives in decide which binary runs. Superseded run
   directories are filed under `~/app_archive` (its `INDEX.md` maps them).
 - **Shipping a build.** From the lane's checkout, `tools/ship_to_rig.sh
@@ -116,12 +114,16 @@ It needs:
   `ln -sfn` onto the directory nests the link inside it; remove the directory
   first. Without `SoapySDR_DIR` the configure fails ("SoapySDR development files
   not found").
-- **Host plugins.** Activate the venv `~/houdini_test` before anything; its
-  plugin (`lib/SoapySDR/modules0.8-3/`) is the default. The demo's slots
-  configs (`bs_rx_slots`, AP-87) run on the software lane's slots plugin in
-  `~/houdini_slots`: `export HOUDINI_SOAPY_ROOT=$HOME/houdini_slots` selects it
-  for `run_rung.sh`/`fstage_run.sh` runs AND for the dashboard's Check and
-  Start. The setup check's stack line shows which one loaded (`host_build`).
+- **Host plugin.** Activate the venv `~/houdini_test` before anything: it is
+  the SoapySDR runtime and the Python bindings, and it carries NO Houdini
+  module. The Houdini host plugin is the release's own prefix, built with the
+  radios' device build: `~/houdini_0.3.1`. `export
+  HOUDINI_SOAPY_ROOT=$HOME/houdini_0.3.1` selects it for every config, for
+  `demo_run.sh`, `run_rung.sh` and `fstage_run.sh` runs, AND for the dashboard's
+  Check and Start; without it no radio opens. The setup check's stack line shows
+  which one loaded (`host_build`, equal to `device_build`; a mismatch is a
+  WARN). Going back one release (0.3.0: `~/houdini_beta` with each node's saved
+  0.3.0 module) is a deploy: the software lane's, on the user's go.
 - **Cores.** `HOUDINI_CORE_MAP` places the sounder's threads by role and the
   main thread pins itself only after the radios start, so the plugin's BS
   receive workers run on the housekeeping cores 0-9 (AP-81, 9.44). The launch
@@ -138,7 +140,7 @@ cd ~/repos/HoudiniLab-rxwin/CC/Sounder
 cat /sys/devices/system/cpu/isolated   # 15-19 when A9 stage 1 is in force
 export HOUDINI_CORE_MAP=main=15 HOUDINI_TX_CPU_AFFINITY=18,19   # isolated (A9); 18,19 while a BS receive flow lands on 16 (pacer_core_check, A8c)
 export HOUDINI_TX_HOST_STATUS=1   # logs the host pacer's state every health period (free)
-export HOUDINI_SOAPY_ROOT=$HOME/houdini_slots   # the slots plugin, for the slots configs (A3)
+export HOUDINI_SOAPY_ROOT=$HOME/houdini_0.3.1   # the host plugin of the radios' release, for every config (A3)
 python3 csi_gui/check_setup.py --conf files/houdini-dualband-xw-steer-slots.json   # must print Ready, egress PASS on both nodes.
 python3 csi_gui/csi_server.py --control --log-dir ~/demo_logs --conf files/houdini-dualband-xw-steer-slots.json   # one log per Start (A8c step 4)
 ```
@@ -162,7 +164,7 @@ Read the stack there, not from this file: it changes with every deploy. The
 last validated stack is in the newest `DEMO_VERIFICATION.md` section 9 row.
 
 The demo configs (A8c): `houdini-dualband-xw-steer-slots.json` (cabled) and
-`-xw-steer-slots-fe.json` (through the XUD1A, A2b), both on the slots plugin.
+`-xw-steer-slots-fe.json` (through the XUD1A, A2b), both on the release's plugin.
 The slots variants also turn on the pre-FFT carrier correction and the 0.12 ppm
 steering deadband, so dropping back to `-xw-steer(-fe).json` changes all three
 at once. `houdini-dualband-steer.json` is the same build with the X-band at 48
@@ -180,7 +182,7 @@ watch, the MER every 15 s, three spectra), files them into the run directory
 and ends with `run_summary.py`'s verdict against A6 (its exit status):
 
 ```sh
-tests/demo-verify/demo_run.sh <TAG> files/houdini-dualband-xw-steer-slots.json 2100 slots
+tests/demo-verify/demo_run.sh <TAG> files/houdini-dualband-xw-steer-slots.json 2100 ~/houdini_0.3.1
 ```
 
 The run lands in `ap79_runs/DEMO/<TAG>_<HHMMSS>/`. `run_summary.py <run dir>`
@@ -336,7 +338,7 @@ constellation, CIR, ADC, beacon sync).
 
    ```sh
    unset HOUDINI_CSI_RECORD    # the replay dashboard records nothing
-   python3 csi_gui/csi_server.py --conf files/houdini-dualband-xw.json &   # VL1_134.rec, FINAL_XW.rec; files/houdini-dualband.json for FINAL.rec
+   python3 csi_gui/csi_server.py --conf files/houdini-dualband-xw.json &   # VL1_134.rec; files/houdini-dualband.json for FINAL.rec
    python3 csi_gui/replay_feed.py ~/demo_rec/<name>.rec --loop
    ```
 
@@ -391,15 +393,11 @@ quarter of the beacons to nearby emitters (`DEMO_VERIFICATION.md` 9.62 to
 `~/repos/HoudiniLab-rxwin` (the X-band at 270 RB beside the sub-6 at 133 RB,
 steered, the BS receiving only its rx slots): cabled, config
 `files/houdini-dualband-xw-steer-slots.json`; through the XUD1A (A2b),
-`files/houdini-dualband-xw-steer-slots-fe.json`. Both run on the slots plugin
-(`HOUDINI_SOAPY_ROOT`, A3). Canned fallback: `~/demo_rec/VL1_134.rec` (fpga
-1.34, the demo head). **The fallbacks:** the same build at 48 MHz X-band,
-`files/houdini-dualband-steer.json`, recording `~/demo_rec/FINAL.rec`; and the
-frozen build `demo-xw` in `~/repos/HoudiniLab-demoxw` with
-`files/houdini-dualband-xw-steer.json` on the default plugin (no
-`HOUDINI_SOAPY_ROOT`), recording `~/demo_rec/FINAL_XW.rec`. The frozen build is a
-CABLED fallback only: it predates the X-band front-end setup (AP-86), so on the
-XUD1A chain its UE X-band channel plays silence.
+`files/houdini-dualband-xw-steer-slots-fe.json`. Both run on the release's host
+plugin (`HOUDINI_SOAPY_ROOT`, A3). Canned fallback: `~/demo_rec/VL1_134.rec` (fpga
+1.34, the demo head). **The fallbacks:** the same build and plugin at 48 MHz
+X-band, `files/houdini-dualband-steer.json`, recording `~/demo_rec/FINAL.rec`;
+and the canned recordings replayed with no radio (A8).
 
 Moving the rig means rebooting the rig host, which re-draws the NIC's receive
 hashing (a node's RX flow can land on a pinned core) and can wedge a node's data
@@ -413,12 +411,12 @@ egress (HS-225). Do every step, every power-up.
    source ~/houdini_test/bin/activate
    cd ~/repos/HoudiniLab-rxwin/CC/Sounder
    export HOUDINI_CORE_MAP=main=15 HOUDINI_TX_CPU_AFFINITY=18,19 HOUDINI_TX_HOST_STATUS=1
-   export HOUDINI_SOAPY_ROOT=$HOME/houdini_slots
+   export HOUDINI_SOAPY_ROOT=$HOME/houdini_0.3.1
    python3 csi_gui/check_setup.py --conf files/houdini-dualband-xw-steer-slots.json
    ```
 
    Ready, egress PASS on both nodes, the stacks match (the stack line's
-   `host_build` is the slots plugin's). A stack FAIL reading
+   `host_build` equals `device_build`). A stack FAIL reading
    `SoapyRPCUnpacker::recv() TIMEOUT` is a slow first open after a server
    restart: run it again (twice in a row has happened, 9.70). An egress FAIL
    needs that node's PL reload or reboot.
@@ -606,12 +604,12 @@ own UDP data planes to each board.
   reachable directly at `http://168.6.244.64:8080/` if the lab firewall allows
   it. Prefer the section B4 tunnel anyway: it works regardless of firewall and
   does not publish the panel on the lab network.
-- SoapySDR host stack: the validated houdini HOST plugin lives ONLY at
-  `/home/houdini/houdini_test/lib/SoapySDR/modules0.8-3/`. The system
-  SoapySDR at `/usr/local` does NOT have it, so every launch must carry
-  `SOAPY_SDR_PLUGIN_PATH=/home/houdini/houdini_test/lib/SoapySDR/modules0.8-3`
-  (the backend's `--venv` default `~/houdini_test` sets this when launching
-  through it). Without it every radio open fails with
+- SoapySDR host stack: the Houdini host plugin lives ONLY in the release
+  prefix, `/home/houdini/houdini_0.3.1/lib/SoapySDR/modules0.8-3/`; the venv
+  `~/houdini_test` and the system SoapySDR at `/usr/local` carry none. Every
+  launch must carry `HOUDINI_SOAPY_ROOT=/home/houdini/houdini_0.3.1` (the
+  backend, the setup check and `run_rung.sh` turn it into `SOAPY_SDR_ROOT` for
+  the sounder). Without it every radio open fails with
   `SoapySDR::Device::make() no match`.
 - Teardown helper: `csi_gui/teardown_framer.py` runs on the rig (it opens the
   boards, so it is device-touching).

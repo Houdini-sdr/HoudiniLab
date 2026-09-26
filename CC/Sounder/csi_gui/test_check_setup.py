@@ -154,6 +154,31 @@ rc, rep, lv = run()
 det = [r["detail"] for r in rep["results"] if r["what"] == "egress 127.0.0.2"]
 check(rc == 0 and lv["egress 127.0.0.2"] == "WARN" and det and "drop p0" in det[0] and lv["egress 127.0.0.1"] == "PASS",
       "saturated egress drop counters are a WARN naming the port (mutation: only the stall bit read)")
+# The plugin from HOUDINI_SOAPY_ROOT's prefix: the venv without a Houdini module
+# (the demo rig's, since the release prefixes carry it) and the prefix with one.
+vmod = os.path.join(venv, "lib", "SoapySDR", "modules0.8-3", "libHoudiniSDRSupport.so")
+rel = os.path.join(root, "rel"); os.makedirs(os.path.join(rel, "lib", "SoapySDR", "modules0.8-3"))
+open(os.path.join(rel, "lib", "SoapySDR", "modules0.8-3", "libHoudiniSDRSupport.so"), "w").close()
+os.rename(vmod, vmod + ".off")
+env_saved = env; env = dict(env_saved, HOUDINI_SOAPY_ROOT=rel)
+rc, rep, lv = run("--quick")
+check(lv.get("plugin") == "PASS", "the plugin is found in HOUDINI_SOAPY_ROOT's prefix when the venv has none "
+      "(mutation: only the venv's module dir searched)")
+env = env_saved
+rc, rep, lv = run("--quick")
+det = [r["fix"] for r in rep["results"] if r["what"] == "plugin"]
+check(rc == 1 and lv.get("plugin") == "FAIL" and det and "HOUDINI_SOAPY_ROOT" in det[0],
+      "no module in the venv and no HOUDINI_SOAPY_ROOT fails, naming the variable (mutation: the old advice)")
+os.rename(vmod + ".off", vmod)
+# A host plugin that is not the radios' device build: a WARN per node.
+json.dump({"127.0.0.1": dict(same, host_build="v0"), "127.0.0.2": dict(same, host_build="v0")}, open(info_file, "w"))
+json.dump({"127.0.0.1": HEALTHY, "127.0.0.2": HEALTHY}, open(egress_file, "w"))
+rc, rep, lv = run()
+check(rc == 0 and lv.get("stack match") == "PASS" and lv.get("plugin build 127.0.0.1") == "WARN"
+      and lv.get("plugin build 127.0.0.2") == "WARN",
+      "a host plugin that is not the radios' device build is a WARN per node, not a failure (mutation: builds not "
+      "compared): %s" % lv)
+json.dump({"127.0.0.1": same, "127.0.0.2": same}, open(info_file, "w"))
 # The device's single marked=N form (older builds printed it per port).
 json.dump({"127.0.0.1": "drop=p0:0,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marked=1",
            "127.0.0.2": "drop=p0:0,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marked=255"}, open(egress_file, "w"))

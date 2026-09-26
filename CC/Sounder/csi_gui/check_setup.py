@@ -151,15 +151,19 @@ def plugin_env(venv):
 
 
 def check_plugin(rep, venv):
-    moddir = plugin_dir(venv)
+    # The Houdini module comes from HOUDINI_SOAPY_ROOT's prefix when it is set
+    # (plugin_env loads it from there), else from the venv's own module dir.
+    root = os.environ.get("HOUDINI_SOAPY_ROOT")
+    moddir = plugin_dir(root or venv)
     if not os.path.isdir(venv):
         rep.add("FAIL", "plugin", "venv %s not found" % venv,
                 "Install the SoapyHoudiniSDR host (walkthrough section 2.4) and pass its prefix as --venv.")
         return
     mods = [m for m in glob.glob(os.path.join(moddir, "*.so")) if "houdini" in os.path.basename(m).lower()]
     if not mods:
-        rep.add("FAIL", "plugin", "no Houdini module in %s" % moddir,
-                "Install the SoapyHoudiniSDR host plugin into this venv (walkthrough section 2.4).")
+        rep.add("FAIL", "plugin", "no Houdini module in %s%s" % (moddir, " (HOUDINI_SOAPY_ROOT)" if root else ""),
+                "Export HOUDINI_SOAPY_ROOT=<the release's host-plugin prefix> (on the demo rig ~/houdini_0.3.1, "
+                "the build the radios run) before the check and the dashboard (walkthrough section 2.4).")
         return
     util = os.path.join(venv, "bin", "SoapySDRUtil")
     env = plugin_env(venv)
@@ -401,6 +405,15 @@ def check_versions(rep, sd, nodes, port, env):
                 "Put both radios on the same blessed stack (ask whoever maintains the boards).")
     else:
         rep.add("PASS", "stack match", "both nodes on the same gateware, firmware, plugin and protocol")
+    # A release pairs the host plugin with the radios' device build (lockstep);
+    # a mismatch is a stale or wrong HOUDINI_SOAPY_ROOT.
+    for ip, info in sorted(infos.items()):
+        hb, db = info.get("host_build"), info.get("device_build")
+        if hb and db and hb != db:
+            rep.add("WARN", "plugin build %s" % ip, "the host plugin (host_build %s) is not this radio's device "
+                    "build (%s)" % (hb, db),
+                    "Point HOUDINI_SOAPY_ROOT at the prefix built with the radios' release (on the demo rig "
+                    "~/houdini_0.3.1).")
 
 
 def main():

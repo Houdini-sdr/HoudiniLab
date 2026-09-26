@@ -40,11 +40,11 @@ display. Every command runs on `<host>` unless it says otherwise.
    cd <path-to-HoudiniLab>/CC/Sounder
    ```
 
-   For a slots config (the demo, section 3), also select the slots host
-   plugin in the same shell before steps 3 and 4:
+   Select the host plugin built with the radios' release in the same shell
+   before steps 3 and 4 (every config runs on it, section 3):
 
    ```sh
-   export HOUDINI_SOAPY_ROOT=<slots-plugin-prefix>
+   export HOUDINI_SOAPY_ROOT=<host-plugin-prefix>
    ```
 
 2. Pick a config from section 3, then put your two radios' addresses in the
@@ -205,6 +205,11 @@ SoapySDRUtil --info            # prints versions and module paths
 ls $SOAPY_SDR_PLUGIN_PATH      # must contain a Houdini .so module
 ```
 
+When the Houdini plugin is installed in a prefix of its own (a release built
+with the radios' device build) instead of the venv, the venv carries no Houdini
+module: export `HOUDINI_SOAPY_ROOT=<host-plugin-prefix>` and the setup check,
+the dashboard and the run scripts load it from there.
+
 If `SoapySDRUtil` is missing, or the module directory has no Houdini entry,
 stop here and complete the SoapyHoudiniSDR host install first. Nothing in this
 walkthrough can work without it.
@@ -348,7 +353,7 @@ list shows. All of them run one client. Each names its own topology file in
 |---|---|
 | `files/houdini-dualband-xw-steer-slots.json` | **The demo.** Sub-6 2425 MHz at 133 RB plus the X-band IF at 4380 MHz at 270 RB (97.2 MHz), 4096 FFT, 30 kHz spacing; the UE's clock steered onto the beacon; the base station receives only its rx slots and removes the carrier offset before the FFT. Needs the slots host plugin (`HOUDINI_SOAPY_ROOT`, `DEMO_BENCH_RUNBOOK.md` A3) |
 | `files/houdini-dualband-xw-steer-slots-fe.json` | The demo through an X-band front end held in a static TX/RX state for the session |
-| `files/houdini-dualband-xw-steer.json` | The demo's widths and steering, receiving every slot, on the default plugin (the frozen fallback build's config) |
+| `files/houdini-dualband-xw-steer.json` | The demo's widths and steering, receiving every slot (the config of the earlier frozen fallback build) |
 | `files/houdini-dualband-xw-steer-fe.json` | That, through the X-band front end |
 | `files/houdini-dualband-steer.json` | Both bands at 133 RB (48 MHz), steered: the fallback when the 97 MHz X-band is too weak |
 | `files/houdini-dualband-steer-fe.json` | That fallback through the X-band front end (not yet run on a rig) |
@@ -366,8 +371,9 @@ list shows. All of them run one client. Each names its own topology file in
 The `-fe` configs set `xband_frontend_static`: they need the X-band front-end
 boards' roles applied on both nodes (`sudo houdini-role status` exits 0 on
 each) and are refused at start without them. The slots configs
-(`bs_rx_slots`) need the slots host plugin, selected by exporting
-`HOUDINI_SOAPY_ROOT=<its prefix>` before the setup check and the dashboard.
+(`bs_rx_slots`) need a host plugin with the slots gate (device 0.3.0 or newer);
+select the release's plugin by exporting `HOUDINI_SOAPY_ROOT=<host-plugin-prefix>`
+before the setup check and the dashboard.
 
 On a new bench, go up the dual-band ladder one rung at a time: `r0` proves the
 link and the stack, `r1` the converter clocks and the sub-6 band, `r2` adds the
@@ -473,9 +479,9 @@ export HOUDINI_MAX_FRAME=2000000000        # keep running instead of stopping at
 ./build/sounder --view --conf_file files/<config>.json
 ```
 
-For a slots config (`bs_rx_slots`), point SoapySDR at the slots host plugin
-instead of the venv's module directory, as the dashboard does:
-`export SOAPY_SDR_ROOT=<slots-plugin-prefix> SOAPY_SDR_PLUGIN_PATH=`.
+When the plugin lives in a prefix of its own (section 2.4), point SoapySDR at
+it instead of the venv's module directory, as the dashboard does:
+`export SOAPY_SDR_ROOT=<host-plugin-prefix> SOAPY_SDR_PLUGIN_PATH=`.
 
 Note the flag names differ between the two programs. The sounder takes
 `--conf_file`; the dashboard backend takes `--conf`.
