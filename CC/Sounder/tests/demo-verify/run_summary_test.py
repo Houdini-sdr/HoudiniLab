@@ -97,6 +97,9 @@ STEER = [
     "32:165260 INFOR: Clock steering [0]: released to the calibrated hold after 2 push(es), offset was 0 counts"]
 check(rs.steering_pushes(STEER) == 2,
       "the push count is the push lines only (mutation: the old 'steer.*(push|CLOCK_ADJ)' count, 5 here): %d" % rs.steering_pushes(STEER))
+PB = ["37:988647 INFOR: UE pilot burst: scheduled 11 frames up to 490587028 (pad 148)",
+      "38:002916 INFOR: UE pilot burst: scheduled 3 frames up to 494273429 (pad 149)"]
+check(rs.pilot_frames(PB) == (14, 2), "a schedule line counts its N frames (mutation: count the lines as bursts): %s" % (rs.pilot_frames(PB),))
 # main: the exit status is the verdict's, read from a run directory's largest log
 d = tempfile.mkdtemp(prefix="run_summary_")
 open(os.path.join(d, "small_cpu.log"), "w").write("x\n")

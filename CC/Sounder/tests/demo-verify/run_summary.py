@@ -156,8 +156,9 @@ def summary(L):
         print(f"  {name}: {sum(bool(re.search(pat, l)) for l in L)}")
     print("== UE acquisition")
     acc = sum("clientSyncBeacon [0]: idx" in l for l in L)
+    frames, lines = pilot_frames(L)
     print(f"  accepted {acc}, locks {sum('lock CONFIRMED' in l for l in L)}, hunts {sum('hunt lock' in l for l in L)}, "
-          f"pilot bursts {sum('UE pilot burst' in l for l in L)}")
+          f"pilot frames scheduled {frames} in {lines} schedule lines")
     snr = [float(m.group(1)) for l in L for m in [re.search(r"Re-sync frame [0-9]+: detection.*snr ([-0-9.]+)", l)] if m]
     if snr:
         print(f"  beacon snr n={len(snr)} median {st.median(snr):.1f} dB, below 10 dB: {sum(s < 10 for s in snr)}")
@@ -183,6 +184,12 @@ def summary(L):
     if res:
         print(f"  post residual Hz n={len(res)} median {st.median(res):.1f} max|.| {max(abs(x) for x in res):.1f}")
     print(f"  steering pushes: {steering_pushes(L)}")
+
+
+def pilot_frames(L):
+    """(frames, lines): each 'UE pilot burst: scheduled N frames' line schedules N frames' bursts."""
+    n = [int(m.group(1)) for l in L for m in [re.search(r"UE pilot burst: scheduled (\d+) frames", l)] if m]
+    return sum(n), len(n)
 
 
 def steering_pushes(L):
