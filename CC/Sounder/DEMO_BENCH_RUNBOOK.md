@@ -273,7 +273,11 @@ steered, cabled):
   a frame or two mid-run with no visible effect (9.71). The durable guard is
   keeping every NIC receive queue off the pacer cores (A8c step 4).
 - **Egress drop counters saturate (HS-212).** Each radio's per-port egress
-  drop and mark counters stop at 255; a throughput test fills them (9.73). A
+  drop counters, and its one marked-frame counter (EGRESS_STATUS prints it per
+  port, but it is a single count after the ports merge), stop at 255; a
+  throughput test fills them (9.73). Judge a run by each counter's change
+  over the run, not its value: a marked frame at a stream's teardown is the
+  designed cleanup. A
   run is not affected, but its link health can no longer see a new egress
   drop, and check_setup says so with a WARN. No software path clears them:
   a node boot does (a reboot is enough, and so is a power cycle, because the
