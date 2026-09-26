@@ -52,7 +52,22 @@ cs._mer_avg(9, 0.01, 100, 0.0)
 e, n = cs._mer_avg(9, 0.0001, 300, 0.5)
 check(abs(e - (0.01 * 100 + 0.0001 * 300) / 400) < 1e-12 and n == 400, "records inside 1 s pool their error power by point count (mutation: average the dB)")
 e, n = cs._mer_avg(9, 0.0001, 300, 2.0)
-check(n == 300, "records older than 1 s drop out")
+check(n == 300, "records older than 1 s drop out, both of them (mutation: never pop the old entries, or pop only one)")
+# The window is per antenna: the X-band card must not pool the sub-6 card's error.
+cs._mer_hist.clear()
+cs._mer_avg(1, 0.01, 100, 0.0)
+e2, n2 = cs._mer_avg(2, 0.0001, 300, 0.1)
+e1, n1 = cs._mer_avg(1, 0.01, 100, 0.2)
+check(abs(e2 - 0.0001) < 1e-15 and n2 == 300 and abs(e1 - 0.01) < 1e-15 and n1 == 200,
+      "each antenna pools only its own records (mutation: key the history to antenna 0 for every card)")
+# EVM is the rms error in percent, 100 sqrt(e) (ETSI TR 101 290), next to MER -10 log10(e).
+evm, m = cs._evm_mer(0.01)
+check(abs(evm - 10.0) < 1e-12 and abs(m - 20.0) < 1e-12,
+      "an error power of 0.01 reads EVM 10 %% and MER 20 dB (EVM %.4f %%, MER %.4f dB) (mutation: EVM as 100 e, which reads 1 %%)"
+      % (evm, m))
+evm, m = cs._evm_mer(0.0004)
+check(abs(evm - 2.0) < 1e-12 and abs(m - 33.9794) < 1e-4,
+      "an error power of 4e-4 reads EVM 2 % and MER 33.98 dB (mutation: EVM as 100 e, which reads 0.04 %)")
 # The page's figure end to end: two CNS1 records of one antenna, 20 and 40 dB,
 # parsed back to back, report their POOLED error, not the last record's own.
 cs._mer_hist.clear()
@@ -66,6 +81,23 @@ pooled = -10 * math.log10((cs._mer_err(p20, 2)[0] + cs._mer_err(p40, 2)[0]) / 2)
 check(a == 5 and abs(rec["mer_db"] - pooled) < 0.051 and rec["mer_pts"] == 4000 and len(rec["pts"]) == 2000,
       "CNS1 reports the 1 s pooled MER %.1f dB over %d points (pooled truth %.2f; the 40 dB record alone reads ~40)"
       % (rec["mer_db"], rec["mer_pts"], pooled))
+# Two antennas' records interleaved, as the two lanes arrive: each card reads
+# its own lane, a 20 dB lane and a 40 dB lane, not their pool (about 23 dB).
+cs._mer_hist.clear()
+cs._parse_cns(cns1(1, 0, p20)); cs._parse_cns(cns1(1, 2, p40))
+_, r0 = cs._parse_cns(cns1(2, 0, p20)); _, r2 = cs._parse_cns(cns1(2, 2, p40))
+own20 = -10 * math.log10(cs._mer_err(p20, 2)[0]); own40 = -10 * math.log10(cs._mer_err(p40, 2)[0])
+check(abs(r0["mer_db"] - own20) < 0.051 and abs(r2["mer_db"] - own40) < 0.051 and r0["mer_pts"] == r2["mer_pts"] == 4000,
+      "interleaved lanes each report their own MER, %.1f and %.1f dB (truth %.2f and %.2f) "
+      "(mutation: key the history to antenna 0 for every card)" % (r0["mer_db"], r2["mer_db"], own20, own40))
+# The record's EVM end to end, a known answer: unit-power QPSK points each
+# displaced by 0.1 in I have an error power of exactly 0.01, so EVM 10 % and MER 20 dB.
+s = 1 / math.sqrt(2)
+qp = [[a * s + 0.1, b * s] for a in (-1, 1) for b in (-1, 1)] * 4
+_, rq = cs._parse_cns(cns1(1, 7, qp))
+check(rq["evm_pct"] == 10.0 and rq["mer_db"] == 20.0 and rq["mer_pts"] == 16,
+      "a CNS1 record with rms error 0.1 reports evm_pct 10.0 and mer_db 20.0 (read %r and %r) "
+      "(mutation: EVM as 100 e, which reads 1.0)" % (rq["evm_pct"], rq["mer_db"]))
 # Delay statistics, the excess delays from the first tap above the threshold
 pre = 64
 db = [-60.0] * 128; db[pre] = 0.0

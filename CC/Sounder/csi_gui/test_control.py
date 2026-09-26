@@ -78,6 +78,46 @@ nsup = cs.SounderSupervisor(args, "x"); nsup.cmd = ["true"]; nsup._start().wait(
 check(nsup.log_dir is None, "without --log-dir nothing is logged (mutation: a default directory)")
 import shutil; shutil.rmtree(ld, ignore_errors=True)
 
+# One session against a sounder that fails every start, in a checkout of its
+# own: the teardown stand-in records the arguments it was given, the sounder
+# stand-in records each launch and exits 1.
+rd = tempfile.mkdtemp(prefix="csi_retry_")
+rlog = os.path.join(rd, "log")
+for d in ("build", "csi_gui", "files"):
+    os.makedirs(os.path.join(rd, d))
+with open(os.path.join(rd, "build", "sounder"), "w") as f:
+    f.write("#!/bin/sh\necho launch >> %s\nexit 1\n" % rlog)
+os.chmod(os.path.join(rd, "build", "sounder"), 0o755)
+with open(os.path.join(rd, "csi_gui", "teardown_framer.py"), "w") as f:
+    f.write("import json, sys\nopen(%r, 'a').write('teardown ' + json.dumps(sys.argv[1:]) + '\\n')\n" % rlog)
+for n, topo in (("houdini-t.json", "files/topology-t.json"), ("houdini-u.json", "files/topology-u.json")):
+    json.dump({"serial_file": topo}, open(os.path.join(rd, "files", n), "w"))
+rsup = cs.SounderSupervisor(types.SimpleNamespace(**dict(vars(args), sounder_dir=rd, conf="files/houdini-t.json")), "x")
+rsup.SETTLE_AFTER_TEARDOWN_S = 0.05; rsup.RETRY_DELAY_S = 0.05
+check(rsup.run() is None and rsup.snapshot()["state"] == "gave up",
+      "a sounder that never starts ends the session as gave up (mutation: no gave-up state, the page shows the retry wait for good)")
+rlines = open(rlog).read().splitlines()
+# SH-442: a cold open that times out is retried; the dashboard's Start makes 4 attempts.
+check(rlines.count("launch") == 4 and rsup.snapshot()["attempt"] == 4,
+      "a failing start is launched 4 times, not once: %d launches (mutation: ATTEMPTS = 1, no retry)" % rlines.count("launch"))
+tds = [json.loads(l[len("teardown "):]) for l in rlines if l.startswith("teardown ")]
+# The teardown clears the radios of the topology the config names; the default
+# topology (teardown_framer.py's) has the demo's BS and UE the other way round.
+check(len(tds) == 4 and all(a == ["--topology", "files/topology-t.json"] for a in tds)
+      and [l.split()[0] for l in rlines] == ["teardown", "launch"] * 4,
+      "every attempt tears down first, against the config's own topology %s (mutation: drop --topology from the "
+      "teardown command)" % (tds[:1],))
+rsup.set_conf("files/houdini-u.json"); rsup._teardown()
+check(json.loads(open(rlog).read().splitlines()[-1][len("teardown "):]) == ["--topology", "files/topology-u.json"],
+      "a config switch tears down against the new config's topology (mutation: the teardown command built once, "
+      "at start-up)")
+demo = cs.SounderSupervisor(types.SimpleNamespace(**dict(vars(args), sounder_dir=os.path.abspath(".."),
+                                                         conf="files/houdini-dualband-xw-steer-slots.json")), "x")
+check(demo.td_cmd == ["python3", "csi_gui/teardown_framer.py", "--topology", "files/topology-houdini-dualband.json"],
+      "the demo config tears down its own mode-V topology (mutation: drop --topology, and the default "
+      "topology-houdini.json has the BS and UE swapped)")
+shutil.rmtree(rd, ignore_errors=True)
+
 # The gap before the main thread picks a Start up (a supervisor not yet serving):
 # a Check or a second Start then is refused, not queued behind it and dropped.
 idle = cs.SounderSupervisor(args, "127.0.0.1:1")

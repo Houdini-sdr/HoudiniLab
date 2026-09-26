@@ -1,7 +1,8 @@
 # Known answers for the canned-data fallback: the record format, the recorder's
-# cap, the replay schedule and window, and the dashboard's UDP loop recording
-# what it receives; plus the loop surviving a malformed datagram and the SSE
-# event shared between pages. Stdlib only; run from csi_gui/ (ctest does).
+# cap, the replay schedule, window and pace, and the dashboard's UDP loop recording
+# what it receives; plus the loop surviving a malformed datagram, each antenna's
+# age in the snapshot, and the SSE event shared between pages. Stdlib only; run
+# from csi_gui/ (ctest does).
 # Each check names the mutation that breaks it.
 import importlib.util, os, socket, struct, sys, tempfile, threading, time
 sys.argv = ["x"]
@@ -108,6 +109,30 @@ rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); rx.bind(("127.0.0.1", 0))
 rf.play(tx, rx.getsockname(), list(cr.read_recording(p3)), 10.0)
 out = [rx.recvfrom(65535)[0] for _ in sent]
 check(out == sent, "a replay delivers the recorded datagrams unchanged and in order (mutation: send the header with the payload)")
+# The replay keeps the recorded pace: three datagrams 0.3 s apart take at least
+# 0.6 s at speed 1 (a lower bound only, so a loaded host cannot fail it).
+paced = [(50.0, b"p0"), (50.3, b"p1"), (50.6, b"p2")]
+t0 = time.monotonic()
+rf.play(tx, rx.getsockname(), paced, 1.0)
+took = time.monotonic() - t0
+got = [rx.recvfrom(65535)[0] for _ in paced]
+check(took >= 0.5 and got == [d for _, d in paced],
+      "a replay of datagrams 0.3 s apart takes %.2f s, at least 0.5 (mutation: delete the pacing sleep, every "
+      "datagram at once)" % took)
+
+# Each antenna's record carries its age, from the last datagram seen for it:
+# a frozen lane must read as old on the page, not as a static channel.
+t_in = time.monotonic()
+with cs._lock:
+    cs._latest[41] = {"cns": {"frame": 1}, "t": t_in - 2.0}
+_seq, snap, _sync = cs._snapshot()
+after = time.monotonic()
+age = snap.get("41", {}).get("age_ms")
+check(age is not None and 1999 <= age <= int((after - t_in + 2.0) * 1000) + 1 and "t" not in snap["41"],
+      "a lane last heard 2 s ago reads age_ms %r, 2000 (less 1 ms of rounding) up to the call's own time (mutation: age_ms forced to 0, "
+      "or the stamp leaked into the record)" % age)
+with cs._lock:
+    del cs._latest[41]
 
 # One serialisation per seq, shared by every open page; a stale re-push (seq
 # unchanged) past BODY_REUSE_S rebuilds, so the ages it carries still move.

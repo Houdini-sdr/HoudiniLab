@@ -227,4 +227,23 @@ check(e0["SOAPY_SDR_PLUGIN_PATH"] == "/v/lib/SoapySDR/modules0.8-3" and e0.get("
 check(e1.get("SOAPY_SDR_ROOT") == "/slots" and e1.get("SOAPY_SDR_PLUGIN_PATH") == "",
       "with HOUDINI_SOAPY_ROOT that prefix loads, not the venv's (mutation: the variable ignored, so the dashboard "
       "runs a slots config on the default plugin; or the venv's module path left set, which SoapySDR searches too)")
+# The operator's own environment rides along: the runbook's launch knobs (the
+# core map, the TX worker pinning) reach the sounder only through this dict.
+knobs = {"HOUDINI_CORE_MAP": "main=3", "HOUDINI_TX_CPU_AFFINITY": "4,5"}
+saved_knobs = {k: os.environ.get(k) for k in knobs}
+os.environ.update(knobs)
+e2 = check_setup.plugin_env("/v")
+os.environ["HOUDINI_SOAPY_ROOT"] = "/slots"
+e3 = check_setup.plugin_env("/v")
+os.environ.pop("HOUDINI_SOAPY_ROOT")
+if saved is not None:
+    os.environ["HOUDINI_SOAPY_ROOT"] = saved
+for k, v in saved_knobs.items():
+    if v is None:
+        os.environ.pop(k, None)
+    else:
+        os.environ[k] = v
+check(all(e.get(k) == v for e in (e2, e3) for k, v in knobs.items()) and e2.get("PATH") == os.environ.get("PATH"),
+      "the operator's HOUDINI_CORE_MAP, HOUDINI_TX_CPU_AFFINITY and PATH reach the sounder, with and without "
+      "HOUDINI_SOAPY_ROOT (mutation: build the environment from scratch instead of from os.environ, even one that keeps PATH and PYTHONPATH)")
 print("%d failure(s)" % fails); sys.exit(1 if fails else 0)
