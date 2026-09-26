@@ -16,9 +16,10 @@
 #   - It relinks CC/Sounder/mufft after the reset (the reset restores the empty
 #     submodule directory; `ln -sfn` onto that directory would nest the link),
 #     pointing at the rig repository's main checkout.
-#   - It configures and builds with the venv sourced (VENV, default ~/houdini_test;
-#     a fresh worktree's cmake does not find SoapySDR without it), never under
-#     `set -e` (sourcing the venv's activate under it aborts the shell).
+#   - It configures and builds with the venv sourced (VENV, default ~/houdini_test)
+#     and a fresh build directory's cmake pointed at the venv's SoapySDR
+#     (SoapySDR_DIR; without it the configure fails), never under `set -e`
+#     (sourcing the venv's activate under it aborts the shell).
 #   - It gates on make's own exit status: ctest after a failed build runs the OLD
 #     binaries and passes.
 #   - With CHECK_STRING set, it requires the new sounder binary to carry that
@@ -57,7 +58,10 @@ if [ "${1:-}" = "--remote" ]; then
   cd CC/Sounder || exit 1
   if [ ! -f build/CMakeCache.txt ]; then
     mkdir -p build
-    (cd build && cmake .. -DCMAKE_BUILD_TYPE=Release > cmake.log 2>&1) || { echo "FAIL: cmake (build/cmake.log)"; exit 1; }
+    SDR_DIR=""
+    [ -d "$VIRTUAL_ENV/share/cmake/SoapySDR" ] && SDR_DIR="-DSoapySDR_DIR=$VIRTUAL_ENV/share/cmake/SoapySDR"
+    # shellcheck disable=SC2086
+    (cd build && cmake .. -DCMAKE_BUILD_TYPE=Release $SDR_DIR > cmake.log 2>&1) || { echo "FAIL: cmake (build/cmake.log)"; exit 1; }
   fi
   (cd build && nice -n 10 make -j"${JOBS:-8}" > make.log 2>&1)
   RC=$?

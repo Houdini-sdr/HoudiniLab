@@ -97,9 +97,12 @@ It needs:
   code validated on fpga 1.32 in 9.57 to 9.59). `--sounder-dir` and the
   checkout the dashboard lives in decide which binary runs. Superseded run
   directories are filed under `~/app_archive` (its `INDEX.md` maps them).
-- **Shipping a build.** Bundle, copy, and fetch INSIDE the target worktree
-  (`FETCH_HEAD` is per worktree), then relink muFFT, which a checkout restores as
-  an empty directory:
+- **Shipping a build.** From the lane's checkout, `tools/ship_to_rig.sh
+  <user>@<rig-host> <rig worktree> [<branch>]` does all of it and fails closed
+  (it refuses while a sounder runs or the host is busy, and `CHECK_STRING=<text>`
+  makes it require the new binary to carry a string only the new code logs). By
+  hand: bundle, copy, and fetch INSIDE the target worktree (`FETCH_HEAD` is per
+  worktree), then relink muFFT, which a checkout restores as an empty directory:
 
   ```sh
   cd ~/repos/HoudiniLab-rxwin && git fetch /tmp/<bundle> <branch> && git reset --hard FETCH_HEAD
