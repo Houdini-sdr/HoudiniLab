@@ -2292,8 +2292,8 @@ function onData(obj){
       card.lastCsi=rec.csi.frame; pktCount++;
     }
     if(rec.cns && rec.cns.frame!==card.lastCns){
+      card.lastCns=rec.cns.frame; card.cnsT=Date.now();  // before drawQuality, which reads its age
       if(open){ drawCons(card,rec.cns); drawQuality(card); } else card.cnsRec=rec.cns;
-      card.lastCns=rec.cns.frame; card.cnsT=Date.now();
       if(sampleMer(card,rec.cns) && open) drawMer(card);
     }
     if(rec.met){
@@ -2334,7 +2334,10 @@ function onData(obj){
 
 function connect(){
   const es=new EventSource('/stream');
-  es.onmessage=e=>{ try{onData(JSON.parse(e.data));}catch(err){} };
+  // A failing update must not stop the stream, but it is said (the first few,
+  // in the browser console) rather than swallowed.
+  let updErrs=0;
+  es.onmessage=e=>{ try{onData(JSON.parse(e.data));}catch(err){ if(updErrs++<5) console.error('dashboard update failed:',err); } };
   es.onerror=()=>{ document.getElementById('meta').innerHTML=
      '<span class="text-red">disconnected, retrying&hellip;</span>'; };
 }
