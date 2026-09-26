@@ -364,6 +364,19 @@ void RecorderWorker::sendSpectrum(Packet* pkt) {
 }
 
 // Pilot slot -> channel estimate H[k] (DC-centered), cached per antenna + streamed.
+// bs_cfo_pre_fft: the rotation can clamp a sample the ADC delivered within 3 dB
+// of full scale (houdini/pre_cfo.h derotate). Counted and warned, never silent.
+void RecorderWorker::notePreCfoSaturation(long long values, uint32_t ant) {
+  if (values <= 0) return;
+  pre_cfo_saturated_ += values;
+  const long long k = ++pre_cfo_sat_slots_;
+  if ((k & (k - 1)) == 0) {  // braces: MLPD_WARN is several statements
+    MLPD_WARN("ant %u: the pre-FFT carrier rotation clamped %lld I/Q value(s) in this slot (%lld slots, %lld values "
+              "so far): the ADC is within 3 dB of full scale\n",
+              ant, values, k, pre_cfo_saturated_);
+  }
+}
+
 void RecorderWorker::sendCsi(Packet* pkt) {
   const int N = static_cast<int>(cfg_->fft_size());
   const int cp = static_cast<int>(cfg_->cp_size());
@@ -387,7 +400,7 @@ void RecorderWorker::sendCsi(Packet* pkt) {
     pc.use = e.coherence >= 0.5;
     if (pc.use) {
       cfo_buf.resize(2 * static_cast<size_t>(slot));
-      houdini::precfo::derotate(d, cfo_buf.data(), slot, e.hz, cfg_->rate(), 0);
+      notePreCfoSaturation(houdini::precfo::derotate(d, cfo_buf.data(), slot, e.hz, cfg_->rate(), 0), pkt->ant_id);
       d = cfo_buf.data();
     }
   }
@@ -596,7 +609,8 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
       pcu = &pc->second;
       const long long t0 = (static_cast<long long>(pkt->slot_id) - static_cast<long long>(pcu->slot)) * slot;
       cfo_buf.resize(2 * static_cast<size_t>(slot));
-      houdini::precfo::derotate(d, cfo_buf.data(), slot, pcu->hz, cfg_->rate(), t0);
+      notePreCfoSaturation(houdini::precfo::derotate(d, cfo_buf.data(), slot, pcu->hz, cfg_->rate(), t0),
+                           pkt->ant_id);
       d = cfo_buf.data();
     }
   }
@@ -883,7 +897,8 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
               "per-symbol correction, so it stays visible while corrected)%s\n",
               slope * 180.0 / M_PI, hz, nph,
               pcu != nullptr ? (", after the pilot's pre-FFT " + std::to_string(std::lround(pcu->hz)) +
-                                " Hz (coherence " + std::to_string(pcu->coherence).substr(0, 4) + ")").c_str()
+                                " Hz (coherence " + std::to_string(pcu->coherence).substr(0, 4) + ", " +
+                                std::to_string(pre_cfo_saturated_) + " I/Q values clamped so far)").c_str()
                              : "");
         }
       }

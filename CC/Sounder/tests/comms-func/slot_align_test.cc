@@ -187,10 +187,25 @@ int main() {
   }
   {
     namespace sa = houdini::slotalign;
-    check(!sa::lanePresent(119.0, 0.0) && sa::lanePresent(121.0, 0.0) && !sa::lanePresent(200.0, 51.0) &&
-              sa::lanePresent(200.0, 49.0),
-          "the presence gate needs rms 120 and 4x the floor (mutation: either bar dropped, or the floor factor "
-          "changed)");
+    check(!sa::lanePresent(119.0, 0.0, 0.9, false) && sa::lanePresent(121.0, 0.0, 0.0, false) &&
+              !sa::lanePresent(200.0, 51.0, 0.9, false) && sa::lanePresent(200.0, 49.0, 0.0, false),
+          "the presence gate needs rms 120 and 4x the floor, whatever the pilot's shape (mutation: either bar "
+          "dropped, the floor factor changed, or the LTS stand-in applied outside slots mode)");
+    check(!sa::lanePresent(500.0, 0.0, 0.30, true) && sa::lanePresent(150.0, 0.0, 0.85, true) &&
+              !sa::lanePresent(110.0, 0.0, 0.95, true),
+          "slots mode: with no noise floor the LTS check stands in, so interference above the bar is a quiet "
+          "frame (mutation: the relative bar against the zero floor, which never fires; or the absolute bar "
+          "dropped)");
+    const long long G_EP = 5000, G_FR = 20 * 61440;
+    check(sa::pilotGridOff(G_EP + 2 * 61440 - 10, 6, G_EP, 2, 61440, G_FR) == -4 &&
+              sa::pilotGridOff(G_EP - G_FR + 2 * 61440 - 100, 107, G_EP, 2, 61440, G_FR) == 7 &&
+              sa::pilotGridOff(G_EP + 13 * 61440, 0, G_EP, 2, 61440, G_FR) == 11 * 61440 - G_FR,
+          "pilotGridOff: the placed start against the scheduled pilot, a stamp before the epoch folded, the "
+          "far side of the frame negative (mutation: no fold, or the pilot slot not subtracted)");
+    check(sa::headAtSlotEdge(-32, 32) && sa::headAtSlotEdge(-30, 32) && !sa::headAtSlotEdge(-29, 32) &&
+              !sa::headAtSlotEdge(-4, 32),
+          "a start pinned at -prefix (the cut edge) flags, the wired -4 does not (mutation: compared against 0, "
+          "or the sign flipped)");
     check(!sa::laneTakesCut(false, 0.99, true, 0.50),
           "a lane that fails the gate never takes the cut, however clean (mutation: the pre-review rule on "
           "self-similarity alone, where a weak clean X-band won and then skipped a frame the sub-6 carried)");

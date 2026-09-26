@@ -49,10 +49,19 @@ inline Est estimate(const short* d, int n, int start, int L, int count, double r
 /// Rotate the offset out: out[i] = in[i] * exp(-j 2 pi hz (t0 + i) / rate), for
 /// n int16 IQ samples, t0 the first sample's index from the reference (the pilot
 /// slot's start), so a later slot of the same frame continues its phase.
-inline void derotate(const short* in, short* out, int n, double hz, double rate, long long t0) {
+/// Returns how many values (I or Q) saturated: a rotation keeps |x|, so a sample above
+/// 32767 in magnitude (both rails large, the ADC within 3 dB of full scale) can
+/// exceed the int16 range once rotated even where neither rail clipped before.
+inline long long derotate(const short* in, short* out, int n, double hz, double rate, long long t0) {
   const double w = -2.0 * M_PI * hz / rate;
-  auto clamp16 = [](double v) {
-    return static_cast<short>(std::lround(std::max(-32768.0, std::min(32767.0, v))));
+  long long saturated = 0;
+  auto clamp16 = [&saturated](double v) {
+    const double r = std::round(v);
+    if (r > 32767.0 || r < -32768.0) {
+      ++saturated;
+      return static_cast<short>(r > 0 ? 32767 : -32768);
+    }
+    return static_cast<short>(r);
   };
   std::complex<double> ph, step(std::cos(w), std::sin(w));
   for (int i = 0; i < n; ++i) {
@@ -65,6 +74,7 @@ inline void derotate(const short* in, short* out, int n, double hz, double rate,
     out[2 * i + 1] = clamp16(y.imag());
     ph *= step;
   }
+  return saturated;
 }
 
 }  // namespace precfo

@@ -602,6 +602,9 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
     }
     return sp > 0 ? std::sqrt(sr * sr + si * si) / sp : 0.0;
   };
+  // AP-87: the device delivers only the rx slots, so the read's guards are
+  // exact zeros (no noise floor) and a head cut is possible at the slot edge.
+  const bool slots_mode = cfg_->bs_rx_slots();
   struct LaneSearch {
     std::vector<double> cse;
     int at = 0;
@@ -687,7 +690,7 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
     L.ss = laneSelfsim(ls, L.p_at);
     L.pilot_rms = std::sqrt(L.best / n);
     L.floor_rms = std::sqrt(std::max(L.worst, 0.0) / n);
-    L.present = houdini::slotalign::lanePresent(L.pilot_rms, L.floor_rms);
+    L.present = houdini::slotalign::lanePresent(L.pilot_rms, L.floor_rms, L.ss, slots_mode);
     return L;
   };
   // Each lane is gated on its own, and the cut goes to the cleanest lane among
@@ -769,9 +772,9 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
         std::snprintf(where, sizeof where, "at %+lld samples from the scheduled pilot", off);
       }
       MLPD_WARN(
-          "BS: no UE burst in frame read (rms %.0f vs floor %.0f, occurrence "
+          "BS: no UE burst in frame read (rms %.0f vs floor %.0f, pilot selfsim %.2f, occurrence "
           "%u; the read's loudest slot rms %.0f, %s) -- frame skipped\n",
-          pilot_rms, floor_rms, qc, std::sqrt(whole_best / n), where);
+          pilot_rms, floor_rms, ref.ss, qc, std::sqrt(whole_best / n), where);
     }
     return 0;
   }
@@ -813,6 +816,25 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
                         static_cast<long long>(htdd_pilot_slot_));
   const long long p_start =
       houdini::slotalign::burstPilotStart(cse, p_at, static_cast<long long>(n), cfg_->prefix());
+  // AP-87: the device cuts at the slot edge, so a UE burst more than its prefix
+  // early loses its head there and the FFT window runs late by the excess;
+  // the placed start then pins at -prefix, and nothing else would say so.
+  // tx_advance is calibrated with bs_rx_slots off (the whole burst visible).
+  if (slots_mode && ft > 0) {
+    const long long off = houdini::slotalign::pilotGridOff(llround(static_cast<double>(ft) * htdd_tick_rate_ / 1e9),
+                                                           p_start, htdd_epoch_,
+                                                           static_cast<long long>(htdd_pilot_slot_), n,
+                                                           htdd_frame_ticks_);
+    if (houdini::slotalign::headAtSlotEdge(off, cfg_->prefix())) {
+      static std::atomic<unsigned> edge_count{0};
+      const unsigned ec = edge_count.fetch_add(1) + 1;
+      if ((ec & (ec - 1)) == 0) {  // braces: MLPD_WARN is several statements
+        MLPD_WARN("BS: the UE burst starts at the pilot slot's edge (pilot_grid_off %lld, prefix %d, occurrence %u): "
+                  "the slot cut takes its head if it is any earlier; recalibrate tx_advance with bs_rx_slots off\n",
+                  off, static_cast<int>(cfg_->prefix()), ec);
+      }
+    }
+  }
   htdd_slot_cache_.resize(K * C * static_cast<size_t>(n) * 2);
   // Slots whose placed start fell outside the capture and were clamped into
   // it: they hold the wrong samples. (Every other slot is exactly p_start plus
@@ -865,17 +887,15 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
       // direct input for deriving tx_advance (DEMO_VERIFICATION.md 4.29).
       const long long stamp_ticks =
           llround(static_cast<double>(ft) * htdd_tick_rate_ / 1e9);
-      const long long fr = htdd_frame_ticks_;
-      long long grid_off =
-          ((stamp_ticks + p_start - htdd_epoch_) % fr + fr) % fr;
-      long long rel_pilot = grid_off -
-          static_cast<long long>(htdd_pilot_slot_) * n;
-      if (rel_pilot > fr / 2) rel_pilot -= fr;
-      if (rel_pilot < -fr / 2) rel_pilot += fr;
+      const long long rel_pilot = houdini::slotalign::pilotGridOff(
+          stamp_ticks, p_start, htdd_epoch_, static_cast<long long>(htdd_pilot_slot_), n, htdd_frame_ticks_);
       // stamp_ticks is carried explicitly: `pilot_grid_off` is an offset and
       // AP-51 needs its SLOPE against time, which the frame counter cannot
       // give (it counts PROCESSED frames, and the BS drops none only when it
       // keeps up). Both numbers on one line so an offline fit needs no join.
+      // With two lanes the offset is the reference lane's (`ref_lane`): the
+      // lanes are sample-aligned, but their paths differ by under a sample, so
+      // a fit across lanes filters on ref_lane.
       MLPD_INFO("HOUDINI_BS_RX: frame=%lld stamp_ticks=%lld cg=%d "
                 "pilot-rms=%.0f selfsim=%.2f p_start=%lld rx_slots=%zu "
                 "pilot_grid_off=%lld clamped=%zu ref_lane=%zu\n",
@@ -898,7 +918,7 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
       snprintf(pb, sizeof(pb), "%s/bsframe_%02d.bin", lm_dir, dk);
       FILE* fb = fopen(pb, "wb");
       if (fb != nullptr) {
-        fwrite(s0, sizeof(int16_t), static_cast<size_t>(cg) * 2, fb);  // lane 0, raw
+        fwrite(s0, sizeof(int16_t), static_cast<size_t>(cg) * 2, fb);  // lane 0, raw; p_start is ref_lane's
         fclose(fb);
       }
       snprintf(pb, sizeof(pb), "%s/bsframe_%02d.txt", lm_dir, dk);

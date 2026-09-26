@@ -136,6 +136,23 @@ int main() {
       std::remove(tmp);
     }
     check(refused, "bs_rx_slots without bs_hw_framer is refused at load [mutation: the check removed]");
+    // 13 symbols make a 57056-sample slot, which no packet of at least 3/4
+    // of the default size divides: the device would cut packets mid-slot.
+    std::ifstream in2("files/houdini-dualband-xw-steer-slots.json");
+    std::string txt2((std::istreambuf_iterator<char>(in2)), std::istreambuf_iterator<char>());
+    const std::string sym_key = "\"ofdm_symbol_per_slot\": 14,";
+    const size_t sat = txt2.find(sym_key);
+    std::string why;
+    if (sat != std::string::npos) {
+      txt2.replace(sat, sym_key.size(), "\"ofdm_symbol_per_slot\": 13,");
+      const char* tmp2 = "files/.ap87_untiled_tmp.json";
+      std::ofstream(tmp2) << txt2;
+      try { Config bad(tmp2, "/tmp", false, false, false); } catch (const std::invalid_argument& e) { why = e.what(); }
+      std::remove(tmp2);
+    }
+    check(why.find("tile the slot") != std::string::npos,
+          "bs_rx_slots with a slot no packet tiles is refused at load, for that reason [mutation: the tiling check "
+          "removed]");
   }
   std::printf("%s: %d failure(s)\n", g_fail == 0 ? "ALL PASS" : "FAILED", g_fail);
   return g_fail == 0 ? 0 : 1;

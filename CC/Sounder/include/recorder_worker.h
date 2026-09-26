@@ -66,6 +66,9 @@ class RecorderWorker {
     bool use = false;
   };
   std::unordered_map<uint32_t, PreCfo> pre_cfo_;  // per antenna, from its latest pilot
+  long long pre_cfo_saturated_ = 0;  // I/Q values the rotation clamped (pre_cfo.h derotate), this worker
+  long long pre_cfo_sat_slots_ = 0;  // slots with any
+  void notePreCfoSaturation(long long values, uint32_t ant);
   int csi_sock_ = -1;
   // DC-centered freq-domain pilot per RX lane (lane = ant % bs_rx_ch): each
   // antenna's own channel's band (AP-85).

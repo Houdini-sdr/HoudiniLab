@@ -130,10 +130,32 @@ inline std::pair<long long, double> densestNear(const std::vector<double>& cse, 
 
 /// The BS presence gate on one lane: a UE burst is there when the densest
 /// window's rms clears the absolute bar and four times the read's quietest
-/// slot-length window.
-inline bool lanePresent(double pilot_rms, double floor_rms) {
-  return !(pilot_rms < 120.0 || pilot_rms < 4.0 * floor_rms);
+/// slot-length window. In slots mode (`floorless`) the read has no noise-only
+/// window: the guards are the device's cut, exact zeros, so the floor reads 0
+/// and the relative bar could never fire. There the pilot's own LTS check
+/// (self-similarity `ss` at least 0.4) stands in for it, so a silent UE with
+/// interference above the absolute bar is a quiet frame, not a delivered one.
+inline bool lanePresent(double pilot_rms, double floor_rms, double ss, bool floorless) {
+  if (pilot_rms < 120.0) return false;
+  return floorless ? ss >= 0.4 : pilot_rms >= 4.0 * floor_rms;
 }
+
+/// The placed pilot start against its scheduled slot boundary, folded into
+/// [-fr/2, fr/2]: HOUDINI_BS_RX's pilot_grid_off. `stamp_ticks` is the read's
+/// first-sample tick, `p_start` the placed start in the read.
+inline long long pilotGridOff(long long stamp_ticks, long long p_start, long long epoch, long long pilot_slot,
+                              long long n, long long fr) {
+  long long rel = ((stamp_ticks + p_start - epoch) % fr + fr) % fr - pilot_slot * n;
+  if (rel > fr / 2) rel -= fr;
+  if (rel < -fr / 2) rel += fr;
+  return rel;
+}
+
+/// Slots mode: whether the burst's content starts at (or within 2 samples of)
+/// the pilot slot's edge. The device cuts there, so a burst more than its
+/// prefix early loses its head, the edge search locks to the cut, and the
+/// placed start pins at -prefix; nothing else says so.
+inline bool headAtSlotEdge(long long grid_off, int prefix) { return grid_off <= -(prefix - 2); }
 
 /// Whether a candidate lane takes the slot cut from the current reference.
 /// Lane 0 starts as the reference. A lane that fails the presence gate never
