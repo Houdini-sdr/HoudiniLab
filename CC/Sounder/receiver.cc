@@ -16,13 +16,11 @@
 
 #include <atomic>
 #include <chrono>
-#include <climits>
 #include <limits>
 #include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
-#include <random>
 
 #include "SoapySDR/Errors.hpp"
 #include "SoapySDR/Time.hpp"
@@ -505,20 +503,6 @@ void Receiver::loopRecv(int tid, int core_id, SampleBuffer* rx_buffer) {
       tid, radio_ids_in_thread.front(), radio_ids_in_thread.back(), num_radios,
       thread_num_);
 
-  // prepare BS beacon in host buffer
-  std::vector<void*> beaconbuff(2);
-  void* zeroes_memory = calloc(config_->samps_per_slot(), sizeof(int16_t) * 2);
-
-  if (zeroes_memory == NULL) {
-    throw std::runtime_error("Memory allocation error");
-  }
-
-  MLPD_SYMBOL(
-      "Process %d -- Loop Rx Allocated memory at: %p, approx size: %lu\n", tid,
-      zeroes_memory, (sizeof(int16_t) * 2) * config_->samps_per_slot());
-  beaconbuff.at(0u) = config_->beacon_ci16().data();
-  beaconbuff.at(1u) = zeroes_memory;
-
   long long rxTimeBs(0);
 
   // read rx_offset to align the FPGA time of the BS
@@ -795,9 +779,6 @@ void Receiver::loopRecv(int tid, int core_id, SampleBuffer* rx_buffer) {
       slot_id++;
     }
   }
-  MLPD_SYMBOL("Process %d -- Loop Rx Freed memory at: %p\n", tid,
-              zeroes_memory);
-  free(zeroes_memory);
 }
 
 void* Receiver::clientTxRx_launch(void* in_context) {

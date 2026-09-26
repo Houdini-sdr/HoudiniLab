@@ -18,10 +18,6 @@ namespace Sounder {
 // dequeue bulk size, used to reduce the overhead of dequeue in main thread
 const int Scheduler::KDequeueBulkSize = 5;
 
-#if (DEBUG_PRINT)
-const int kDsSim = 5;
-#endif
-
 Scheduler::Scheduler(Config* in_cfg, unsigned int core_start)
     : cfg_(in_cfg),
       kMainDispatchCore(core_start),

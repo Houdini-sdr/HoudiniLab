@@ -20,8 +20,8 @@
   * Backends: RadioSoapy (Iris and SoapyUHD, the SoapySDR plumbing) and
   * RadioHoudini (RadioSoapy plus the Houdini stream arguments, the
   * pre-stream rates, the drain and gap ledger, the TDD grid). The native UHD
-  * build (RADIO_TYPE=PURE_UHD) is not a Radio backend: its radio sets
-  * implement RadioSetInterfaces.h directly (kUhdNative is not constructed).
+  * build (RADIO_TYPE=PURE_UHD) is not a backend here: its radio sets
+  * implement RadioSetInterfaces.h directly.
 */
 #ifndef RADIO_H_
 #define RADIO_H_
@@ -87,10 +87,10 @@ struct RadioParams {
 
 class Radio {
  public:
-  enum class Type { kSoapyIris, kSoapyUhd, kSoapyHoudini, kUhdNative };
+  enum class Type { kSoapyIris, kSoapyUhd, kSoapyHoudini };
 
   /// The one place that knows which backend a type is. Throws
-  /// std::invalid_argument for a type this build has no backend for.
+  /// std::invalid_argument for a value outside the enum.
   static std::unique_ptr<Radio> create(Type type, const RadioParams& params);
   static const char* name(Type type);
 

@@ -7,36 +7,22 @@
   *  Initializes and Configures Radios in the massive-MIMO base station 
   * ----------------------------------------------------------
   */
-#include <cerrno>
-#include "houdini/rx_packet.h"
 #include "include/BaseRadioSet.h"
-#include "include/rx_gap_sink.h"
 
-#include <algorithm>
-#include <cmath>
-#include <complex>
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <sstream>
+#include <pthread.h>
+
+#include <cassert>
+#include <iostream>
 #include <string>
 #include <vector>
 
-#include "SoapySDR/Errors.hpp"
-#include "SoapySDR/Formats.hpp"
 #include "SoapySDR/Time.hpp"
-#include "include/HoudiniFramer.h"
+#include "houdini/rx_packet.h"
 #include "include/IrisFramer.h"
 #include "include/Radio.h"
-#include "include/comms-lib.h"
 #include "include/logger.h"
 #include "include/macros.h"
-#include "include/node_version.h"
 #include "include/utils.h"
-#include "nlohmann/json.hpp"
-
-using json = nlohmann::json;
 
 BaseRadioSet::BaseRadioSet(Config* cfg, const bool calibrate_proc) : _cfg(cfg) {
   bsRadios.resize(_cfg->num_cells());
@@ -337,38 +323,8 @@ void BaseRadioSet::radioStart() {
   if (framer_ != nullptr) framer_->start();
 }
 
-void BaseRadioSet::readSensors() {
-  for (size_t c = 0; c < _cfg->num_cells(); c++) {
-    for (size_t i = 0; i < bsRadios.at(c).size(); i++) {
-      auto* dev = bsRadios.at(c).at(i)->RawDev();
-      std::cout << "TEMPs on Iris " << i << std::endl;
-      std::cout << "ZYNQ_TEMP: " << dev->readSensor("ZYNQ_TEMP") << std::endl;
-      std::cout << "LMS7_TEMP  : " << dev->readSensor("LMS7_TEMP") << std::endl;
-      std::cout << "FE_TEMP  : " << dev->readSensor("FE_TEMP") << std::endl;
-      std::cout << "TX0 TEMP  : " << dev->readSensor(SOAPY_SDR_TX, 0, "TEMP")
-                << std::endl;
-      std::cout << "TX1 TEMP  : " << dev->readSensor(SOAPY_SDR_TX, 1, "TEMP")
-                << std::endl;
-      std::cout << "RX0 TEMP  : " << dev->readSensor(SOAPY_SDR_RX, 0, "TEMP")
-                << std::endl;
-      std::cout << "RX1 TEMP  : " << dev->readSensor(SOAPY_SDR_RX, 1, "TEMP")
-                << std::endl;
-      std::cout << std::endl;
-    }
-  }
-}
-
 void BaseRadioSet::radioStop(void) {
   if (framer_ != nullptr) framer_->stop();
-}
-
-void BaseRadioSet::radioTx(const void* const* buffs) {
-  long long frameTime(0);
-  for (size_t c = 0; c < _cfg->num_cells(); c++) {
-    for (size_t i = 0; i < bsRadios.at(c).size(); i++) {
-      bsRadios.at(c).at(i)->xmit(buffs, _cfg->samps_per_slot(), 0, frameTime);
-    }
-  }
 }
 
 int BaseRadioSet::radioTx(size_t radio_id, size_t cell_id,
@@ -389,16 +345,6 @@ int BaseRadioSet::radioTx(size_t radio_id, size_t cell_id,
     return -1;
   }
   return framer_->txBeacon(radio_id, cell_id, buffs, flags, frameTime);
-}
-
-void BaseRadioSet::radioRx(void* const* buffs) {
-  long long frameTime(0);
-  for (size_t c = 0; c < _cfg->num_cells(); c++) {
-    for (size_t i = 0; i < bsRadios.at(c).size(); i++) {
-      void* const* buff = buffs + (i * 2);
-      bsRadios.at(c).at(i)->recv(buff, _cfg->samps_per_slot(), frameTime);
-    }
-  }
 }
 
 size_t BaseRadioSet::lastRxPadSamples(size_t radio_id, size_t cell_id) const {

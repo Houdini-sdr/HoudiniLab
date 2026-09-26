@@ -7,21 +7,25 @@
   * Initializes and Configures Client Radios 
   * ----------------------------------------------------------
   */
-#include <atomic>
-#include <cstdlib>
-#include "houdini/rx_packet.h"
 #include "include/ClientRadioSet.h"
-#include "include/RadioHoudini.h"
 
-#include "SoapySDR/Errors.hpp"
-#include "SoapySDR/Formats.hpp"
-#include "SoapySDR/Time.hpp"
+#include <pthread.h>
+
+#include <algorithm>
+#include <atomic>
+#include <cassert>
+#include <cmath>
+#include <cstdlib>
+#include <iostream>
+#include <string>
+
 #include "SoapySDR/Device.hpp"
+#include "SoapySDR/Time.hpp"
+#include "houdini/rx_packet.h"
 #include "include/Radio.h"
-#include "include/comms-lib.h"
+#include "include/RadioHoudini.h"
 #include "include/logger.h"
 #include "include/macros.h"
-#include "include/node_version.h"
 #include "include/utils.h"
 #include "nlohmann/json.hpp"
 
@@ -53,8 +57,6 @@ static double ueTxFreqOffsetHz(void) {
 ClientRadioSet::ClientRadioSet(Config* cfg) : _cfg(cfg) {
   size_t num_radios = _cfg->num_cl_sdrs();
 
-  //load channels
-  auto channels = Utils::strToChannels(_cfg->cl_channel());
   radios.clear();
   radios.resize(num_radios);
   radioNotFound = false;
