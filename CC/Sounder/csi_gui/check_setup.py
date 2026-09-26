@@ -336,7 +336,7 @@ def check_egress(rep, ip, raw):
 
 def check_clock(rep, ip, port, st):
     """A radio's CLOCK_ADJ state. A node left steered (a steering run that did
-    not release, or clock_steer_loop.py) runs every later run off its
+    not release, or a steering script) runs every later run off its
     calibration point, and a run with steering off never reads it."""
     f = dict(kv.split("=", 1) for kv in st.split() if "=" in kv)
     off = f.get("offset", "")

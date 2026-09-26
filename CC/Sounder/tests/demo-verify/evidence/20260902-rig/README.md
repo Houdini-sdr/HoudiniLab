@@ -28,8 +28,8 @@ could belong to either change. It is why the PRE/POST control below exists.
 | `r1_{a,b,c}.json` | software lane reading 1, both nodes on saved codes |
 | `r2_{a,b,c,d,e}.json` | software lane reading 2, .22 steered to man_dac 406 |
 
-Produced by `tests/demo-verify/gate_summary.py` and
-`tests/demo-verify/clock_drift_probe.py`. The summaries are re-derivable from
+Produced by `tests/demo-verify/archive/gate_summary.py` and
+`tests/demo-verify/archive/clock_drift_probe.py`. The summaries are re-derivable from
 the raw logs, which stayed on the rig host at `/tmp/aplogs/` and are NOT
 retained; the json here is the durable artifact.
 
