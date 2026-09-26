@@ -787,6 +787,10 @@ def _pump(stream, prefix, log=None):
                     log.flush()
                 except (OSError, ValueError) as e:  # a full disk must not stop the pump
                     print("[csi] session log stopped: %s" % e, flush=True)
+                    try:
+                        log.close()
+                    except (OSError, ValueError):
+                        pass
                     log = None
     finally:
         if log is not None:
@@ -805,7 +809,7 @@ class SounderSupervisor:
     ATTEMPTS = 4
     SETTLE_AFTER_TEARDOWN_S = 8.0  # the boards' server needs this to release
     RETRY_DELAY_S = 5.0
-    STOP_GRACE_S = 4.0
+    STOP_GRACE_S = 10.0  # a clean stop takes about 1 s (9.69-9.71's logs)
 
     def __init__(self, args, udp_dest):
         self.args = args
@@ -899,19 +903,27 @@ class SounderSupervisor:
         return None
 
     def _kill(self):
-        """SIGTERM the running sounder's group, then SIGKILL what is left."""
+        """SIGINT the running sounder's group, then SIGKILL what is left.
+
+        SIGINT is the sounder's own stop (its only handler, signalHandler.cpp):
+        the loop ends and the radios close through their destructors, which
+        print the end-of-run checks (RX read check, AP-87 slot check,
+        RX_HOST_STATUS) and write the end-of-run state records. SIGTERM took
+        the default action and skipped all of it, so a dashboard session's log
+        never had those lines. SIGKILL after the grace releases the boards the
+        same way SIGTERM did (the kernel closes the sockets)."""
         proc = self.proc
         if proc is None or proc.poll() is not None:
             return
         try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            os.killpg(os.getpgid(proc.pid), signal.SIGINT)
         except ProcessLookupError:
             return
         pgid = proc.pid  # the sounder leads its own session (setsid in _die_with_parent)
         deadline = time.time() + self.STOP_GRACE_S
         while proc.poll() is None and time.time() < deadline:
             time.sleep(0.1)
-        # The whole group, even when the leader went on SIGTERM: a child left
+        # The whole group, even when the leader went on SIGINT: a child left
         # behind would still hold the radios when the next start runs.
         try:
             os.killpg(pgid, signal.SIGKILL)
@@ -1000,9 +1012,14 @@ class SounderSupervisor:
     def _start(self):
         print("[csi] launching sounder --view in %s" % self.sd, flush=True)
         log = self._open_log()
-        proc = subprocess.Popen(self.cmd, cwd=self.sd, env=self.env,
-                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                preexec_fn=_die_with_parent)
+        try:
+            proc = subprocess.Popen(self.cmd, cwd=self.sd, env=self.env,
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    preexec_fn=_die_with_parent)
+        except BaseException:
+            if log is not None:
+                log.close()
+            raise
         threading.Thread(target=_pump, args=(proc.stdout, "[sounder] ", log),
                          daemon=True).start()
         return proc
@@ -1077,7 +1094,7 @@ class SounderSupervisor:
                 c = self.run()
 
     def stop(self):
-        """SIGTERM the sounder's group, then SIGKILL what is left. Safe to repeat."""
+        """SIGINT the sounder's group, then SIGKILL what is left. Safe to repeat."""
         self.stopping = True
         self._kill()
 
@@ -1201,7 +1218,7 @@ def main():
           % (url, args.http_port, args.http_port), flush=True)
 
     def _cleanup():
-        if sup is not None:  # SIGTERM then SIGKILL the sounder's process group
+        if sup is not None:  # SIGINT then SIGKILL the sounder's process group
             sup.stop()
 
     def _sigterm(*_):

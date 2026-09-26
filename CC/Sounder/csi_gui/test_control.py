@@ -118,6 +118,17 @@ check(demo.td_cmd == ["python3", "csi_gui/teardown_framer.py", "--topology", "fi
       "topology-houdini.json has the BS and UE swapped)")
 shutil.rmtree(rd, ignore_errors=True)
 
+# Stop sends SIGINT first, the sounder's own stop, so its destructors print the
+# end-of-run checks; SIGTERM skipped them (the default action).
+isup = cs.SounderSupervisor(args, "x"); isup.STOP_GRACE_S = 5.0
+ilog = os.path.join(sd, "int.log")
+isup.cmd = ["sh", "-c", "trap 'echo got-int >> %s; exit 0' INT; while :; do sleep 0.1; done" % ilog]
+isup.proc = isup._start(); time.sleep(0.5)
+t0 = time.time(); isup._kill(); took = time.time() - t0
+check(os.path.exists(ilog) and "got-int" in open(ilog).read() and took < 4.0,
+      "Stop reaches the sounder as SIGINT and a clean exit ends the wait early (%.1f s) (mutation: SIGTERM first, "
+      "which skips the sounder's end-of-run lines)" % took)
+
 # The gap before the main thread picks a Start up (a supervisor not yet serving):
 # a Check or a second Start then is refused, not queued behind it and dropped.
 idle = cs.SounderSupervisor(args, "127.0.0.1:1")
