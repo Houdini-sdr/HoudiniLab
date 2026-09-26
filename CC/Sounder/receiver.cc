@@ -550,6 +550,19 @@ void Receiver::loopRecv(int tid, int core_id, SampleBuffer* rx_buffer) {
   size_t slot_id = 0;
   size_t ant_id = 0;
   cell = 0;
+  // Release the `n_pk` buffers reserved at the cursor for a round that builds
+  // no packet; one that was not reserved is a bookkeeping fault.
+  auto releaseReserved = [&](size_t n_pk) {
+    for (size_t ch = 0; ch < n_pk; ++ch) {
+      const int bit = 1 << (cursor + ch) % sizeof(std::atomic_int);
+      const int offs = (cursor + ch) / sizeof(std::atomic_int);
+      const int old = std::atomic_fetch_and(&pkt_buf_inuse[offs], ~bit);  // now empty
+      if ((old & bit) != bit) {
+        MLPD_ERROR("thread %d freed buffer when already free\n", tid);
+        throw std::runtime_error("buffer empty during free\n");
+      }
+    }
+  };
   MLPD_INFO("Start BS main recv loop in thread %d\n", tid);
   while (config_->running() == true) {
     // Global updates of frame and slot IDs for USRPs
@@ -650,18 +663,7 @@ void Receiver::loopRecv(int tid, int core_id, SampleBuffer* rx_buffer) {
         }
         if (!config_->isPilot(cell, radio_id, slot_id) &&
             !config_->isUlData(cell, radio_id, slot_id)) {
-          for (size_t ch = 0; ch < num_packets; ++ch) {
-            const int bit = 1 << (cursor + ch) % sizeof(std::atomic_int);
-            const int offs = (cursor + ch) / sizeof(std::atomic_int);
-            const int old =
-                std::atomic_fetch_and(&pkt_buf_inuse[offs], ~bit);  // now empty
-            // if buffer was empty, exit
-            if ((old & bit) != bit) {
-              MLPD_ERROR("thread %d freed buffer when already free\n", tid);
-              throw std::runtime_error("buffer empty during free\n");
-            }
-            // Reserved until marked empty by consumer
-          }
+          releaseReserved(num_packets);
           continue;
         }
 
@@ -707,16 +709,7 @@ void Receiver::loopRecv(int tid, int core_id, SampleBuffer* rx_buffer) {
                 "(check the BS opened and its data-plane egress).\n",
                 radio_id, n_noslot + 1);
           }
-          for (size_t ch = 0; ch < num_packets; ++ch) {
-            const int bit = 1 << (cursor + ch) % sizeof(std::atomic_int);
-            const int offs = (cursor + ch) / sizeof(std::atomic_int);
-            const int old =
-                std::atomic_fetch_and(&pkt_buf_inuse[offs], ~bit);  // now empty
-            if ((old & bit) != bit) {
-              MLPD_ERROR("thread %d freed buffer when already free\n", tid);
-              throw std::runtime_error("buffer empty during free\n");
-            }
-          }
+          releaseReserved(num_packets);
           continue;
         }
 

@@ -57,6 +57,36 @@ static int beaconTailTicks(const Config* cfg) {
              : 0;
 }
 
+// The beacon channel's index in the opened TX channel list (bs_tx_channel):
+// beacon_channel(), clamped to the list.
+static size_t beaconTxIndex(const Config* cfg, const std::vector<size_t>& bs_chans) {
+  return bs_chans.empty() ? 0 : std::min(static_cast<size_t>(cfg->beacon_channel()), bs_chans.size() - 1);
+}
+
+// Load the replay RAM with the beacon image `iq`. The beacon is single-antenna:
+// with per-channel TX streams (SH-235) its samples go at the beacon channel's
+// index and nullptr elsewhere, and xmit skips the null channels, so a
+// non-beacon TX stream is never filled. The load is the beacon: a refused or
+// short load (the plugin returns an error while the replay bank's level arm is
+// still set) throws, so the bring-up stops rather than arming over stale RAM
+// and playing a beacon that is not the one built (DEMO_VERIFICATION 4.24,
+// SH-348).
+static void loadBeaconRam(Radio* r, const std::vector<int16_t>& iq, const std::vector<size_t>& bs_chans,
+                          size_t beacon_idx) {
+  const size_t n_load = iq.size() / 2;
+  std::vector<const void*> buffs(bs_chans.empty() ? 1 : bs_chans.size(), nullptr);
+  buffs[beacon_idx] = iq.data();
+  long long t0 = 0;
+  const int loaded = r->xmit(buffs.data(), static_cast<int>(n_load), 0, t0);
+  if (loaded != static_cast<int>(n_load)) {
+    throw std::runtime_error(
+        "Houdini beacon replay RAM load refused: " +
+        std::string(loaded < 0 ? SoapySDR::errToStr(loaded) : "short load") +
+        " (" + std::to_string(loaded) + " of " + std::to_string(n_load) +
+        " samples)");
+  }
+}
+
 void HoudiniFramer::buildBeacon(std::vector<int16_t>& iq) {
   // Houdini TX replay RAM depth: 4096 TX samples, so 4096 / (TX per tick)
   // ticks of image built here (xmit doubles it at TX = 2 x rate).
@@ -149,34 +179,14 @@ void HoudiniFramer::armReplayBeacon(void) {
   // Load the replay RAM + arm free-running on the beacon radio's TX. The TX
   // stream is bound to the BS channel (the wired DAC), so xmit targets it. RX
   // is NOT activated here: it would sit unread (overflowing) until the caller is
-  // ready to receive -- activateHoudiniRx() starts it on demand.
-  // Beacon is single-antenna: with per-channel TX streams (SH-235) pass it only
-  // on the beacon channel's index in the opened channel list, nullptr elsewhere.
+  // ready to receive -- start() starts it on demand.
   const auto bs_chans = Utils::strToChannels(cfg_->bs_tx_channel());  // beacon is TX
-  const size_t beacon_idx =
-      bs_chans.empty() ? 0
-                       : std::min(static_cast<size_t>(cfg_->beacon_channel()),
-                                  bs_chans.size() - 1);
-  std::vector<const void*> buffs(bs_chans.empty() ? 1 : bs_chans.size(),
-                                 nullptr);
-  buffs[beacon_idx] = iq.data();
-  long long t0 = 0;
+  const size_t beacon_idx = beaconTxIndex(cfg_, bs_chans);
   for (size_t c = 0; c < radios_.size(); ++c) {
     for (size_t i = 0; i < radios_.at(c).size(); ++i) {
       if (i != cfg_->beacon_radio()) continue;
       Radio* r = radios_.at(c).at(i).get();
-      // The load is the beacon: a refused or short load (the plugin returns an
-      // error while the replay bank's level arm is still set) must stop the
-      // bring-up here, not arm the loop over stale RAM and play a beacon that
-      // is not the one built above (DEMO_VERIFICATION 4.24, SH-348).
-      const int loaded = r->xmit(buffs.data(), static_cast<int>(n_load), 0, t0);
-      if (loaded != static_cast<int>(n_load)) {
-        throw std::runtime_error(
-            "Houdini beacon replay RAM load refused: " +
-            std::string(loaded < 0 ? SoapySDR::errToStr(loaded) : "short load") +
-            " (" + std::to_string(loaded) + " of " + std::to_string(n_load) +
-            " samples)");
-      }
+      loadBeaconRam(r, iq, bs_chans, beacon_idx);  // throws on a refused or short load
       r->activateXmit();  // arm free-running loop
       MLPD_INFO(
           "Houdini BS beacon armed: %zu-sample app-rate replay loop (isolated "
@@ -403,25 +413,15 @@ void HoudiniFramer::armTdd(void) {
       // logical 0: that fires the strobe on ch0 (DAC_B, not cabled) and the
       // beacon never reaches the UE.
       const auto bs_chans = Utils::strToChannels(cfg_->bs_tx_channel());  // beacon is TX
-      const size_t beacon_idx =
-          bs_chans.empty()
-              ? 0
-              : std::min(static_cast<size_t>(cfg_->beacon_channel()),
-                         bs_chans.size() - 1);
+      const size_t beacon_idx = beaconTxIndex(cfg_, bs_chans);
+      // The load lands only on the beacon channel's stream (loadBeaconRam),
+      // and the strobe below targets tx_ch only, so a non-beacon TX stream is
+      // never filled or armed.
       const size_t tx_ch = bs_chans.empty() ? 0 : bs_chans.at(beacon_idx);
-      // Beacon is single-antenna: with per-channel TX streams (SH-235) the load
-      // must land only on the beacon channel's stream. Pass its samples at the
-      // beacon channel's index in the opened channel list and nullptr elsewhere;
-      // xmit skips the null channels, so a non-beacon TX stream is never filled
-      // or (via the strobe below, which also targets tx_ch only) armed.
-      std::vector<const void*> buffs(bs_chans.empty() ? 1 : bs_chans.size(),
-                                     nullptr);
-      buffs[beacon_idx] = iq.data();
       // The load/schedule/strobe sequence, re-runnable: the arm retry loop
       // re-invokes it after every teardown ladder (a ladder invalidates this
       // state, so a bare arm retry could arm a beaconless framer).
       const auto setup_framer = [&]() {
-        long long t0 = 0;
         // Explicitly disarm any strobe left armed by a previous (e.g. killed)
         // run -- TDD_CMD abort alone doesn't release it, and the replay RAM
         // can't be filled while strobe mode is enabled ("Disarm first").
@@ -441,20 +441,11 @@ void HoudiniFramer::armTdd(void) {
         } catch (...) {
           MLPD_WARN("TDD_REPLAY_STROBE ch%zu:off before the load refused\n", tx_ch);
         }
-        // A refused or short load (the plugin refuses the fill while the
-        // replay bank's level arm is set) stops the sequence here: the arm
-        // retry loop runs the ladder, which clears that arm, and re-invokes
-        // this setup. Arming over stale RAM would play a beacon that is not
-        // the one built above (DEMO_VERIFICATION 4.24, SH-348).
-        const int loaded = r->xmit(buffs.data(), static_cast<int>(n_load), 0, t0);
-        if (loaded != static_cast<int>(n_load)) {
-          throw std::runtime_error(
-              "Houdini beacon replay RAM load refused: " +
-              std::string(loaded < 0 ? SoapySDR::errToStr(loaded)
-                                     : "short load") +
-              " (" + std::to_string(loaded) + " of " +
-              std::to_string(n_load) + " samples)");
-        }
+        // A refused or short load throws out of armTdd, from the first setup
+        // and from a retry's re-setup alike (armTddOnce does not catch it), so
+        // the bring-up fails rather than arming over stale RAM; the next arm
+        // starts with the full ladder, which clears the replay bank's level arm.
+        loadBeaconRam(r, iq, bs_chans, beacon_idx);
         dev->writeSetting("TDD_SCHED", tdd);
         // ONE burst per frame (loops=1) spanning the usable symbol: the RAM is
         // [lead zeros][beacon core][zeros], and len (2-sample units, driver
@@ -621,6 +612,12 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
   // AP-87: the device delivers only the rx slots, so the read's guards are
   // exact zeros (no noise floor) and a head cut is possible at the slot edge.
   const bool slots_mode = cfg_->bs_rx_slots();
+  // The read's first-sample stamp in ticks (meaningful when ft > 0), and the
+  // span the frame's rx slots need from the pilot (first to last rx slot,
+  // plus a slot of margin).
+  const long long stamp_ticks = llround(static_cast<double>(ft) * htdd_tick_rate_ / 1e9);
+  const long long span_n = (static_cast<long long>(htdd_rx_slots_.back()) -
+                            static_cast<long long>(htdd_rx_slots_.front()) + 2) * n;
   // Each lane's cumulative energy lives in a member buffer reused frame to
   // frame: a fresh zero-filled vector per lane per frame costs about 24 MB of
   // allocation and page faults every frame. Every entry is rewritten below,
@@ -672,9 +669,6 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
     L.whole_at = L.at;  // the whole read's loudest slot, kept for the
     L.whole_best = L.best;  // presence-gate diagnostic below
     if (ft > 0) {
-      const long long stamp_ticks = llround(static_cast<double>(ft) * htdd_tick_rate_ / 1e9);
-      const long long span_n = (static_cast<long long>(htdd_rx_slots_.back()) -
-                                static_cast<long long>(htdd_rx_slots_.front()) + 2) * n;
       // A pilot at the head of the read takes the next frame's copy when the
       // read holds it (slot_align.h chooseExpect).
       const long long expect = houdini::slotalign::chooseExpect(
@@ -699,8 +693,6 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
     // span.
     {
       const int fr_t = static_cast<int>(htdd_frame_ticks_);
-      const int span_n = (static_cast<int>(htdd_rx_slots_.back()) -
-                          static_cast<int>(htdd_rx_slots_.front()) + 2) * n;
       while (L.at + span_n > cg && L.at >= fr_t) L.at -= fr_t;
     }
     // The densest slot `at` is a UE slot -- pilot OR data. Identify it by the
@@ -850,8 +842,7 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
   // the placed start then pins at -prefix, and nothing else would say so.
   // tx_advance is calibrated with bs_rx_slots off (the whole burst visible).
   if (slots_mode && ft > 0) {
-    const long long off = houdini::slotalign::pilotGridOff(llround(static_cast<double>(ft) * htdd_tick_rate_ / 1e9),
-                                                           p_start, htdd_epoch_,
+    const long long off = houdini::slotalign::pilotGridOff(stamp_ticks, p_start, htdd_epoch_,
                                                            static_cast<long long>(htdd_pilot_slot_), n,
                                                            htdd_frame_ticks_);
     if (houdini::slotalign::headAtSlotEdge(off, cfg_->prefix())) {
@@ -914,8 +905,6 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
       // number decomposes as prefix + round-trip latency - tx_advance +
       // grid/snap residuals; it must be CONSTANT within a run, and it is the
       // direct input for deriving tx_advance (DEMO_VERIFICATION.md 4.29).
-      const long long stamp_ticks =
-          llround(static_cast<double>(ft) * htdd_tick_rate_ / 1e9);
       const long long rel_pilot = houdini::slotalign::pilotGridOff(
           stamp_ticks, p_start, htdd_epoch_, static_cast<long long>(htdd_pilot_slot_), n, htdd_frame_ticks_);
       // stamp_ticks is carried explicitly: `pilot_grid_off` is an offset and
