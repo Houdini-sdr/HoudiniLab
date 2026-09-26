@@ -1948,7 +1948,10 @@ function drawCir(card,r){
 // the NCO is the converter's IF (the X lane is up-converted later), the
 // bandwidth is the TRANSMISSION bandwidth (N_RB x 12 x SCS when the tones
 // make whole resource blocks), MER is decision-directed (TR 101 290), averaged
-// over ~1 s as error power, and the delay figures carry their threshold and
+// over ~1 s as error power, over the tones the recorder equalises (|H| at least
+// 0.4 x the median, 8 dB under it: recorder_worker.cc skips deeper fades, so
+// over a faded channel the MER describes the stronger tones and says so), and
+// the delay figures carry their threshold and
 // the resolution (about 2/B, the Hann mainlobe).
 // The card is named by its BAND [user: 'RX antenna 0/1' above and 'ch A/C' in
 // the quality line read as four different things]. The band follows from the
@@ -1973,7 +1976,7 @@ function drawQuality(card){
   const cn=card.cnsRec;
   if(cn && cn.mer_db!==undefined && Date.now()-(card.cnsT||0)<2000)
     q.push('MER '+cn.mer_db.toFixed(1)+' dB · EVM '+cn.evm_pct.toFixed(2)+' % (decision-directed, 1 s avg, '
-           +cn.mer_pts+' pts)');
+           +cn.mer_pts+' pts, tones within 8 dB of the median |H|)');
   const c=card.cirRec;
   if(c){
     let t='RMS delay spread '+c.rms_ns.toFixed(1)+' ns · mean excess '+c.mean_ns.toFixed(1)
