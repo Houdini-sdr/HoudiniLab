@@ -23,14 +23,6 @@ import time
 from csi_record import read_recording
 
 
-def schedule(times, speed):
-    """Send offsets (s, from the first datagram) for the recorded arrival times."""
-    if not times:
-        return []
-    t0 = times[0]
-    return [(t - t0) / speed for t in times]
-
-
 def window(path, start, duration):
     """Yield the datagrams in [start, start + duration) s from the recording's
     first one (duration 0: to the end), reading as a stream that stops past the

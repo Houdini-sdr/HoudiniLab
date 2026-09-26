@@ -1,5 +1,5 @@
 # Known answers for the canned-data fallback: the record format, the recorder's
-# cap, the replay schedule, window and pace, and the dashboard's UDP loop recording
+# cap, the replay window and pace, and the dashboard's UDP loop recording
 # what it receives; plus the loop surviving a malformed datagram, each antenna's
 # age in the snapshot, and the SSE event shared between pages. Stdlib only; run
 # from csi_gui/ (ctest does).
@@ -65,7 +65,24 @@ except OSError:
     ok = False
 check(ok, "a recording that cannot be created records nothing and never raises into the dashboard's start (mutation: let the OSError through)")
 
-check(rf.schedule([10.0, 10.25, 11.5], 2.0) == [0.0, 0.125, 0.75], "the schedule keeps the recorded spacing scaled by speed (mutation: ignore speed)")
+# play() on a fake clock that moves only when play sleeps: the waits are the
+# recorded spacing divided by the speed.
+class _FakeTime:
+    now = 0.0; waits = []
+    @classmethod
+    def monotonic(cls): return cls.now
+    @classmethod
+    def sleep(cls, s): cls.waits.append(round(s, 9)); cls.now += s
+class _Sink:
+    sent = []
+    def sendto(self, d, dest): self.sent.append(d)
+real_time = rf.time; rf.time = _FakeTime
+try:
+    n_sent = rf.play(_Sink(), ("x", 1), [(10.0, b"a"), (10.25, b"b"), (11.5, b"c")], 2.0)
+finally:
+    rf.time = real_time
+check(n_sent == 3 and _Sink.sent == [b"a", b"b", b"c"] and _FakeTime.waits == [0.125, 0.625],
+      "a replay keeps the recorded spacing scaled by speed: waits %s (mutation: ignore speed)" % _FakeTime.waits)
 check([t for t, _ in rf.load(p, 0.25, 1.25)] == [10.25], "a window takes [start, start + duration) from the first datagram (mutation: an inclusive end)")
 check(len(rf.load(p, 0.0, 0.0)) == 3, "duration 0 plays to the end (mutation: treat 0 as empty)")
 read = [0]; real_read = rf.read_recording

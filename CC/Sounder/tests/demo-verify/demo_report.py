@@ -6,18 +6,14 @@ time, saturation and watchdog lines with their device time, CNS low per 300 s,
 late-release forensic statistics, the wake-jitter close lines, warning classes,
 and the tracked carrier offset about every 5 min."""
 import collections, os, re, sys
+import sounder_log as sl
 
 run = sys.argv[1].rstrip("/")
 name = os.path.basename(run)
-L = [re.sub(r"\x1b\[[0-9;]*m", "", l) for l in open(os.path.join(run, name + ".log"), errors="replace").read().splitlines()]
+L = sl.read_lines(os.path.join(run, name + ".log"))
 
-tx = collections.Counter()
-for l in L:
-    m = re.search(r"(UE|BS) [\d.]+ link health: .*", l)
-    if m:
-        for k, v in re.findall(r"(tx\d\.\w+) \+(\d+)", m.group(0)):
-            tx["%s %s" % (m.group(1), k)] += int(v)
-print("TX totals: " + (", ".join("%s +%d" % kv for kv in sorted(tx.items())) or "none"))
+tx = sl.tx_totals(L)
+print("TX totals: " + (", ".join("%s %s +%d" % (r, k, v) for (r, k), v in sorted(tx.items())) or "none"))
 
 ev = []
 for i, l in enumerate(L):
@@ -43,7 +39,7 @@ for i, l in enumerate(L):
     if "SATURATED" in l or "WATCHDOG" in l:
         print("  line %d ~dev %.0f s: %s" % (i + 1, tdev(i), l.strip()[l.find("[WARNING]"):][:150]))
 
-pts = [(i, int(m.group(1)), int(m.group(2))) for i, l in enumerate(L) for m in [re.search(r"\((\d+) datagrams, (\d+) low\)", l)] if m]
+pts = sl.cns_summaries(L)
 if pts and ev:
     prev, edge = (0, 0), 300
     for i, d, lo in pts:

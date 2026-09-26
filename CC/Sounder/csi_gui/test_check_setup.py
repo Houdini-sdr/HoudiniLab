@@ -255,5 +255,20 @@ for k, v in saved_knobs.items():
 check(all(e.get(k) == v for e in (e2, e3) for k, v in knobs.items()) and e2.get("PATH") == os.environ.get("PATH"),
       "the operator's HOUDINI_CORE_MAP, HOUDINI_TX_CPU_AFFINITY and PATH reach the sounder, with and without "
       "HOUDINI_SOAPY_ROOT (mutation: build the environment from scratch instead of from os.environ, even one that keeps PATH and PYTHONPATH)")
+# The teardown's radios, by hand: --node, else --topology, else the topology
+# the config names, else a refusal (a default topology names one bench only).
+import teardown_framer as tf
+cfx, topo = os.path.join(sd, "files", "houdini-x.json"), os.path.join(sd, "files", "topo.json")
+check(tf.resolve_nodes(None, None, cfx, sd) == (["127.0.0.1", "127.0.0.2"], None),
+      "--conf tears down the radios its serial_file names, relative to the checkout (mutation: ignore --conf, "
+      "or resolve serial_file against the cwd)")
+nodes, err = tf.resolve_nodes(None, None, None, sd)
+check(nodes == [] and err and "--conf" in err,
+      "with no --node, --topology or --conf the teardown refuses (mutation: fall back to a default topology)")
+check(tf.resolve_nodes(["10.9.9.9"], topo, cfx, sd) == (["10.9.9.9"], None)
+      and tf.resolve_nodes(None, topo, os.path.join(sd, "files", "houdini-bad.json"), sd)[0] == ["127.0.0.1", "127.0.0.2"],
+      "--node wins over --topology and --conf, and --topology over --conf (mutation: --conf read first)")
+nodes, err = tf.resolve_nodes(None, None, os.path.join(sd, "files", "houdini-bad.json"), sd)
+check(nodes == [] and "cannot read the config" in err, "an unreadable config is refused, not a traceback")
 import shutil; shutil.rmtree(root, ignore_errors=True)  # no temp dir left per run
 print("%d failure(s)" % fails); sys.exit(1 if fails else 0)

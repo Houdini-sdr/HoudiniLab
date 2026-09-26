@@ -24,11 +24,9 @@ not guard bins; and the dump must skip the first frames or every run looks alike
 """
 import argparse
 import json
-import math
 import os
 import signal
 import subprocess
-import sys
 import time
 import urllib.request
 

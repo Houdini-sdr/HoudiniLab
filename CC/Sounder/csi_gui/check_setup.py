@@ -16,7 +16,7 @@ What it checks, in order:
   2. the sounder binary exists (and is not older than its sources);
   3. the host plugin: the venv, the Houdini module, and SoapySDR loading it;
   4. the SoapyHoudiniSDR host examples the framer teardown imports;
-  5. no other sounder is running on this host (it would hold the radios);
+  5. no other sounder on this host holds these radios (one on other radios is named);
   6. each radio's server answers on the config's remote port;
   7. (full form only) each radio's stack: gateware, firmware, plugin and protocol
      versions, which must agree between the nodes; each radio's data egress,
@@ -88,7 +88,7 @@ def check_config(rep, sd, conf):
         bs, ue = roles_from_topology(t)
     except (OSError, ValueError, AttributeError, TypeError) as e:  # not JSON, or not the topology shape
         rep.add("FAIL", "topology", "%s: %s" % (topo, e),
-                "Create %s with your radios' addresses (walkthrough section 3)." % topo)
+                "Create %s with your radios' addresses (walkthrough section 2.6)." % topo)
         return cfg, [], []
     # The sounder reads the cells as BS0, BS1, ... in order and the clients as
     # {"sdr": [...]} (config.cc), stricter than the teardown's tolerant reader:
@@ -114,7 +114,8 @@ def check_build(rep, sd):
     exe = os.path.join(sd, "build", "sounder")
     if not os.access(exe, os.X_OK):
         rep.add("FAIL", "build", "%s not found" % exe,
-                "Build it: cd %s && cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j "
+                "Build it: cd %s && cmake -B build -DCMAKE_BUILD_TYPE=Release "
+                "-DSoapySDR_DIR=<prefix>/share/cmake/SoapySDR && cmake --build build -j "
                 "(walkthrough section 2.5)." % sd)
         return
     srcs = []
@@ -336,7 +337,7 @@ def check_egress(rep, ip, raw):
 
 def check_clock(rep, ip, port, st):
     """A radio's CLOCK_ADJ state. A node left steered (a steering run that did
-    not release, or clock_steer_loop.py) runs every later run off its
+    not release, or a steering script) runs every later run off its
     calibration point, and a run with steering off never reads it."""
     f = dict(kv.split("=", 1) for kv in st.split() if "=" in kv)
     off = f.get("offset", "")

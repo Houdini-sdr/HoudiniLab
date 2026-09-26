@@ -3,10 +3,6 @@ cmake_minimum_required(VERSION 3.10)
 cmake_policy(SET CMP0048 NEW)
 project(Sounder VERSION 1.2.0)
 
-if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER 7.0)
-  set(GCC_COVERAGE_COMPILE_FLAGS "-faligned-new")
-endif()
-
 configure_file(${CMAKE_SOURCE_DIR}/include/version_config.h.in ${CMAKE_SOURCE_DIR}/include/version_config.h)
 
 # Off by default: on, every build directory wrote its libraries into the
@@ -65,8 +61,6 @@ if(${CMAKE_C_COMPILER_ID} STREQUAL "GNU")
   set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -O0")
 else()
   message(FATAL_ERROR "Unsupported version of compiler")
-  set(CMAKE_CXX_STANDARD 17)
-  set(CMAKE_CXX_STANDARD_REQUIRED ON)
 endif()
 
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
@@ -213,7 +207,7 @@ if (HOUDINI_USE_CUDA)
   add_definitions(-DUSE_CUDA)
   # The kernel is a backend of houdini_sync's Detector (sync/detector.cc), so
   # it is compiled into the library, not into the sounder's sources: every
-  # consumer of the library then links (review round 4, HIGH 3).
+  # consumer of the library then links.
   set(HOUDINI_CUDA_SOURCES find_beacon_cuda.cu)
   message(STATUS "GPU beacon correlator: ENABLED (CUDA arch ${CMAKE_CUDA_ARCHITECTURES})")
 endif()
@@ -233,7 +227,7 @@ else()
         ${CMAKE_SOURCE_DIR}/mufft/libmuFFT-avx.a)
 endif()
 
-target_link_libraries(sounder houdini_sync -lpthread --enable-threadsafe ${GFLAGS_LIBRARIES} ${UHD_LIBRARIES}
+target_link_libraries(sounder houdini_sync -lpthread ${GFLAGS_LIBRARIES} ${UHD_LIBRARIES}
     ${SoapySDR_LIBRARIES}
     ${HDF5_LIBRARIES}
     ${MUFFT_LIBRARIES})
@@ -241,17 +235,13 @@ target_link_libraries(sounder houdini_sync -lpthread --enable-threadsafe ${GFLAG
 add_library(sounder_module MODULE
     ${SOUNDER_SOURCES})
 
-target_link_libraries(sounder_module houdini_sync -lpthread --enable-threadsafe ${GFLAGS_LIBRARIES} ${UHD_LIBRARIES}
+target_link_libraries(sounder_module houdini_sync -lpthread ${GFLAGS_LIBRARIES} ${UHD_LIBRARIES}
     -Wl,--whole-archive
     ${MUFFT_LIBRARIES}
     -Wl,--no-whole-archive
     ${HDF5_LIBRARIES}
     ${SoapySDR_LIBRARIES})
 
-# Radio-free unit test: the UE beacon-sync geometry across the whole rate
-# ladder. Links NOTHING (sync_geometry.h is header-only and dependency-free) so
-# it builds and runs anywhere, which is the point -- the two defects it covers
-# were only visible by running a UE against silicon at one rate.
 enable_testing()
 # ---- houdini_sync: the UE synchronisation library ---------------------------
 # One classed home for the beacon shapes, the detector, the confirm, the carrier
@@ -260,7 +250,7 @@ enable_testing()
 # comms-lib and utils are compiled HERE and nowhere else: the sounder, the
 # module, the two HIL tools, the geometry test, the dumper and the beacon TX
 # tool all take them from this library, so there is one find_beacon_avx in
-# the tree (review rounds 2 and 3).
+# the tree.
 add_library(houdini_sync STATIC
     sync/sync_config.cc
     sync/beacon_shape.cc
@@ -290,6 +280,10 @@ target_link_libraries(golden_window_test houdini_sync -lpthread)
 add_test(NAME golden_window COMMAND golden_window_test
          ${CMAKE_CURRENT_SOURCE_DIR}/tests/comms-func/fixtures/golden)
 
+# The UE beacon-sync geometry across the whole rate ladder. Links NOTHING
+# (sync_geometry.h is header-only and dependency-free) so it builds and runs
+# anywhere, which is the point: the defects it covers were only visible by
+# running a UE against silicon at one rate.
 add_executable(sync_geometry_test tests/comms-func/sync_geometry_test.cc)
 target_include_directories(sync_geometry_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 add_test(NAME sync_geometry COMMAND sync_geometry_test)
@@ -382,6 +376,7 @@ add_test(NAME pacer_core_check COMMAND python3 pacer_core_check_test.py WORKING_
 add_test(NAME config_keys COMMAND python3 tests/config_keys_test.py WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 add_test(NAME mer_sampler COMMAND python3 mer_sampler_test.py WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/tests/demo-verify)
 add_test(NAME run_summary COMMAND python3 run_summary_test.py WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/tests/demo-verify)
+add_test(NAME sounder_log COMMAND python3 sounder_log_test.py WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/tests/demo-verify)
 add_test(NAME syn1_wire COMMAND python3 syn1_wire_test.py WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/tests/demo-verify)
 # fstage_report needs numpy (the rig host's venv has it); registered only where it imports.
 execute_process(COMMAND python3 -c "import numpy" RESULT_VARIABLE HAVE_NUMPY_RC OUTPUT_QUIET ERROR_QUIET)
@@ -456,7 +451,7 @@ target_link_libraries(config_pilot_test houdini_sync -lpthread ${GFLAGS_LIBRARIE
 add_test(NAME config_pilot COMMAND config_pilot_test WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 
 # AP-85: per-band channel widths through the real Config: the backward
-# compatibility pin (today's configs byte for byte) and the wide band.
+# compatibility pin (the configs without per-band widths, byte for byte) and the wide band.
 add_executable(per_band_test tests/comms-func/per_band_test.cc ${SOUNDER_SOURCES})
 target_include_directories(per_band_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(per_band_test houdini_sync -lpthread ${GFLAGS_LIBRARIES} ${UHD_LIBRARIES}
@@ -482,12 +477,14 @@ add_executable(beacon_geometry_test
 target_link_libraries(beacon_geometry_test houdini_sync -lpthread ${MUFFT_LIBRARIES})
 add_test(NAME beacon_geometry COMMAND beacon_geometry_test)
 
-# HIL helper: transmit the real Gold beacon from a Houdini board so a Houdini UE
-# running the unmodified receiver.cc client-sync path can acquire it.
+# Bench helper: each candidate beacon's TX core and correlator replica, written
+# from the one definition in include/sync/beacon_shapes.h for the probes to read.
 add_executable(beacon_shape_dump
     tests/comms-func/beacon_shape_dump.cc)
 target_link_libraries(beacon_shape_dump houdini_sync -lpthread ${MUFFT_LIBRARIES})
 
+# HIL helper: transmit the real Gold beacon from a Houdini board so a Houdini UE
+# running the unmodified receiver.cc client-sync path can acquire it.
 add_executable(beacon_tx_gold
     tests/comms-func/beacon_tx_gold.cc)
 target_link_libraries(beacon_tx_gold houdini_sync -lpthread
@@ -500,7 +497,7 @@ target_link_libraries(beacon_tx_gold houdini_sync -lpthread
 add_executable(houdini_bs_ue_sync
     tests/comms-func/houdini_bs_ue_sync.cc
     ${SOUNDER_SOURCES})
-target_link_libraries(houdini_bs_ue_sync houdini_sync -lpthread --enable-threadsafe ${GFLAGS_LIBRARIES} ${UHD_LIBRARIES}
+target_link_libraries(houdini_bs_ue_sync houdini_sync -lpthread ${GFLAGS_LIBRARIES} ${UHD_LIBRARIES}
     ${SoapySDR_LIBRARIES}
     ${HDF5_LIBRARIES}
     ${MUFFT_LIBRARIES})
@@ -510,7 +507,7 @@ target_link_libraries(houdini_bs_ue_sync houdini_sync -lpthread --enable-threads
 add_executable(houdini_loopback
     tests/comms-func/houdini_loopback.cc
     ${SOUNDER_SOURCES})
-target_link_libraries(houdini_loopback houdini_sync -lpthread --enable-threadsafe ${GFLAGS_LIBRARIES} ${UHD_LIBRARIES}
+target_link_libraries(houdini_loopback houdini_sync -lpthread ${GFLAGS_LIBRARIES} ${UHD_LIBRARIES}
     ${SoapySDR_LIBRARIES}
     ${HDF5_LIBRARIES}
     ${MUFFT_LIBRARIES})

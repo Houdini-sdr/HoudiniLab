@@ -2,9 +2,9 @@
 """AP-79 rung report: every pass-criterion number from one sounder log.
 Throttled warnings (powers of two, or every Nth) are read by their LAST
 occurrence number, never by counting lines."""
-import os, re, sys, collections, statistics as st
+import os, re, sys, statistics as st
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from run_summary import alarm_kinds  # noqa: E402  one alarm classifier, not two
+from sounder_log import alarm_kinds, cns_total, tx_totals  # noqa: E402
 
 
 def acquisitions(L):
@@ -16,9 +16,8 @@ def acquisitions(L):
 def ue_tx0_totals(L):
     """The UE's tx0 late, under and zerofill increments, summed over the UE's own
     link-health lines (the BS prints the same keys for its beacon stream)."""
-    ue = [l for l in L if re.search(r"\bUE \S+ link health: ", l)]
-    return tuple(sum(int(v) for l in ue for v in re.findall(r"tx0\.%s \+(\d+)" % k, l))
-                 for k in ("late", "under", "zerofill"))
+    t = tx_totals(L)
+    return tuple(t[("UE", "tx0." + k)] for k in ("late", "under", "zerofill"))
 
 
 def main(path):
@@ -45,9 +44,7 @@ def main(path):
           sum("UE PILOT LOST" in l for l in L), sum(bool(re.search(r"escalat(e|ion) (to|#)|ESCALAT", l)) for l in L)))
     print("BS no-UE-burst skips >= %d; LTS-untrusted >= %d; CNS low %s" % (
           last_occ("no UE burst in frame read"), last_occ("failed the LTS check"),
-          # the periodic SUMMARY carries the true total; the per-event warning's
-          # 'low occurrence K of D' is throttled on powers of two (AP-58)
-          (lambda m: "%s of %s (summary)" % (m[-1][1], m[-1][0]) if m else "none")(re.findall(r"\((\d+) datagrams, (\d+) low\)", "\n".join(L)))))
+          (lambda t: "%d of %d (summary)" % (t[1], t[0]) if t else "none")(cns_total(L))))
     ev = [(int(m.group(1)), int(m.group(2))) for l in L for m in [re.search(r"UE pilot burst: scheduled (\d+) frames up to (\d+)", l)] if m]
     if len(ev) > 2:
         fr = 122880.0

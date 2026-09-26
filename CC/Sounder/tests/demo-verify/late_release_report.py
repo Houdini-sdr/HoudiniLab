@@ -4,9 +4,9 @@ verbatim (up to 30 per stream) with its log line number and the nearest MLPD
 stamps before and after it, then the UE per-channel TX totals.
 usage: late_release_report.py <run.log>"""
 import collections, re, sys
+import sounder_log as sl
 
-L = open(sys.argv[1], errors="replace").read().splitlines()
-L = [re.sub(r"\x1b\[[0-9;]*m", "", l) for l in L]
+L = sl.read_lines(sys.argv[1])
 stamp = re.compile(r"^(\d+:\d{6}) (INFOR|WARNG|ERROR)")
 KEY = "[WARNING] HoudiniStream TX late-release"
 per = collections.defaultdict(list)
@@ -24,12 +24,7 @@ for c, v in sorted(per.items()):
     print("== stream %s (%d lines, first %d shown)" % (c, len(v), min(30, len(v))))
     for n, b, a, t in v[:30]:
         print("line %d [%s .. %s] %s" % (n, b, a, t))
-tx = collections.Counter()
-for l in L:
-    m = re.search(r"UE [\d.]+ link health: .*", l)
-    if m:
-        for k, v in re.findall(r"(tx\d\.\w+) \+(\d+)", m.group(0)):
-            tx[k] += int(v)
-print("UE totals: " + ", ".join("%s +%d" % kv for kv in sorted(tx.items())))
-cns = re.findall(r"\((\d+) datagrams, (\d+) low\)", "\n".join(L))
-print("CNS low %s" % ("%s/%s" % (cns[-1][1], cns[-1][0]) if cns else "none"))
+tx = sl.tx_totals(L)
+print("UE totals: " + ", ".join("%s +%d" % (k, v) for (r, k), v in sorted(tx.items()) if r == "UE"))
+cns = sl.cns_total(L)
+print("CNS low %s" % ("%d/%d" % (cns[1], cns[0]) if cns else "none"))

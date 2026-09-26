@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""AP-79 filter staging (DEMO_FREQUENCY_PLAN 6.1b): per-run link numbers and
+"""AP-79 filter staging (Houdini-Streaming docs/DEMO_FREQUENCY_PLAN.md 6.1b): per-run link numbers and
 per-stage change against the first stage given.
 
 usage: fstage_report.py <stage_dir> [<stage_dir> ...]   (each holds run dirs from fstage_run.sh)
@@ -31,6 +31,7 @@ holds R2 and R3 runs, and a mean over both would mix numerologies.
 import glob, json, math, os, re, statistics as st, sys
 import numpy as np
 import rig_dumps as rd
+import sounder_log as sl
 
 FS = 32767.0
 
@@ -139,7 +140,7 @@ def logfig(run):
     coh = [float(v) for v in re.findall(r"syncSearch: detection #\d+ statistic ([\d.]+) vs bar", L)]
     seat = [int(v) for v in re.findall(r"pilot_grid_off=([-\d]+)", L)]
     snr = [float(v) for v in re.findall(r"beacon alive .*?snr ([\d.]+) dB", L)]
-    cns = re.findall(r"\((\d+) datagrams, (\d+) low\)", L)
+    cns = sl.CNS_SUMMARY.findall(L)
     # median, not min: a detection whose beacon straddles the read boundary
     # reads low (0.35 at idx 701 on F0 run 1) while the link is the same
     return {"coh": st.median(coh) if coh else float("nan"),

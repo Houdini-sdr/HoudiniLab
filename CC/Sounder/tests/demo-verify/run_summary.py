@@ -15,6 +15,8 @@ windows and late releases are warnings to read. Exits 1 on FAIL.
 """
 import glob, os, re, statistics as st, sys
 from collections import Counter
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from sounder_log import ANSI, alarm_kinds  # noqa: E402,F401  alarm_kinds: rung_report and the test read it here too
 
 # "Radios Not Found. Will attempt a retry" is the in-process retry of a slow or
 # refused open (8.127, 8.131): a warning when the run then closes cleanly; one
@@ -22,20 +24,6 @@ from collections import Counter
 ERRORS = r"what\(\)|terminate called|bs_rx_slots: TDD_RX_SLOTS|mode V bring-up:"
 
 
-def alarm_kinds(lines):
-    """Counter of the alarm kinds in link-health lines, one entry per item, in
-    the forms link_health.h writes them: a counter rise '<name> +N', a blind
-    egress counter '<name>=N (sticky' or '(saturated', a new preflight FAIL, a
-    config drift 'config <section>: old -> new', and the app counters."""
-    pat = re.compile(r"((?:tx|rx)\d\.\w+ \+\d+|(?:egress|host)\.\w+ \+\d+|egress\.\w+=\d+ \((?:sticky|saturated)"
-                     r"|preflight new FAIL [^|;]+|config [^:|;]+:|(?:rx|tx)_\w+ \+[1-9]\d*)")
-    out = Counter()
-    for l in lines:
-        for m in pat.finditer(l):
-            k = re.sub(r"\+\d+", "+N", m.group(1))
-            k = re.sub(r"=\d+ \((sticky|saturated)$", r" \1", k)
-            out[k.rstrip(":") + (" drift" if k.startswith("config ") else "")] += 1
-    return out
 HOST_COUNTERS = ("tdd_straddle", "tdd_refused", "rxq_ovfl", "ring_ovfl")
 
 
@@ -54,7 +42,7 @@ def read_log(path):
         path = own if os.path.isfile(own) else logs[-1]
     with open(path, errors="ignore") as f:
         # the config echo holds every key's text, so it would match anything
-        return [re.sub(r"\x1b\[[0-9;]*m", "", l.rstrip("\n")) for l in f if "Config: {" not in l]
+        return [ANSI.sub("", l.rstrip("\n")) for l in f if "Config: {" not in l]
 
 
 def verdict(L):
