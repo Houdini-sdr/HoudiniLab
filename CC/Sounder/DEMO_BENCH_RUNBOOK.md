@@ -269,6 +269,15 @@ the demo head, `houdini-dualband-xw-steer-slots.json`, steered, cabled):
 - **Host timing.** One run in several shows a single UE TX late-release event of
   a frame or two mid-run with no visible effect (9.71). The durable guard is
   keeping every NIC receive queue off the pacer cores (A8c step 4).
+- **Egress drop counters saturate (HS-241).** Each radio's per-port egress
+  drop and mark counters stop at 255 and clear only with a gateware (PL)
+  reload; a throughput test can fill them (9.73). A run is not affected, but
+  its link health can no longer see a new egress drop, and check_setup says
+  so with a WARN. Before a run that relies on that watch, a PL reload of the
+  same bitstream clears them: a deploy, so the user's call.
+- **The pilot seat moves between sessions** by a few samples (9.73: 0/+1 in
+  VL1, -3/-4 in RV1), untraced; the converters' MTS latency lands differently
+  each session (SH-468). Inside the +-32-sample slot margin; MER unchanged.
 
 ## A8. Stopping and recovery
 
