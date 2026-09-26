@@ -1,16 +1,17 @@
 /**
  * @file houdini_bs_ue_sync.cc
  * @brief Drive BOTH ends of the Houdini HIL link with the sounder's real radio
- *        classes: construct the actual BaseRadioSet (which now arms the Gold
+ *        classes: construct the actual BaseRadioSet (whose framer arms the
  *        beacon replay on the BS board) and the actual ClientRadioSet (the UE),
- *        then run receiver.cc::syncSearch's exact correlator (find_beacon on
- *        config_->gold_cf32()) on the UE RX. This proves the BaseRadioSet
- *        Houdini backend transmits the beacon the UE acquires -- replacing the
- *        external beacon_tx_gold helper with the sounder's own BS class.
+ *        then run find_beacon on config_->gold_cf32() on the UE RX. This shows
+ *        the BaseRadioSet Houdini backend transmits a beacon the UE acquires,
+ *        without the external beacon_tx_gold helper.
  *
- * The boards are wired TX(.21 ch1) -> RX(.22 ch1) only, so the BS->UE beacon is
- * exercised here; the reverse link (BS receiving UE pilots) needs bidirectional
- * wiring + a Houdini-compatible BS receive framer and is out of scope.
+ * find_beacon runs with its own defaults (first-crossing pick, power-ratio
+ * threshold), not the configured detector Receiver::syncSearch runs, so this
+ * shows the beacon is on the air, not where the sounder's search places it.
+ * Only the BS->UE beacon is exercised; houdini_loopback closes the reverse
+ * link.
  *
  * Build: CMake target houdini_bs_ue_sync (links the full sounder sources).
  * Run (venv SoapySDR runtime):

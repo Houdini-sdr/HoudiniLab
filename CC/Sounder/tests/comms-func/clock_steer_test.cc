@@ -237,8 +237,7 @@ static void sessionTests() {
     check(s.offset() == 2, "a write that reports failure but lands still moves the offset");
   }
   {
-    // The review's case: the write reports failure yet lands (+2), and its
-    // readback fails.
+    // The write reports failure yet lands (+2), and its readback fails.
     Bench b;
     b.node.write_result = false;
     auto s = b.make();

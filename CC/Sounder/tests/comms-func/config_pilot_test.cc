@@ -1,17 +1,17 @@
 /**
  * @file config_pilot_test.cc
- * @brief The run configs through the REAL Config (AP-79 final review), NO
- *        hardware: the pilot slot is exactly one slot long, its symbols are
- *        fft_size points, and its spectrum sits inside the +-24 MHz channel.
+ * @brief The run configs through the REAL Config (AP-79), NO hardware: the
+ *        pilot slot is exactly one slot long, its symbols are fft_size points,
+ *        and its spectrum sits inside the +-24 MHz channel.
  *
- * The bug this pins: for fft_size != 64 the Zadoff-Chu pilot was built at the
- * next power of two ABOVE ofdm_data_num (the sequence generator's own
- * padding), not at fft_size. At R1 (fft 256, 96 data subcarriers) that made a
- * 2560-sample pilot slot against the 4096-sample slot everything else uses:
- * the view mode threw at startup, the UE's burst copy read 6 KB past the
- * pilot and transmitted it, and the tones sat at twice the spacing, outside
- * the filters. Config now refuses a pilot slot of the wrong length, and this
- * test constructs every run config to prove none has one.
+ * The Zadoff-Chu pilot must be built at fft_size, NOT at the sequence
+ * generator's own padding (the next power of two above ofdm_data_num). At R1
+ * (fft 256, 96 data subcarriers) the generator's size makes a 2560-sample pilot
+ * slot against the 4096-sample slot everything else uses: the view mode
+ * throws at startup, the UE's burst copy reads 6 KB past the pilot and
+ * transmits it, and the tones sit at twice the spacing, outside the filters.
+ * Config refuses a pilot slot of the wrong length, and this test constructs
+ * every run config to prove none has one.
  *
  * Run from CC/Sounder (the configs' relative paths): ctest sets the working
  * directory.
@@ -20,6 +20,8 @@
 #include <cmath>
 #include <complex>
 #include <cstdio>
+#include <fstream>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -70,7 +72,7 @@ int main() {
       {
         // The data symbols' pilot tones: every one must carry a real value
         // (unit magnitude ZC on the fft grid, or the 802.11 pilots at fft 64),
-        // or the BS's timing fit and phase fix run on noise (final review 2).
+        // or the BS's timing fit and phase fix run on noise.
         double min_mag = 1e9;
         for (const auto& v : c.pilot_sc()) min_mag = std::min(min_mag, static_cast<double>(std::abs(v)));
         std::printf("  %zu data-symbol pilot tones, smallest |value| %.3f\n", c.pilot_sc().size(), min_mag);
@@ -102,7 +104,7 @@ int main() {
         const auto zc = CommsLib::getSequence(CommsLib::LTE_ZADOFF_CHU, c.symbol_data_subcarrier_num());
         check(zc.at(0).size() != c.fft_size(),
               std::string(f) + ": the generator's power-of-two symbol (" + std::to_string(zc.at(0).size()) +
-                  ") is NOT fft_size, the old bug's shape");
+                  ") is NOT fft_size, so the slot-length checks above would catch a pilot built at it");
       }
       if (c.sync().beacon.type == "nr_pss_bl") {
         // The thresholds detection_calibration_test derives for this beacon.

@@ -4,17 +4,18 @@
  *        BS recorder, NO hardware: the X-band at 270 RB (3240 tones) beside
  *        the sub-6 at 133 RB (1596) on one numerology.
  *
- * WHAT IS PINNED:
+ * WHAT IS PINNED (the numbered sections below):
  *   1. Backward compatibility: every buffer Config builds for six shipped
- *      configs hashes to the value measured on the untouched baseline
- *      (d27d5f5), and so does the prefiltered TX interpolation of the pilot.
+ *      configs hashes to the value the build before per-band widths (d27d5f5)
+ *      produced, and so does the prefiltered TX interpolation of the pilot.
  *   2. The channel -> band map, on files/houdini-dualband-xw.json and on a
  *      probe whose lane order differs from the letter order.
- *   3. The wide band's pilot, data and level, known answers.
- *   4. The config's refusals.
- *   5. The BS recorder end to end in view mode (UDP loopback): each antenna's
+ *   3. The wide band's pilot and data, known answers.
+ *   4. The two bands' levels.
+ *   5. The config's refusals.
+ *   6. The BS recorder end to end in view mode (UDP loopback): each antenna's
  *      CSI, channel constants and constellation against its own band.
- * Every assertion names the mutation that breaks it (the lane rule).
+ * Assertions name the mutation that breaks them where one applies.
  *
  * Run from CC/Sounder (the configs' relative paths): ctest sets the working
  * directory.

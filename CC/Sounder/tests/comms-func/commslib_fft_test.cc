@@ -2,12 +2,13 @@
  * @file commslib_fft_test.cc
  * @brief CommsLib::FFT / IFFT on an input SHORTER than the transform (AP-79).
  *
- * The inherited code sized its output to the input and memcpy'd fftSize
- * samples in and out, so getPilotScValue's ofdm_data_num-long sequence
- * overran the heap at every fft_size larger than it (a crash at 256 / 96, a
- * silent 20 KB overrun at 4096 / 1596; the old fft 64 configs took the 802.11
- * path and never reached it). The fixed transform is fftSize points of the
- * zero-padded input; this pins the length and the values against a direct DFT.
+ * The contract: fftSize outputs, the transform of the input zero-padded to
+ * fftSize. getPilotScValue passes an ofdm_data_num-long sequence, shorter than
+ * fft_size in every Zadoff-Chu config, so a transform that sizes its output to
+ * the input and copies fftSize samples in and out overruns the heap (a crash
+ * at 256 / 96, a silent 20 KB overrun at 4096 / 1596; fft 64 takes the 802.11
+ * pilot path and never reaches it). This pins the length and the values
+ * against a direct DFT.
  *
  * Build: CMake target commslib_fft_test. Run: ./commslib_fft_test (or ctest).
  */

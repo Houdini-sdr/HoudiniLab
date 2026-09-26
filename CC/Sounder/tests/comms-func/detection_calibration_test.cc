@@ -4,16 +4,16 @@
  *        derived on a simulated link instead of carried from legacy (AP-79),
  *        NO hardware. Prints the values the dual-band configs use.
  *
- * WHAT WAS CARRIED, AND WHY IT IS WRONG FOR THIS BEACON. The dual-band configs
- * started from the last demo's corr_scale (100 resync, 10 acquisition) and
- * the 30 dB in-window SNR floor, all set on the wideband legacy beacon. For
+ * WHY LEGACY'S THRESHOLDS ARE WRONG FOR THIS BEACON. The legacy-beacon configs
+ * run corr_scale 100 (resync) and 10 (acquisition) and a 30 dB in-window SNR
+ * floor, all set on the wideband legacy beacon. For
  * nr_pss_bl, whose replica is one 512-sample PSS, the detector resolves to the
  * coherence form, whose bar is 1 / corr_scale. MEASURED here through the
  * filtered lane: the noise-only maximum coherence over a 16384-sample window
  * is 0.038 median, 0.057 at the 99th percentile, 0.080 worst of 400; a
  * bench-level beacon reads 0.975 and one 30 dB weaker still 0.90. So the bar
  * is 0.2 (corr_scale 5 for acquisition and resync): 2.5x above the worst
- * noise, 4.5x under a beacon 30 dB down. The carried resync bar (0.01) sits
+ * noise, 4.5x under a beacon 30 dB down. Legacy's resync bar (0.01) sits
  * INSIDE the noise, and so does the false-alarm-probability bar
  * (detector.pfa_per_window 1e-3 -> 0.032): its white-noise model counts the
  * replica's 512 samples as independent, but a band-limited PSS has about 127
@@ -27,12 +27,12 @@
  * nr_pss_bl runs through the SAME noise at its planned transmit scale (0.34
  * peak, the plan's -16 dBFS RMS back-off at its 6.6 dB PAPR) and through the
  * RX channel filter the UE's sub-6 lane applies. The shift between the two is
- * the floor's shift: the new floor keeps legacy's 16.5 dB margin.
+ * the floor's shift: nr_pss_bl's floor keeps legacy's 16.5 dB margin.
  *
  * The checks: every beacon at the bench level is detected at its exact end
- * and clears the new floor (20 seeds, the uncalibrated 20.7 kHz CFO); no
- * noise-only window crosses the bar or is accepted (400 seeds); and
- * the carried bar (corr_scale 100 -> 0.01) is the mutant that false-alarms on
+ * and clears the derived floor (20 seeds, the uncalibrated 20.7 kHz CFO); no
+ * noise-only window crosses the bar or is accepted (400 seeds); and legacy's
+ * resync bar (corr_scale 100 -> 0.01) is the mutant that false-alarms on
  * noise.
  *
  * Build: CMake target detection_calibration_test. Run: ./detection_calibration_test.
@@ -107,9 +107,9 @@ std::vector<std::complex<int16_t>> window(const BeaconShape& s, double scale, do
     for (auto& v : w) {
       const double a = std::sqrt(-2.0 * std::log(u01())) * std::cos(2.0 * M_PI * u01());
       const double b = std::sqrt(-2.0 * std::log(u01())) * std::cos(2.0 * M_PI * u01());
-      // Truncated toward zero, as sim::Channel::receive quantizes (review: a
-      // rounding here made noise-only windows 0.45 dB louder than the
-      // beacon windows' noise).
+      // Truncated toward zero, as sim::Channel::receive quantizes: rounding
+      // here would make noise-only windows 0.45 dB louder than the beacon
+      // windows' noise.
       v = std::complex<int16_t>(static_cast<int16_t>(sd * a), static_cast<int16_t>(sd * b));
     }
   }
@@ -152,7 +152,7 @@ int main() {
               snr_legacy, snr_bl);
   std::printf("=> confirm.snr_floor_db for nr_pss_bl: %.0f dB (legacy's 30 dB shifted by %+.1f dB)\n", floor_bl, shift);
   // A harness figure, not an assertion: the noise was CHOSEN from 46.5 dB, so
-  // this only shows the sim's estimator agrees with that choice (review).
+  // this only shows the sim's estimator agrees with that choice.
   std::printf("harness: legacy reads %.1f dB against the 46.5 dB the noise was set from\n", snr_legacy);
 
   // ---- the detector, configured as the dual-band configs are --------------
@@ -194,7 +194,7 @@ int main() {
   std::printf("noise-only windows: %d/400 crossed the 0.2 bar, %d accepted by the floor\n", bar_cross, accepted);
   check(bar_cross == 0 && accepted == 0, "no noise-only window crosses the 0.2 bar (0 of 400), none is accepted");
 
-  // The header's figures, asserted (review). The noise-only maximum
+  // The header's figures, asserted. The noise-only maximum
   // coherence, probed with a vanishing bar so every window reports its max.
   {
     std::vector<double> nmax;
@@ -249,9 +249,9 @@ int main() {
     return crosses;
   };
   {
-    const int c = noiseCrossings(det, 100.0f);  // the carried resync corr_scale: bar 0.01
-    std::printf("carried corr_scale 100 (bar 0.01): %d/200 noise-only windows cross\n", c);
-    check(c > 20, "mutant: the carried corr_scale 100 bar false-alarms on noise");
+    const int c = noiseCrossings(det, 100.0f);  // legacy's resync corr_scale: bar 0.01
+    std::printf("legacy corr_scale 100 (bar 0.01): %d/200 noise-only windows cross\n", c);
+    check(c > 20, "mutant: legacy's corr_scale 100 bar false-alarms on noise");
   }
   {
     auto pcfg = SyncConfig::loadFromText(R"({"sync": {"detector": {"pick": "argmax", "pfa_per_window": 1e-3}}})");
@@ -263,7 +263,7 @@ int main() {
     check(c > 20, "mutant: the white-noise pfa bar false-alarms on a band-limited replica (127, not 512, degrees of freedom)");
   }
   {
-    // The carried floor would still accept every bench beacon (it has margin),
+    // Legacy's 30 dB floor would still accept every bench beacon (it has margin),
     // but it is the wrong number to calibrate against; the floor's job is also
     // to reject what crosses the bar on noise, which it does at any sane value.
     // So the floor's mutant is a floor ABOVE the bench beacons: it must reject.

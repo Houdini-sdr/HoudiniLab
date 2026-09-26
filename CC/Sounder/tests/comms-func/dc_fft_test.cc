@@ -1,7 +1,7 @@
 /**
  * @file dc_fft_test.cc
- * @brief houdini::DcCenteredFft against the explicit DFT-matrix definition it
- *        replaced in RecorderWorker::symbolFft (AP-79), NO hardware.
+ * @brief houdini::DcCenteredFft against the explicit DC-centred DFT definition
+ *        the CSI view's per-symbol spectrum keeps (AP-79), NO hardware.
  *
  * The definition: Xs[k] = sum_n x[n] exp(-j 2 pi m n / N), m = (k + N/2) mod N,
  * x the CS16 sample with the imaginary part negated when `conj`. Checked in
