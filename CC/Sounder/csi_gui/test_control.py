@@ -1,7 +1,7 @@
 # Dashboard control (--control) against a stand-in sounder: the supervisor runs
 # on the main thread as in main(); commands arrive from another thread, and the
 # HTTP route is exercised end to end. Stdlib only; run from csi_gui/ (ctest does).
-import json, os, sys, tempfile, threading, time, types, urllib.request, urllib.error
+import json, os, signal, sys, tempfile, threading, time, types, urllib.request, urllib.error
 sys.argv = ["x"]
 for k in ("HOUDINI_SOAPY_ROOT", "SOAPY_SDR_ROOT"):  # the runbook's A4 exports one; the venv's plugin is asserted
     os.environ.pop(k, None)
@@ -128,6 +128,27 @@ t0 = time.time(); isup._kill(); took = time.time() - t0
 check(os.path.exists(ilog) and "got-int" in open(ilog).read() and took < 4.0,
       "Stop reaches the sounder as SIGINT and a clean exit ends the wait early (%.1f s) (mutation: SIGTERM first, "
       "which skips the sounder's end-of-run lines)" % took)
+
+# A sounder that does not exit on SIGINT is SIGKILLed after the grace: that is
+# what frees the radios when a clean stop hangs.
+ksup = cs.SounderSupervisor(args, "x"); ksup.STOP_GRACE_S = 1.0
+ksup.cmd = ["sh", "-c", "trap '' INT; while :; do sleep 0.1; done"]
+ksup.proc = ksup._start(); time.sleep(0.5)
+t0 = time.time(); ksup._kill(); took = time.time() - t0
+check(ksup.proc.poll() is not None and 0.9 <= took < 5.0,
+      "a sounder that ignores SIGINT is killed after the grace (%.1f s) (mutation: no deadline, wait for the exit forever)" % took)
+# The sounder starts with SIGINT at its default even when the dashboard runs
+# with SIGINT ignored (a background start from a script).
+dsup = cs.SounderSupervisor(args, "x"); dlog = os.path.join(sd, "sigign.txt")
+dsup.cmd = ["sh", "-c", "grep SigIgn /proc/self/status > %s" % dlog]
+old = signal.signal(signal.SIGINT, signal.SIG_IGN)
+try:
+    dsup._start().wait()
+finally:
+    signal.signal(signal.SIGINT, old)
+ign = int(open(dlog).read().split()[1], 16) if os.path.exists(dlog) else -1
+check(ign >= 0 and not (ign & (1 << (signal.SIGINT - 1))),
+      "the sounder does not inherit an ignored SIGINT (mutation: no SIG_DFL reset in the child)")
 
 # The gap before the main thread picks a Start up (a supervisor not yet serving):
 # a Check or a second Start then is refused, not queued behind it and dropped.

@@ -770,6 +770,10 @@ def _die_with_parent():
     except (OSError, AttributeError):
         os.write(2, b"[csi] PR_SET_PDEATHSIG unavailable on this platform\n")
     os.setsid()  # its own session: the clean-shutdown path signals the group
+    # A dashboard started in the background by a script inherits SIGINT as
+    # ignored and would pass that on: the sounder installs its own handler a
+    # few ms after exec, and a Stop before that would be lost.
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
 
 
 def _pump(stream, prefix, log=None):
@@ -1222,10 +1226,15 @@ def main():
             sup.stop()
 
     def _sigterm(*_):
-        print("\n[csi] shutting down (SIGTERM)", flush=True)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        print("\n[csi] shutting down (SIGTERM): stopping the sounder, up to %.0f s"
+              % SounderSupervisor.STOP_GRACE_S, flush=True)
         _cleanup()
         os._exit(0)
     signal.signal(signal.SIGTERM, _sigterm)
+    # SIGINT stops the dashboard even when a script started it in the background
+    # (which leaves SIGINT ignored, and Python then never raises KeyboardInterrupt).
+    signal.signal(signal.SIGINT, signal.default_int_handler)
 
     try:
         if sup is not None and args.control:
@@ -1235,7 +1244,11 @@ def main():
         while True:
             time.sleep(0.5)
     except KeyboardInterrupt:
-        print("\n[csi] shutting down (Ctrl+C)", flush=True)
+        # A second Ctrl+C during the sounder's grace must not cut its clean stop
+        # short (a traceback, then the launcher's death SIGTERMs the sounder).
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        print("\n[csi] shutting down (Ctrl+C): stopping the sounder, up to %.0f s"
+              % SounderSupervisor.STOP_GRACE_S, flush=True)
         _cleanup()
         os._exit(0)  # hard exit: avoids any serve_forever/shutdown deadlock
 
