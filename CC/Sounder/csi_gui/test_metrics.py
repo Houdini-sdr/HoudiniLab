@@ -191,4 +191,5 @@ check(cs._mag_top(td, "bad.json", None) == 90.0 and cs._mag_top(td, "flag.json",
 check(cs._mag_top(td, "missing.json", None) == 90.0, "an unreadable config falls back to the default")
 demo = json.load(open(os.path.join(os.path.dirname(os.path.abspath("csi_server.py")), "..", "files", "houdini-dualband.json")))
 check(demo.get("dashboard_mag_top") == 115, "the demo config carries its axis top (|H| read 97-104 dB there)")
+import shutil; shutil.rmtree(td, ignore_errors=True)  # no temp dir left per run
 print("FAILED %d" % fails if fails else "ALL PASS"); sys.exit(1 if fails else 0)

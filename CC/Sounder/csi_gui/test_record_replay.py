@@ -150,5 +150,6 @@ check(calls[0] == 3 and e4.startswith(b"data: ") and e4.endswith(b"\n\n"), "a ne
 check(cs._shared_event(902, {"0": {"x": float("nan")}}, {}, 200.0) is None, "a non-finite value gives no event rather than invalid JSON (mutation: allow_nan)")
 cs.json.dumps = real
 
+import shutil; shutil.rmtree(td, ignore_errors=True)  # no temp dir left per run
 print("%d failure(s)" % fails)
 sys.exit(1 if fails else 0)

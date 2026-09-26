@@ -18,6 +18,8 @@ ap.add_argument("first", type=float, nargs="?", default=0.0)
 ap.add_argument("--url", default="http://127.0.0.1:8080/stream")
 ap.add_argument("--stale-ms", type=int, default=1500, help="the dashboard's own default")
 args = ap.parse_args()
+if args.period <= 0 or args.total <= 0:
+    ap.error("period and total must be positive")
 
 
 def one_event(url):
@@ -40,6 +42,12 @@ last, bad, n = {}, 0, 0
 # own duration no longer pushes the next ones later, which carried the last
 # sample of a long run past the stream's end (a false STALE).
 while n * args.period < args.total:
+    # After a sample that overran its period, skip the grid points it covered
+    # rather than firing back to back (a second sample within one frame would
+    # read as not advanced, a false STALE).
+    n = max(n, int((time.time() - t0) / args.period + 0.999))
+    if n * args.period >= args.total:
+        break
     time.sleep(max(0.0, t0 + n * args.period - time.time()))
     stamp = time.strftime("%H:%M:%S", time.gmtime())
     stale_any = False

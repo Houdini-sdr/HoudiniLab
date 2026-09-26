@@ -115,8 +115,10 @@ def main():
     after = {p: read(p)[0] for p in ports}
     # Queues with traffic counters but no readable IRQ affinity, on a port whose
     # map was otherwise read: taken as CPU N, and said.
+    # Only queues that received in the window: mlx5 keeps counters for channels
+    # no longer active, which have no IRQ at all.
     partial = ["%s queue %s" % (p, ",".join(map(str, qs))) for p in ports if qmap[p]
-               for qs in [sorted(q for q in after[p] if q not in qmap[p])] if qs]
+               for qs in [sorted(q for q in after[p] if q not in qmap[p] and after[p][q] != before[p].get(q))] if qs]
     how = ("IRQ map read from /proc" if not identity
            else "queue N taken as CPU N for %s: its IRQ map was not readable" % ", ".join(identity))
     if partial:

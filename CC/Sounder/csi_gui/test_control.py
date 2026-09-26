@@ -296,4 +296,5 @@ srv.control = None
 check(get() == {"enabled": False}, "no --control: GET reports disabled")
 check(post({"cmd": "start"})[0] == 404, "no --control: POST is 404")
 srv.shutdown()
+import shutil; shutil.rmtree(sd, ignore_errors=True)  # no temp dir left per run
 print("%d failure(s)" % fails); sys.exit(1 if fails else 0)

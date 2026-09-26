@@ -55,10 +55,15 @@ lr = GOOD + ["57:%d INFOR: UE TX_HOST_STATUS release_late_ch0=0 release_late_ch1
 v = rs.verdict(lr)
 check([t for lv, t in v if lv == "WARN"] == ["late releases (host pacer): ch0 0, ch1 2"],
       "late releases are the cumulative counter's peak per channel, not its line count (mutation: count lines)")
+# With a readable status beside it (a second radio, or a read that worked once),
+# only the explicit rule can fail the unreadable one.
+v = rs.verdict(GOOD + ["57:1 WARNG: BS 192.168.10.22: RX_HOST_STATUS unreadable: RemoteError: unknown key"])
+check(any(lv == "FAIL" and "unreadable" in t for lv, t in v),
+      "an unreadable RX_HOST_STATUS fails even beside a readable one (mutation: drop the unreadable rule)")
 v = rs.verdict([l for l in GOOD if "RX_HOST_STATUS" not in l]
                + ["57:1 WARNG: BS 192.168.10.22: RX_HOST_STATUS unreadable: RemoteError: unknown key"])
 check("FAIL" in [lv for lv, _ in v] and not any("counters 0" in t for _, t in v),
-      "an unreadable RX_HOST_STATUS fails instead of passing with no counters (mutation: match any line naming the key)")
+      "an unreadable RX_HOST_STATUS alone fails instead of passing with no counters (mutation: match any line naming the key)")
 check("FAIL" in levels([l.replace(" tdd_refused=0", "") for l in GOOD]),
       "an RX_HOST_STATUS without a judged counter fails (mutation: a missing key read as 0)")
 rnf = ["57:1 WARNG: Radios Not Found. Will attempt a retry"] + GOOD

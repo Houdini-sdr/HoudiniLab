@@ -240,6 +240,7 @@ check(e1.get("SOAPY_SDR_ROOT") == "/slots" and e1.get("SOAPY_SDR_PLUGIN_PATH") =
 knobs = {"HOUDINI_CORE_MAP": "main=3", "HOUDINI_TX_CPU_AFFINITY": "4,5"}
 saved_knobs = {k: os.environ.get(k) for k in knobs}
 os.environ.update(knobs)
+os.environ.pop("HOUDINI_SOAPY_ROOT", None)  # e2 is the case without it, whatever the shell exported
 e2 = check_setup.plugin_env("/v")
 os.environ["HOUDINI_SOAPY_ROOT"] = "/slots"
 e3 = check_setup.plugin_env("/v")
@@ -254,4 +255,5 @@ for k, v in saved_knobs.items():
 check(all(e.get(k) == v for e in (e2, e3) for k, v in knobs.items()) and e2.get("PATH") == os.environ.get("PATH"),
       "the operator's HOUDINI_CORE_MAP, HOUDINI_TX_CPU_AFFINITY and PATH reach the sounder, with and without "
       "HOUDINI_SOAPY_ROOT (mutation: build the environment from scratch instead of from os.environ, even one that keeps PATH and PYTHONPATH)")
+import shutil; shutil.rmtree(root, ignore_errors=True)  # no temp dir left per run
 print("%d failure(s)" % fails); sys.exit(1 if fails else 0)

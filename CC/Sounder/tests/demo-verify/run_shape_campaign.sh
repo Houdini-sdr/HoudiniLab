@@ -104,10 +104,11 @@ for ((k = 0; k < ROUNDS; ++k)); do
       # that and the aggregate refused to run over nine empty "runs".
       timeout 90 python3 csi_gui/teardown_framer.py --topology "$TOPO" > "$OUT/td-${s}-$((k + 1)).txt" 2>&1
       sleep 5
-      # SIGTERM at the wall clock is the demo launcher's own shutdown path, so
-      # streams close the way they do in the demo; a hard kill 15 s later is
-      # the backstop. rc 124 (timed out) is therefore the SUCCESS code here.
-      timeout -k 15 "$RUN_S" ./build/sounder --view --conf_file "${conf_of[$s]}" > "$f" 2>&1
+      # SIGINT at the wall clock is the dashboard's own stop (the sounder's
+      # only signal handler), so streams close the way they do in the demo and
+      # the end-of-run checks print; a hard kill 15 s later is the backstop.
+      # rc 124 (timed out) is therefore the SUCCESS code here.
+      timeout -s INT -k 15 "$RUN_S" ./build/sounder --view --conf_file "${conf_of[$s]}" > "$f" 2>&1
       rc=$?
       if [ "$rc" -eq 124 ] || grep -q "lock CONFIRMED" "$f"; then started=1; break; fi
       echo "  attempt $attempt rc=$rc (no lock, run ended early), retrying" | tee -a "$log"
