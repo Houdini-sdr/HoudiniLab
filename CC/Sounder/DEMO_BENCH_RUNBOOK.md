@@ -272,7 +272,7 @@ steered, cabled):
 - **Host timing.** One run in several shows a single UE TX late-release event of
   a frame or two mid-run with no visible effect (9.71). The durable guard is
   keeping every NIC receive queue off the pacer cores (A8c step 4).
-- **Egress drop counters saturate (HS-241).** Each radio's per-port egress
+- **Egress drop counters saturate (HS-212).** Each radio's per-port egress
   drop and mark counters stop at 255 and clear only with a gateware (PL)
   reload; a throughput test can fill them (9.73). A run is not affected, but
   its link health can no longer see a new egress drop, and check_setup says
