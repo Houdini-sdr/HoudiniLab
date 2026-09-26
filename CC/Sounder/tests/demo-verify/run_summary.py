@@ -117,14 +117,22 @@ def verdict(L):
         n = sum(bool(re.search(pat, l)) for l in L)
         if n:
             out.append(("WARN", "%s: %d lines" % (name, n)))
-    # release_late is the host pacer's cumulative count, printed every health
-    # period: its peak is the number of late releases, not its line count.
-    late = {}
-    for l in L:
-        for ch, v in re.findall(r"release_late_ch(\d)=(\d+)", l):
-            late[ch] = max(late.get(ch, 0), int(v))
-    if any(late.values()):
-        out.append(("WARN", "late releases (host pacer): " + ", ".join("ch%s %d" % kv for kv in sorted(late.items()))))
+    # The host pacer's counters are cumulative, printed every health period:
+    # the peak is the count, not the number of lines. late_refusals (the host
+    # refusing a TX write stamped behind its time, SH-427) and the plugin's
+    # 'Write rejected: HAS_TIME stamp ... behind' line are the software lane's
+    # to trace: send them the log window.
+    for key, what in (("release_late", "late releases (host pacer)"),
+                      ("late_refusals", "late TX writes refused by the host (send the window to the software lane)")):
+        peak = {}
+        for l in L:
+            for ch, v in re.findall(r"\b%s_ch(\d)=(\d+)" % key, l):
+                peak[ch] = max(peak.get(ch, 0), int(v))
+        if any(peak.values()):
+            out.append(("WARN", what + ": " + ", ".join("ch%s %d" % kv for kv in sorted(peak.items()))))
+    n = sum("Write rejected: HAS_TIME stamp" in l for l in L)
+    if n:
+        out.append(("WARN", "%d 'Write rejected: HAS_TIME stamp' lines (send the window to the software lane)" % n))
     return out
 
 

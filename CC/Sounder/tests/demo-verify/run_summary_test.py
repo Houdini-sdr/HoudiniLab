@@ -72,6 +72,13 @@ K = rs.alarm_kinds([
 check(dict(K) == {"egress.stall_seen sticky": 1, "config blocks drift": 1, "egress.drop_p0 saturated": 1},
       "blind and drift items get their kinds in link_health.h's own forms (mutation: the old 'drift ...' and "
       "'blind ...' patterns, which match nothing): %s" % dict(K))
+lr2 = GOOD + ["57:%d INFOR: UE 192.168.10.21 TX_HOST_STATUS: late_refusals_ch0=%d late_refusals_ch1=0 release_late_ch0=0" % (i, i)
+               for i in range(3)] + ["57:9 WARNG: Write rejected: HAS_TIME stamp 123 behind by 50 ms"]
+w = [t for lv, t in rs.verdict(lr2) if lv == "WARN"]
+check(any("refused by the host" in t and "ch0 2" in t for t in w) and any("Write rejected" in t for t in w)
+      and "FAIL" not in levels(lr2),
+      "late TX writes the host refused and the plugin's Write rejected lines are warnings for the software lane "
+      "(mutation: late_refusals not read)")
 # main: the exit status is the verdict's, read from a run directory's largest log
 d = tempfile.mkdtemp(prefix="run_summary_")
 open(os.path.join(d, "small_cpu.log"), "w").write("x\n")
