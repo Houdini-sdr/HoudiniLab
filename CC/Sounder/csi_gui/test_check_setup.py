@@ -142,10 +142,18 @@ json.dump({"127.0.0.1": HEALTHY, "127.0.0.2": "drop=p0:255,p1:0,p2:0,p3:0;stall_
 rc, rep, lv = run()
 check(rc == 1 and lv["egress 127.0.0.2"] == "FAIL" and lv["egress 127.0.0.1"] == "PASS",
       "a sticky stall fails that node only (breaks if the stall branch is a WARN or keyed to the wrong node)")
-json.dump({"127.0.0.1": HEALTHY, "127.0.0.2": "drop=p0:255,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marked=p0:0,p1:0,p2:0,p3:0"},
+json.dump({"127.0.0.1": HEALTHY, "127.0.0.2": "drop=p0:17,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marked=p0:0,p1:0,p2:0,p3:0"},
           open(egress_file, "w"))
 rc, rep, lv = run()
 check(rc == 0 and lv["egress 127.0.0.2"] == "PASS", "drops without the stall bit pass (breaks if any nonzero count fails)")
+# Saturated at 255 (only an egress reset clears them): a WARN naming the port,
+# since the run's link health is then blind to new drops; not a FAIL.
+json.dump({"127.0.0.1": HEALTHY, "127.0.0.2": "drop=p0:255,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marked=p0:0,p1:0,p2:0,p3:0"},
+          open(egress_file, "w"))
+rc, rep, lv = run()
+det = [r["detail"] for r in rep["results"] if r["what"] == "egress 127.0.0.2"]
+check(rc == 0 and lv["egress 127.0.0.2"] == "WARN" and det and "drop p0" in det[0] and lv["egress 127.0.0.1"] == "PASS",
+      "saturated egress drop counters are a WARN naming the port (mutation: only the stall bit read)")
 json.dump({"127.0.0.1": HEALTHY}, open(egress_file, "w"))
 rc, rep, lv = run()
 check(rc == 0 and lv["egress 127.0.0.2"] == "WARN", "an unreadable EGRESS_STATUS is a WARN (breaks if it passes silently or fails the run)")
