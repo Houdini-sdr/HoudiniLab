@@ -58,6 +58,26 @@ finally:
     cs.plugin_env = sys.modules["check_setup"].plugin_env = real_env
 check(probe.env.get("PLUGIN_ENV_SENTINEL") == sd, "the supervisor takes its environment from the setup check's plugin_env")
 
+# --log-dir: each start's output lands in its own file as the sounder wrote it
+# (the report tools match its lines), after the command and the teardown.
+import glob
+ld = tempfile.mkdtemp(prefix="csi_log_")
+lsup = cs.SounderSupervisor(types.SimpleNamespace(**dict(vars(args), log_dir=ld)), "x")
+lsup.td_text = "cleared ch0\n"
+lsup.cmd = ["sh", "-c", "echo 'RX read check: 0 lost'; echo second"]
+lsup._start().wait()
+deadline = time.time() + 5
+while time.time() < deadline and not any(open(f).read().endswith("second\n") for f in glob.glob(os.path.join(ld, "sounder_*.log"))):
+    time.sleep(0.05)
+logs = glob.glob(os.path.join(ld, "sounder_*.log"))
+text = open(logs[0]).read() if len(logs) == 1 else ""
+check(text.startswith("# sh -c") and "# teardown: cleared ch0\n" in text and text.endswith("RX read check: 0 lost\nsecond\n"),
+      "with --log-dir a start's output is logged as written, after its command and teardown "
+      "(mutation: the pump not writing the log, or writing its [sounder] prefix)")
+nsup = cs.SounderSupervisor(args, "x"); nsup.cmd = ["true"]; nsup._start().wait()
+check(nsup.log_dir is None, "without --log-dir nothing is logged (mutation: a default directory)")
+import shutil; shutil.rmtree(ld, ignore_errors=True)
+
 # The gap before the main thread picks a Start up (a supervisor not yet serving):
 # a Check or a second Start then is refused, not queued behind it and dropped.
 idle = cs.SounderSupervisor(args, "127.0.0.1:1")

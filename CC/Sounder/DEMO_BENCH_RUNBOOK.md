@@ -135,7 +135,7 @@ export HOUDINI_CORE_MAP=main=15 HOUDINI_TX_CPU_AFFINITY=18,19   # isolated (A9);
 export HOUDINI_TX_HOST_STATUS=1   # logs the host pacer's state every health period (free)
 export HOUDINI_SOAPY_ROOT=$HOME/houdini_slots   # the slots plugin, for the slots configs (A3)
 python3 csi_gui/check_setup.py --conf files/houdini-dualband-xw-steer-slots.json   # must print Ready, egress PASS on both nodes.
-python3 csi_gui/csi_server.py --control --conf files/houdini-dualband-xw-steer-slots.json
+python3 csi_gui/csi_server.py --control --log-dir ~/demo_logs --conf files/houdini-dualband-xw-steer-slots.json   # one log per Start (A8c step 4)
 ```
 
 **Why the pinning.** Left to the kernel, the host plugin's two UE TX pacer
@@ -387,8 +387,13 @@ egress (HS-225). Do every step, every power-up.
 
    ```sh
    export HOUDINI_CSI_RECORD=~/demo_rec/<name>.rec    # optional: records a fallback; a new name each start
-   python3 csi_gui/csi_server.py --control --conf files/houdini-dualband-xw-steer-slots.json
+   python3 csi_gui/csi_server.py --control --log-dir ~/demo_logs --conf files/houdini-dualband-xw-steer-slots.json
    ```
+
+   `--log-dir` keeps each Start's sounder output in
+   `~/demo_logs/sounder_<UTC>.log` (the dashboard prints the name), with the
+   teardown before it: the A6 end-of-run lines (`RX read check`,
+   `AP-87 slot check`, `RX_HOST_STATUS`) land there at Stop.
 
 5. Within the first minute of a Start:
    - the log shows `steer.enable = true [json]` and `Clock steering [0]: ON`;

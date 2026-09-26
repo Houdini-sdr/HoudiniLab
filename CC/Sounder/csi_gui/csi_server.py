@@ -772,11 +772,25 @@ def _die_with_parent():
     os.setsid()  # its own session: the clean-shutdown path signals the group
 
 
-def _pump(stream, prefix):
-    """Copy a child's output to ours, one prefix per line (was a sed)."""
-    for line in iter(stream.readline, b""):
-        sys.stdout.write(prefix + line.decode("utf-8", errors="replace"))
-        sys.stdout.flush()
+def _pump(stream, prefix, log=None):
+    """Copy a child's output to ours, one prefix per line (was a sed), and to
+    `log` as written (the report tools read the sounder's own lines); closes
+    `log` at the child's end of output."""
+    try:
+        for line in iter(stream.readline, b""):
+            text = line.decode("utf-8", errors="replace")
+            sys.stdout.write(prefix + text)
+            sys.stdout.flush()
+            if log is not None:
+                try:
+                    log.write(text)
+                    log.flush()
+                except (OSError, ValueError) as e:  # a full disk must not stop the pump
+                    print("[csi] session log stopped: %s" % e, flush=True)
+                    log = None
+    finally:
+        if log is not None:
+            log.close()
 
 
 class SounderSupervisor:
@@ -806,6 +820,8 @@ class SounderSupervisor:
         self.env["HOUDINI_MAX_FRAME"] = str(args.max_frame)
         if args.csi_fps:
             self.env["HOUDINI_CSI_FPS"] = str(args.csi_fps)
+        self.log_dir = getattr(args, "log_dir", None)
+        self.td_text = ""  # the last teardown's output, the head of the next start's log
         self.proc = None
         self.stopping = False
         # Dashboard control (--control): the HTTP threads only QUEUE commands;
@@ -960,13 +976,34 @@ class SounderSupervisor:
             text = (exc.stdout or b"").decode("utf-8", errors="replace") + "timed out\n"
         for line in text.splitlines():
             print("[teardown] " + line, flush=True)
+        self.td_text = text
+
+    def _open_log(self):
+        """With --log-dir, one file per sounder start: the command, the
+        teardown before it, then the sounder's own output. None without it or
+        when the file cannot be made (said once; the run goes on)."""
+        if not self.log_dir:
+            return None
+        path = os.path.join(self.log_dir, "sounder_%s.log" % time.strftime("%Y%m%d-%H%M%S", time.gmtime()))
+        try:
+            os.makedirs(self.log_dir, exist_ok=True)
+            f = open(path, "a", encoding="utf-8")
+            f.write("# %s (in %s)\n" % (" ".join(self.cmd), self.sd))
+            f.writelines("# teardown: %s\n" % l for l in self.td_text.splitlines())
+            f.flush()
+        except OSError as e:
+            print("[csi] NOT logging this start: %s" % e, flush=True)
+            return None
+        print("[csi] logging this start to %s" % path, flush=True)
+        return f
 
     def _start(self):
         print("[csi] launching sounder --view in %s" % self.sd, flush=True)
+        log = self._open_log()
         proc = subprocess.Popen(self.cmd, cwd=self.sd, env=self.env,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 preexec_fn=_die_with_parent)
-        threading.Thread(target=_pump, args=(proc.stdout, "[sounder] "),
+        threading.Thread(target=_pump, args=(proc.stdout, "[sounder] ", log),
                          daemon=True).start()
         return proc
 
@@ -1089,6 +1126,9 @@ def main():
                     help="HOUDINI_MAX_FRAME for continuous viewing")
     ap.add_argument("--csi-fps", type=float, default=0.0,
                     help="HOUDINI_CSI_FPS per-antenna stream rate (0 = sounder default 30)")
+    ap.add_argument("--log-dir", default=None,
+                    help="with --launch/--control, write each sounder start's output to "
+                         "<dir>/sounder_<UTC>.log for the report tools (default: off)")
     ap.add_argument("--dest-host", default="127.0.0.1",
                     help="host the sounder streams CSI to (when --launch)")
     args = ap.parse_args()
