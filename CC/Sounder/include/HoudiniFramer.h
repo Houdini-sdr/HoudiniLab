@@ -33,7 +33,9 @@ class HoudiniFramer : public BeaconFramer {
   bool gatesRx() const override { return cfg_->bs_hw_framer(); }
   int rx(size_t radio_id, void* const* buffs, long long& frameTime) override;
   size_t framePad() const override { return htdd_frame_pad_; }
-  size_t lanePad(size_t lane) const override { return lane < htdd_lane_pad_.size() ? htdd_lane_pad_[lane] : 0; }
+  bool laneRefusedAlone(size_t lane) const override {
+    return lane < htdd_lane_refused_.size() && htdd_lane_refused_[lane];
+  }
   /// The beacon is a device replay armed at arm(): the per-frame software
   /// beacon TX is a no-op that reports the full slot as sent (writing to the
   /// replay-mode stream would corrupt the loaded beacon).
@@ -68,9 +70,9 @@ class HoudiniFramer : public BeaconFramer {
   // One continuous read yields EVERY rx slot of the frame, so a gap in that
   // read taints the whole frame. Held per frame and handed to each slot (AP-10).
   size_t htdd_frame_pad_ = 0;
-  // Per lane, for the frame last served: a lane refused on its own (n) or 0,
-  // and its run of refused frames for the lost / returned warnings.
-  std::vector<size_t> htdd_lane_pad_;
+  // Per lane, for the frame last served: refused on its own or not, and its
+  // run of refused delivered frames for the lost / returned warnings.
+  std::vector<bool> htdd_lane_refused_;
   std::vector<size_t> htdd_lane_streak_;
   std::vector<bool> htdd_lane_warned_;
   size_t htdd_quiet_streak_ = 0;  // consecutive presence-gated (no-pilot) frames

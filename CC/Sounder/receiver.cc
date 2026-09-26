@@ -794,14 +794,14 @@ void Receiver::loopRecv(int tid, int core_id, SampleBuffer* rx_buffer) {
 
       // Zeros the RX path inserted to cover a dropped packet. Carried on the packet
       // so consumers that compute on the samples can refuse to trust them (AP-10).
-      // A gated framer also refuses one lane alone when its own pilot failed
-      // (the lane is channel ch: samp[ch] is the framer's buffs[ch]).
-      const size_t frame_pad = this->base_radio_set_->lastRxPadSamples(radio_id, cell);
+      const uint32_t rx_pad = static_cast<uint32_t>(
+          this->base_radio_set_->lastRxPadSamples(radio_id, cell));
       for (size_t ch = 0; ch < num_packets; ++ch) {
-        const uint32_t rx_pad =
-            static_cast<uint32_t>(frame_pad + this->base_radio_set_->lastRxLanePad(radio_id, cell, ch));
+        // A gated framer also refuses one lane's pilot alone (the lane is
+        // channel ch: samp[ch] is the framer's buffs[ch]).
+        const uint32_t refused = this->base_radio_set_->lastRxLaneRefused(radio_id, cell, ch) ? 1u : 0u;
         // new (pkt[ch]) Packet(frame_id, slot_id, 0, ant_id + ch);
-        new (pkt[ch]) Packet(frame_id, slot_id, cell, ant_id + ch, rx_pad);
+        new (pkt[ch]) Packet(frame_id, slot_id, cell, ant_id + ch, rx_pad, refused);
         // push kEventRxSymbol event into the queue
         this->notifyPacket(kBS, frame_id, slot_id, ant_id + ch,
                            buffer_chunk_size, cursor + tid * buffer_chunk_size);

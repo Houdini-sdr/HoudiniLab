@@ -191,8 +191,8 @@ void RecorderWorker::streamCsi(Packet* pkt, NodeType node_type) {
     if (now - csi_drop_log_ns_ > 5000000000LL) {  // at most one line per 5 s
       csi_drop_log_ns_ = now;
       MLPD_WARN(
-          "CSI view: dropped %zu slot(s) with RX gaps or a refused lane pilot (latest %u padded samples, "
-          "ant %u). The display is stale, not wrong; the link is losing packets or that lane's pilot.\n",
+          "CSI view: dropped %zu slot(s) with RX gaps (latest %u padded samples, "
+          "ant %u). The display is stale, not wrong; the link is losing packets.\n",
           csi_slots_dropped_, pkt->rx_pad, pkt->ant_id);
     }
     return;
@@ -216,6 +216,23 @@ void RecorderWorker::streamCsi(Packet* pkt, NodeType node_type) {
     sendMeta(pkt->ant_id, std::chrono::duration_cast<std::chrono::nanoseconds>(
                             std::chrono::steady_clock::now().time_since_epoch())
                             .count());
+  // The BS refused this lane's pilot on its own (another lane placed the cut):
+  // its samples are real, so the ADC and spectrum above still draw, but its H
+  // would be built from a faded or hit pilot. Its H and constellation go
+  // stale instead (the frame's P and U carry the same flag).
+  if (pkt->lane_refused != 0) {
+    csi_lane_refused_++;
+    const long long now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                              std::chrono::steady_clock::now().time_since_epoch())
+                              .count();
+    if (now - csi_refused_log_ns_ > 5000000000LL) {  // at most one line per 5 s
+      csi_refused_log_ns_ = now;
+      MLPD_WARN("CSI view: kept %zu slot(s) out of H and the constellation, their lane's pilot refused by the BS "
+                "(latest ant %u); the ADC and spectrum still draw\n",
+                csi_lane_refused_, pkt->ant_id);
+    }
+    return;
+  }
   // H is estimated only for a pilot whose H will be USED: the CSI datagram
   // and the constellation are both throttled to csi_throttle_ns_, so an H for
   // every other pilot was computed and thrown away. At R3 (14 FFTs of 4096 per

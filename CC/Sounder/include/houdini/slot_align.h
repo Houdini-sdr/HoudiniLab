@@ -132,6 +132,8 @@ inline std::pair<long long, double> densestNear(const std::vector<double>& cse, 
 /// self-similarity at lag cp + fft is high; data and noise score low. Below
 /// this a pilot slot is not trusted.
 constexpr double kLtsMinSelfsim = 0.4;
+/// The presence gate's absolute bar on the densest window's rms (int16 counts).
+constexpr double kPresenceMinRms = 120.0;
 
 /// The BS presence gate on one lane: a UE burst is there when the densest
 /// window's rms clears the absolute bar and four times the read's quietest
@@ -145,7 +147,7 @@ constexpr double kLtsMinSelfsim = 0.4;
 /// above the bar is self-similar too and passes; the wired X-band makes that
 /// rare.)
 inline bool lanePresent(double pilot_rms, double floor_rms, double ss, bool floorless) {
-  if (pilot_rms < 120.0) return false;
+  if (pilot_rms < kPresenceMinRms) return false;
   return floorless ? ss >= kLtsMinSelfsim : pilot_rms >= 4.0 * floor_rms;
 }
 
@@ -174,13 +176,16 @@ inline bool headAtSlotEdge(long long grid_off, int prefix) { return grid_off <= 
 
 /// Whether a candidate lane takes the slot cut from the current reference.
 /// Lane 0 starts as the reference. A lane that fails the presence gate never
-/// takes it; a passing lane takes it from a failing reference, or from a
-/// passing one whose pilot self-similarity it beats by more than 0.05. So a
-/// frame is skipped only when every lane fails, and a weak lane can neither
-/// skip a frame another lane carries nor place its cut.
+/// takes it; a passing lane takes it from a failing reference, from one whose
+/// pilot fails the LTS check while its own passes (whatever the margin), or
+/// from a passing one whose pilot self-similarity it beats by more than 0.05.
+/// So a frame is skipped only when every lane fails, and a weak lane can
+/// neither skip a frame another lane carries nor place its cut.
 inline bool laneTakesCut(bool cand_present, double cand_ss, bool ref_present, double ref_ss) {
   if (!cand_present) return false;
-  return !ref_present || cand_ss > ref_ss + 0.05;
+  if (!ref_present) return true;
+  if (cand_ss >= kLtsMinSelfsim && ref_ss < kLtsMinSelfsim) return true;
+  return cand_ss > ref_ss + 0.05;
 }
 
 }  // namespace slotalign

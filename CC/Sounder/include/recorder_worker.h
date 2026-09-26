@@ -105,6 +105,10 @@ class RecorderWorker {
   // (AP-10), plus a throttle so the warning cannot flood a lossy run.
   size_t csi_slots_dropped_ = 0;
   long long csi_drop_log_ns_ = 0;
+  // Slots kept out of H and the constellation because the BS refused their
+  // lane's pilot alone (Packet::lane_refused), and that warning's throttle.
+  size_t csi_lane_refused_ = 0;
+  long long csi_refused_log_ns_ = 0;
   // Latest channel estimate H[k] per antenna (DC-centered), cached from the pilot
   // slot and used to equalize that antenna's uplink-data (U) slot.
   std::unordered_map<uint32_t, std::vector<std::complex<float>>> csi_h_;

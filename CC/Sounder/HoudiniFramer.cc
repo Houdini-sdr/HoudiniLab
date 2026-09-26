@@ -524,8 +524,9 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
   // buffers and RadioHoudini::recv reads C lanes, so every read/cache/deliver here
   // must span all C -- a single-lane read hands the driver a null buffs[1] and its
   // null-lane guard rejects the whole read (-2 STREAM_ERROR). The pilot/timing is
-  // located on lane 0 and applied to all lanes (they are sample-aligned by the
-  // combined stream). C==1 reduces to the original single-channel path. The cache
+  // located on the lane with the cleanest pilot and applied to all lanes (they are
+  // sample-aligned by the combined stream). C==1 reduces to the original
+  // single-channel path. The cache
   // is laid out slot-major, lanes contiguous within a slot: [slot k][lane c].
   const size_t C = std::max<size_t>(1, cfg_->bs_rx_ch());
 
@@ -684,8 +685,8 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
     // pilot and equalization from the data.
     L.p_at = L.at;
     if (laneSelfsim(ls, L.at) < 0.5) {  // `at` is a data slot -> the pilot is `gap` earlier
-      if (laneSelfsim(ls, L.at - gap) >= 0.4) L.p_at = L.at - gap;
-      else if (laneSelfsim(ls, L.at + gap) >= 0.4) L.p_at = L.at + gap;
+      if (laneSelfsim(ls, L.at - gap) >= houdini::slotalign::kLtsMinSelfsim) L.p_at = L.at - gap;
+      else if (laneSelfsim(ls, L.at + gap) >= houdini::slotalign::kLtsMinSelfsim) L.p_at = L.at + gap;
     }
     L.ss = laneSelfsim(ls, L.p_at);
     L.pilot_rms = std::sqrt(L.best / n);
@@ -699,12 +700,13 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
   const int16_t* s0 = htdd_cap_buf_.data();
   LaneSearch ref = searchLane(s0);
   size_t ref_lane = 0;
-  // Each lane's own verdict, kept for the per-lane refusal below.
-  std::vector<std::pair<bool, double>> lane_verdict(C);
-  lane_verdict[0] = {ref.present, ref.ss};
+  // Each lane's own floor and densest-window rms, kept for the per-lane
+  // refusal and the quiet warning below.
+  std::vector<std::pair<double, double>> lane_rms(C);  // {pilot rms, floor rms}
+  lane_rms[0] = {ref.pilot_rms, ref.floor_rms};
   for (size_t c = 1; c < C; ++c) {
     LaneSearch L = searchLane(s0 + c * static_cast<size_t>(fn) * 2);
-    lane_verdict[c] = {L.present, L.ss};
+    lane_rms[c] = {L.pilot_rms, L.floor_rms};
     if (houdini::slotalign::laneTakesCut(L.present, L.ss, ref.present, ref.ss)) {
       ref = std::move(L);
       ref_lane = c;
@@ -779,8 +781,12 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
           "BS: no UE burst in frame read (rms %.0f vs floor %.0f, pilot selfsim %.2f, occurrence "
           "%u; the read's loudest slot rms %.0f, %s) -- frame skipped%s\n",
           pilot_rms, floor_rms, ref.ss, qc, std::sqrt(whole_best / n), where,
-          (slots_mode && pilot_rms >= 120.0) ? " (slots mode: a burst above the bar whose pilot failed the LTS check)"
-                                             : "");
+          (slots_mode && std::any_of(lane_rms.begin(), lane_rms.end(),
+                                     [](const std::pair<double, double>& lr) {
+                                       return lr.first >= houdini::slotalign::kPresenceMinRms;
+                                     }))
+              ? " (slots mode: a burst above the bar whose pilot failed the LTS check)"
+              : "");
     }
     return 0;
   }
@@ -790,26 +796,42 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
     htdd_quiet_warned_ = false;
   }
   htdd_quiet_streak_ = 0;
-  // A lane that does not place the cut is refused on its own when it failed
-  // its own gate or LTS check (slot_align.h laneRefused): its packets carry a
-  // pad, so the view refuses them while the other lane's are used. Over the
-  // air the wired X-band usually places the cut, and a faded or burst-hit
-  // sub-6 pilot would otherwise go out as trusted H (review). The gap sink has
-  // no lane field, so recordings do not mark a lane refused alone.
-  htdd_lane_pad_.assign(C, 0);
+  // A lane that does not place the cut is refused on its own when its pilot,
+  // at the cut every lane is delivered at, fails the presence gate or the LTS
+  // check (slot_align.h laneRefused). Its packets carry lane_refused, so the
+  // view keeps its H and constellation stale while its ADC and spectrum, and
+  // the other lane, still draw. Over the air the wired X-band usually places
+  // the cut, and a faded or burst-hit sub-6 pilot would otherwise go out as
+  // trusted H (review). The cut lane's own failure acts on the whole frame
+  // (framePad below). The gap sink has no lane field, so recordings do not
+  // mark a lane refused alone.
+  htdd_lane_refused_.assign(C, false);
   if (htdd_lane_streak_.size() != C) {
     htdd_lane_streak_.assign(C, 0);
     htdd_lane_warned_.assign(C, false);
   }
   for (size_t c = 0; c < C; ++c) {
-    const bool refused = houdini::slotalign::laneRefused(lane_verdict[c].first, lane_verdict[c].second);
-    if (refused && c != ref_lane) htdd_lane_pad_[c] = static_cast<size_t>(n);
+    bool refused = false;
+    if (c != ref_lane) {
+      const int16_t* lc = s0 + c * static_cast<size_t>(fn) * 2;
+      const int at_cut = ref.p_at;
+      double e = 0.0;
+      const bool inside = at_cut >= 0 && at_cut + n <= cg;
+      for (int m = 0; inside && m < n; ++m) {
+        const double re = lc[2 * (at_cut + m)], im = lc[2 * (at_cut + m) + 1];
+        e += re * re + im * im;
+      }
+      const double ss_cut = laneSelfsim(lc, at_cut);
+      refused = houdini::slotalign::laneRefused(
+          houdini::slotalign::lanePresent(std::sqrt(e / n), lane_rms[c].second, ss_cut, slots_mode), ss_cut);
+    }
+    htdd_lane_refused_[c] = refused;
     if (refused) {
       const size_t k = ++htdd_lane_streak_[c];
       if (k == kQuietWarnFrames || (k > kQuietWarnFrames && k % 2000 == 0)) {
         htdd_lane_warned_[c] = true;
-        MLPD_WARN("BS: lane %zu has had no usable pilot for %zu frames (lane %zu carries the frame) -- its slots "
-                  "are refused\n",
+        MLPD_WARN("BS: lane %zu has had no usable pilot for %zu delivered frames (lane %zu places the cut) -- its "
+                  "H and constellation are held\n",
                   c, k, ref_lane);
       }
     } else {

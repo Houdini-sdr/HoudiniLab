@@ -33,7 +33,7 @@ class BaseRadioSet : public IBaseRadioSet {
   // caller stamps it onto the Packet so downstream (notably the CSI/view path) can
   // tell a slot carrying inserted zeros from an all-real one. See AP-10.
   size_t lastRxPadSamples(size_t radio_id, size_t cell_id) const override;
-  size_t lastRxLanePad(size_t radio_id, size_t cell_id, size_t lane) const override;
+  bool lastRxLaneRefused(size_t radio_id, size_t cell_id, size_t lane) const override;
   void radioStart(void) override;
   void radioStop(void) override;
   bool getRadioNotFound() override { return radioNotFound; }

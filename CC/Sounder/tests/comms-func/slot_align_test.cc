@@ -219,6 +219,10 @@ int main() {
     check(sa::laneTakesCut(true, 0.60, false, 0.90),
           "a passing lane takes the cut from a failing reference (mutation: the reference kept, so a weak sub-6 "
           "skipped the frame and the wired X-band was lost with it)");
+    check(sa::laneTakesCut(true, 0.43, true, 0.39) && !sa::laneTakesCut(true, 0.39, true, 0.36),
+          "a lane whose pilot passes the LTS check takes the cut from one that fails it, whatever the margin "
+          "(mutation: the 0.05 margin applied across the bar, so the frame is marked untrusted while a clean "
+          "lane is refused with it)");
     check(!sa::laneTakesCut(true, 0.93, true, 0.90) && sa::laneTakesCut(true, 0.96, true, 0.90),
           "between passing lanes the reference keeps the cut unless beaten by more than 0.05 (mutation: the "
           "margin dropped, so noise in self-similarity flips the cut lane frame to frame)");

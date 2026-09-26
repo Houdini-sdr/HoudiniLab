@@ -412,10 +412,9 @@ size_t BaseRadioSet::lastRxPadSamples(size_t radio_id, size_t cell_id) const {
   return 0;
 }
 
-size_t BaseRadioSet::lastRxLanePad(size_t /*radio_id*/, size_t /*cell_id*/, size_t lane) const {
+bool BaseRadioSet::lastRxLaneRefused(size_t /*radio_id*/, size_t /*cell_id*/, size_t lane) const {
   // Only the native-TDD framer judges each lane's pilot on its own.
-  if (framer_ != nullptr && framer_->gatesRx()) return framer_->lanePad(lane);
-  return 0;
+  return framer_ != nullptr && framer_->gatesRx() && framer_->laneRefusedAlone(lane);
 }
 
 int BaseRadioSet::radioRx(size_t radio_id, size_t cell_id, void* const* buffs,
