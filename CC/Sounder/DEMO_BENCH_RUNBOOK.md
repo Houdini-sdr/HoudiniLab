@@ -117,8 +117,11 @@ It needs:
   `~/houdini_slots`: `export HOUDINI_SOAPY_ROOT=$HOME/houdini_slots` selects it
   for `run_rung.sh`/`fstage_run.sh` runs AND for the dashboard's Check and
   Start. The setup check's stack line shows which one loaded (`host_build`).
-- **Cores.** The sounder pins its own threads to cores 0-4, which are the slow
-  ones on this host; the plugin's BS receive workers inherit core 0 (AP-81).
+- **Cores.** `HOUDINI_CORE_MAP` places the sounder's threads by role and the
+  main thread pins itself only after the radios start, so the plugin's BS
+  receive workers run on the housekeeping cores 0-9 (AP-81, 9.44). The launch
+  (A4) puts the main thread on isolated core 15 and the UE's two TX pacers on
+  isolated 18 and 19.
 
 ## A4. The launch
 
@@ -139,29 +142,31 @@ python3 csi_gui/csi_server.py --control --conf files/houdini-dualband-xw-steer-s
 workers land on the cores that take the 100G data NIC's interrupts (about 61k
 completion IRQs a second on one core, 1-3k on several others), where receive
 softirq work preempts them for milliseconds and whole bursts go out late
-(`DEMO_VERIFICATION.md` 9.36). Cores 10 and 11 took no NIC interrupts on this
-host; pinned there, the late bursts all but stop (9.37-9.39). The dashboard
-passes the variable to the sounder it launches. Before trusting the choice
-on another day, check the cores are still quiet:
-`grep mlx5 /proc/interrupts` (the per-CPU columns for 10 and 11 should not
-move between two reads a few seconds apart).
-
-**With CPU isolation (A9 stage 1) in force**, the sounder's main thread takes
-isolated core 15 and the TX workers 16 and 17, which are performance cores;
-10 and 11 are efficiency cores. There the pacer's worst wake over a 35 min
-run was about 0.28 ms, against 10.5 ms on 10 and 11 (9.41, 9.44). Each TX
-worker still takes its own NIC completion interrupts on its core (about 1,100
-a second), which did not delay it.
+(`DEMO_VERIFICATION.md` 9.36). The dashboard passes the variables to the
+sounder it launches. **Today's values:** the main thread on isolated core 15
+and the pacers on isolated 18 and 19, all performance cores. The pacers moved
+from 16 and 17 when the NIC's receive hashing put a BS receive flow on queue 16
+(the hashing is re-drawn at every rig-host boot), so check it every power-up
+with `tests/demo-verify/pacer_core_check.py --cores 15,18,19` (A8c step 5).
+**History:** cores 10 and 11 (efficiency cores, no NIC interrupts) first
+stopped the late bursts (9.37-9.39); on isolated performance cores the
+pacer's worst wake over a 35 min run fell to about 0.28 ms against 10.5 ms on
+10 and 11 (9.41, 9.44).
 
 The check's full form reads both radios' stacks and FAILs if they differ.
 Read the stack there, not from this file: it changes with every deploy. The
 last validated stack is in the newest `DEMO_VERIFICATION.md` section 9 row.
 
-The configs, from the ladder (walkthrough section 3): `houdini-r0.json`
-(control), `houdini-dualband-r1.json`, `-r2.json`, `-r3a.json`,
-`houdini-dualband.json` (R3, the demo) and `houdini-dualband-40.json` (the
-40 MHz fallback). On a freshly deployed stack, climb R1 to R3 before running the
-demo. R0 (NCO 500 MHz) cannot run while the F3b chain is fitted: the VBF-2450+
+The demo configs (A8c): `houdini-dualband-xw-steer-slots.json` (cabled) and
+`-xw-steer-slots-fe.json` (through the XUD1A, A2b), both on the slots plugin.
+The slots variants also turn on the pre-FFT carrier correction and the 0.12 ppm
+steering deadband, so dropping back to `-xw-steer(-fe).json` changes all three
+at once. `houdini-dualband-steer.json` is the same build with the X-band at 48
+MHz. The older ladder (walkthrough section 3): `houdini-r0.json` (control),
+`houdini-dualband-r1.json`, `-r2.json`, `-r3a.json`, `houdini-dualband.json`
+(R3, the 48 MHz unsteered baseline of 9.1-9.54) and `houdini-dualband-40.json`;
+on a freshly deployed stack a short run of the demo config (9.70) replaces the
+climb. R0 (NCO 500 MHz) cannot run while the F3b chain is fitted: the VBF-2450+
 bandpasses on the sub-6 DAC paths block its beacon, so the UE never acquires
 (`DEMO_VERIFICATION.md` 9.40). It is the control only with the filters out.
 
@@ -349,7 +354,9 @@ steered, the BS receiving only its rx slots): cabled, config
 `files/houdini-dualband-steer.json`, recording `~/demo_rec/FINAL.rec`; and the
 frozen build `demo-xw` in `~/repos/HoudiniLab-demoxw` with
 `files/houdini-dualband-xw-steer.json` on the default plugin (no
-`HOUDINI_SOAPY_ROOT`), recording `~/demo_rec/FINAL_XW.rec`.
+`HOUDINI_SOAPY_ROOT`), recording `~/demo_rec/FINAL_XW.rec`. The frozen build is a
+CABLED fallback only: it predates the X-band front-end setup (AP-86), so on the
+XUD1A chain its UE X-band channel plays silence.
 
 Moving the rig means rebooting the rig host, which re-draws the NIC's receive
 hashing (a node's RX flow can land on a pinned core) and can wedge a node's data
