@@ -40,8 +40,7 @@ Frame (122.88 MSPS, in replay RAM, looped):
    python3 loopback_ofdm.py --board <board-ip> --html       # plus a visualization in /tmp/loopback_ofdm.html
    ```
 
-   Pass `--board` every time: the built-in default is an address of the
-   bench the tool was written on.
+   `--board` is required for a hardware run: the tool has no default board.
 
 **Visualization (`--html`):** writes a self-contained HTML page (no external
 libraries, inline canvas, opens in any browser) with the channel `|H|` (dB),

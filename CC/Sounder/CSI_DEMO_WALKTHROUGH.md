@@ -497,7 +497,7 @@ from before that path existed, and it is not part of this demo.
 | `--csi-fps` | sounder default (30) | Per antenna stream rate out of the sounder |
 | `--launch` | off | Start the sounder in viewing mode on this host at once |
 | `--control` | off | Start, Stop, Restart and Check buttons and a config list (the sounder's `files/houdini*.json`) in the page header; section 4.4 |
-| `--conf` | none | The config to run (with `--launch` or `--control`), and the one the page's axes and subcarrier layout come from |
+| `--conf` | `files/houdini-1u.json` | The config to run (with `--launch` or `--control`), and the one the page's \|H\| axis top comes from (`dashboard_mag_top`) |
 | `--sounder-dir` | the checkout `csi_server.py` is in | Which checkout's `build/sounder` runs |
 | `--venv` | the activated venv, else `~/houdini_test` | The SoapySDR and Houdini plugin prefix the sounder runs with |
 | `--log-dir` | off | Write each start's sounder output to `<dir>/sounder_<UTC>.log` |
@@ -824,7 +824,7 @@ read, and the two may not disagree). Six are available:
 | `legacy_guard` | The same, with a 32 sample cyclic guard inserted before the Gold field, in the style of an 802.11 long training field. |
 | `dot11` | The 802.11a/g/n legacy preamble as the standard defines it: the short training field, then the guard and two long training symbols. |
 | `nr` | The 5G NR primary synchronisation signal, then a guard and two repeats of a tracking symbol built from the NR reference sequence. The client finds it on the repeated tracking symbol. |
-| `nr_pss` | The same burst as `nr`, sample for sample, but the client finds it the way an NR handset does: a plain matched filter on the primary synchronisation signal, with no repeat check. The log says `threshold form forced to nolag` when this is in effect. |
+| `nr_pss` | The same burst as `nr`, sample for sample, but the client finds it the way an NR handset does: a plain matched filter on the primary synchronisation signal, with no repeat check. The log says `threshold form forced to coherence` when this is in effect. |
 | `nr_pss_bl` | The band-limited beacon of the dual-band configs: the NR primary synchronisation signal, then a guarded pair of tracking symbols on the central 96 tones, all inside the sub-6 channel filter's plus or minus 24 MHz. |
 
 The first four were measured on the bench, four rounds each with the order
@@ -1106,11 +1106,10 @@ python3 csi_gui/teardown_framer.py --topology <that file>
 ```
 
 It reads the radio addresses from the topology file, opens each one, issues
-the framer abort, clears the transmit RAM, and releases the gate. Without
-`--topology` it reads `files/topology-houdini.json`, the legacy configs'
-topology, which is the wrong file for a dual-band config (their topology is
-`files/topology-houdini-dualband.json`). You can also name radios directly
-with `--node <addr>` (repeatable).
+the framer abort, clears the transmit RAM, and releases the gate. Name the
+radios one of three ways: `--conf files/<config>.json` (the topology that
+config's `serial_file` names), `--topology <file>`, or `--node <addr>`
+(repeatable). With none of them it refuses rather than guess.
 
 Read the exit status, not just the output. It is 0 only when every radio was
 cleared, and non-zero when one could not be opened or torn down, which is

@@ -73,7 +73,7 @@ struct RadioParams {                // what a radio needs to open: no Config poi
   double rx_gain, tx_gain; std::string bw / antenna facts; stream arguments
 };
 class Radio {                       // abstract and NARROW: streams, time, device facts
-  enum class Type { kSoapyIris, kSoapyHoudini, kUhdNative };
+  enum class Type { kSoapyIris, kSoapyHoudini };   // a native-UHD type was planned; the PURE_UHD build uses its own sets
   static std::unique_ptr<Radio> create(Type, const RadioParams&);   // the one place that knows the type
   // pure virtual: recv (one form), xmit, activateRecv/Xmit, deactivateRecv/Xmit,
   //   getTriggers, setup (gains), drain_buffers

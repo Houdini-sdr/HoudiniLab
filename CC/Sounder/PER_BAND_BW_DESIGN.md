@@ -220,9 +220,9 @@ one-rate only, or the sub-6 beacon.
 | `HoudiniFramer.cc` energy search, presence gate, self-similarity, leading edge, `beaconLeadTicks` | all on lane 0 (sub-6) | Adapts (Q3); the beacon lead keeps the prefiltered figure |
 | `cir.h` Hann window | the non-zero span of H | Adapts per antenna |
 | `csi_gui/csi_server.py` | each card's axis from its own CSI2 frame (4096 bins, unused tones drawn as gaps); MET1 per antenna feeds the RB/bandwidth line; one global `dashboard_mag_top` | Adapts; the X-band trace spans twice the bins; the 3 dB lower X-band level stays inside the 75-115 dB window |
-| `tests/demo-verify/rig_dumps.py`, `fstage_report.py` `ul()`, `fstage_hratio.py`, `ab_report.py`, `mer_sampler.py` | read N and `data_ind` from each dump | Adapts (the dumps carry the antenna's own `data_ind`) |
+| `tests/demo-verify/rig_dumps.py`, `fstage_report.py` `ul()`, `archive/fstage_hratio.py`, `archive/ab_report.py`, `mer_sampler.py` | read N and `data_ind` from each dump | Adapts (the dumps carry the antenna's own `data_ind`) |
 | `tests/demo-verify/fstage_report.py` `stage_stats` | refuses a rung tag reused across numerologies by `N` only (4096 either way) | Not changed: give the 270 RB runs their own tag (the rig plan does); recorded as a residual |
-| `evm_compare.py`, `ap15_diff.py` | take the first `ul_data_f_*.bin` as THE reference | Not on the path (antenna-0 bsframe tools); no X-band reference file is written, so the first stays the sub-6's |
+| `archive/evm_compare.py`, `archive/ap15_diff.py` | take the first `ul_data_f_*.bin` as THE reference | Not on the path (antenna-0 bsframe tools); no X-band reference file is written, so the first stays the sub-6's |
 | `PYTHON/IrisUtils/plot_hdf5.py`, `hdf5_lib.py`, `csi_analysis.py` | one `OFDM_PILOT_F` / `OFDM_DATA_SC` for all antennas | Not on the path: recording mode is refused for differing bands, and these tools already fail at fft 4096 with 1596 tones (`hdf5_lib.py` sizes the FFT as the power of two above the tone count) |
 | `config_pilot_test.cc` | the pilot checked inside +-24 MHz | Still right for band 0; the new config is added to its list; the X-band band is tested in `per_band_test` |
 | `mode_v_bringup_test.cc`, `rf_plan_test.cc`, `band_filters_test.cc`, `tx_rx_boundary_test.cc` | one width, +-25 MHz | Extended (section 4) |
