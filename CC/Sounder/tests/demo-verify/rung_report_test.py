@@ -5,6 +5,18 @@ rr = importlib.util.module_from_spec(spec); spec.loader.exec_module(rr)
 fails = 0
 def check(ok, what):
     global fails; print(("PASS " if ok else "FAIL ") + what); fails += (not ok)
+def report(lines):
+    """rung_report's printed report for a log of these lines; the log is removed
+    whatever main does."""
+    log = tempfile.NamedTemporaryFile("w", suffix=".log", delete=False)
+    try:
+        log.write("\n".join(lines) + "\n"); log.close()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rr.main(log.name)
+        return out.getvalue()
+    finally:
+        os.remove(log.name)
 L = ["12:000001 INFOR syncSearch: detection #1 statistic 0.9712 vs bar 0.3500 (confirm), idx 701 in 4096",
      "12:000002 INFOR syncSearch: detection #2 statistic 0.9650 vs bar 0.3500 (confirm), idx 702 in 4096",
      "12:000003 WARNG BS 168.6.244.22 link health: [WARN] tx0.late +5 tx0.under +1 | app ok",
@@ -24,23 +36,19 @@ acq = rr.acquisitions(L)
 check(acq == [(0.9712, 0.35), (0.965, 0.35)], "detections are read at any bar: %s" % acq)
 # Fails under: summing every link-health line (the BS's own tx0 adds +5 late, +1 under).
 check(rr.ue_tx0_totals(L) == (7, 2, 100), "UE tx0 totals are the UE's lines only: %s" % (rr.ue_tx0_totals(L),))
-log = tempfile.NamedTemporaryFile("w", suffix=".log", delete=False); log.write("\n".join(L) + "\n"); log.close()
-out = io.StringIO()
-with contextlib.redirect_stdout(out):
-    rr.main(log.name)
-os.remove(log.name)
-check("UE tx0 totals: late 7, under 2, zerofill 100" in out.getvalue() and "vs bar [0.35]" in out.getvalue(),
+o1 = report(L)
+check("UE tx0 totals: late 7, under 2, zerofill 100" in o1 and "vs bar [0.35]" in o1,
       "the report prints both")
 # Fails under: BAD SYNC counted as a constant 0 (or its pattern not matching the line).
-check("BAD SYNC 1," in out.getvalue(), "a BAD SYNC line is counted")
+check("BAD SYNC 1," in o1, "a BAD SYNC line is counted")
 # Fails under: the CNS low read from the first summary, or from the throttled
 # per-event warning ("low occurrence 8"), instead of the last summary.
-check("CNS low 7 of 900 (summary)" in out.getvalue(), "the CNS low is the last summary's total")
+check("CNS low 7 of 900 (summary)" in o1, "the CNS low is the last summary's total")
 # Fails under: the residual pattern dropping a sign (a negative residual then
 # never matches and the range reads 2..2 over 1 re-sync).
-check("re-syncs alive 2; resid -3..2" in out.getvalue(), "negative re-sync residuals are read")
+check("re-syncs alive 2; resid -3..2" in o1, "negative re-sync residuals are read")
 # Fails under: reading the retired pu_spacing_err field (the line never prints).
-check("BS slots clamped past the capture edge: 1 of 2 sampled frames" in out.getvalue(),
+check("BS slots clamped past the capture edge: 1 of 2 sampled frames" in o1,
       "the report counts the frames whose slots were clamped")
 # Real-format health lines (RadioHoudini's health thread, link_health.h line()):
 # an app-only alarm reads "clean" on the device side.
@@ -50,12 +58,7 @@ H = ["57:000001 WARNG: BS 192.168.10.22 link health: [BS 192.168.10.22] 5.0 s: i
      " | app: rx_err +0, rx_short +0, rx_pad +0, tx_short +0, tx_sat +0",
      "57:000003 INFOR: BS 192.168.10.22 link health: [BS 192.168.10.22] 60.0 s: irq 12/s, preflight ok: clean"
      " | app: rx_err +0, rx_short +0, rx_pad +0, tx_short +0, tx_sat +0"]
-log = tempfile.NamedTemporaryFile("w", suffix=".log", delete=False); log.write("\n".join(H) + "\n"); log.close()
-out = io.StringIO()
-with contextlib.redirect_stdout(out):
-    rr.main(log.name)
-os.remove(log.name)
-o2 = out.getvalue()
+o2 = report(H)
 check("health alarm lines 2 " in o2 and "'rx_pad +N': 1" in o2 and "'tx_sat +N': 1" in o2 and "'rx0.gated +N': 1" in o2,
       "an app-only alarm and an rx bank alarm both count, the periodic clean line does not (mutation: drop lines "
       "reading 'clean |', or no rx bank pattern): " + o2[o2.find("health alarm"):].split("\n")[0])

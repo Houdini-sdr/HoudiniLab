@@ -111,4 +111,5 @@ except ValueError:
 # Fails under: removing the numerology check in stage_stats.
 check(refused, "one tag reused for two numerologies is refused")
 shutil.rmtree(root)
+os.remove(f.name); os.remove(cut.name)
 print("%d failure(s)" % fails); sys.exit(1 if fails else 0)
