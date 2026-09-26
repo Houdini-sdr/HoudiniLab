@@ -115,6 +115,21 @@ int main(int argc, char** argv) {
           "the device's single marked=N parses as one counter beside the per-port drops");
     check(eq(blindCounters({{"egress.marked", 255}}), {"egress.marked=255 (saturated: further drops cannot be counted)"}),
           "a saturated single marked counter is flagged (mutation: only the old per-port 'egress.marked_' prefix read)");
+    // The software lane's 0.3.1 strings, from their T0 (FormatEgressStatus and the paced tests' TX_HOST_STATUS).
+    const auto t0 = parseEgressStatus("drop=p0:3,p1:2,p2:0,p3:255;stall_seen=1,stall_evt=7;marked=5");
+    check(t0.at("drop_p0") == 3 && t0.at("drop_p1") == 2 && t0.at("drop_p3") == 255 && t0.at("stall_seen") == 1 &&
+              t0.at("stall_evt") == 7 && t0.at("marked") == 5 && t0.size() == 7,
+          "0.3.1's EGRESS_STATUS parses to its seven counters (mutation: marked split as per-port)");
+    FakeNode c;
+    c.keys["TX_HOST_STATUS"] =
+        "eob_recloses=0 eob_recloses_ch0=0 eob_recloses_ch1=0 offset_us_ch0=-100.0 offset_samples_ch0=0 "
+        "offset_implausible_ch0=0 anchor_rejects_ch0=0 rate_ppm_ch0=0.00 late_refusals_ch0=0 write_min_margin_us_ch0=inf "
+        "release_min_margin_us_ch0=inf release_late_ch0=0 burst_refusals_ch0=0 cold_releases_ch0=0 cold_window_ms_ch0=inf";
+    c.keys["EGRESS_STATUS"] = "drop=p0:0,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marked=0";
+    const auto cc = collectCounters(c.read());
+    check(cc.at("host.eob_recloses") == 0 && cc.count("host.cold_releases_ch0") == 0 && cc.at("egress.marked") == 0,
+          "0.3.1's TX_HOST_STATUS with its cold keys and 'inf' values reads the alarm fields only (mutation: every "
+          "host key alarmed)");
     FakeNode n;
     n.keys["EGRESS_STATUS"] = "drop=p0:255,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marked=p0:0,p1:0,p2:0,p3:0";
     LinkHealth h(n.read(), "bs", n.clock());

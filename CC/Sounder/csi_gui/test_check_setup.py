@@ -161,6 +161,11 @@ rc, rep, lv = run()
 det = [r["detail"] for r in rep["results"] if r["what"] == "egress 127.0.0.2"]
 check(rc == 0 and lv["egress 127.0.0.1"] == "PASS" and lv["egress 127.0.0.2"] == "WARN" and det and "marked" in det[0],
       "a saturated single marked=N counter is a WARN, an unsaturated one passes (mutation: only per-port items read)")
+json.dump({"127.0.0.1": "drop=p0:0,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marked=0",
+           "127.0.0.2": "drop=p0:3,p1:2,p2:0,p3:255;stall_seen=1,stall_evt=7;marked=5"}, open(egress_file, "w"))
+rc, rep, lv = run()
+check(rc == 1 and lv["egress 127.0.0.1"] == "PASS" and lv["egress 127.0.0.2"] == "FAIL",
+      "0.3.1's strings (the software lane's T0): clean passes, a recorded stall fails (mutation: stall_seen not read)")
 json.dump({"127.0.0.1": HEALTHY}, open(egress_file, "w"))
 rc, rep, lv = run()
 check(rc == 0 and lv["egress 127.0.0.2"] == "WARN", "an unreadable EGRESS_STATUS is a WARN (breaks if it passes silently or fails the run)")

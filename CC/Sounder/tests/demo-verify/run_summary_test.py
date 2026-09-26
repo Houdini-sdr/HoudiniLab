@@ -100,6 +100,14 @@ check(rs.steering_pushes(STEER) == 2,
 PB = ["37:988647 INFOR: UE pilot burst: scheduled 11 frames up to 490587028 (pad 148)",
       "38:002916 INFOR: UE pilot burst: scheduled 3 frames up to 494273429 (pad 149)"]
 check(rs.pilot_frames(PB) == (14, 2), "a schedule line counts its N frames (mutation: count the lines as bursts): %s" % (rs.pilot_frames(PB),))
+C31 = ["57:1 INFOR: UE 192.168.10.21 TX_HOST_STATUS: eob_recloses=0 eob_recloses_ch0=0 eob_recloses_ch1=0 offset_us_ch0=-25.8 "
+       "offset_samples_ch0=4 offset_implausible_ch0=0 anchor_rejects_ch0=0 rate_ppm_ch0=-0.00 late_refusals_ch0=0 "
+       "write_min_margin_us_ch0=29753.6 release_min_margin_us_ch0=-64417.1 release_late_ch0=24691 burst_refusals_ch0=0 "
+       "cold_releases_ch0=12710 cold_window_ms_ch0=249.6"]
+w31 = [t for lv, t in rs.verdict(GOOD + C31) if lv == "WARN"]
+check(any("late releases" in t and "ch0 24691" in t for t in w31) and not any("12710" in t for t in w31),
+      "0.3.1's TX_HOST_STATUS: release_late read as before, the cold keys not taken for it (mutation: a looser key "
+      "pattern): %s" % w31)
 # main: the exit status is the verdict's, read from a run directory's largest log
 d = tempfile.mkdtemp(prefix="run_summary_")
 open(os.path.join(d, "small_cpu.log"), "w").write("x\n")
