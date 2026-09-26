@@ -276,9 +276,11 @@ steered, cabled):
   drop and mark counters stop at 255; a throughput test fills them (9.73). A
   run is not affected, but its link health can no longer see a new egress
   drop, and check_setup says so with a WARN. No software path clears them:
-  a node boot does (a power cycle or a reboot, because the boot service loads
-  the bitstream again), as does a PL reload of the same bitstream (a deploy,
-  so the user's call). A restart of the device services does not. Do not run
+  a node boot does (a reboot is enough, and so is a power cycle, because the
+  boot service loads the bitstream again), as does a PL reload of the same
+  bitstream (a deploy, so the user's call). With an XUD1A attached, a boot
+  follows A2b step 1: its 12 V off through the boot, on only after the PL has
+  loaded, then the role. A restart of the device services does not. Do not run
   a throughput test after the nodes' last boot before a demo, and after any
   boot confirm with check_setup that the counters read 0 and the fpga version
   is the expected one (a re-flashed card boots the bitstream baked into its
