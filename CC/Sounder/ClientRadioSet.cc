@@ -255,6 +255,7 @@ void ClientRadioSet::init(ClientRadioContext* context) {
   // Packets that tile the slot exactly, RX and TX alike (1920: 32 per RX slot,
   // 64 per TX slot at the 2x TX rate) [user].
   p.packet_samples = houdini::rxpkt::tiledPacketOrDefault(_cfg->samps_per_slot());
+  if (_cfg->xband_frontend_static()) p.xband_fe_state = "tx";  // AP-86: the UE's board transmits
   p.rx_freq_offset_hz = ueRxFreqOffsetHz();
   p.tx_freq_offset_hz = ueTxFreqOffsetHz();
   // Houdini UE: the UE feeds pilots live, so host-fed streaming TX (SH-183);

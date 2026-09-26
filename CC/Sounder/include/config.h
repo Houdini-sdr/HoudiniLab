@@ -78,6 +78,8 @@ class Config {
   /// The BS removes each lane's pilot-measured carrier offset before the FFT.
   inline bool bs_cfo_pre_fft(void) const { return this->bs_cfo_pre_fft_; }
   inline bool hw_framer(void) const { return this->hw_framer_; }
+  /// AP-86: the X-band RF front end attached (per-session static state).
+  inline bool xband_frontend_static(void) const { return this->xband_frontend_static_; }
   // Radio backend selector within the SoapySDR (non-UHD) path: "iris" (default)
   // drives the Iris HW correlator/TDD; "houdini" drives the Houdini RFSoC over
   // SoapyHoudiniSDR with software beacon sync (find_beacon). See ClientRadioSet.
@@ -512,6 +514,7 @@ class Config {
   bool bs_rx_slots_ = false;  // AP-87
   bool bs_cfo_pre_fft_ = false;
   bool hw_framer_;
+  bool xband_frontend_static_ = false;  // AP-86
   std::string radio_type_;
   std::string remote_port_;
   bool ue_tdd_pilot_ = false;

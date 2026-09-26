@@ -277,6 +277,7 @@ void BaseRadioSet::init(BaseRadioContext* context) {
   p.rx_gain_db = _cfg->houdini_rx_gain_db();
   // Packets that tile the slot exactly (1920 x 32 at the demo's 61440) [user].
   p.packet_samples = houdini::rxpkt::tiledPacketOrDefault(_cfg->samps_per_slot());
+  if (_cfg->xband_frontend_static()) p.xband_fe_state = "rx";  // AP-86: the BS's board receives
   // Houdini BS: the beacon is device BRAM replay (tx_mode=replay). The RX
   // host port follows the channel (RadioHoudini::rxStreamArgs).
   p.tx_mode = "replay";

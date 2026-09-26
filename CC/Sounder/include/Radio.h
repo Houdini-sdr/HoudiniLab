@@ -81,6 +81,7 @@ struct RadioParams {
   /// the same MTU, so one divisor of the slot tiles both (the TX slot is twice
   /// the RX slot's samples). 0 = the driver's default MTU.
   size_t packet_samples = 0;
+  std::string xband_fe_state;  ///< AP-86: the X-band front end's static state, "tx"/"rx"; empty = none
 };
 
 class Radio {

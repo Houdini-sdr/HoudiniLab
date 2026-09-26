@@ -7,6 +7,15 @@
  * recipe (handoff 2026-09-22, the reference driver host/examples/dualband_link.py)
  * and the HS-202 plan section 3.2, which the device enforces:
  *   1. FORCE_IDLE: a known-idle device, leaks from an earlier session reported.
+ *   1b. AP-86, only with the X-band RF front end attached (Plan::xband_fe_state):
+ *      the board's STATIC state for this session. After FORCE_IDLE, which
+ *      resets TDD_EXTPIN_CTRL/SRC, and before any schedule, arm or stream, since
+ *      the static SRC write is refused unless the TDD framer is idle. CTRL with
+ *      the interlock, SRC static tx (UE) or rx (BS), then TDD_EXTPIN_STAT polled
+ *      until the source is applied, and every opened TX channel must read
+ *      drive_allow_chK=1 or its TX would be blanked (the software lane's spec,
+ *      BACKLOG AP-86). The node-lifetime state (MODE xband, the guard, the
+ *      board's power) is houdini-role's, not the sounder's.
  *   2. setSampleRate(TX) on EVERY TX channel, then RFDC_DAC_FS: the TX rate
  *      and the DAC Fs together fix interpolation 24.
  *   3. RFDC_ADC_FS, then setSampleRate(RX) on every RX channel: decimation 40
@@ -42,10 +51,12 @@
 
 #include "houdini/link_health.h"
 #include <cstdlib>
+#include <chrono>
 #include <limits>
 #include <map>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "SoapySDR/Constants.h"
@@ -70,6 +81,9 @@ struct Plan {
   double rx_gain_db = std::numeric_limits<double>::quiet_NaN();
   double rx_freq_offset_hz = 0.0;          ///< deliberate detune (AP-33), normally 0
   double tx_freq_offset_hz = 0.0;
+  /// AP-86: the X-band front end's static state for this node, "tx" (UE) or
+  /// "rx" (BS); empty = no front end, nothing written (the wired build).
+  std::string xband_fe_state;
 
   double ncoFor(size_t ch) const {
     const auto it = nco_by_channel.find(ch);
@@ -94,6 +108,7 @@ struct Result {
   std::vector<ChannelResult> tx, rx;
   std::vector<std::string> log;  ///< one line per step, with the device's readbacks
   std::string snapshot;          ///< RFDC_SNAPSHOT after the writes
+  std::string xband_fe_state;    ///< AP-86: as the plan; the post-setup check re-reads it
 
   /// Whether RX `ch` needs the +-24 MHz channel filter.
   bool rxFilter(size_t ch) const {
@@ -161,6 +176,48 @@ inline std::string blockField(const std::string& raw, const std::string& addr, c
   return "";
 }
 
+/// One `key=value` field of a readback whose fields are separated by spaces,
+/// commas, semicolons or newlines (TDD_EXTPIN_STAT), or "" when absent. The
+/// key matches whole: `drive_allow` never matches `drive_allow_ch0=`.
+inline std::string kvField(const std::string& raw, const std::string& key) {
+  size_t p = 0;
+  while (p < raw.size()) {
+    const size_t e = std::min(raw.find_first_of(" ,;\t\r\n", p), raw.size());
+    const std::string tok = raw.substr(p, e - p);
+    if (tok.size() > key.size() && tok.compare(0, key.size(), key) == 0 && tok[key.size()] == '=')
+      return tok.substr(key.size() + 1);
+    p = e + 1;
+  }
+  return "";
+}
+
+/// AP-86: whether TDD_EXTPIN_STAT shows the static source applied in `state`
+/// (tx or rx) and settled, and every channel in `tx` allowed to drive. `why`
+/// names the first miss.
+inline bool extpinStaticOk(const std::string& stat, const std::string& state, const std::vector<size_t>& tx,
+                           std::string* why) {
+  if (kvField(stat, "src_applied") != "static") {
+    *why = "src_applied=" + kvField(stat, "src_applied");
+    return false;
+  }
+  if (kvField(stat, "applied") != state) {  // a board static in the WRONG state passes the rest
+    *why = "applied=" + kvField(stat, "applied") + ", wanted " + state;
+    return false;
+  }
+  if (kvField(stat, "seq_busy") != "0") {
+    *why = "seq_busy=" + kvField(stat, "seq_busy");
+    return false;
+  }
+  for (size_t ch : tx) {
+    const std::string k = "drive_allow_ch" + std::to_string(ch);
+    if (kvField(stat, k) != "1") {
+      *why = k + "=" + kvField(stat, k);
+      return false;
+    }
+  }
+  return true;
+}
+
 inline void expectNear(const char* what, size_t ch, double got, double want, double tol) {
   if (!(std::fabs(got - want) <= tol)) {
     char b[160];
@@ -178,7 +235,11 @@ inline Result bringUp(SoapySDR::Device& dev, const Plan& p) {
   if (!(p.tx_rate_hz > 0.0 && p.rx_rate_hz > 0.0 && p.adc_fs_hz > 0.0 && p.dac_fs_hz > 0.0)) {
     throw std::invalid_argument("mode V bring-up: rates and converter Fs must all be set");
   }
+  if (!p.xband_fe_state.empty() && p.xband_fe_state != "tx" && p.xband_fe_state != "rx") {
+    throw std::invalid_argument("mode V bring-up: xband_fe_state must be tx, rx or empty, not '" + p.xband_fe_state + "'");
+  }
   Result res;
+  res.xband_fe_state = p.xband_fe_state;
   // Derive and validate every channel BEFORE any write, so a refused plan
   // leaves the device untouched.
   const auto cp = p.converters();
@@ -202,6 +263,31 @@ inline Result bringUp(SoapySDR::Device& dev, const Plan& p) {
   // 1
   dev.writeSetting("FORCE_IDLE", "");
   logLine("FORCE_IDLE");
+  // 1b
+  if (!p.xband_fe_state.empty()) {
+    dev.writeSetting("TDD_EXTPIN_CTRL", "txsel=1,trsw=1,ilock=1");
+    dev.writeSetting("TDD_EXTPIN_SRC", "src=static,state=" + p.xband_fe_state);
+    // The walk takes up to about 82 us and the adoption about 1 ms; 200 ms is
+    // far past both, so a timeout means the write did not take (an unknown
+    // key no-ops silently: this readback is the evidence, standing trap 1).
+    std::vector<size_t> tx_chs;
+    for (const auto& t : res.tx) tx_chs.push_back(t.channel);
+    std::string stat, why;
+    const auto t0 = std::chrono::steady_clock::now();
+    for (;;) {
+      stat = dev.readSetting("TDD_EXTPIN_STAT");
+      if (detail::extpinStaticOk(stat, p.xband_fe_state, tx_chs, &why)) break;
+      if (std::chrono::steady_clock::now() - t0 > std::chrono::milliseconds(200))
+        throw std::runtime_error("mode V bring-up: the X-band front end's static " + p.xband_fe_state +
+                                 " did not take (" + why + "; TDD_EXTPIN_STAT '" + stat +
+                                 "'): a plugin that ignores the keys, or the board not ready (pa_ready: its "
+                                 "power board or the ADTR1107 init); a node without houdini-role refuses the "
+                                 "SRC write itself, with its reason");
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    logLine("TDD_EXTPIN_CTRL txsel=1,trsw=1,ilock=1 -> " + dev.readSetting("TDD_EXTPIN_CTRL"));
+    logLine("TDD_EXTPIN_SRC src=static,state=" + p.xband_fe_state + " -> STAT " + stat);
+  }
   // 2
   const size_t n_tx = dev.getNumChannels(SOAPY_SDR_TX), n_rx = dev.getNumChannels(SOAPY_SDR_RX);
   for (size_t ch = 0; ch < n_tx; ++ch) dev.setSampleRate(SOAPY_SDR_TX, ch, p.tx_rate_hz);
@@ -375,6 +461,19 @@ inline PostSetup postSetupCheck(SoapySDR::Device& dev, const Result& r) {
       throw std::runtime_error("mode V: RX ch" + std::to_string(x.channel) + " (ADC " + addr + ") runs cal=" + mode +
                                ", wanted mode" + std::to_string(x.cal_mode));
     }
+  }
+  if (!r.xband_fe_state.empty()) {
+    // AP-86: the static state must survive the setups (the plugin resets it at
+    // open, FORCE_IDLE and close); a TX channel not allowed to drive would be
+    // blanked for the whole run.
+    std::vector<size_t> tx_chs;
+    for (const auto& t : r.tx) tx_chs.push_back(t.channel);
+    const std::string stat = dev.readSetting("TDD_EXTPIN_STAT");
+    std::string why;
+    if (!detail::extpinStaticOk(stat, r.xband_fe_state, tx_chs, &why))
+      throw std::runtime_error("mode V: the X-band front end's static " + r.xband_fe_state +
+                               " was lost across the setups (" + why + "; TDD_EXTPIN_STAT '" + stat + "')");
+    ps.log.push_back("TDD_EXTPIN_STAT after the setups -> " + stat);
   }
   const std::string pf = dev.readSetting("RFDC_PREFLIGHT");
   ps.preflight = pf.substr(0, pf.find('\n'));
