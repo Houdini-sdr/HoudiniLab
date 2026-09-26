@@ -9,7 +9,11 @@ endif()
 
 configure_file(${CMAKE_SOURCE_DIR}/include/version_config.h.in ${CMAKE_SOURCE_DIR}/include/version_config.h)
 
-option(FORCE_BUILD_PATH "Hardcode the build directory path to be 'build/'" ON)
+# Off by default: on, every build directory wrote its libraries into the
+# source tree's build/, so a second build directory (a Debug or sanitizer
+# build) overwrote the first one's archive and the first then linked it.
+# The usual build in build/ is the same either way.
+option(FORCE_BUILD_PATH "Hardcode the build directory path to be 'build/'" OFF)
 if(FORCE_BUILD_PATH)
   message(STATUS "Setting the build directory to build folder")
   set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/build)
