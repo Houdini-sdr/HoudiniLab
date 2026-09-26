@@ -1563,7 +1563,7 @@ nothing about the Iris/UHD untargeted branch, which is deliberately unchanged.
 
 ## 9. AP-79 mode V on silicon: the first runs (2026-09-23)
 
-Rig host .26, BS .22, UE .21, fpga `0a32114f`, device `e002dead` then `05707a98` (log flush only), host plugin `b0addfb9` then `a4aab2a4` (SH-425). Branch `feat/sub6-xband-demo`; run logs, state records and dumps in `~/repos/HoudiniLab-ap79/CC/Sounder/ap79_runs/` on .26. Run plan: `tests/demo-verify/AP79_FIRST_RUN.md`.
+Rig host .26, BS .22, UE .21, fpga `0a32114f`, device `e002dead` then `05707a98` (log flush only), host plugin `b0addfb9` then `a4aab2a4` (SH-425). Branch `feat/sub6-xband-demo`; run logs, state records and dumps in `~/repos/HoudiniLab-ap79/CC/Sounder/ap79_runs/` on .26. Run plan: `tests/demo-verify/AP79_FIRST_RUN.md` (retired once the runbook and `demo_run.sh` replaced it; in git history).
 
 **Where the cited run directories are now.** The superseded worktrees `-ap79`, `-ap80`, `-diag`, `-perband`, `-ap87` and `-steer` were removed on .26; their `ap79_runs/` trees were moved whole to `~/app_archive/ap79_runs/<ap79|ap80|diag|perband|ap87|steer>/`, so a row citing `~/repos/HoudiniLab-<name>/CC/Sounder/ap79_runs/X` reads `~/app_archive/ap79_runs/<name>/X` (map and per-worktree rows in `~/app_archive/INDEX.md`). The per-run sampler files once in `/tmp` are in `~/app_archive/tmp_evidence/`. The spare recordings `V4.rec` and `XV3.rec` are in `~/demo_rec/archive/`. The live worktrees (`-demoxw`, the frozen build, and `-rxwin`, the demo head) keep their runs in place.
 

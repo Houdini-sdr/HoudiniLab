@@ -315,7 +315,14 @@ list shows. All of them run one client. Each names its own topology file in
 
 | Config | What it runs |
 |---|---|
-| `files/houdini-dualband.json` | The dual-band demo: sub-6 2425 MHz plus the X-band IF at 4380 MHz, 5G-like numerology (4096 FFT, 30 kHz spacing, 133 RB) |
+| `files/houdini-dualband-xw-steer-slots.json` | **The demo.** Sub-6 2425 MHz at 133 RB plus the X-band IF at 4380 MHz at 270 RB (97.2 MHz), 4096 FFT, 30 kHz spacing; the UE's clock steered onto the beacon; the base station receives only its rx slots and removes the carrier offset before the FFT. Needs the slots host plugin (`HOUDINI_SOAPY_ROOT`, `DEMO_BENCH_RUNBOOK.md` A3) |
+| `files/houdini-dualband-xw-steer-slots-fe.json` | The demo through an X-band front end held in a static TX/RX state for the session |
+| `files/houdini-dualband-xw-steer.json` | The demo's widths and steering, receiving every slot, on the default plugin |
+| `files/houdini-dualband-xw-steer-fe.json` | That, through the X-band front end |
+| `files/houdini-dualband-steer.json` | Both bands at 133 RB (48 MHz), steered: the fallback when the 97 MHz X-band is too weak |
+| `files/houdini-dualband-steer-fe.json` | That fallback through the X-band front end |
+| `files/houdini-dualband-xw.json` | The 97 MHz X-band, unsteered |
+| `files/houdini-dualband.json` | Both bands at 133 RB, unsteered: the 5G-like numerology the demo builds on |
 | `files/houdini-dualband-40.json` | The demo at 40 MHz (106 RB) with sub-6 centred at 2420 MHz, the fallback if the 50 MHz link disappoints |
 | `files/houdini-dualband-r3a.json` | The demo numerology on sub-6 only |
 | `files/houdini-dualband-r2.json` | Both bands at 256 FFT, 480 kHz spacing |
@@ -327,8 +334,10 @@ list shows. All of them run one client. Each names its own topology file in
 
 On a new bench, go up the dual-band ladder one rung at a time: `r0` proves the
 link and the stack, `r1` the converter clocks and the sub-6 band, `r2` adds the
-X-band IF, `r3a` the demo numerology, and `houdini-dualband.json` is the demo.
-When a rung fails, the one below it passing tells you what changed. On the
+X-band IF, `r3a` the demo numerology on sub-6, and `houdini-dualband.json` both
+bands; the demo configs at the top of the table add the X-band's width, the
+clock steering and the slots mode. When a rung fails, the one below it passing
+tells you what changed. On the
 legacy bench roles, start with `houdini-1u.json` and move to `houdini-ul.json`
 once the channel estimate is clean: the constellation only has something to
 draw when the frame carries an uplink data slot.
@@ -621,21 +630,21 @@ frequency, so treat sub kilohertz beacon readings as instrument noise rather
 than a real offset. It reads `beacon n/a` when the visible segment holds no
 detection to estimate from.
 
-### 5.3 The ADC tab
+### 5.3 The Spectrum tab
 
-Each card has two tabs. **Channel** is everything above. **ADC** shows the
-received pilot slot in the time domain, which is where you look when the
-channel panels are strange and you suspect the front end or the timing
-rather than the algorithm.
+Each card has two tabs. **Channel** is everything above. **Spectrum** shows
+the received pilot slot in frequency and how much of the converter it uses,
+which is where you look when the channel panels are strange and you suspect
+the front end rather than the algorithm.
 
-The trace is the slot's **power envelope in dBFS** on a fixed 0 to -80 dB
-axis: each plotted column carries the maximum absolute sample over every
-sample it covers, so a single clipped sample pins its column at 0 dBFS and
-cannot be hidden. Two dashed vertical markers show the nominal guard seats,
-`ofdm_tx_zero_prefix` and `ofdm_tx_zero_postfix` samples in from the slot
-edges (read from your config): on a healthy run the burst's
-rising edge sits on the first marker and its falling edge on the second, so
-this panel doubles as a live landing view for the transmit timing.
+The trace is the pilot slot's **spectrum in dBFS per bin** (the bin width is
+in the panel title) on a fixed 0 to -140 dB axis, so a full-scale complex tone
+reads 0 dBFS and a level change is a real change, not a rescale. The x axis is
+MHz from the lane's NCO on a 10 MHz grid, and two dashed lines mark the
+occupied band's edges. A healthy pilot is a flat shelf between the dashed
+lines with the floor well below it outside; a spur, an image or a filter edge
+shows up where it sits. A value above the top pins to it and lights an
+`off scale` badge.
 
 The absolute question, how much of the converter you are using, is answered
 underneath by a bar on a fixed full scale. The bar turns amber below 10

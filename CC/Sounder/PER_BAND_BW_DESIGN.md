@@ -110,6 +110,12 @@ in the rig predictions (section 5).
 
 ### Q3. The BS framer's pilot edge and `tx_advance`
 
+Superseded in part by AP-90: the lane with the cleanest pilot now places the
+cut (`slot_align.h` `laneTakesCut`), not lane 0. On the direct X-IF cable that
+is usually the X-band lane (`DEMO_VERIFICATION.md` 9.69: 2,536 of 2,545 cuts),
+and `pilot_grid_off` stayed within a few samples (9.69 to 9.71), so the
+`tx_advance` calibration held. The reasoning below is the design as written.
+
 `HoudiniFramer` finds the burst (energy search, presence gate, P/U
 self-similarity, the leading edge in `slot_align.h`) on lane 0 of the combined
 RX stream only, and applies that placement to every lane (the lanes are
@@ -346,6 +352,7 @@ printed values before anything else.
    says the wide lane's one-off cost is below today's X-band lane's.
 4. `rx_channel` with the X-band on lane 0 ("CA") would move the framer's edge to
    the wide pilot and void the 169 calibration (Q3). No config does; not guarded.
+   Since AP-90 the cleanest lane places the edge whatever the order (Q3's note).
 5. `fstage_report.py` keys its numerology guard on N only; the rig plan gives
    the 270 RB runs their own tag.
 6. The outer RBs sit on the decimator's roll-off (plan 3.3). Not predicted in
