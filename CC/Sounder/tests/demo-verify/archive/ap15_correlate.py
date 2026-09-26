@@ -74,7 +74,7 @@ def one_run(i, args):
     log = open("logs/ap15_run%d.log" % i, "rb").read().decode(errors="replace")
     # The run's timing draw, taken from the first debug line AT OR AFTER the
     # settle boundary (the very first line of a run is pre-settle and can
-    # differ, Opus review), and checked constant across the run.
+    # differ, review), and checked constant across the run.
     draws = re.findall(r"HOUDINI_BS_RX: frame=(\d+) .*?pilot_grid_off=(-?\d+) "
                        r"clamped=(\d+)", log)
     settled = [(int(f), g, u) for f, g, u in draws if int(f) >= args.settle]
@@ -87,7 +87,7 @@ def one_run(i, args):
     if not pts:
         return "run %2d: NO CNS POINTS (rc=%s) pgo=%s clamped=%s" % (
             i, p.returncode, pgo, pu)
-    # PER-DATAGRAM phase-only 4th-power scores (Opus review H8: one score
+    # PER-DATAGRAM phase-only 4th-power scores (review H8: one score
     # over the whole run's pooled points cannot see a rare bad-frame class --
     # a 5%% garbage fraction still averaged 0.949 "CLUSTERS"). The run report
     # carries the median, the worst datagram, and the low fraction; CLUSTERS

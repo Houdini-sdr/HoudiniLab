@@ -122,7 +122,7 @@ def main():
                 err = None
             except Exception as e:  # noqa: BLE001 - the throw IS the datum
                 err = str(e)
-                rc = 1  # a throwing step is a failed walk (Opus review)
+                rc = 1  # a throwing step is a failed walk (review)
                 print("    THREW: %s" % err)
             nxt = snap(dev, "after_" + label, ch=CH)
             nxt["_call_s"] = round(time.time() - t0, 3)

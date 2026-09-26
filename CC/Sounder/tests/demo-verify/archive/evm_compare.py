@@ -149,8 +149,7 @@ def main():
         mean_t = tp[:, occ].mean(0)
         var_t = tp[:, occ].var(0)
         # Aggregate SNR (total signal power over total error power): the mean
-        # of per-tone ratios lets one quiet-variance tone dominate (Opus
-        # review).
+        # of per-tone ratios lets one quiet-variance tone dominate (review).
         psnr = 10 * np.log10(np.sum(np.abs(mean_t) ** 2)
                              / (np.sum(var_t) + 1e-30))
         # per-symbol pilot EVM vs the across-symbol mean
@@ -183,8 +182,8 @@ def main():
 
             # Ramp sign matches the sounder (it rotates H by +ang before
             # dividing, so the data acquires e^{-j ang}): this tool's r now
-            # reads on the SAME convention as the sounder's logged r (Opus
-            # review: the old +j form reported the opposite sign).
+            # reads on the SAME convention as the sounder's logged r (review:
+            # the old +j form reported the opposite sign).
             def score(td_c, r):
                 z = td_c[:, occ] * np.exp(-1j * 2 * np.pi * r * kk[occ] / FFT)
                 num = np.abs(np.sum(z[good] * np.conj(rr[:, occ][good])))
@@ -192,7 +191,7 @@ def main():
                               np.sum(np.abs(rr[:, occ][good]) ** 2))
                 return num / (den + 1e-30)
 
-            # r covers the sounder's own +-8 blind range (Opus review H7:
+            # r covers the sounder's own +-8 blind range (review H7:
             # +-2 saturated on the measured +3-sample draws and reported the
             # grid edge as the answer).
             best_sc = -1.0
@@ -223,7 +222,7 @@ def main():
             g = np.sum(z[good] * np.conj(rr[:, occ][good])) / \
                 np.sum(np.abs(rr[:, occ][good]) ** 2)
             # Score only reference-valid cells: one leaked null tone in occ
-            # otherwise collapses the reported SNR (Opus review).
+            # otherwise collapses the reported SNR (review).
             err_all = z - g * rr[:, occ]
             sig_all = np.abs(g * rr[:, occ]) ** 2
             dsnr = 10 * np.log10(np.mean(sig_all[good])
@@ -238,7 +237,7 @@ def main():
             z = z[np.abs(z) > 1e-12]
             # (angle - pi)/4, matching recorder_worker's derotation: without
             # the -pi the decisions sit 45 deg off and the reported SNR pins
-            # at 2-4 dB anti-correlated with the truth (Opus review H6).
+            # at 2-4 dB anti-correlated with the truth (review H6).
             rot = (np.angle(np.mean((z / np.abs(z)) ** 4)) - np.pi) / 4
             z = z * np.exp(-1j * rot)
             dec = (np.sign(z.real) + 1j * np.sign(z.imag)) / np.sqrt(2)
