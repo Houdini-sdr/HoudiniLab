@@ -120,6 +120,10 @@ int main() {
       check(!demo.bs_rx_slots(), "the demo config leaves bs_rx_slots off [mutation: the default flipped]");
       check(sl.bs_cfo_pre_fft() && !demo.bs_cfo_pre_fft(),
             "the slots config removes the carrier offset before the FFT, the demo config does not [mutation: the key not parsed]");
+      Config both("files/houdini-dualband-xw-steer-slots-fe.json", "/tmp", false, false, false);
+      check(both.bs_rx_slots() && both.bs_cfo_pre_fft() && both.xband_frontend_static() && !sl.xband_frontend_static(),
+            "houdini-dualband-xw-steer-slots-fe.json: slots mode, the pre-FFT correction and the X-band front end "
+            "together, and AP-86's config rules accept it [mutation: a key dropped, or an AP-86 refusal firing]");
     } catch (const std::exception& e) {
       check(false, std::string("AP-87 configs: Config threw: ") + e.what());
     }
