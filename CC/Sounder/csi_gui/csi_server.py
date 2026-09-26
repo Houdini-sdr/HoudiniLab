@@ -2253,8 +2253,12 @@ function onData(obj){
       card.lastCns=rec.cns.frame; card.cnsT=Date.now();
       if(sampleMer(card,rec.cns) && open) drawMer(card);
     }
-    if(rec.met && !card.metRec) { card.metRec=rec.met; setCardTitle(card); if(open) drawQuality(card); }
-    else if(rec.met) card.metRec=rec.met;
+    if(rec.met){
+      // Retitle on a change too: a --control switch to another config moves the
+      // lane's centre (or channel) under the same antenna index.
+      const was=card.metRec; card.metRec=rec.met;
+      if(!was || was.ch!==rec.met.ch || was.fc_mhz!==rec.met.fc_mhz){ setCardTitle(card); if(open) drawQuality(card); }
+    }
     if(rec.cir && rec.cir.frame!==card.lastCir){
       if(open) drawCir(card,rec.cir); else card.cirRec=rec.cir;
       card.lastCir=rec.cir.frame;
