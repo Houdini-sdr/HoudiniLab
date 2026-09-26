@@ -124,6 +124,10 @@ int main() {
       check(both.bs_rx_slots() && both.bs_cfo_pre_fft() && both.xband_frontend_static() && !sl.xband_frontend_static(),
             "houdini-dualband-xw-steer-slots-fe.json: slots mode, the pre-FFT correction and the X-band front end "
             "together, and AP-86's config rules accept it [mutation: a key dropped, or an AP-86 refusal firing]");
+      Config fe48("files/houdini-dualband-steer-fe.json", "/tmp", false, false, false);
+      check(fe48.xband_frontend_static() && !fe48.bs_rx_slots() && !fe48.bs_cfo_pre_fft(),
+            "houdini-dualband-steer-fe.json: the X-band front end at 48 MHz, nothing else new [mutation: the key "
+            "dropped, or a slots key copied in]");
     } catch (const std::exception& e) {
       check(false, std::string("AP-87 configs: Config threw: ") + e.what());
     }
