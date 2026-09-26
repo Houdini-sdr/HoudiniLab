@@ -13,7 +13,7 @@ static void check(bool ok, const char* what) {
 int main() {
   namespace rp = houdini::rxpkt;
   check(rp::deviceSamples(8192) == 2032,
-        "the device's derivation reproduces today's 2032 at MTU 8192 (mutation: overhead or beat rounding wrong)");
+        "the device's derivation reproduces the default 2032 at MTU 8192 (mutation: overhead or beat rounding wrong)");
   const size_t s = rp::samplesForSlot(61440);
   check(s == 1920 && 61440 % s == 0 && 61440 / s == 32,
         "the demo slot (61440) tiles as 32 packets of 1920 (mutation: a non-divisor, e.g. 2032)");

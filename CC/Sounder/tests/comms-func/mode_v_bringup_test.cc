@@ -86,7 +86,7 @@ class FakeDevice : public SoapySDR::Device {
       for (const auto& kv : houdini::modev::detail::chanList(value)) lists_[key][kv.first] = kv.second;
   }
   // The device's readback FORMATS, as the software lane captured them at mode
-  // V (2026-09-22): Fs per tile in MHz with more fields; zones and inverse sinc
+  // V: Fs per tile in MHz with more fields; zones and inverse sinc
   // per channel over every channel; inverse sinc resolved to 'zone<k>'; ADC_CAL
   // per '<tile>.<block>' with cal= the mode the tile started with.
   std::string readSetting(const std::string& key) const override {

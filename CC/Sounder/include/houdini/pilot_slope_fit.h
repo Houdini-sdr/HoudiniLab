@@ -5,14 +5,13 @@
  *
  * The tones' phases are UNWRAPPED along frequency (each from its neighbour),
  * so the fit depends only on adjacent tones being within pi of each other.
- * Taking arg() of each tone directly, as this fit first did, wraps when the
- * common phase sits near +-180 degrees: some tones read +179, others -179, and
- * the fitted slope (the timing correction) is garbage. (Referencing the tones
- * to their unit-vector mean instead, tried next, fixed that but shrank the
- * unambiguous range at fft 64: an Opus review measured a 1.2-sample residual
- * read as -0.63.) At R3's
- * 30 kHz spacing the pilot-to-data phase from an uncorrected carrier offset is
- * 94-124 degrees and drifts through the wrap (a metric audit, 2026-09-23).
+ * Do not take arg() of each tone directly: that wraps when the common phase
+ * sits near +-180 degrees (some tones read +179, others -179), and the fitted
+ * slope (the timing correction) is garbage. Referencing the tones to their
+ * unit-vector mean avoids the wrap but shrinks the unambiguous range at
+ * fft 64 (a 1.2-sample residual reads as -0.63). At R3's 30 kHz spacing the
+ * pilot-to-data phase from an uncorrected carrier offset is 94-124 degrees
+ * and drifts through the wrap.
  */
 #pragma once
 

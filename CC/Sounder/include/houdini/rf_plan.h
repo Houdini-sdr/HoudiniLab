@@ -5,8 +5,8 @@
  *        calibration mode, and whether the RX lane needs the +-24 MHz channel
  *        filter. Pure arithmetic, no radio.
  *
- * WHY DERIVED, NOT CONFIGURED. [user]: keep the config common and split only
- * what must differ. Across the two bands only the NCO must differ (2425 sub-6,
+ * WHY DERIVED, NOT CONFIGURED. Keep the config common and split only what
+ * must differ. Across the two bands only the NCO must differ (2425 sub-6,
  * 4380 X-band IF); everything else below follows from it and the converter
  * rates by PG269's rules, so writing them into the config would be four more
  * per-channel values that can disagree with the one that decides them. The

@@ -1,7 +1,7 @@
 /**
  * @file houdini/core_map.h
- * @brief Where the sounder pins its own threads (HOUDINI_CORE_MAP), for the
- *        CPU isolation experiments: "main=15,recorder=18,bsrx=5,ue=6".
+ * @brief Where the sounder pins its own threads (HOUDINI_CORE_MAP), for CPU
+ *        isolation on the rig host: "main=15,recorder=18,bsrx=5,ue=6".
  *
  * Each named role gets that base core, and its i-th thread base + i; a role
  * not named keeps the default layout (main on the scheduler's start core, the

@@ -1,7 +1,7 @@
 // AP-88: every MLPD_* logging macro is ONE statement. Mutation that breaks it:
-// the old three-statement form (header; fprintf; fflush) leaves the `else`
-// below without its `if`, so this file stops compiling, and an unbraced
-// `if (x) MLPD_WARN(...)` guarded only the header and printed the rest always.
+// a three-statement form (header; fprintf; fflush) leaves the `else` below
+// without its `if`, so this file stops compiling, and an unbraced
+// `if (x) MLPD_WARN(...)` would guard only the header and print the rest always.
 #include <cstdio>
 
 #include "logger.h"

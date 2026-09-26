@@ -50,18 +50,18 @@ static Cover simulate(Resume resume, double frame_d, double jitter, unsigned see
 int main() {
   const double fd = 122881.0588;  // a tracked period (not a whole number)
   auto fixed = [](long long cur, long long tx, double f) { return houdini::ladder::resumeIndex(cur, tx, f); };
-  // The pre-fix rule, kept here as the mutation the coverage check must catch.
-  auto old = [](long long cursor, long long tx, double f) -> long long {
+  // The ceil rule, kept here as the mutation the coverage check must catch.
+  auto ceil_rule = [](long long cursor, long long tx, double f) -> long long {
     const long long frame = std::llround(f);
     return cursor + frame > tx ? static_cast<long long>(std::ceil(static_cast<double>(cursor + frame - tx) / f)) : 0;
   };
   const Cover a = simulate(fixed, fd, 0.6, 1);
   check(a.covered == a.frames && a.dups == 0,
-        "resume: every frame covered once under +-0.6 sample grid jitter (mutation: the old ceil rule)");
-  const Cover b = simulate(old, fd, 0.6, 1);
-  std::printf("      old rule: %lld of %lld frames (%.1f%%), %lld dups\n", b.covered, b.frames, 100.0 * b.covered / b.frames,
+        "resume: every frame covered once under +-0.6 sample grid jitter (mutation: the ceil rule)");
+  const Cover b = simulate(ceil_rule, fd, 0.6, 1);
+  std::printf("      ceil rule: %lld of %lld frames (%.1f%%), %lld dups\n", b.covered, b.frames, 100.0 * b.covered / b.frames,
               b.dups);
-  check(b.covered < b.frames, "the old ceil rule skips frames under the same jitter (the defect this test pins)");
+  check(b.covered < b.frames, "the ceil rule skips frames under the same jitter (the defect this test pins)");
   const Cover c = simulate(fixed, fd, 0.2 * fd, 2);
   check(c.covered == c.frames && c.dups == 0,
         "resume: still exact under jitter of 0.2 frame, so calls differ by up to 0.4 (mutation: a quarter-frame threshold)");

@@ -61,7 +61,7 @@ int main() {
         "a window too short for lead + core + tail is refused, not cut at the gate close");
   check(throws([] { strobe(2, 4096, 2048, 1076, 200, 22); }), "an offs below the driver's 256 floor is refused");
 
-  // INPUT SENSITIVITY, not code mutants (review): each units slip a caller
+  // INPUT SENSITIVITY, not code mutants: each units slip a caller
   // could make changes the answer, so the pinned values above would catch it.
   // A slip INSIDE the function is caught by the pinned values themselves
   // (dropping k turns R1's len into 1024); the named inputs struct stops the

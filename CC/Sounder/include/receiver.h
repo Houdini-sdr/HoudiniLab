@@ -74,14 +74,14 @@ class Receiver {
   static void* clientTxRx_launch(void* in_context);
   void clientTxRx(int tid);
   void clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer);
-  // `pick` is the crossing-selection rule, and the two callers need DIFFERENT
-  // ones. Acquisition searches a wide window that can hold several beacon copies
-  // 4096 samples apart, so it takes the earliest copy refined to its own peak --
-  // repeatable across restarts, which the once-only pilot anchor depends on.
-  // Re-sync searches a targeted lead+tail slice that cannot hold two copies, so
-  // it takes the strongest crossing: there the earliest one is the beacon's own
-  // lag-128 self-coherent STS preamble, hundreds of samples early, and whether
-  // it wins depends on received level. See houdini::sync::PickRule.
+  // `pick` is the crossing-selection rule. Acquisition and the targeted
+  // re-sync pass the configured one (sync.detector.pick): the acquisition
+  // window holds at most one beacon copy (copies are a frame apart) and the
+  // targeted lead+tail slice cannot hold two, so the earliest crossing is not
+  // wanted there -- it is the beacon's own lag-128 self-coherent STS preamble,
+  // hundreds of samples early, and whether it wins depends on received level.
+  // The untargeted re-sync (Iris/UHD, or no anchor yet) passes kFirstCrossing.
+  // See houdini::sync::PickRule.
   ssize_t syncSearch(const std::complex<int16_t>* check_data,
                      size_t search_window, float corr_scale,
                      houdini::sync::PickRule pick,

@@ -74,8 +74,8 @@ int main() {
   std::printf("      per-slot rule: P %+lld, U %+lld, P-to-U error %+lld samples\n", old_p - truth,
               old_u - truth - n, old_u - old_p - n);
   check(std::llabs(old_u - old_p - n) > 50, "the per-slot rule mis-spaces adjacent P and U (the defect this test pins)");
-  // The edge anchor, for a U at any level relative to P (the burst centroid
-  // tried first failed below ~0.7x and lost U entirely below ~0.3x).
+  // The edge anchor, for a U at any level relative to P (a whole-burst
+  // centroid fails below ~0.7x and loses U entirely below ~0.3x).
   bool all = true;
   for (double u : {1500.0, 1000.0, 700.0, 300.0, 100.0, 0.0}) {
     for (long long err : {-900LL, -150LL, 0LL, 150LL, 900LL}) {  // the coarse guess, within n/4
@@ -97,7 +97,7 @@ int main() {
   const auto cse3 = capture(cg, truth, n, pu, {1000.0, 1000.0}, 32, 256, 3);
   check(std::llabs(houdini::slotalign::burstPilotStart(cse3, truth + 100, n, 32) - truth) <= 2,
         "prefix 32 / postfix 256: exact (mutation: subtract a fixed 128 instead of the prefix)");
-  // The review's case (L1, L2, L9): OFDM-like content (Gaussian I/Q, so the
+  // The hard case: OFDM-like content (Gaussian I/Q, so the
   // windowed energy fluctuates), a POSITIVE noise floor, U within +-5 % of P,
   // and the coarse guess off by up to 0.45 of a slot either way. A noise-like
   // envelope moves the half-plateau crossing by a waveform-dependent bias
@@ -128,7 +128,7 @@ int main() {
           if (std::llabs(d) > 32) ok = false;
         }
     std::printf("      OFDM-like, U 0.95-1.05, guess +-0.45 slot: worst error %lld samples (300 trials)\n", worst);
-    check(ok, "OFDM-like P+U, guess off by up to 0.45 slot: the pilot within 32 samples (mutation: the old "
+    check(ok, "OFDM-like P+U, guess off by up to 0.45 slot: the pilot within 32 samples (mutation: a "
               "median over guess+n/4..3n/4 and a search from guess-n/4)");
   }
   const std::vector<long long> p = {0};
@@ -210,7 +210,7 @@ int main() {
           "a start pinned at -prefix (the cut edge) flags, the wired -4 does not (mutation: compared against 0, "
           "or the sign flipped)");
     check(!sa::laneTakesCut(false, 0.99, true, 0.50),
-          "a lane that fails the gate never takes the cut, however clean (mutation: the pre-review rule on "
+          "a lane that fails the gate never takes the cut, however clean (mutation: the rule on "
           "self-similarity alone, where a weak clean X-band won and then skipped a frame the sub-6 carried)");
     check(sa::laneTakesCut(true, 0.60, false, 0.90),
           "a passing lane takes the cut from a failing reference (mutation: the reference kept, so a weak sub-6 "
