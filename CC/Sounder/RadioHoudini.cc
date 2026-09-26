@@ -1,6 +1,6 @@
 /** @file RadioHoudini.cc
   * @brief The Houdini RFSoC backend: stream arguments, the receive drain with
-  *        its gap ledger, the TDD transmit grid. Moved out of Radio.cc.
+  *        its gap ledger, the TDD transmit grid.
   *
   * RENEW OPEN SOURCE LICENSE: http://renew-wireless.org/license
 */
@@ -48,7 +48,7 @@ SoapySDR::Kwargs RadioHoudini::deviceArgs(const RadioParams& p) {
   // plugin sizes TX packets from the same MTU (TxPacketizer, DeriveFrameWords):
   // asking for the MTU that yields exactly packet_samples makes every RX slot
   // and every TX slot (twice the samples, at the 2x TX rate) a whole number of
-  // packets, so a slot-exact TX burst ends on a packet boundary [user].
+  // packets, so a slot-exact TX burst ends on a packet boundary.
   if (p.packet_samples > 0)
     args["remote:HOUDINI_MTU"] = std::to_string(houdini::rxpkt::mtuFor(p.packet_samples));
   return args;
@@ -60,10 +60,10 @@ SoapySDR::Kwargs RadioHoudini::rxStreamArgs(const RadioParams& p) {
   // RX channel to a FIXED destination port, 10001 + channel (the RX stream
   // contract, SH-142/SH-159), whatever the host binds; the driver accepts any
   // local_port and a mismatched one delivers NOTHING (every datagram lands on
-  // NoPorts). AP-79's R0 hit exactly that: a port fixed at 10002 (ch1's,
-  // right for the old channel-B demo) on channel A. So derive it from the
-  // channel. On a COMBINED (>1 channel) stream the driver rejects local_port
-  // and assigns the per-channel ports itself, so leave it unset.
+  // NoPorts). So derive it from the channel: a port fixed at 10002 (ch1's)
+  // receives nothing on channel A (AP-79 R0). On a COMBINED (>1 channel)
+  // stream the driver rejects local_port and assigns the per-channel ports
+  // itself, so leave it unset.
   if (p.rx_channels.size() == 1) {
     rx["local_port"] = std::to_string(10001 + p.rx_channels.front());
   }
@@ -143,7 +143,7 @@ void RadioHoudini::writeModeVRecord(const std::string& label, SoapySDR::Device& 
                                     const houdini::modev::Result& r,
                                     const houdini::modev::PostSetup& ps, const std::string& failure) {
   try {
-    // The converter state this session ran with, beside the run (plan rule 5:
+    // The converter state of this bring-up, beside the run (plan rule 5:
     // a capture carries its state). One file per node per bring-up. Best
     // effort: a record that cannot be written is warned about, never fatal.
     const RecordFile rec = openRecord("modev", label);
@@ -168,7 +168,7 @@ void RadioHoudini::writeModeVRecord(const std::string& label, SoapySDR::Device& 
     MLPD_INFO("%s mode V: session record %s\n", label.c_str(), rec.path.c_str());
   } catch (const std::exception& e) {
     // Best effort, never fatal: a record that cannot be written must not
-    // refuse a healthy radio (review).
+    // refuse a healthy radio.
     MLPD_WARN("%s mode V: the session record could not be written: %s\n", label.c_str(), e.what());
   }
 }
@@ -403,11 +403,11 @@ RadioHoudini::~RadioHoudini() {
 
 void RadioHoudini::maybeStartHealth() {
   // AP-79: the software lane's link-health checks (houdini/link_health.h) on
-  // THIS session's handle, once streaming. HOUDINI_LINK_HEALTH_S sets the
-  // period (default 5 s in mode V, off otherwise; 0 turns it off).
+  // THIS radio's own device handle, once streaming. HOUDINI_LINK_HEALTH_S
+  // sets the period (default 5 s in mode V, off otherwise; 0 turns it off).
   if (health_started_.exchange(true)) return;
-  // On by default in mode V only; the one-rate path keeps its control plane
-  // as it was unless asked.
+  // On by default in mode V only; the one-rate path adds no control-plane
+  // reads unless asked.
   double period = mode_v_ != nullptr ? 5.0 : 0.0;
   if (const char* e = std::getenv("HOUDINI_LINK_HEALTH_S")) period = std::atof(e);
   if (!(period > 0.0)) return;
@@ -424,12 +424,12 @@ void RadioHoudini::healthLoop(double period_s) {
   try {
     // The bring-up latches benign ADC flags (SH-372 class): clear them now
     // that the group is up and active (about 2 s after the first read), so
-    // the baseline and every later verdict describe this session (software
-    // lane, SH-422 silicon check). What is latched is logged first, so the
+    // the baseline and every later verdict describe this run (the software
+    // lane's SH-422 silicon check). What is latched is logged first, so the
     // clear erases nothing without a trace. The driver REFUSES the clear when
     // a judged bit is still set after it (level-asserted, re-latched, or new):
     // that refusal names the bits, so it is logged and the baseline is taken
-    // anyway rather than stopping the monitor (review).
+    // anyway rather than stopping the monitor.
     {
       const std::string before = dev_->readSetting("RFDC_PREFLIGHT");
       MLPD_INFO("%s link health: preflight before the post-activate clear: %s\n", label.c_str(),
@@ -566,15 +566,12 @@ int RadioHoudini::recv(void* const* buffs, int samples, long long& frameTime) {
     jb[c] = junk.data() + c * drain_samps * kBytesPerSamp;
   int jf = 0;
   long long jt = 0;
-  // Split drain from read: the loop spends 93% of an iteration inside the 30
-  // radioRx calls it makes per frame (29 of them purely to throw the slot
-  // away), at ~880 us each, and the fix differs depending on whether that cost
-  // is the drain loop or the read itself. HOUDINI_LOOP_PROFILE reports both.
-  // Its OWN knob: HOUDINI_LOOP_PROFILE counts loop ITERATIONS while this
-  // counts radioRx CALLS, and coalescing changes the ratio between them from
-  // ~30:1 to ~2:1. One shared setting would silently report two different
-  // scales, which is a hazard given how much of this branch's evidence rests
-  // on those numbers being comparable.
+  // HOUDINI_RX_PROFILE splits a radioRx call's cost into the drain and the
+  // read (the RX PROFILE line), every N calls. Its OWN knob, not
+  // HOUDINI_LOOP_PROFILE: that one counts loop ITERATIONS while this counts
+  // radioRx CALLS, and coalescing changes the ratio between them (about 30:1
+  // uncoalesced, 2:1 coalesced), so one shared setting would silently report
+  // two different scales.
   static const size_t rx_profile_every = [] {
     const char* e = getenv("HOUDINI_RX_PROFILE");
     return e != nullptr ? static_cast<size_t>(atol(e)) : 0;
@@ -597,13 +594,6 @@ int RadioHoudini::recv(void* const* buffs, int samples, long long& frameTime) {
                         ? std::chrono::steady_clock::now()
                         : std::chrono::steady_clock::time_point{};
 
-  // A dropped UDP packet splices a gap between two reads of THIS window. Detect it
-  // from each read's own timestamp (the window used to keep only the first read's
-  // time and concatenate the rest as if contiguous -- silently mis-aligning every
-  // post-gap sample, which corrupts the correlation window / CSI). A per-window
-  // TimeGridTracker compares where each read's samples land vs. where its stamp says
-  // they belong; a gap is zero-padded so post-gap samples stay on their true offset,
-  // and the extent is logged (absolute RX sample position) for the /Data/Gaps table.
   if (rx_profile_every > 0) {
     p_drain += std::chrono::duration<double, std::micro>(p_t1 - p_t0).count();
     p_chunks += static_cast<size_t>(drained_chunks);
@@ -646,6 +636,14 @@ int RadioHoudini::recv(void* const* buffs, int samples, long long& frameTime) {
       }
     }
   }
+  // A dropped UDP packet splices a gap between two reads of THIS window. Detect
+  // it from each read's own timestamp: keeping only the first read's time and
+  // concatenating the rest as if contiguous would silently misalign every
+  // post-gap sample, which corrupts the correlation window / CSI. A per-window
+  // TimeGridTracker compares where each read's samples land vs. where its stamp
+  // says they belong; a gap is zero-padded so post-gap samples stay on their
+  // true offset, and the extent is logged (absolute RX sample position) for the
+  // /Data/Gaps table.
   Sounder::TimeGridTracker grid(rx_rate_);
   std::vector<void*> cur(num_rx_ch_);
   int got = 0;
@@ -656,7 +654,7 @@ int RadioHoudini::recv(void* const* buffs, int samples, long long& frameTime) {
     // AP-87: in slots mode nothing is delivered outside the rx slots, so once
     // the rest of the window lies wholly in guards or the beacon slot, a read
     // would block until the next frame's pilot and keep none of it (about 8 ms
-    // per framer read, review). The rest is the schedule's own gap: zero it.
+    // per framer read). The rest is the schedule's own gap: zero it.
     if (first_stamped &&
         houdini::bsslots::restIsCut(std::llround(static_cast<double>(frameTime) * rx_rate_ / 1e9), got, samples,
                                     slot_epoch_, slot_n_, slot_fr_, slot_rx_)) {
@@ -678,13 +676,12 @@ int RadioHoudini::recv(void* const* buffs, int samples, long long& frameTime) {
       if (r < 0) app_rx_err_.fetch_add(1, std::memory_order_relaxed);
       if (got > 0) app_rx_short_.fetch_add(1, std::memory_order_relaxed);
       if (got == 0) {
-      // Account the call before leaving, or the drain cost already added above
-      // is divided across a call count that never saw it -- over-reporting
-      // drain per call on the very instrument this branch's cost evidence
-      // rests on.
-      if (rx_profile_every > 0) ++p_calls;
-      return r;
-    }
+        // Account the call before leaving, or the drain cost already added
+        // above is divided across a call count that never saw it, which
+        // over-reports the drain per call.
+        if (rx_profile_every > 0) ++p_calls;
+        return r;
+      }
       break;
     }
     if (got == 0) {  // first (grid-anchoring) read stamps the window
@@ -791,7 +788,7 @@ int RadioHoudini::recv(void* const* buffs, int samples, long long& frameTime) {
   // shows the filtered samples, the ones the detector sees. On the BS the
   // framer turns this off and filters the slots it extracts instead
   // (HoudiniFramer::rx), so there the dump shows the RAW capture. The RX
-  // PROFILE's "read" time includes this filter (review).
+  // PROFILE's "read" time includes this filter.
   if (rx_filters_ != nullptr && recv_filter_ && got > 0) {
     rx_filters_->apply(buffs, num_rx_ch_, static_cast<size_t>(got));
   }
@@ -814,7 +811,7 @@ int RadioHoudini::recv(void* const* buffs, int samples, long long& frameTime) {
       static std::atomic<int> cnt{0};
       if ((cnt.fetch_add(1) % 40) == 0) {
         MLPD_INFO("Houdini client RX dbg: got=%d rms=%.2f absmax=%d\n", got,
-                  rms, amax);                 // is a multi-statement macro
+                  rms, amax);
       }
     }
     // Dump the first strong (beacon-present) window for offline correlation.

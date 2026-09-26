@@ -14,13 +14,14 @@
   * platform's framer hooks. What a platform has and another does not (the
   * transmit time grid, the receive gap ledger, a hardware trigger, an AGC)
   * is a capability a backend reports: a query the caller can branch on, or
-  * an honest "none" (0 pad, 0 status events) where the old code reported the
-  * same. What there is not is a hook that claims to have acted and did not.
+  * an honest "none" (0 pad, 0 status events). What there is not is a hook
+  * that claims to have acted and did not.
   *
-  * Backends: RadioSoapy (Iris and SoapyUHD, the SoapySDR plumbing),
+  * Backends: RadioSoapy (Iris and SoapyUHD, the SoapySDR plumbing) and
   * RadioHoudini (RadioSoapy plus the Houdini stream arguments, the
-  * pre-stream rates, the drain and gap ledger, the TDD grid), and, when
-  * built with USE_UHD, the native UHD radio (seam step S3).
+  * pre-stream rates, the drain and gap ledger, the TDD grid). The native UHD
+  * build (RADIO_TYPE=PURE_UHD) is not a Radio backend: its radio sets
+  * implement RadioSetInterfaces.h directly (kUhdNative is not constructed).
 */
 #ifndef RADIO_H_
 #define RADIO_H_
@@ -63,7 +64,7 @@ struct RadioParams {
   // sounder launches lost the BS open on every attempt; the node saw each
   // attempt's first connection accepted and then NO request for the whole 1 s,
   // so the wait is inside this process (cause unmeasured). 3 s rides it out; a
-  // dead node now takes 3 s to report, and a fresh process's first discovery
+  // dead node takes 3 s to report, and a fresh process's first discovery
   // sleeps the full 3 s by SoapyRemote's design.
   std::string timeout = "3000000";
   // AP-79 mode V (Houdini). adc_fs_hz > 0 selects the mode-V converter
@@ -140,9 +141,10 @@ class Radio {
   virtual void drain_buffers(std::vector<void*> buffs, int symSamp) = 0;
   virtual void reset_DATA_clk_domain() = 0;
 
-  /// The SoapySDR device behind a Soapy backend, nullptr otherwise. Used by
-  /// the base-station framer code that still programs the Iris TDD block
-  /// directly; seam step S2 moves those callers into the framer objects.
+  /// The SoapySDR device behind a Soapy backend, nullptr otherwise. Used for
+  /// the device settings the seam does not model: the framers' TDD and
+  /// beacon programming, the client set's Iris framer and CLOCK_ADJ access,
+  /// and the calibration procedures.
   virtual SoapySDR::Device* RawDev() const { return nullptr; }
 
  protected:

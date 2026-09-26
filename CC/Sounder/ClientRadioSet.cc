@@ -1,5 +1,5 @@
 /** @file ClientRadioSet.cc
-  * @brief Defination file for the ClientRadioSet class.
+  * @brief Definition file for the ClientRadioSet class.
   *
   * Copyright (c) 2018-2022, Rice University
   * RENEW OPEN SOURCE LICENSE: http://renew-wireless.org/license
@@ -160,7 +160,6 @@ ClientRadioSet::ClientRadioSet(Config* cfg) : _cfg(cfg) {
                          _cfg->rate()));
         tddConf["max_frame"] =
             _cfg->frame_mode() == "free_running" ? 0 : max_frame_;
-        //std::cout << "max_frames for client " << i << " is " << max_frame_ << std::endl;
         if (_cfg->cl_sdr_ch() == 2) tddConf["dual_pilot"] = true;
         tddConf["frames"] = json::array();
         tddConf["frames"].push_back(tddSched);
@@ -253,7 +252,7 @@ void ClientRadioSet::init(ClientRadioContext* context) {
   p.tx_gain_db = _cfg->houdini_tx_gain_db();
   p.rx_gain_db = _cfg->houdini_rx_gain_db();
   // Packets that tile the slot exactly, RX and TX alike (1920: 32 per RX slot,
-  // 64 per TX slot at the 2x TX rate) [user].
+  // 64 per TX slot at the 2x TX rate).
   p.packet_samples = houdini::rxpkt::tiledPacketOrDefault(_cfg->samps_per_slot());
   if (_cfg->xband_frontend_static()) p.xband_fe_state = "tx";  // AP-86: the UE's board transmits
   p.rx_freq_offset_hz = ueRxFreqOffsetHz();
@@ -398,15 +397,10 @@ int ClientRadioSet::radioTx(size_t radio_id, const void* const* buffs,
   if (_cfg->hw_framer()) {
     return radios.at(radio_id)->xmit(buffs, numSamps, flags, frameTime);
   } else {
-    // Houdini streaming pilot. With the `tdd=1` TX stream arg (set in init when
-    // ue_tdd_pilot), the driver's TxTickAnchor accepts HAS_TIME starts on the
-    // 3.125 us TDD window grid (SH-248/SH-301), so we snap the beacon-referenced
-    // txTime to that grid -- fine enough to land in the BS rx_gate and, unlike
-    // the whole-ms fallback, with NO 1 ms drift-cliff. ue_tx_advance_ticks is a
-    // fine calibration (ticks) added before the snap. Non-TDD Houdini keeps the
-    // whole-ms fallback.
-    // The transmit time grid is the backend's (RadioHoudini snaps to its TDD
-    // window grid after the tick advance; the others convert plainly).
+    // The transmit time grid is the backend's: RadioHoudini adds
+    // ue_tx_advance_ticks and snaps to the 3.125 us TDD window grid with the
+    // `tdd=1` stream arg (ue_tdd_pilot, SH-248/SH-301), or to whole ms
+    // without it (RadioHoudini::txTimeNs); the others convert plainly.
     long long frameTimeNs = radios.at(radio_id)->txTimeNs(
         frameTime, _cfg->rate(), _cfg->ue_tdd_pilot(), _cfg->ue_tx_advance_ticks());
     const int r = radios.at(radio_id)->xmit(buffs, numSamps, flags, frameTimeNs);
@@ -417,7 +411,7 @@ int ClientRadioSet::radioTx(size_t radio_id, const void* const* buffs,
         try {
           const std::string b =
               radios.at(radio_id)->RawDev()->readSetting("TX_BANK_STATUS");
-          // The first TX channel's bank (the label used to be fixed at ch1).
+          // The first TX channel's bank.
           const auto txc = Utils::strToChannels(_cfg->cl_tx_channel());
           const size_t p = b.find("ch" + std::to_string(txc.empty() ? 0 : txc.front()) + ":");
           MLPD_INFO("UE TX dbg: xmit r=%d/%d txNs=%lld bank[%s]\n", r, numSamps,

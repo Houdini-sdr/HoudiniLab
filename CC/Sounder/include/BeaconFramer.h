@@ -7,7 +7,7 @@
   * the beacon RAM and the trigger; the Houdini framer loads the replay RAM,
   * arms the native TDD ring with its strobe grid, and extracts the gated
   * slots from a continuous read. BaseRadioSet owns one framer, picked from
-  * the radios' platform, and asks it; it no longer asks which radio it holds.
+  * the radios' platform, and asks it rather than asking which radio it holds.
   *
   * RENEW OPEN SOURCE LICENSE: http://renew-wireless.org/license
 */
@@ -50,8 +50,10 @@ class BeaconFramer {
   /// than the caller reading the radio per slot.
   virtual bool gatesRx() const = 0;
   /// One gated receive slot into `buffs`, tagged (frame << 32 | slot << 16)
-  /// in frameTime; the slot length in samples, 0 for a skipped frame, < 0
-  /// to stop. Only when gatesRx().
+  /// in frameTime: the slot length in samples; 0 when there is no slot this
+  /// round (a skipped frame, a short read, or max_frame reached, which also
+  /// clears running()); < 0 for a read error, which loopRecv drops as
+  /// recoverable. Only when gatesRx().
   virtual int rx(size_t radio_id, void* const* buffs, long long& frameTime) = 0;
   /// Samples zero-padded into the frame the last rx() served (AP-10).
   virtual size_t framePad() const = 0;

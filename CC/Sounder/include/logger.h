@@ -43,8 +43,8 @@
 #define mlpd_trace_file_or_default_stream MLPD_LOG_DEFAULT_STREAM
 
 // Each MLPD_* macro is ONE statement (do { } while (0)), so an unbraced
-// `if (x) MLPD_INFO(...);` guards the whole line (AP-88: the old three-statement
-// form guarded only the header and printed the rest every time).
+// `if (x) MLPD_INFO(...);` guards the whole line (AP-88: a three-statement
+// form guards only the header and prints the rest every time).
 
 // If MLPD_LOG_LEVEL is not defined, default to the highest level so that
 // YouCompleteMe does not report compilation errors

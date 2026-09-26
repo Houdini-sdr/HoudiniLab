@@ -1,5 +1,5 @@
 /** @file BaseRadioSet.cc
-  * @brief Defination file for the BaseRadioSet class.
+  * @brief Definition file for the BaseRadioSet class.
   *
   * Copyright (c) 2018-2022, Rice University
   * RENEW OPEN SOURCE LICENSE: http://renew-wireless.org/license
@@ -110,11 +110,10 @@ BaseRadioSet::BaseRadioSet(Config* cfg, const bool calibrate_proc) : _cfg(cfg) {
     _cfg->n_bs_sdrs().at(c) = num_radios;
     // A cell that LISTS radios and opens none is never success: fail loudly
     // rather than let the framer's start() iterate an empty vector and spin on
-    // a dead stream (observed on the bench before this guard existed). A cell
-    // configured with no radios proceeds, as it always did.
+    // a dead stream. A cell configured with no radios proceeds.
     if (bsRadios.at(c).empty() && requested_radios == 0) {
-      // Not a failure (master proceeded), but on Houdini it means no beacon
-      // is armed from this cell, which is worth one line.
+      // Not a failure, but on Houdini it means no beacon is armed from this
+      // cell, which is worth one line.
       MLPD_WARN("cell %zu lists no base station radios: nothing armed from it\n", c);
     }
     if (bsRadios.at(c).empty() && requested_radios > 0) {
@@ -127,10 +126,10 @@ BaseRadioSet::BaseRadioSet(Config* cfg, const bool calibrate_proc) : _cfg(cfg) {
       // The count write-back above mutates the SHARED Config, which main()
       // builds ONCE and reuses across its retry loop. Restore the requested
       // topology so the in-process retry starts clean instead of constructing
-      // nothing and failing with a misleading zero-radio message (observed
-      // 2026-08-30: a transient server wedge on attempt 1 doomed attempt 2
-      // before it touched a radio). The destructor iterates the vector, not
-      // this count, so the restore cannot over-delete.
+      // nothing and failing with a misleading zero-radio message (a transient
+      // server wedge on one attempt would otherwise doom the next before it
+      // touches a radio). The destructor iterates the vector, not this count,
+      // so the restore cannot over-delete.
       _cfg->n_bs_sdrs().at(c) = requested_radios;
       break;
     }
@@ -172,9 +171,8 @@ BaseRadioSet::BaseRadioSet(Config* cfg, const bool calibrate_proc) : _cfg(cfg) {
       bsRadios.at(c).at(i)->printSettings();
     }
     // Measure Sync Delays now: a trigger-block operation, so only a backend
-    // with the hardware trigger (Iris). (An Iris cell that lists no radios
-    // used to reach an out-of-range index here; it is skipped.)
-    // (The strip loop above leaves no null entry, so front() is a radio.)
+    // with the hardware trigger (Iris). A cell with no radios is skipped, and
+    // the strip loop above leaves no null entry, so front() is a radio.
     if (!bsRadios.at(c).empty() && bsRadios.at(c).front()->hasHardwareTrigger()) {
       ensureFramer();
       // hasHardwareTrigger() is the gate (Iris only), so the framer is the
@@ -190,7 +188,7 @@ BaseRadioSet::BaseRadioSet(Config* cfg, const bool calibrate_proc) : _cfg(cfg) {
 
   // The framer exists from here on, whichever path follows: radioStop() on
   // the failure/retry path must still run the Houdini teardown ladder over
-  // the radios that did open (S2 review, item 2).
+  // the radios that did open.
   ensureFramer();
   if (radioNotFound == true) {
     for (auto st = radio_serial_not_found.begin();
@@ -204,8 +202,7 @@ BaseRadioSet::BaseRadioSet(Config* cfg, const bool calibrate_proc) : _cfg(cfg) {
               << std::endl;
   } else {
     // The sample-offset calibration is an Iris procedure (trigger-based); a
-    // Houdini calibration run arms its framer as any run does (S2 review,
-    // item 1: the branch had moved in front of both platforms).
+    // Houdini calibration run arms its framer as any run does.
     if (calibrate_proc && _cfg->sample_cal_en() == true &&
         dynamic_cast<IrisFramer*>(framer_.get()) != nullptr) {
       this->syncTimeOffset();
@@ -218,7 +215,7 @@ BaseRadioSet::BaseRadioSet(Config* cfg, const bool calibrate_proc) : _cfg(cfg) {
 void BaseRadioSet::ensureFramer() {
   if (framer_ != nullptr) return;
   // The platform is the radios' fact; with no radio constructed there is
-  // nothing to frame, and the Iris framer is the historical default.
+  // nothing to frame, and the Iris framer is the default.
   houdini::sync::Platform platform = houdini::sync::Platform::kIrisUhd;
   for (const auto& cell : bsRadios)
     for (const auto& r : cell)
@@ -275,7 +272,7 @@ void BaseRadioSet::init(BaseRadioContext* context) {
   p.half_bw_by_channel = _cfg->channel_half_bw_hz();
   p.tx_gain_db = _cfg->houdini_tx_gain_db();
   p.rx_gain_db = _cfg->houdini_rx_gain_db();
-  // Packets that tile the slot exactly (1920 x 32 at the demo's 61440) [user].
+  // Packets that tile the slot exactly (1920 x 32 at the demo's 61440).
   p.packet_samples = houdini::rxpkt::tiledPacketOrDefault(_cfg->samps_per_slot());
   if (_cfg->xband_frontend_static()) p.xband_fe_state = "rx";  // AP-86: the BS's board receives
   // Houdini BS: the beacon is device BRAM replay (tx_mode=replay). The RX
@@ -287,13 +284,11 @@ void BaseRadioSet::init(BaseRadioContext* context) {
   } catch (const std::exception& err) {
     // Any std::exception: this runs on an init thread, where an escaped one is
     // std::terminate with no teardown.
-    // Name the radio by what it actually is, and SAY WHY it was dropped. This
-    // used to print "Ignoring iris <addr>" (upstream RENEWLab hardware we do not
-    // run) and throw err.what() away, so a base station that failed to open gave
-    // only its address before surfacing as "serials were not discovered in the
-    // network" -- which sends you to check discovery when the real cause was in
-    // the exception all along (a missing data-plane route, a busy stream). The
-    // client path already logs its reason; this matches it.
+    // Name the radio by its backend, and SAY WHY it was dropped: an address
+    // alone later surfaces as "serials were not discovered in the network",
+    // which sends you to check discovery when the cause is in this exception
+    // (a missing data-plane route, a busy stream). The client path logs its
+    // reason the same way.
     std::cerr << "Ignoring " << Radio::name(type) << " " << p.id << ": " << err.what()
               << std::endl;
     bsRadios.at(c).at(i).reset();
@@ -382,9 +377,10 @@ int BaseRadioSet::radioTx(size_t radio_id, size_t cell_id,
   // The per-frame beacon transmission is the framer's: a software TX on
   // Iris, a no-op that reports the slot as sent on Houdini (device replay).
   if (framer_ == nullptr) {
-    // Unreachable from the receiver today (the only path that leaves the
-    // framer unbuilt never constructs one); loud if a future set gets here,
-    // and negative so the caller treats it as an error, not a short write.
+    // Unreachable from the receiver (only the DC/IQ calibration run returns
+    // before the framer is built, and it transmits no beacon); loud if a
+    // future caller gets here, and negative so the caller treats it as an
+    // error, not a short write.
     static bool said = false;
     if (!said) {
       said = true;
