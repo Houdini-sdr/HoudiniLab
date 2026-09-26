@@ -1003,7 +1003,7 @@ Release it, from `<host>`, in the sounder directory:
 
 ```sh
 python3 tools/rig_release_holders.py
-python3 csi_gui/teardown_framer.py --topology <the config's serial_file>
+python3 csi_gui/teardown_framer.py --conf files/<config>.json   # or --topology <its serial_file>
 ```
 
 The first command stops EVERY sounder, dashboard backend and teardown on
@@ -1206,7 +1206,7 @@ direction.
 After any run that ended abnormally, release the framer before starting again:
 
 ```sh
-python3 csi_gui/teardown_framer.py --topology <the config's serial_file>
+python3 csi_gui/teardown_framer.py --conf files/<config>.json   # or --topology <its serial_file>
 ```
 
 A framer left armed is the most common reason the next run fails to start, and
