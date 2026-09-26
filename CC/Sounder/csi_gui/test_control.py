@@ -32,9 +32,7 @@ with open(os.path.join(sd, "csi_gui", "check_setup.py"), "w") as f:
             "print(json.dumps({'ok': not bad, 'quick': q, 'conf': sys.argv[2], 'results': "
             "[{'level': 'FAIL' if bad else 'PASS', 'what': 'stand-in', 'detail': '', 'fix': ''}]}))\n" % (log, flag, slow))
 for n in ("houdini-a.json", "houdini-b.json", "other.json"):
-    # b carries its own guard seats (the ADC panel's markers); a has the default 128
-    extra = ', "ofdm_tx_zero_prefix": 32, "ofdm_tx_zero_postfix": 40' if n == "houdini-b.json" else ""
-    open(os.path.join(sd, "files", n), "w").write('{"_description": "desc of %s"%s}' % (n, extra))
+    open(os.path.join(sd, "files", n), "w").write('{"_description": "desc of %s"}' % n)
 args = types.SimpleNamespace(sounder_dir=sd, max_frame=1, csi_fps=0, venv=sd,
                              conf="files/houdini-a.json", storepath=sd)
 # The operator's own --conf is offered even when it is not files/houdini*.json.
@@ -195,7 +193,6 @@ def driver():
         check(st["enabled"] and st["state"] == "stopped", "not autostarted: stopped until asked")
         check(st["configs"] == ["files/houdini-a.json", "files/houdini-b.json"], "only files/houdini*.json are offered")
         check(st["desc"]["files/houdini-b.json"] == "desc of houdini-b.json", "each config's _description is served")
-        check(st["guard"] == [128, 128], "a config without guard seats draws the 128 default")
         # A failing quick check blocks Start and is shown; nothing launches.
         open(flag, "w").close()
         post({"cmd": "start"})
@@ -270,11 +267,6 @@ def driver():
         kid1 = int(open(log + ".kids").read().split()[0])
         check(not alive(kid1), "restart killed the old sounder's SIGTERM-proof child (group SIGKILL)")
         check(get()["conf"] == "files/houdini-b.json" and starts()[-1] == "files/houdini-b.json", "restart switched config")
-        # The config is relative to the sounder's checkout, not this process's cwd
-        # (csi_gui/ under ctest, where files/houdini-b.json does not exist).
-        # Fails under: _load_conf opening `conf` as given, or the control state
-        # carrying the launch config's seats instead of the running one's.
-        check(get()["guard"] == [32, 40], "the ADC guard markers follow the switch to b's seats (%s)" % get()["guard"])
         check(open(log).read().count("teardown") == 2, "every start is preceded by a teardown")
         pid2 = get()["pid"]
         post({"cmd": "stop"})

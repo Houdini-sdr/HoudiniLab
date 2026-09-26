@@ -533,12 +533,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/" or self.path.startswith("/index"):
-            pre, post = self.server.guard_seats()
             body = (PAGE.replace("__STALE_MS__", str(self.server.stale_ms))
                         .replace("__MAG_TOP__", str(self.server.mag_top()))
                         .replace("__MAG_SPAN__", str(self.server.mag_span))
-                        .replace("__GUARD_PRE__", str(pre))
-                        .replace("__GUARD_POST__", str(post))
                         .encode("utf-8"))
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -578,8 +575,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(403, {"enabled": False, "error": why})
             return
         st = sup.snapshot()
-        st.update({"enabled": True, "configs": sup.configs(), "desc": sup.descriptions(),
-                   "guard": list(_guard_seats(sup.sd, st["conf"]))})
+        st.update({"enabled": True, "configs": sup.configs(), "desc": sup.descriptions()})
         self._json(200, st)
 
     def do_POST(self):
@@ -667,8 +663,8 @@ class Handler(BaseHTTPRequestHandler):
                 now = time.monotonic()
                 stale = any(r.get("age_ms", 0) >= stale_ms for r in snap.values())
                 # The sync stream must count too: it is quiet by nature between
-                # resync bursts, and after the staleness fix its age is the only
-                # thing that can move the chip off a stale state. Without this
+                # resync bursts, and its age is the only thing that can move the
+                # chip off a stale state. Without this
                 # the push stops when SYN1 stops and the age freezes on screen.
                 # Bounded above as well as below: past SYNC_REPUSH_CEIL_MS the
                 # page has long since shown NOT SYNCED, and a tid that never
@@ -735,17 +731,6 @@ def _topology_of(sounder_dir, conf):
     return (_load_conf(sounder_dir, conf) or {}).get("serial_file") or None
 
 
-def _guard_seats(sounder_dir, conf):
-    """The config's nominal guard seats (zero prefix, postfix) for the ADC
-    panel's dashed markers; 128 each when the config cannot be read (the
-    markers are cosmetic)."""
-    cj = _load_conf(sounder_dir, conf) or {}
-    try:
-        return int(cj.get("ofdm_tx_zero_prefix", 128)), int(cj.get("ofdm_tx_zero_postfix", 128))
-    except (TypeError, ValueError):
-        return 128, 128
-
-
 _PR_SET_PDEATHSIG = 1  # linux/prctl.h
 
 
@@ -777,7 +762,7 @@ def _die_with_parent():
 
 
 def _pump(stream, prefix, log=None):
-    """Copy a child's output to ours, one prefix per line (was a sed), and to
+    """Copy a child's output to ours, one prefix per line, and to
     `log` as written (the report tools read the sounder's own lines); closes
     `log` at the child's end of output."""
     try:
@@ -1154,7 +1139,7 @@ def main():
                     help="host the sounder streams CSI to (when --launch)")
     args = ap.parse_args()
     # Validate BEFORE anything launches: a SystemExit after the supervisor starts
-    # orphaned the sounder group holding the radios (second review 2.5).
+    # orphans the sounder group holding the radios.
     if not ((args.mag_top is None or math.isfinite(args.mag_top)) and math.isfinite(args.mag_span)
             and args.mag_span > 0):
         raise SystemExit("--mag-top/--mag-span must be finite (span > 0)")
@@ -1207,11 +1192,6 @@ def main():
     # so a config switch under --control takes effect on the next reload.
     srv.mag_top = lambda: _mag_top(args.sounder_dir, sup.conf if sup else args.conf, args.mag_top)
     srv.mag_span = args.mag_span
-    # Nominal guard seats for the ADC panel's dashed markers (Opus review M16:
-    # 128 was hardcoded but eight shipped configs use 160), from the config the
-    # sounder runs, resolved against its checkout as the sounder resolves it;
-    # the page refreshes them from /control when a config switch restarts it.
-    srv.guard_seats = lambda: _guard_seats(args.sounder_dir, sup.conf if sup else args.conf)
     srv.daemon_threads = True
     srv.control = sup if args.control else None
     # Serve in a daemon thread so the main thread can wait for Ctrl+C. (Calling
@@ -1266,14 +1246,9 @@ PAGE = r"""<!doctype html>
    to keep in step. Same reason the canvases read their colours from these vars. */
 .csi-cards{display:grid;gap:1rem;padding:1rem;align-items:start;
   grid-template-columns:repeat(auto-fit,minmax(520px,1fr))}
-/* No fixed card width. The old 620px card gave 586px of content while the views
-   needed 588, so every panel was clipped by 2px: sizing a card by arithmetic that
-   has to be redone whenever a panel changes is the bug, not the number. The
-   canvases now stretch to whatever the grid gives them. */
+/* No fixed card width: the canvases stretch to whatever the grid gives them, so a
+   panel change never needs the card's width redone by arithmetic. */
 .csi-card{min-width:0}
-/* Both views need 588px of content and the card gives 606, but a future size change
-   should degrade to a scrollbar rather than silently clip a panel off the edge. */
-.csi-plots{min-width:0}
 /* A stale card dims its plots but NOT its header, so the badge that explains the
    dimming does not dim along with the thing it is explaining. */
 .csi-card.stale .csi-plots{opacity:.4}
@@ -1285,20 +1260,16 @@ PAGE = r"""<!doctype html>
 #ctl[hidden]{display:none!important}
 .csi-fold svg{transition:transform .15s}
 .csi-card.csi-collapsed .csi-fold svg{transform:rotate(-90deg)}
-.csi-plots{display:grid;grid-template-columns:1fr 1fr;gap:.75rem 1rem}
+.csi-plots{display:grid;grid-template-columns:1fr 1fr;gap:.75rem 1rem;min-width:0}
 .csi-phase-stack{display:flex;flex-direction:column;gap:.35rem}
 .csi-h-half canvas{height:110px}
-/* (retired) The quality strip sat in the SAME grid cell as the magnitude panel, directly
-   under it, so the two share one subcarrier axis exactly. A strip in its own
-   full-width row would be a different pixels-per-subcarrier scale, and a null would
-   appear at two different x positions in two panels that describe the same tone. */
 .csi-adc .csi-plot{grid-column:1 / -1}
 .csi-head{grid-column:1 / -1;margin-top:.5rem}
 .csi-head-lbl{font-size:.85rem;color:var(--tblr-secondary);margin-bottom:.15rem}
 .csi-head-pct{font-variant-numeric:tabular-nums}
 .csi-plot-title{font-size:.85rem;color:var(--tblr-secondary);margin-bottom:.15rem;
   display:flex;align-items:center;gap:.35rem}
-.csi-stage{display:flex}
+.csi-stage{display:flex;min-width:0}
 .csi-y-axis{position:relative;width:46px;flex:0 0 46px;font-size:.8rem;
   color:var(--tblr-secondary);font-variant-numeric:tabular-nums}
 .csi-y-axis span{position:absolute;right:5px;transform:translateY(-50%);white-space:nowrap}
@@ -1309,15 +1280,14 @@ PAGE = r"""<!doctype html>
 .csi-y-axis span:last-child{transform:translateY(-100%)}
 .csi-plot canvas{display:block;width:100%;background:var(--tblr-bg-surface-tertiary);
   border:1px solid var(--tblr-border-color);border-radius:4px}
-/* Heights live here, widths come from the grid. Bigger than the first pass: at
-   120px a 64-subcarrier trace had under 2px per subcarrier. */
+/* Heights live here, widths come from the grid (at 120px a 64-subcarrier trace
+   had under 2px per subcarrier). */
 .csi-h-line canvas{height:190px}
 .csi-h-wf   canvas{height:190px}
 .csi-h-cons canvas{height:250px}
 .csi-h-cir  canvas{height:150px}
 .csi-quality{font-size:.95rem;line-height:1.5;align-self:center}
 .csi-h-adc  canvas{height:220px}
-.csi-stage{min-width:0}
 .csi-plot{min-width:0}
 .csi-x-axis{display:flex;justify-content:space-between;margin-left:46px;margin-top:.1rem;
   font-size:.8rem;color:var(--tblr-secondary);font-variant-numeric:tabular-nums}
@@ -1358,15 +1328,12 @@ PAGE = r"""<!doctype html>
 // Canvas sizes are MEASURED from the layout every time it changes, not declared
 // here: the panels stretch with the card, so a hard-coded width could only ever be
 // wrong. Heights come from the .csi-h-* classes. See fitCard().
-// Full scale for the sample container: the 14-bit ADC is MSB-aligned in int16, so
-// the rail really is 32768 and not the converter's 8191 (device/README.md:239,
-// Full scale of the int16 sample CONTAINER (the absolute converter mapping
-// is unmeasured, DEMO_VERIFICATION.md 2.19). The PARSER is the single
-// page-side source: it stamps `full_scale` on every record and drawAdc
-// reads the record. The ADC2 wire does not carry it, so a sounder-side
-// change still means editing the parser constant (second review 2.6).
+// Full scale of the int16 sample CONTAINER: the 14-bit ADC is MSB-aligned in
+// int16, so the rail is 32767 and not the converter's 8191 (the absolute
+// converter mapping is unmeasured, DEMO_VERIFICATION.md 2.19). The server's
+// parser stamps `full_scale` on every ADC record and drawAdc reads it; the ADC2
+// wire does not carry it, so a sounder-side change means editing the parser.
 const ADC_FS=32767;
-let GUARD_PRE=__GUARD_PRE__, GUARD_POST=__GUARD_POST__;  // pollCtl follows a config switch
 const STALE_MS=__STALE_MS__;         // no update for this long -> dim + badge
 // Both top panels are FIXED frame to frame. An axis that re-ranges per frame makes
 // a static channel look alive and hides real drift, so nothing here auto-scales
@@ -1685,7 +1652,7 @@ function fitCard(card, force){
   }
 }
 
-// Grid only: the labels are HTML now. Horizontal quarters plus the DC centre line.
+// Grid only: the labels are HTML gutters (yAxis). Horizontal quarters plus the DC centre line.
 function grid(ctx,w,h){
   ctx.clearRect(0,0,w,h);
   ctx.strokeStyle=C.grid; ctx.lineWidth=1;
@@ -1707,17 +1674,18 @@ function line(ctx,vals,ymin,ymax,color,w,h){
   ctx.stroke();
 }
 
-// Phase panels [user: "too zoomed out and update too fast"]. Both redraw every
-// PH_DRAW_MS, not every frame. The raw panel stays arg(H) as measured on -pi..+pi.
-// The lower panel is the channel's phase SHAPE: from each frame the sounder's
-// de-ramped phase loses its measured delay (a least-squares line, seeded by the
-// mean phase step between adjacent tones so wrapping cannot fool it) and its common
-// phase, and what is left is averaged over the frames since
-// the last draw (as unit phasors) and drawn on a fixed +-PH_SPAN_DEG axis. Removing
-// only the window back-off (the sounder's de-ramp) left a tilt that the frame timing
-// moves by about a sample from one frame to the next, plus the two free-running
-// carriers' phase; both swamped the shape, which on a cable is the filters' ripple.
-// The removed delay is printed beside the title instead.
+// Phase-shape panel [user: "too zoomed out and update too fast"]. It redraws
+// every PH_DRAW_MS, not every frame, and shows the channel's phase SHAPE: from
+// each frame the sounder's de-ramped phase loses its measured delay (a
+// least-squares line, seeded by the mean phase step between adjacent tones so
+// wrapping cannot fool it) and its common phase, and what is left is averaged
+// over the frames since the last draw (as unit phasors) and drawn on a fixed
+// +-PH_SPAN_DEG axis. Removing only the window back-off (the sounder's de-ramp)
+// leaves a tilt that the frame timing moves by about a sample from one frame to
+// the next, plus the two free-running carriers' phase; both swamp the shape,
+// which on a cable is the filters' ripple. The removed delay is printed beside
+// the title instead.
+//
 // MER history [user]: the dashboard's own 1 s pooled MER (the quality line's
 // figure), sampled every MER_STEP_MS into a MER_HIST_S window on a FIXED
 // 0..MER_TOP dB axis; a gap in the line is a stretch with no constellation.
@@ -1834,8 +1802,8 @@ function setScAxis(card,nsc){
   const lab=['-'+(nsc>>1),'DC','+'+(nsc>>1)];
   // Gutters in document order: mag, MER history, phase shape, waterfall. The
   // MER history (index 1) keeps its time labels and the constellation (index 4)
-  // its I/Q labels (Opus review M14: adding the phase stack shifted these
-  // indices and the waterfall lost its labels).
+  // its I/Q labels. A panel added to the channel view shifts these indices:
+  // recount them, or a gutter loses its labels.
   for(const i of [0,2,3]){
     const sp=card.xax[i].querySelectorAll('span');
     for(let j=0;j<3;j++) sp[j].textContent=lab[j];
@@ -2083,12 +2051,11 @@ let pktCount=0,t0=Date.now();
 // ---- beacon sync / CFO panel (AP-32) --------------------------------------
 // One card per client tid, matching how every other stream here is keyed.
 const SYNC_SHOW=120, SYNC_QUIET_FLOOR_MS=2500, SYNC_DEAD_MS=60000;
-// THE QUIET THRESHOLD MUST TRACK THE RESYNC CADENCE, NOT A CONSTANT. 2500 ms was
-// chosen when the client resynced every 260 ms, so it meant "about ten missed
-// opportunities". The cadence default became 2604 ms on 2026-09-02, which put
-// every NORMAL detection past a fixed 2500 and would have dimmed the card and
-// shown "quiet 2.6s" permanently -- destroying the one badge whose whole job is
-// to distinguish held data from live data.
+// THE QUIET THRESHOLD MUST TRACK THE RESYNC CADENCE, NOT A CONSTANT. 2500 ms
+// meant "about ten missed opportunities" at a 260 ms cadence; at the 2604 ms
+// default every NORMAL detection lands past a fixed 2500, which would dim the
+// card and show "quiet 2.6s" permanently -- destroying the one badge whose whole
+// job is to distinguish held data from live data.
 //
 // SYN1 does not carry the cadence, so the page measures it: the median interval
 // between arriving records for this tid, over the last few. Self-calibrating, no
@@ -2284,9 +2251,9 @@ function drawSyncCard(tid, sync){
         +(Math.abs(bm)<CFO_NOISE_HZ?', inside the ~2 kHz phase-noise floor':'')
         +')';
   }
-  // The beacon's detection SNR at the UE [user: 'is beacon SNR displayed
-  // anywhere?']: the median over the latest detections, the number to watch
-  // while aiming antennas (the demo's detector floor is 25 dB).
+  // The beacon's detection SNR at the UE: the median over the latest
+  // detections, the number to watch while aiming antennas (the demo's detector
+  // floor is 25 dB).
   const snrs=hist.slice(-40).map(h=>h.snr).filter(v=>Number.isFinite(v)).sort((a,b)=>a-b);
   const snrStr=snrs.length?('beacon SNR '+snrs[snrs.length>>1].toFixed(1)+' dB (median of '+snrs.length+')  |  '):'';
   card.read.textContent=snrStr
@@ -2400,7 +2367,6 @@ async function pollCtl(){
       sel.value=st.conf;
     }
     drawCheck(st.check);
-    if(st.guard){ GUARD_PRE=st.guard[0]; GUARD_POST=st.guard[1]; }
     let t=st.state;
     if(st.state==='running') t+=' (pid '+st.pid+')';
     else if(st.state==='exited') t+=' rc '+st.rc;
@@ -2441,7 +2407,6 @@ function drawCheck(ck){
 }
 async function sendCtl(cmd){
   const conf=document.getElementById('ctl-conf').value||null;
-  const el=document.getElementById('ctl-state');
   try{
     const r=await fetch('/control',{method:'POST',headers:{'Content-Type':'application/json'},
                                     body:JSON.stringify({cmd:cmd,conf:(cmd==='stop'?null:conf)})});
