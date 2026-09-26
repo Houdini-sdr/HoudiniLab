@@ -151,6 +151,22 @@ check(age is not None and 1999 <= age <= int((after - t_in + 2.0) * 1000) + 1 an
 with cs._lock:
     del cs._latest[41]
 
+# A datagram carrying a non-finite float is dropped at the parser: kept, it would
+# poison the snapshot and fail every SSE event until replaced (never, for a
+# stray antenna id).
+nsc = 8
+good_vals = [0.5] * (2 * nsc) + [0.0] * nsc
+csi2 = lambda vals, rate=122.88e6: cs.CSI2_HDR.pack(cs.MAGIC_CSI2, 3, 0, nsc, rate, 1) + struct.pack("<%df" % len(vals), *vals)
+cns = lambda vals: cs.CNS_HDR.pack(cs.MAGIC_CNS, 3, 0, len(vals) // 2, 2) + struct.pack("<%df" % len(vals), *vals)
+bad_vals = list(good_vals); bad_vals[5] = float("nan")
+inf_vals = list(good_vals); inf_vals[2] = float("inf")
+check(cs._parse_csi(csi2(good_vals), True) is not None
+      and cs._parse_csi(csi2(bad_vals), True) is None and cs._parse_csi(csi2(inf_vals), True) is None
+      and cs._parse_csi(csi2(good_vals, float("nan")), True) is None,
+      "a CSI datagram with a NaN or infinite value is dropped, a finite one parsed (mutation: no finiteness check)")
+check(cs._parse_cns(cns([0.7, -0.7] * 4)) is not None and cs._parse_cns(cns([0.7, float("nan")] * 4)) is None,
+      "a constellation datagram with a NaN point is dropped (mutation: no finiteness check)")
+
 # One serialisation per seq, shared by every open page; a stale re-push (seq
 # unchanged) past BODY_REUSE_S rebuilds, so the ages it carries still move.
 calls = [0]; real = cs.json.dumps

@@ -11,6 +11,10 @@ ST=$1; TAG=$2; CONF=$3; SECS=$4
 cd "${SOUNDER_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}" || exit 1  # default: this checkout; SOUNDER_DIR: another worktree's build
 D=ap79_runs
 rm -f "$D"/cns_dump*.bin "$D/beacon_ram.bin" "$D/gold.bin"
+# State records already here belong to a run this script did not launch (a
+# direct run_rung.sh): set them aside, or the filing below takes them as this
+# run's own.
+mkdir -p "$D/unfiled" && mv "$D"/rfdc_*.txt "$D"/modev_*.txt "$D/unfiled/" 2>/dev/null
 RW=$(mktemp -d /tmp/rw_XXXX)
 export HOUDINI_CSI_DUMP=${HOUDINI_CSI_DUMP:-60} HOUDINI_BS_RX_DEBUG=1 HOUDINI_DUMP_BEACON=1 HOUDINI_DUMP_RESYNC_WIN=$RW
 # SYN retransmits on this host around the run: an open that stalls about 1 s

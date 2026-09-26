@@ -29,9 +29,12 @@ pgrep -x sounder >/dev/null && { echo "a sounder is running on this host; stop i
 [ "$SECS" -gt 90 ] || { echo "secs must be over 90 (the samplers start 40 s in)"; exit 1; }
 S=$(mktemp -d /tmp/demo_run_XXXX)
 setsid nohup python3 "$HERE/freeze_watch.py" --run-dir "$D/ap79_runs" --tag "$TAG" > "$S/freeze.txt" 2>&1 < /dev/null &
+SAMPLERS=$!
 # The MER every 15 s from 40 s in, the last about 20 s before the run ends.
 setsid nohup python3 "$HERE/mer_sampler.py" "$S/mer.txt" 15 $((SECS - 60)) 40 > /dev/null 2>&1 < /dev/null &
+SAMPLERS="$SAMPLERS $!"
 setsid nohup python3 "$HERE/spc_sample.py" "$S/spc.txt" 60,$((SECS / 2)),$((SECS - 40)) > "$S/spc.err" 2>&1 < /dev/null &
+SAMPLERS="$SAMPLERS $!"
 [ "$PLUG" = slots ] && export HOUDINI_SOAPY_ROOT=${HOUDINI_SLOTS_ROOT:-$HOME/houdini_slots}
 export SOUNDER_DIR=$D HEALTH_S=5 HOUDINI_TX_HOST_STATUS=1 FILTERS="$FILT"
 export HOUDINI_CORE_MAP=${HOUDINI_CORE_MAP:-main=15} HOUDINI_TX_CPU_AFFINITY=${HOUDINI_TX_CPU_AFFINITY:-18,19}
@@ -46,7 +49,8 @@ bash "$HERE/fstage_run.sh" "${STAGE:-DEMO}" "$TAG" "$CONF" "$SECS" 2>&1 | grep -
 sleep 5
 IRQ1=$(irq)
 R=$(cat "ap79_runs/$TAG.current" 2>/dev/null); O=$D/ap79_runs/${STAGE:-DEMO}/$R
-[ -n "$R" ] && [ -d "$O" ] || { echo "no run directory filed"; exit 1; }
+# A run that filed nothing leaves no samplers behind: stop them by their own pids.
+[ -n "$R" ] && [ -d "$O" ] || { echo "no run directory filed"; kill $SAMPLERS 2>/dev/null; rm -rf "$S"; exit 1; }
 cp "$S/mer.txt" "$O/mer.txt" 2>/dev/null; cp "$S/freeze.txt" "$O/freeze_watch.txt" 2>/dev/null
 cat "$S/spc.txt" "$S/spc.err" > "$O/spectrum.txt" 2>/dev/null
 echo "run dir: $O"

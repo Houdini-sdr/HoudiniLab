@@ -159,6 +159,11 @@ def _parse_csi(payload, with_quality):
     if len(payload) < need:
         return None
     vals = struct.unpack_from("<%df" % (2 * nsc), payload, off)
+    # A non-finite value would poison the snapshot: every SSE event fails to
+    # serialise (allow_nan=False) until a finite record replaces it, which a
+    # stray antenna id never does. A sum is finite only when every term is.
+    if not (math.isfinite(rate) and math.isfinite(sum(vals))):
+        return None
     mag_db, phase, mags = [], [], []
     for k in range(nsc):
         re, im = vals[2 * k], vals[2 * k + 1]
@@ -194,7 +199,7 @@ def _parse_adc(payload, v2):
         magic, frame, ant, cols, samps, rate, peak, clipped = ADC_HDR.unpack_from(payload, 0)
         off = ADC_HDR.size
         slot, any_peak, any_clipped = -1, peak, clipped
-    if len(payload) < off + 8 * cols:
+    if len(payload) < off + 8 * cols or not math.isfinite(rate):
         return None
     return int(ant), {"frame": int(frame), "cols": int(cols), "samps": int(samps),
                       "rate": float(rate), "peak": int(peak), "clipped": int(clipped),
@@ -257,6 +262,8 @@ def _parse_cns(payload):
     if len(payload) < off + 8 * npt:
         return None
     vals = struct.unpack_from("<%df" % (2 * npt), payload, off)
+    if not math.isfinite(sum(vals)):  # as _parse_csi: a non-finite point poisons the snapshot
+        return None
     pts = [[vals[2 * i], vals[2 * i + 1]] for i in range(npt)]
     rec = {"frame": int(frame), "mod": int(mod), "pts": pts}
     r = _mer_err(pts, int(mod))
@@ -1143,6 +1150,8 @@ def main():
     if not ((args.mag_top is None or math.isfinite(args.mag_top)) and math.isfinite(args.mag_span)
             and args.mag_span > 0):
         raise SystemExit("--mag-top/--mag-span must be finite (span > 0)")
+    if not (math.isfinite(args.fps) and args.fps > 0):
+        raise SystemExit("--fps must be a positive number")  # every SSE handler sleeps 1/fps
 
     recorder = None
     if args.record:
@@ -2034,6 +2043,7 @@ function redrawAll(){
     if(card.adcRec) drawAdc(card,card.adcRec);
     if(card.spcRec) drawSpc(card,card.spcRec);
     if(card.cirRec) drawCir(card,card.cirRec);
+    drawMer(card);
   }
 }
 
