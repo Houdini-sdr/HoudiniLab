@@ -111,8 +111,9 @@ inline long long chooseExpect(long long expect, long long n, long long fr, long 
 /// The densest n-sample window whose start lies within +-tol of `expect`,
 /// stepping `step`, over the cumulative energy cse: {start, energy}, or
 /// {-1, 0} when no window fits the capture. The host half of the user's
-/// contract that a TDD node receives only its RX slots (SH-347): the BS keeps
-/// its rx gate open all frame (a gate close abandons the continuous capture),
+/// contract that a TDD node receives only its RX slots (SH-347): without
+/// bs_rx_slots the BS keeps its rx gate open all frame (up to fpga 1.33 a gate
+/// close abandoned the continuous capture),
 /// so over the air its own beacon slot and the guards carry whatever is on
 /// the air, and a whole-frame search takes the loudest of it for the UE.
 /// Searching only the scheduled pilot position cannot.

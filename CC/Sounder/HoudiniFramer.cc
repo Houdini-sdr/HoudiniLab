@@ -297,13 +297,14 @@ void HoudiniFramer::armTdd(void) {
   // samps_per_slot, symbols_per_frame = slot_per_frame), '6' on the beacon
   // slot, '2' on every other slot. Verified on silicon 2026-08-30
   // (DEMO_VERIFICATION.md 4.12): the ring arms and the strobe plays exactly
-  // one burst per frame. Every non-beacon entry must keep the rx bit set:
-  // a gate close ABANDONS a running continuous capture (driver contract,
-  // D4 window-pump + overlength-abandon), and per-window host pumping costs
-  // ~100 ms RPC per window, unusable at 1 ms frames. True rx-only-in-P/U
-  // gating therefore needs a driver capability (hardware-chained windowed
-  // RX); until then the wire carries the whole frame and the guards are
-  // silent AIR, not absent DATA (DEMO_VERIFICATION.md section 3/4).
+  // one burst per frame. Without bs_rx_slots every non-beacon entry keeps
+  // the rx bit: up to fpga 1.33 a gate close ABANDONED a running continuous
+  // capture (driver contract, D4 window-pump + overlength-abandon), so the
+  // wire carries the whole frame and the guards are silent AIR, not absent
+  // DATA (DEMO_VERIFICATION.md section 3/4). With bs_rx_slots (AP-87) the
+  // pattern is the schedule's own: the device's slots mode (SH-347) delivers
+  // only the rx slots, and from fpga 1.34 the fabric gates packets by the rx
+  // bit (HS-237) instead of abandoning the capture.
   //
   // The strobe plays ONE beacon copy per frame (loops=1, len = beacon core):
   // the old loops=forever filled a 0.5 ms symbol with ~15 copies, which made
@@ -360,8 +361,9 @@ void HoudiniFramer::armTdd(void) {
       std::string tdd(spf_tdd, '2');    // every slot rx-gates
       // NB the ring's last rx entry abuts the tx-ish '6' across the frame
       // wrap, so the driver logs the HS-184 warm-return warning twice per
-      // arm. ACCEPTED deliberately: a '0' guard would close the rx gate and
-      // abandon the continuous capture (see the function comment); the
+      // arm. ACCEPTED deliberately for this all-rx ring: up to fpga 1.33 a
+      // '0' guard closed the rx gate and abandoned the continuous capture
+      // (see the function comment; 1.34 packet-gates instead); the
       // warning is about X-band T/R-switch timing, moot on this cabled
       // bench. (The guarded probe ring in DEMO_VERIFICATION.md 4.12 avoided
       // the warning; the shipped ring does not.)

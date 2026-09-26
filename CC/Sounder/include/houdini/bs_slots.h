@@ -28,10 +28,11 @@ namespace bsslots {
 /// continuous capture needed before slots mode: '6' on the beacon, '2' elsewhere.
 /// The slots form puts a guard ('0'; across the frame wrap when the beacon is
 /// slot 0, as in the demo schedule) directly before the beacon
-/// ('4'). The device refuses that arm (rule 6b, the power board's warm return)
-/// only while the schedule drives TX_SEL; highz and AP-86's static source do
-/// not, so it arms. A per-symbol T/R switch from the schedule would be refused,
-/// loudly, at TDD_ARM.
+/// ('4'). On fpga 1.33 the device refuses that arm (rule 6b, the power board's
+/// warm return) only while the schedule drives TX_SEL; highz and AP-86's static
+/// source do not, so it arms. From fpga 1.34 the fill is as written and the
+/// refusal is gone; the fabric then gates RX packets by each entry's rx bit
+/// (HS-237), which is why the beacon slot is '4', not '6'.
 inline std::string tddPattern(const std::string& sched, bool rx_slots_only) {
   std::string t(sched.size(), rx_slots_only ? '0' : '2');
   for (size_t s = 0; s < sched.size(); ++s) {
