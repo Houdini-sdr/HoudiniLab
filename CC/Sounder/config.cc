@@ -535,6 +535,26 @@ Config::Config(const std::string& jsonfile, const std::string& directory,
     throw std::invalid_argument("bs_rx_slots needs packets that tile the slot (the device cuts whole packets at the "
                                 "slot edges); a " + std::to_string(samps_per_slot_) + "-sample slot has no such packet");
   }
+  // The Houdini TDD framer cuts ONE pilot slot per frame: it keeps the
+  // schedule's 'P' as the pilot and centres the burst search on it, so a
+  // second 'P' sits where the search assumes silence and misplaces every cut,
+  // unflagged. With bs_rx_slots the beacon strobe is armed on the 'B' slot, so
+  // a schedule without one plays no beacon.
+  if (is_houdini() && bs_hw_framer_ && !internal_measurement_) {
+    for (const auto& cell : bs_array_frames_) {
+      for (const auto& sched : cell) {
+        const auto np = std::count(sched.begin(), sched.end(), 'P');
+        if (np != 1) {
+          throw std::invalid_argument("frame_schedule '" + sched + "': the Houdini TDD framer cuts exactly one pilot "
+                                      "slot ('P') per frame; this schedule has " + std::to_string(np));
+        }
+        if (bs_rx_slots_ && sched.find('B') == std::string::npos) {
+          throw std::invalid_argument("frame_schedule '" + sched + "': bs_rx_slots arms the beacon strobe on the "
+                                      "schedule's 'B' slot, and this schedule has none");
+        }
+      }
+    }
+  }
   assert((internal_measurement_ && num_cl_antennas_ == 0) || (dl_pilots_en_) ||
          (num_cl_sdrs_ > 0 && slot_per_frame_ == cl_frames_.at(0).size()));
 

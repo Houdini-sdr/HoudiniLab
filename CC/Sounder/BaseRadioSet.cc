@@ -281,7 +281,7 @@ void BaseRadioSet::init(BaseRadioContext* context) {
   }
   MLPD_TRACE("BaseRadioSet: Init complete\n");
   assert(thread_count->load() != 0);
-  thread_count->store(thread_count->load() - 1);
+  thread_count->fetch_sub(1);  // one atomic step: a load then a store loses a decrement when two init threads finish together, and the constructor then waits forever
 }
 
 void* BaseRadioSet::configure_launch(void* in_context) {
@@ -309,7 +309,7 @@ void BaseRadioSet::configure(BaseRadioContext* context) {
   }
 
   assert(thread_count->load() != 0);
-  thread_count->store(thread_count->load() - 1);
+  thread_count->fetch_sub(1);  // one atomic step: a load then a store loses a decrement when two init threads finish together, and the constructor then waits forever
 }
 
 void BaseRadioSet::radioTrigger(void) {

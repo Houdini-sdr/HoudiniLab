@@ -344,6 +344,24 @@ int main() {
   // ---- 5. refusals --------------------------------------------------------------
   {
     auto refused = [](const std::string& msg, const char* want) { return msg.find(want) != std::string::npos; };
+    {
+      // The Houdini framer cuts one pilot slot; the slots mode needs the beacon slot.
+      json k = load("files/houdini-dualband-xw-steer-slots.json");
+      std::string two = k["frame_schedule"][0].get<std::string>();
+      two[two.find('G', two.find('P'))] = 'P';
+      k["frame_schedule"] = {two};
+      k["ue_frame_schedule"] = {std::string(two.size(), 'G')};
+      check(refused(refusal(k, "r_twop"), "exactly one pilot slot"),
+            "refused: a Houdini schedule with two pilot slots [mutation: the one-pilot check removed]");
+      k = load("files/houdini-dualband-xw-steer-slots.json");
+      std::string nob = k["frame_schedule"][0].get<std::string>();
+      nob[nob.find('B')] = 'G';
+      k["frame_schedule"] = {nob};
+      check(refused(refusal(k, "r_nobeacon"), "has none"),
+            "refused: a slots-mode schedule without a beacon slot [mutation: the beacon-slot check removed]");
+      check(refusal(load("files/houdini-dualband-xw-steer-slots.json"), "r_demo_ok").empty(),
+            "the demo config itself loads [mutation: the checks refuse a valid schedule]");
+    }
     json j = load("files/houdini-r0.json");
     j["channel_ofdm_data_num"] = {{"B", 1596}};
     check(refused(refusal(j, "r_nomodev"), "needs the mode-V converter plan"),

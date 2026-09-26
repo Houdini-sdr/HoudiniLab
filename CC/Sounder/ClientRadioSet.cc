@@ -296,7 +296,7 @@ void ClientRadioSet::init(ClientRadioContext* context) {
   }
   MLPD_TRACE("ClientRadioSet: Init complete\n");
   assert(thread_count->load() != 0);
-  thread_count->store(thread_count->load() - 1);
+  thread_count->fetch_sub(1);  // one atomic step: a load then a store loses a decrement when two init threads finish together, and the constructor then waits forever
 }
 
 ClientRadioSet::~ClientRadioSet(void) { radios.clear(); }
