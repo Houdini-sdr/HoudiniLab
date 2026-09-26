@@ -4,45 +4,36 @@
  *        schema in one static table, loaded from the JSON `sync` block,
  *        validated, resolved, and printed with the provenance of every value.
  *
- * WHY ONE TABLE. Until 2026-09-03 these values were about thirty HOUDINI_*
- * environment variables read at their point of use in receiver.cc,
- * comms-lib-portable.cc and BaseRadioSet.cc. Three costs were paid for that
- * (docs/SYNC_LIBRARY_ARCHITECTURE.md section 1): a knob accepted a nonsense
- * value silently (AP-56), a threshold inherited across beacons became a cliff
- * (DEMO_VERIFICATION 8.157), and the effective configuration of a run was only
- * knowable from its log. Every knob is one row of `schema()`: its JSON path,
- * the environment name it used to have, its range, its policy, and typed
- * accessors into the value struct. Loading, validation, the startup print and
- * the walkthrough's knob table are all generated from that one table.
+ * WHY ONE TABLE. A value read from the environment at its point of use
+ * accepts a nonsense value silently (AP-56), lets a threshold carry across
+ * beacons into a cliff (DEMO_VERIFICATION 8.157), and leaves the effective
+ * configuration of a run knowable only from its log
+ * (docs/SYNC_LIBRARY_ARCHITECTURE.md section 1). So every knob is one row of
+ * `schema()`: its JSON path, its HOUDINI_* environment name where it has one,
+ * its range, its policy, and typed accessors into the value struct. Loading,
+ * validation, the startup print and the walkthrough's knob table are all
+ * generated from that one table.
  *
  * SCHEMA AND VALUES ARE SEPARATE. `schema()` is a static table of specs whose
  * accessors are plain functions of a SyncConfig; it holds no pointer into any
  * object, can be read from a const object, and needs no instance to render
- * the documentation. (Its first version kept raw pointers into `*this`, which
- * let a const reference hand out writable storage; the architecture review of
- * 2026-09-03 called it, and this is the fix.)
+ * the documentation. Do not store pointers into `*this` in a spec: a const
+ * reference would then hand out writable storage.
  *
- * ENVIRONMENT OVERRIDES ARE OFF BY DEFAULT (decided 2026-09-03,
- * docs/RADIO_PLATFORM_SEAM.md section 1). The JSON is the configuration; the
- * bench scripts sweep through a JSON overlay (run_shape_campaign.sh,
- * SYNC_OVERLAY). A config that sets `allow_env_overrides` true gets the old
- * HOUDINI_* readers back, every override logged; an environment variable seen
- * while they are off is reported as IGNORED so a stale export cannot pass
- * silently. The environment path is kept one more release for that reason
- * and then removed.
+ * ENVIRONMENT OVERRIDES ARE OFF BY DEFAULT (docs/RADIO_PLATFORM_SEAM.md
+ * section 1). The JSON is the configuration; the bench scripts sweep through
+ * a JSON overlay (tests/demo-verify/run_shape_campaign.sh, SYNC_OVERLAY). A
+ * config that sets `allow_env_overrides` true enables the HOUDINI_* readers,
+ * every override logged; an environment variable seen while they are off is
+ * reported as IGNORED so a stale export cannot pass silently. The
+ * environment path is deprecated and will be removed.
  *
- * WHAT AN OUT-OF-RANGE ENVIRONMENT VALUE DOES, knob by knob, because the old
- * readers were not uniform: four integer knobs (`resync.retry_max`,
- * `resync.escalate_episodes`, `resync.hold_offgrid`, `cfo.log_every`) were
- * clamped to at least 1, three knobs (`beacon.tx_full_scale`,
- * `detector.first_path_floor_db`, `detector.first_path_window`) IGNORED a value
- * outside their range and kept what was in place, and every other numeric
- * knob passed anything finite through with no range at all -- which is what
- * AP-56 complained about. Now: EnvPolicy::kClamp pulls the value to the
- * nearest bound with a note (the four ints as before, the formerly unbounded
- * knobs as the AP-56 fix); EnvPolicy::kIgnoreOutOfRange keeps the value
- * already in place with a note (the three that always did). Garbage is
- * always refused.
+ * WHAT AN OUT-OF-RANGE ENVIRONMENT VALUE DOES, per knob (Spec::env_policy):
+ * EnvPolicy::kClamp pulls the value to the nearest bound with a note;
+ * EnvPolicy::kIgnoreOutOfRange keeps the value already in place with a note
+ * (`beacon.tx_full_scale`, `detector.first_path_floor_db`,
+ * `detector.first_path_window`, whose readers always behaved so). A value
+ * that does not parse is always refused. JSON is always strict.
  *
  * The value struct has no JSON dependency; the loader in sync_config.cc does.
  */
@@ -96,17 +87,16 @@ struct BeaconConfig {
 
 /// The detection threshold as the correlator understands it: the bar is
 /// 1 / corr_scale for every form, and each resync retry relaxes it by one
-/// (corr_scale + attempt), the ladder the receiver has always run. Owned here,
-/// so the bar is configuration with a range and a record, not a number handed
-/// to the detector per call (architecture review 2026-09-03, item 1).
+/// (corr_scale + attempt). Owned here, so the bar is configuration with a
+/// range and a record, not a number handed to the detector per call.
 struct ThresholdPolicy {
   double corr_scale = 10.0;       ///< resync bar = 1 / corr_scale
   double corr_scale_init = 10.0;  ///< acquisition bar = 1 / corr_scale_init
-  /// The lowest bar the retry relaxation may reach; 0 = no limit (the ladder
-  /// as it always ran). The +1-per-retry ladder was sized for corr_scale 100,
-  /// where it moves the bar 1% a retry; at a small corr_scale (5, the
-  /// band-limited beacon's) it moves it 20% a retry and walks into the noise
-  /// within ~15 retries (AP-79 review), so such a config sets this.
+  /// The lowest bar the retry relaxation may reach; 0 = no limit. The
+  /// +1-per-retry ladder was sized for corr_scale 100, where it moves the bar
+  /// 1% a retry; at a small corr_scale (5, the band-limited beacon's) it moves
+  /// it 20% a retry and walks into the noise within ~15 retries (AP-79), so
+  /// such a config sets this.
   /// It only stops the relaxation: a configured bar already below it stays
   /// as configured and is not relaxed (SyncConfig::validate notes that).
   double min_bar = 0.0;
@@ -122,10 +112,9 @@ struct ThresholdPolicy {
   /// bar = 1 - (pfa_per_window / window_samples)^(1/(L-1)). Measured against
   /// its prediction in beacon_geometry_test; applied by the detector for the
   /// coherence form when DetectorConfig::pfa_applies, on a backend that
-  /// applies the configuration (P3). The correlator
-  /// ranks window + L - 1 indices, so the realised rate is that fraction
-  /// above the requested one (about 3 % at 4096 and 128), well inside the
-  /// Beta model's own error.
+  /// applies the configuration (P3). The correlator ranks window + L - 1
+  /// indices, so the realised rate is that fraction above the requested one
+  /// (about 3 % at 4096 and 128), well inside the Beta model's own error.
   static double coherenceBar(size_t replica_len, double pfa_per_window, size_t window_samples);
 };
 
@@ -144,14 +133,13 @@ struct DetectorConfig {
   /// rule that framer has always run, unless the JSON sets one.
   PickRule pick = PickRule::kFirstPath;
   /// Samples of back-search from the peak. -1 (the default) means "half the
-  /// replica length", which is what the pre-library code derived: 64 for a
-  /// 128-tap replica, 32 for the 64-tap dot11 and nr replicas. resolve()
-  /// fills it in from the shape.
+  /// replica length": 64 for a 128-tap replica, 32 for the 64-tap dot11 and
+  /// nr replicas. resolve() fills it in from the shape.
   int first_path_window = -1;
   double first_path_floor_db = -9.0;  ///< how much weaker an earlier path may be
   /// Samples before the peak the first-path back-scan skips: the split
   /// partner of the same arrival, which is not an earlier path (8aj).
-  /// 0 is what every release so far has shipped.
+  /// 0 is the shipped default.
   int first_path_guard = 0;
   ThresholdPolicy bar;
   /// Threads for the correlator's matched filter (CommsLib::correlate_mt).

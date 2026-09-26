@@ -2,13 +2,13 @@
  * @file sync/confirm.h
  * @brief The liveness confirm on a claimed detection: the in-window SNR guard.
  *
- * Moved from receiver.cc's beaconSnrDb unchanged. On this bench a real beacon
- * measures 45 to 48 dB and the noise-window artifact class that crosses the
- * correlation threshold measures ~0 dB (DEMO_VERIFICATION 4.25, 8.155), so a
- * floor separates them by orders of magnitude. The floor is a property of the
- * LINK AND THE WAVEFORM, not of the detector: a beacon 1.1 dB quieter than
- * the one the floor was set on is rejected wholesale at a level the louder one
- * clears (8.157). SyncConfig::validate says so when it can.
+ * On this bench a real beacon measures 45 to 48 dB and the noise-window
+ * artifact class that crosses the correlation threshold measures ~0 dB
+ * (DEMO_VERIFICATION 4.25, 8.155), so a floor separates them by orders of
+ * magnitude. The floor is a property of the LINK AND THE WAVEFORM, not of
+ * the detector: a beacon 1.1 dB quieter than the one the floor was set on is
+ * rejected wholesale at a level the louder one clears (8.157).
+ * SyncConfig::validate says so when it can.
  *
  * NR's equivalent is the SSS decode at the PSS timing; a SequenceConfirm with
  * this interface is AP-68's job and slots in beside this one.
@@ -41,7 +41,7 @@ class SnrWindowGuard {
   /// guard, inside the noise sum -- a 1.4x echo 24 samples late then reads
   /// ~20 dB, the floor rejects, and resync escalates (8.151). The echo
   /// allowance is a channel property, not a replica one, so it is a constant:
-  /// 64 samples (0.52 us), the value every shape ran with before the library.
+  /// 64 samples (0.52 us at 122.88 MSPS).
   static constexpr int kEchoGuardSamples = 64;
   static size_t guardFor(int resolved_first_path_window) {
     return static_cast<size_t>(std::max(kEchoGuardSamples, resolved_first_path_window));
@@ -53,8 +53,9 @@ class SnrWindowGuard {
   /// read, NOT an SS-SINR (TS 38.215 5.1.6 measures per resource element in
   /// the signal's own band). It reads 3 dB at 0 dB SNR, and an out-of-band
   /// tone in the window (the ADC's Fs/2 spur, AP-79) lowers it with the link
-  /// unchanged. A sound GATE; quote it as a ratio, not as the link's SNR. Returns -99 for an impossible span and +99 for
-  /// a window with no noise samples left to compare against.
+  /// unchanged. A sound GATE; quote it as a ratio, not as the link's SNR.
+  /// Returns -99 for an impossible span and +99 for a window with no noise
+  /// samples left to compare against.
   double snrDb(const std::complex<int16_t>* w, size_t n, ssize_t end_idx) const {
     const size_t core_len = core_len_;
     const ssize_t lo = end_idx - static_cast<ssize_t>(core_len);

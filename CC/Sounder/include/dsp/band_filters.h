@@ -7,7 +7,7 @@
  * WHY THEY EXIST. Mode V runs the DAC at 5898.24 with interpolation 24, so the
  * TX stream is 245.76 MSPS while the RX stream, and the device's timestamp
  * tick, stay at 122.88. The sounder keeps generating every TX waveform at
- * 122.88, in ticks, exactly as the config schedule defines it [user], and this
+ * 122.88, in ticks, exactly as the config schedule defines it, and this
  * interpolator doubles it at the radio TX boundary. The RFDC's own
  * interpolation passband reaches about 0.4 x 245.76 = 98 MHz and there is no
  * analog filter after the DAC, so the halfband's images (97.88 to 147.88 MHz
@@ -16,7 +16,7 @@
  *
  * On the RX side, at NCO 2425 a full-strength (0 dBc) copy of the sub-6
  * channel's upper content aliases to 40.2 to 61.4 MHz from the NCO, inside the
- * 122.88 output (HS-202 plan section 3; measured 30/30 on the prediction). The
+ * 122.88 output (HS-202 plan section 3, confirmed on silicon). The
  * application therefore uses +-25 MHz and never the full output. The OFDM FFT
  * separates that alias by orthogonality, but the beacon correlator, the CFO
  * estimator and the energy search run in the time domain and do not, so the
@@ -32,10 +32,10 @@
  * The price is the edge contract: samples outside the buffer are taken as
  * ZERO, so the buffer must carry at least contextBefore()/contextAfter()
  * samples of zeros, or real neighbouring content, at each end. The TDD slots
- * carry zero prefixes and postfixes (32 ticks in the R3 configs, 128 in R1 and R2), more
- * than either needs.
- * Neither filter runs in place (the output overwrites input it still needs);
- * both refuse it.
+ * carry zero prefixes and postfixes (32 ticks in the R3 configs, 128 in R1
+ * and R2), more than the channel filter and interpolator chain needs (23
+ * before, 22 after). Neither filter runs in place (the output overwrites
+ * input it still needs); both refuse it.
  *
  * THE DESIGNS, and why these numbers. Kaiser-windowed sinc, the taps computed
  * here at construction so no coefficient table can drift from its stated
@@ -124,17 +124,17 @@ class HalfbandInterp2 {
     // makes the centre tap exactly 1 and every other even-offset tap exactly
     // 0: those are forced rather than left to rounding, so the passthrough
     // samples are bit-exact.
-    full_ = kaiserLowpass(taps, 0.25, beta);
+    std::vector<double> full = kaiserLowpass(taps, 0.25, beta);
     const long c = static_cast<long>(taps - 1) / 2;
     for (size_t n = 0; n < taps; ++n) {
       const long off = static_cast<long>(n) - c;
-      full_[n] = (off == 0) ? 1.0 : ((off % 2 == 0) ? 0.0 : 2.0 * full_[n]);
+      full[n] = (off == 0) ? 1.0 : ((off % 2 == 0) ? 0.0 : 2.0 * full[n]);
     }
     // Odd output 2k+1 = sum over odd offsets i = 2t+1 of h[c+i] * in[k-t],
     // t from -(c+1)/2 to (c-1)/2: in[k+(c+1)/2] .. in[k-(c-1)/2].
     const long half = (c + 1) / 2;
     for (long t = -half; t <= half - 1; ++t) {
-      odd_.push_back(static_cast<float>(full_[static_cast<size_t>(c + 2 * t + 1)]));
+      odd_.push_back(static_cast<float>(full[static_cast<size_t>(c + 2 * t + 1)]));
       odd_off_.push_back(-t);  // input index offset from k
     }
     // Input p reaches odd outputs k = p - half .. p + half - 1, so content
@@ -149,7 +149,6 @@ class HalfbandInterp2 {
   /// signal.
   size_t contextBefore() const { return before_; }
   size_t contextAfter() const { return after_; }
-  const std::vector<double>& taps() const { return full_; }
 
   /// Samples outside [0, n) are zero. `out` holds 2n samples.
   void run(const std::complex<float>* in, size_t n, std::complex<float>* out) const {
@@ -214,7 +213,6 @@ class HalfbandInterp2 {
   }
 
  private:
-  std::vector<double> full_;
   std::vector<float> odd_;
   std::vector<long> odd_off_;
   size_t before_ = 0, after_ = 0;
@@ -237,7 +235,6 @@ class ChannelFilter {
   }
 
   size_t halfLength() const { return half_; }
-  const std::vector<float>& taps() const { return taps_; }
 
   void run(const std::complex<float>* in, size_t n, std::complex<float>* out) const {
     runRange(in, n, 0, n, out);
@@ -248,8 +245,9 @@ class ChannelFilter {
   /// `in` around the range are used as real context, so a slice cut from a
   /// longer capture is filtered exactly as the whole capture would be.
   ///
-  /// SPEED (AP-79: the scalar form measured 94 to 138 ms per 10 ms of one
-  /// lane). The taps are symmetric, so out[k] = h_c x[k] + sum_j h_{c-j}
+  /// SPEED. A straightforward scalar loop runs 9 to 14x slower than real time
+  /// on one lane (AP-79), so the form matters. The taps are symmetric, so
+  /// out[k] = h_c x[k] + sum_j h_{c-j}
   /// (x[k-j] + x[k+j]): half the multiplies. The taps are real, so the I and
   /// Q of the interleaved float array filter identically with a stride of 2,
   /// and the interior runs as `half` passes of a branch-free, contiguous loop

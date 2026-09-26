@@ -5,10 +5,9 @@
  *        timing and Gaussian noise, and hand back int16 samples the way the
  *        radio would.
  *
- * Extracted from beacon_geometry_test (architecture review 2026-09-03, item
- * 19) so the detector, the guard, the estimator and the policy all get sweep
- * tests against ONE channel model. Test-only and header-only: it links
- * nothing. The noise is drawn per sample in a fixed order (real then
+ * ONE channel model, so the detector, the guard, the estimator and the policy
+ * all get sweep tests against the same link. Test-only and header-only: it
+ * links nothing. The noise is drawn per sample in a fixed order (real then
  * imaginary) from a seeded generator, so a run is reproducible.
  *
  * Scale is by PEAK, because that is what the transmit path constrains: the
@@ -22,7 +21,6 @@
 #include <complex>
 #include <cstdint>
 #include <random>
-#include <utility>
 #include <vector>
 
 namespace houdini {

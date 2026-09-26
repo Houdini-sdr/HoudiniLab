@@ -7,7 +7,6 @@
 
 #include <algorithm>
 #include <cctype>
-#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <sstream>
@@ -27,7 +26,7 @@ const char* const kTrackerNames[] = {"alpha_beta", "kalman", nullptr};
 const char* const kSourceNames[] = {"default", "json", "env", "derived"};
 const char* const kPlatformNames[] = {"houdini", "iris_uhd"};
 
-// The environment spellings that predate the table.
+// Environment spellings accepted as aliases of the table's enum names.
 struct EnvAlias {
   const char* env;
   const char* value;  // env spelling
@@ -220,7 +219,7 @@ const std::vector<SyncConfig::Spec>& SyncConfig::schema() {
        KNOB_ACCESS(double, beacon.tx_full_scale), nullptr, EP::kIgnoreOutOfRange},
       // detector
       {"detector.threshold", "HOUDINI_BEACON_THRESH", 0, 0,
-       "Decision statistic: auto picks coherence for a single-copy replica and the normalised cross-correlation otherwise; power is the pre-2026-09 form and the Iris/UHD default.",
+       "Decision statistic: auto picks coherence for a single-copy replica and the normalised cross-correlation otherwise; power is the original level-dependent form (4th order in amplitude against 2nd) and the Iris/UHD default.",
        KNOB_ACCESS(ThresholdForm, detector.threshold), kThresholdNames, EP::kClamp},
       {"detector.pfa_per_window", nullptr, 1e-9, 0.5,
        "The coherence form's bar when set: the false-alarm probability per search window, turned into a bar by the replica and window lengths (8.163). Unset, corr_scale applies; ignored for the repeated-field forms.",
@@ -235,7 +234,7 @@ const std::vector<SyncConfig::Spec>& SyncConfig::schema() {
        "How much weaker, in dB of path power, an earlier arrival may be and still be taken as the first path.",
        KNOB_ACCESS(double, detector.first_path_floor_db), nullptr, EP::kIgnoreOutOfRange},
       {"detector.first_path_guard", "HOUDINI_FIRST_PATH_GUARD", 0, 1,
-       "Samples immediately before the peak the first-path search skips. A beacon between samples splits its peak over two adjacent taps and the earlier one is the SAME arrival, not an earlier one; 1 skips it. Only 0 and 1: 2 loses a genuine two-sample-earlier arrival and 3 a three-sample one (measured). 0, the default, is what every release so far has shipped.",
+       "Samples immediately before the peak the first-path search skips. A beacon between samples splits its peak over two adjacent taps and the earlier one is the SAME arrival, not an earlier one; 1 skips it. Only 0 and 1: 2 loses a genuine two-sample-earlier arrival and 3 a three-sample one (measured). 0 is the default (DEMO_VERIFICATION.md 8ak).",
        KNOB_ACCESS(int, detector.first_path_guard), nullptr, EP::kClamp},
       {"detector.corr_scale", nullptr, 1e-4, 1e7,
        "Resync detection threshold: the bar is 1 / corr_scale, relaxed by one per retry. Read from the legacy per-client top-level array when absent.",
@@ -525,8 +524,7 @@ SyncConfig SyncConfig::load(const std::optional<std::string>& sync_block_json,
 }
 
 void SyncConfig::resolve(const ResolveContext& ctx) {
-  // -1 means "half the replica length": what the pre-library correlator
-  // derived by default (64 at 128 taps, 32 at 64).
+  // -1 means "half the replica length" (64 at 128 taps, 32 at 64).
   if (detector.first_path_window < 0 && ctx.replica_len > 0) {
     detector.first_path_window = static_cast<int>(ctx.replica_len / 2);
     setProvenance("detector.first_path_window", Source::kDerived);
@@ -536,10 +534,9 @@ void SyncConfig::resolve(const ResolveContext& ctx) {
     resync.sync_tol_samples = ctx.prefix_samples / 4.0;
     setProvenance("resync.sync_tol_samples", Source::kDerived);
   }
-  // The Iris/UHD defaults are the rules that framer has always run (master
-  // returned the first threshold crossing under the power-ratio form); the
-  // Houdini defaults are the measured ones. A value the JSON sets is honoured
-  // on either platform, which is what makes the change a choice.
+  // The Iris/UHD defaults are the rules that framer runs (the first
+  // threshold crossing under the power-ratio form); the Houdini defaults are
+  // the measured ones. A value the JSON sets is honoured on either platform.
   if (ctx.platform == Platform::kIrisUhd) {
     if (!wasSet("detector.pick")) {
       detector.pick = PickRule::kFirstCrossing;

@@ -5,26 +5,25 @@
  *        or off-grid detections make an escalation, and what a caller should
  *        do next.
  *
- * Extracted from Receiver::clientSyncTxRx (architecture review 2026-09-03,
- * item 18), where the same rules lived in fifteen loop-local variables and a
- * lambda that did `continue` on the caller's loop. The transitions are the
- * ones the ledger paid for and nothing here changes them:
+ * The rules live here rather than as loop-local state in
+ * Receiver::clientSyncTxRx so every transition can be driven without a radio.
+ * They are the ones the ledger paid for:
  *
  *   - LOOK when the cadence says so: on Houdini a wall-clock interval
  *     (ResyncSchedule::resync_interval_s, 8.136); on Iris/UHD a frame count.
  *   - An on-grid accept clears every streak (the grid is alive, 4.18).
  *   - An off-grid accept is HELD, not applied: one is scatter, `hold_offgrid`
  *     consecutive ones mean the beacon MOVED and the caller re-acquires
- *     (AP-52 [user 2026-08-30]).
+ *     (AP-52).
  *   - `retry_max` misses in one period is an EXHAUSTED episode: under the
  *     targeted search an attempt only counts when the grid predicted the
  *     beacon inside the window, so one episode is ~100 predicted positions in
  *     a row with nothing there; `escalate_episodes` consecutive episodes mean
- *     the beacon is LOST and the caller re-acquires (AP-18, Opus review M4).
- *     Without an anchored grid (Iris/UHD, or before the first confirm) an
- *     exhausted episode STOPS the run, as the original receiver did.
- *   - After the caller re-acquires it calls reset(), which is exactly what
- *     the old escalation lambda did to the counters.
+ *     the beacon is LOST and the caller re-acquires (AP-18). Without an
+ *     anchored grid (Iris/UHD, or before the first confirm) an exhausted
+ *     episode STOPS the run: nothing keeps the pilots seated.
+ *   - After the caller re-acquires it calls reset(): every streak and the
+ *     cadence restart.
  *
  * The object holds counters and clocks only; it never touches a radio, so
  * resync_policy_test drives every transition without one.
@@ -120,7 +119,7 @@ class ResyncPolicy {
     return ResyncAction::kExhausted;
   }
   /// After the caller re-acquired (or tried to): every streak and the cadence
-  /// restart, exactly as the old escalation did.
+  /// restart.
   void reset(size_t frame_now, Clock::time_point now) {
     exhausted_streak_ = 0;
     hold_pending_ = false;
@@ -140,7 +139,7 @@ class ResyncPolicy {
 
  private:
   ResyncPolicyConfig cfg_;
-  bool looking_ = true;  // the original receiver started with resync = true
+  bool looking_ = true;  // looking from construction, before any cadence tick
   size_t retry_ = 0;
   size_t successes_ = 0;
   size_t offgrid_streak_ = 0;

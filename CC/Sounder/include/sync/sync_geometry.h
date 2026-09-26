@@ -3,29 +3,27 @@
  * @brief The UE beacon-sync geometry, derived in ONE place so it can be tested
  *        without a radio: the targeted-slice geometry and the resync schedule.
  *
- * Every constant here used to be computed inline inside clientSyncTxRx, from
- * three formulas spread across two hundred lines, and the only way to see what
- * they came out as at a given sample rate was to run a UE against live silicon.
- * Two defects lived in that gap and neither was reachable from the bench:
+ * A pure function of the config numbers, so what the geometry comes out as
+ * at any sample rate is visible in a table (`sync_geometry_test` prints and
+ * asserts it with no hardware in the loop) instead of only by running a UE
+ * against silicon. Two failure classes are arithmetic of exactly that kind,
+ * invisible at the one rate a bench runs:
  *
- *   - the acquisition tolerance stayed a fixed 640 SAMPLES while the tracking
- *     tolerance had been converted to TIME, so the two gates scaled apart at
- *     every rate but the one we happened to run (DEMO_VERIFICATION 8.59);
- *   - the clamp that keeps the tracking tolerance inside the slot used the
- *     WHOLE slot, so the moment it fired the accept window collapsed to a
- *     single admissible read phase -- at every rate above ~226 MSPS, i.e. at
- *     exactly the rates the time-based tolerance exists to serve (8.65).
- *
- * Both are arithmetic. Both are visible at a glance in a table of rates. So the
- * derivation is a pure function of the config numbers, and `sync_geometry_test`
- * prints and asserts that table with no hardware in the loop.
+ *   - the acquisition and tracking tolerances must both be TIMES; one held in
+ *     samples scales apart from the other at every other rate
+ *     (DEMO_VERIFICATION 8.59);
+ *   - the clamp that keeps the tracking tolerance inside the slot must leave
+ *     room for the accept window: clamping against the WHOLE slot collapses
+ *     the window to a single admissible read phase at every rate above
+ *     ~226 MSPS, exactly the rates a time-based tolerance exists to serve
+ *     (8.65).
  *
  * Two objects, because they answer two questions: SliceGeometry is what the
  * detector's targeted slice needs (lead, tail, the accept window), sized from
- * the tolerances and the REPLICA LENGTH of the configured shape (it used to
- * hardcode the 128-tap gold replica, so a 64-tap shape ran on the wrong
- * run-up); ResyncSchedule is when to look (the cadence in frames, seconds, and
- * the Iris/UHD frame count). SyncGeometry is both, for callers that want one.
+ * the tolerances and the REPLICA LENGTH of the configured shape (a 64-tap
+ * shape needs a shorter run-up than the 128-tap gold); ResyncSchedule is when
+ * to look (the cadence in frames, seconds, and the Iris/UHD frame count).
+ * SyncGeometry is both, for callers that want one.
  *
  * Header-only and dependency-free on purpose: the test must not have to link
  * the sounder (and therefore SoapySDR, HDF5 and muFFT) to check arithmetic.
@@ -43,7 +41,7 @@ namespace sync {
 /// leave the gate a usable width, not merely a non-negative one (8.65).
 constexpr long long kSyncWindowReserveDiv = 4;  // a quarter of the slot
 /// The Iris/UHD frame-count cadence assumes at most this clock error, in
-/// parts per billion; it was `max_cfo` in the original receiver.
+/// parts per billion.
 constexpr double kIrisResyncMaxCfoPpb = 100.0;
 
 /// What the targeted resync slice needs. Sample counts at the given rate.
@@ -98,14 +96,14 @@ inline SliceGeometry computeSliceGeometry(double rate_hz, long long samps_per_sl
   const long long want = std::llround(scatter_tol_us * 1e-6 * rate);
   g.scatter_clamped = want > g.slot_cap;
   g.scatter_tol = std::max<long long>(1, g.scatter_clamped ? g.slot_cap : want);
-  // ACQUISITION MUST NEVER BE LOOSER THAN TRACKING. Both are times now, so
-  // both scale with the rate -- but the tracking gate is additionally CLAMPED
-  // by the slot geometry, which does not scale, and the acquisition gate was
-  // not. Above ~450 MSPS that inverted them: at 491.52 the confirm gate is
-  // 2560 samples against a clamped tracking gate of 1376, so acquisition would
-  // hand back an anchor that the very first tracking check rejects as off-grid
-  // -- a lock that escalates immediately, forever. Found by this file's own
-  // test on its first run, which is the entire argument for having it (AP-56).
+  // ACQUISITION MUST NEVER BE LOOSER THAN TRACKING. Both are times, so both
+  // scale with the rate, but the tracking gate is additionally CLAMPED by the
+  // slot geometry, which does not scale. Without the same bound on the
+  // acquisition gate the two can invert: at 491.52 MSPS with an 8.33 us
+  // tracking tolerance, the 5.21 us confirm gate is 2560 samples against a
+  // tracking gate clamped to 1376, so acquisition would hand back an anchor
+  // that the very first tracking check rejects as off-grid -- a lock that
+  // escalates immediately, forever (AP-56).
   const long long confirm_want =
       std::max<long long>(1, std::llround(confirm_tol_us * 1e-6 * rate));
   g.confirm_tol = std::min(confirm_want, g.scatter_tol);
