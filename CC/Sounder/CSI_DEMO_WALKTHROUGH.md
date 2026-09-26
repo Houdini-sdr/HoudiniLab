@@ -21,9 +21,9 @@ Five placeholders appear throughout. Add your own values:
 - `<your-houdini-venv>`: the virtual environment prefix where the
   SoapyHoudiniSDR host plugin is installed.
 
-Additional reference material lives in `../../docs/UE_TX_FINE_GRID_TIMING.md`
+Additional reference material lives in `../../docs/archive/UE_TX_FINE_GRID_TIMING.md`
 (why the client pilot lands on the fine timing grid) and
-`../../docs/TWO_BOARD_CLOCK_LOCK.md` (locking both boards to one external
+`../../docs/archive/TWO_BOARD_CLOCK_LOCK.md` (locking both boards to one external
 reference clock). The record of every measurement behind this walkthrough is
 `DEMO_VERIFICATION.md`.
 
@@ -148,7 +148,7 @@ fails.
   of two plans:
   - **One shared reference.** Feed both boards a common 10 MHz on `CLK IN`
     and confirm the firmware selects the external mux
-    (`../../docs/TWO_BOARD_CLOCK_LOCK.md` has the verification procedure).
+    (`../../docs/archive/TWO_BOARD_CLOCK_LOCK.md` has the verification procedure).
     The legacy 500 MHz configs were validated this way.
   - **Each board in calibrated hold, the client steered.** With
     `clock_ref = calibrated` on both boards and no shared reference, the
