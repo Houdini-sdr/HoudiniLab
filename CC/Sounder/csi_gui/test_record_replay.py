@@ -1,7 +1,8 @@
 # Known answers for the canned-data fallback: the record format, the recorder's
 # cap, the replay schedule and window, and the dashboard's UDP loop recording
-# what it receives. Stdlib only; run from csi_gui/ (ctest does). Each check names
-# the mutation that breaks it.
+# what it receives; plus the loop surviving a malformed datagram and the SSE
+# event shared between pages. Stdlib only; run from csi_gui/ (ctest does).
+# Each check names the mutation that breaks it.
 import importlib.util, os, socket, struct, sys, tempfile, threading, time
 sys.argv = ["x"]
 import csi_record as cr
@@ -51,6 +52,18 @@ except OSError:
     ok = False
 check(ok, "a write error (a full disk) stops the recording once and never raises into the receive loop (mutation: drop the try)")
 
+before = open(p, "rb").read(); logs3 = []
+r = cr.Recorder(p, 1 << 20, log=logs3.append); r.write(20.0, b"zz"); r.close()
+check(open(p, "rb").read() == before and r.f is None and len(logs3) == 1,
+      "an existing recording is never truncated or appended to, and the refusal is said once (mutation: open with wb)")
+logs4 = []
+try:
+    r = cr.Recorder(os.path.join(td, "no_such_dir", "x.rec"), 1 << 20, log=logs4.append)
+    r.write(1.0, b"x"); ok = r.f is None and len(logs4) == 1
+except OSError:
+    ok = False
+check(ok, "a recording that cannot be created records nothing and never raises into the dashboard's start (mutation: let the OSError through)")
+
 check(rf.schedule([10.0, 10.25, 11.5], 2.0) == [0.0, 0.125, 0.75], "the schedule keeps the recorded spacing scaled by speed (mutation: ignore speed)")
 check([t for t, _ in rf.load(p, 0.25, 1.25)] == [10.25], "a window takes [start, start + duration) from the first datagram (mutation: an inclusive end)")
 check(len(rf.load(p, 0.0, 0.0)) == 3, "duration 0 plays to the end (mutation: treat 0 as empty)")
@@ -72,10 +85,34 @@ while rec3.n < len(sent) and time.time() < deadline: time.sleep(0.05)
 rec3.close()
 got = [d for _, d in cr.read_recording(p3)]
 check(got == sent, "the dashboard's UDP loop records every datagram as received, unknown magic included (mutation: record after the magic filter)")
+# A short datagram with a known magic raises inside its parser; the loop must
+# count it and keep going (the port is open to the network).
+tx.sendto(struct.pack("<II", cs.MAGIC_CSI2, 7), ("127.0.0.1", port)); time.sleep(0.05)
+tx.sendto(cs.MET_HDR.pack(cs.MAGIC_MET, 5, 1, 4096, 3276, 10.0e9, 30e3, 98.28e6), ("127.0.0.1", port))
+deadline = time.time() + 3
+while 5 not in cs._latest and time.time() < deadline: time.sleep(0.05)
+check(cs._bad_dgram[0] == 1 and cs._latest.get(5, {}).get("met", {}).get("fc_mhz") == 10.0e3,
+      "a short datagram is counted and the receive loop parses the next one (mutation: drop the try around the parse)")
 rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); rx.bind(("127.0.0.1", 0)); rx.settimeout(2)
 rf.play(tx, rx.getsockname(), list(cr.read_recording(p3)), 10.0)
 out = [rx.recvfrom(65535)[0] for _ in sent]
 check(out == sent, "a replay delivers the recorded datagrams unchanged and in order (mutation: send the header with the payload)")
+
+# One serialisation per seq, shared by every open page; a stale re-push (seq
+# unchanged) past BODY_REUSE_S rebuilds, so the ages it carries still move.
+calls = [0]; real = cs.json.dumps
+def counting(*a, **k):
+    calls[0] += 1; return real(*a, **k)
+cs.json.dumps = counting
+e1 = cs._shared_event(900, {"0": {"age_ms": 1}}, {}, 100.0)
+e2 = cs._shared_event(900, {"0": {"age_ms": 2}}, {}, 100.1)
+check(e1 is e2 and calls[0] == 1, "a second page within BODY_REUSE_S gets the same event, serialised once (mutation: no cache)")
+e3 = cs._shared_event(900, {"0": {"age_ms": 400}}, {}, 100.0 + cs.BODY_REUSE_S + 0.01)
+check(calls[0] == 2 and b'"age_ms": 400' in e3, "a re-push of the same seq past BODY_REUSE_S carries fresh ages (mutation: reuse on seq alone)")
+e4 = cs._shared_event(901, {"0": {"age_ms": 0}}, {}, 100.0 + cs.BODY_REUSE_S + 0.02)
+check(calls[0] == 3 and e4.startswith(b"data: ") and e4.endswith(b"\n\n"), "a new seq is serialised as an SSE event (mutation: reuse regardless of seq)")
+check(cs._shared_event(902, {"0": {"x": float("nan")}}, {}, 200.0) is None, "a non-finite value gives no event rather than invalid JSON (mutation: allow_nan)")
+cs.json.dumps = real
 
 print("%d failure(s)" % fails)
 sys.exit(1 if fails else 0)

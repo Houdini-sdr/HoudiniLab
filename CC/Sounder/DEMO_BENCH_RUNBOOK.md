@@ -288,16 +288,20 @@ constellation, CIR, ADC, beacon sync).
    mkdir -p ~/demo_rec && export HOUDINI_CSI_RECORD=~/demo_rec/<name>.rec
    ```
 
-   The dashboard prints `recording every datagram to ...` at start. It flushes
+   The dashboard prints `recording every datagram to ...` at start. A name
+   that already exists is refused, never overwritten (the dashboard prints
+   `NOT recording: ... exists` and runs on without recording), so give each run
+   its own name. It flushes
    about once a second and stops at 2 GB (`--record-max-mb`).
 2. Replay, with no sounder running:
 
    ```sh
+   unset HOUDINI_CSI_RECORD    # the replay dashboard records nothing
    python3 csi_gui/csi_server.py --conf files/houdini-dualband-xw.json &   # VL1_134.rec, FINAL_XW.rec; files/houdini-dualband.json for FINAL.rec
    python3 csi_gui/replay_feed.py ~/demo_rec/<name>.rec --loop
    ```
 
-   The `--conf` sets the page's |H| axis and guard marks for the recorded
+   The `--conf` sets the page's |H| axis for the recorded
    configuration (without it the dashboard falls back to a single-band config
    and the dual-band |H| reads off scale). `--start` and `--duration` pick a window (seconds into the recording), for
    example a stretch with steering settled. Each loop restarts the frame
@@ -382,7 +386,7 @@ egress (HS-225). Do every step, every power-up.
 4. The dashboard, from the same shell:
 
    ```sh
-   export HOUDINI_CSI_RECORD=~/demo_rec/<name>.rec    # optional: records a fallback
+   export HOUDINI_CSI_RECORD=~/demo_rec/<name>.rec    # optional: records a fallback; a new name each start
    python3 csi_gui/csi_server.py --control --conf files/houdini-dualband-xw-steer-slots.json
    ```
 

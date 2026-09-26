@@ -133,6 +133,7 @@ _sync = {}     # tid -> deque of records
 _sync_t = {}   # tid -> monotonic time of that tid's last SYN1
 _sync_bad = [0]     # datagrams rejected as non-finite
 _bad_payload = [0]  # SSE snapshots dropped because a float would not serialise
+_bad_dgram = [0]    # datagrams whose parse raised (short header, corrupt field)
 SYNC_REPUSH_CEIL_MS = 120000  # past this a quiet tid stops driving re-pushes
 # tid arrives as a uint32 off the wire, so the map is unbounded by construction.
 # Entries are NOT pruned on age -- the record is what lets the page show
@@ -144,8 +145,8 @@ MAX_SYNC_TIDS = 8
 def _parse_csi(payload, with_quality):
     """CSI1 or CSI2 -> one antenna's channel estimate.
 
-    Both layouts are accepted so a dashboard running ahead of an un-rebuilt sounder
-    still draws everything except the raw-phase panel, rather than drawing nothing.
+    Both layouts are accepted. CSI2's trailing raw-phase block is length-checked
+    and not carried: no panel draws it.
     """
     if with_quality:
         magic, frame, ant, nsc, rate, reps = CSI2_HDR.unpack_from(payload, 0)
@@ -158,11 +159,7 @@ def _parse_csi(payload, with_quality):
     if len(payload) < need:
         return None
     vals = struct.unpack_from("<%df" % (2 * nsc), payload, off)
-    # CSI2's trailing float block carries the RAW per-subcarrier phase
-    # (radians): arg(H) before the display de-ramp and the per-run anchor.
-    rawph_in = (struct.unpack_from("<%df" % nsc, payload, off + 8 * nsc)
-                if with_quality else None)
-    mag_db, phase, mags, rawph = [], [], [], []
+    mag_db, phase, mags = [], [], []
     for k in range(nsc):
         re, im = vals[2 * k], vals[2 * k + 1]
         m = math.hypot(re, im)
@@ -170,20 +167,19 @@ def _parse_csi(payload, with_quality):
         if m < 1e-9:               # unused subcarrier (guard band / DC null)
             mag_db.append(None)
             phase.append(None)
-            rawph.append(None)     # a gap, not a zero: nothing was measured here
         else:
             mag_db.append(20.0 * math.log10(m))
             phase.append(math.atan2(im, re))
-            rawph.append(rawph_in[k] if rawph_in else None)
     peak = max((m for m in mags if m > 0), default=0.0)
     return int(ant), {"frame": int(frame), "sc": int(nsc), "rate": float(rate),
                       "mag_db": mag_db, "phase": phase,
-                      "raw_ph": (rawph if with_quality else None),
                       "peak_db": (20.0 * math.log10(peak) if peak > 0 else 0.0)}
 
 
 def _parse_adc(payload, v2):
-    """ADC1/ADC2 -> one antenna's raw-sample min/max envelope plus clip counts.
+    """ADC1/ADC2 -> one antenna's peak and clip counts. The datagram's min/max
+    envelope is length-checked and not carried: the card draws only the peak
+    and the clipping badge.
 
     ADC2 draws the PILOT slot only and carries a separate ledger covering every slot
     seen since the previous send. A frame's slots differ in level by orders of
@@ -200,13 +196,10 @@ def _parse_adc(payload, v2):
         slot, any_peak, any_clipped = -1, peak, clipped
     if len(payload) < off + 8 * cols:
         return None
-    e = struct.unpack_from("<%dh" % (4 * cols), payload, off)
     return int(ant), {"frame": int(frame), "cols": int(cols), "samps": int(samps),
                       "rate": float(rate), "peak": int(peak), "clipped": int(clipped),
                       "slot": int(slot), "any_peak": int(any_peak),
                       "any_clipped": int(any_clipped),
-                      "i_min": e[0::4], "i_max": e[1::4],
-                      "q_min": e[2::4], "q_max": e[3::4],
                       "full_scale": 32767}
 
 
@@ -382,6 +375,30 @@ def _parse_syn(payload):
     return rec
 
 
+def _parse(magic, data):
+    """(parsed, kind) for one datagram: parsed is (ant, rec), a SYN1 record for
+    kind "syn", or None for an unknown magic or a malformed datagram."""
+    if magic == MAGIC_CSI:
+        return _parse_csi(data, False), "csi"
+    if magic == MAGIC_CSI2:
+        return _parse_csi(data, True), "csi"
+    if magic == MAGIC_CNS:
+        return _parse_cns(data), "cns"
+    if magic == MAGIC_ADC:
+        return _parse_adc(data, False), "adc"
+    if magic == MAGIC_ADC2:
+        return _parse_adc(data, True), "adc"
+    if magic == MAGIC_CIR:
+        return _parse_cir(data), "cir"
+    if magic == MAGIC_MET:
+        return _parse_met(data), "met"
+    if magic == MAGIC_SPC:
+        return _parse_spc(data), "spc"
+    if magic == MAGIC_SYN:
+        return _parse_syn(data), "syn"
+    return None, None
+
+
 def _udp_loop(bind_host, bind_port, recorder=None):
     global _seq
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -399,25 +416,20 @@ def _udp_loop(bind_host, bind_port, recorder=None):
         if len(data) < 4:
             continue
         magic = struct.unpack_from("<I", data, 0)[0]
-        parsed, kind = (None, None)
-        if magic == MAGIC_CSI:
-            parsed, kind = _parse_csi(data, False), "csi"
-        elif magic == MAGIC_CSI2:
-            parsed, kind = _parse_csi(data, True), "csi"
-        elif magic == MAGIC_CNS:
-            parsed, kind = _parse_cns(data), "cns"
-        elif magic == MAGIC_ADC:
-            parsed, kind = _parse_adc(data, False), "adc"
-        elif magic == MAGIC_ADC2:
-            parsed, kind = _parse_adc(data, True), "adc"
-        elif magic == MAGIC_CIR:
-            parsed, kind = _parse_cir(data), "cir"
-        elif magic == MAGIC_MET:
-            parsed, kind = _parse_met(data), "met"
-        elif magic == MAGIC_SPC:
-            parsed, kind = _parse_spc(data), "spc"
-        elif magic == MAGIC_SYN:
-            rec = _parse_syn(data)
+        try:
+            parsed, kind = _parse(magic, data)
+        except Exception as e:  # noqa: BLE001 -- one bad datagram must not end the receive loop
+            # A short or corrupt datagram raised out of a parser (struct.error
+            # on a header, a bad field); the port is open to the network. The
+            # thread dying left every card stale for good, which reads as a
+            # dead link.
+            _bad_dgram[0] += 1
+            if _bad_dgram[0] == 1 or _bad_dgram[0] % 1000 == 0:
+                print("[csi] a %d-byte datagram (magic 0x%08x) failed to parse: %r; "
+                      "%d so far" % (len(data), magic, e, _bad_dgram[0]), flush=True)
+            continue
+        if kind == "syn":
+            rec = parsed
             if rec is not None:
                 with _lock:
                     t = rec["tid"]
@@ -467,6 +479,32 @@ def _snapshot():
 
 
 # ---- HTTP / SSE ------------------------------------------------------------
+BODY_REUSE_S = 0.25
+_body_lock = threading.Lock()
+_body = [None, 0.0, None]  # seq, when built (monotonic), the encoded SSE event
+
+
+def _shared_event(seq, snap, sync, now):
+    """The SSE event for this seq, serialised once for every open page. Each
+    page serialising the whole snapshot itself (about 20 ms for two lanes) at
+    30 Hz, all under one GIL, starved the UDP receiver: three pages dropped a
+    fifth of the datagrams. An event is reused while it is under BODY_REUSE_S
+    old, so a stale re-push (seq unchanged) still carries ages that move. None:
+    a value that would not serialise (allow_nan=False turns a poisoned value
+    into an exception here rather than invalid JSON on the wire)."""
+    with _body_lock:
+        if _body[0] == seq and now - _body[1] < BODY_REUSE_S:
+            return _body[2]
+        try:
+            ev = ("data: %s\n\n" % json.dumps({"ant": snap, "sync": sync},
+                                                 allow_nan=False)).encode("utf-8")
+        except ValueError:
+            _bad_payload[0] += 1
+            ev = None
+        _body[:] = [seq, now, ev]
+        return ev
+
+
 def _host_is_address(host):
     """A Host header that names this server by address or as localhost (any
     port). DNS rebinding points an attacker's NAME at 127.0.0.1: the browser
@@ -639,26 +677,19 @@ class Handler(BaseHTTPRequestHandler):
                 stale = stale or any(
                     stale_ms <= (v.get("age_ms") or 0) < SYNC_REPUSH_CEIL_MS
                     for v in sync.values())
-                body = None
+                ev = None
                 if (snap or sync) and (seq != last_seq or
                              (stale and now - last_stale_push >= 0.5)):
-                    # allow_nan=False turns a poisoned value into an exception
-                    # here rather than invalid JSON on the wire. Serialise
-                    # BEFORE booking the snapshot as delivered, and fall through
-                    # to the keepalive on failure -- an early `continue` here
-                    # skipped the throttle at the bottom of the loop and spun
-                    # the thread at 100% CPU against the UDP receiver.
-                    try:
-                        body = json.dumps({"ant": snap, "sync": sync},
-                                          allow_nan=False)
-                    except ValueError:
-                        _bad_payload[0] += 1
-                        body = None
-                if body is not None:
+                    # Serialise BEFORE booking the snapshot as delivered, and
+                    # fall through to the keepalive on failure: an early
+                    # `continue` here skipped the throttle at the bottom of the
+                    # loop and spun the thread at 100% CPU against the UDP
+                    # receiver.
+                    ev = _shared_event(seq, snap, sync, now)
+                if ev is not None:
                     last_seq = seq
                     last_stale_push = now
-                    msg = "data: %s\n\n" % body
-                    self.wfile.write(msg.encode("utf-8"))
+                    self.wfile.write(ev)
                     self.wfile.flush()
                 else:
                     # keep-alive comment so proxies/clients don't time out
@@ -1071,7 +1102,10 @@ def main():
     if args.record:
         recorder = csi_record.Recorder(args.record, int(args.record_max_mb * 1e6),
                                        log=lambda m: print(m, flush=True))
-        print("[csi] recording every datagram to %s" % args.record, flush=True)
+        if recorder.f is None:
+            recorder = None  # it said why
+        else:
+            print("[csi] recording every datagram to %s" % args.record, flush=True)
     t = threading.Thread(target=_udp_loop, args=(args.udp_host, args.udp_port, recorder),
                          daemon=True)
     t.start()
@@ -1098,6 +1132,8 @@ def main():
                 extra += ", SYN1 dropped=%d" % _sync_bad[0]
             if _bad_payload[0]:
                 extra += ", payloads dropped=%d" % _bad_payload[0]
+            if _bad_dgram[0]:
+                extra += ", unparsable datagrams=%d" % _bad_dgram[0]
             print("[csi] %d datagrams, antennas=%s%s" % (n, ants, extra),
                   flush=True)
     threading.Thread(target=_stats_loop, daemon=True).start()

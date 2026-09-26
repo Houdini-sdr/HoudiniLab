@@ -15,15 +15,27 @@ REC_HDR = struct.Struct("<dI")
 class Recorder:
     """Appends datagrams to a recording until `max_bytes` would be exceeded, then
     stops (once, with a message) and leaves a readable file. Flushes about once a
-    second, so a run stopped by a signal loses at most the last second."""
+    second, so a run stopped by a signal loses at most the last second.
+
+    Never overwrites: an existing file (the recording about to be replayed, a
+    previous run's) is refused. A file that cannot be created leaves `f` None,
+    says why once, and records nothing; it never stops the live dashboard."""
 
     def __init__(self, path, max_bytes, log=print):
-        self.f = open(path, "wb")
-        self.f.write(REC_MAGIC)
         self.left = max_bytes - len(REC_MAGIC)
         self.log = log
         self.t_flush = time.monotonic()
         self.n = 0
+        try:
+            self.f = open(path, "xb")
+            self.f.write(REC_MAGIC)
+        except FileExistsError:
+            self.f = None
+            log("[csi] NOT recording: %s exists and a recording is never overwritten; "
+                "name a new file" % path)
+        except OSError as e:
+            self.f = None
+            log("[csi] NOT recording to %s: %s" % (path, e))
 
     def write(self, t, data):
         if self.f is None:
