@@ -1,6 +1,6 @@
 #!/bin/bash
 # usage: [FILTERS=<state>] fstage_run.sh <stage F0..F4b> <rung tag> <conf> <secs>
-# One filter-staging run (DEMO_FREQUENCY_PLAN 6.1b): run_rung.sh with the
+# One filter-staging run (Houdini-Streaming docs/DEMO_FREQUENCY_PLAN.md 6.1b): run_rung.sh with the
 # measurement dumps on, then every per-run artefact moved into
 # ap79_runs/<stage>/<tag>_<T>/ so runs never overwrite. Rig tool: it runs the
 # checkout it lives in (see run_rung.sh). Analyse with run_summary.py or

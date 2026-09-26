@@ -88,7 +88,7 @@ def check_config(rep, sd, conf):
         bs, ue = roles_from_topology(t)
     except (OSError, ValueError, AttributeError, TypeError) as e:  # not JSON, or not the topology shape
         rep.add("FAIL", "topology", "%s: %s" % (topo, e),
-                "Create %s with your radios' addresses (walkthrough section 3)." % topo)
+                "Create %s with your radios' addresses (walkthrough section 2.6)." % topo)
         return cfg, [], []
     # The sounder reads the cells as BS0, BS1, ... in order and the clients as
     # {"sdr": [...]} (config.cc), stricter than the teardown's tolerant reader:
@@ -114,7 +114,8 @@ def check_build(rep, sd):
     exe = os.path.join(sd, "build", "sounder")
     if not os.access(exe, os.X_OK):
         rep.add("FAIL", "build", "%s not found" % exe,
-                "Build it: cd %s && cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j "
+                "Build it: cd %s && cmake -B build -DCMAKE_BUILD_TYPE=Release "
+                "-DSoapySDR_DIR=<prefix>/share/cmake/SoapySDR && cmake --build build -j "
                 "(walkthrough section 2.5)." % sd)
         return
     srcs = []

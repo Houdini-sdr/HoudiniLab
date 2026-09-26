@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""AP-79 filter staging (DEMO_FREQUENCY_PLAN 6.1b): per-run link numbers and
+"""AP-79 filter staging (Houdini-Streaming docs/DEMO_FREQUENCY_PLAN.md 6.1b): per-run link numbers and
 per-stage change against the first stage given.
 
 usage: fstage_report.py <stage_dir> [<stage_dir> ...]   (each holds run dirs from fstage_run.sh)
