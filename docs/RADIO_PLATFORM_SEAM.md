@@ -1,7 +1,8 @@
 # The radio platform seam: design and verification plan
 
-Status: PLAN, 2026-09-03, decided with the user after the review-fix round
-(DEMO_VERIFICATION 8.175 to 8.182). Companion to
+Status: steps S1 to S3 are done and on `develop` (the step table in section 4 gives
+their commits); S0 and S4 are not marked done. Decided with the user after the
+review-fix round (DEMO_VERIFICATION 8.175 to 8.182). Companion to
 `SYNC_LIBRARY_ARCHITECTURE.md` (the sync library) and
 `SOUNDER_CHANGE_PACKAGING.md` (fixes against features).
 
