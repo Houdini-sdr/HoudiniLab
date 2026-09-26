@@ -1,8 +1,9 @@
 /** @file HoudiniFramer.cc
-  * @brief The Houdini base-station framer, moved out of BaseRadioSet.cc
-  *        (seam step S2). The mechanics and their measured reasons are the
-  *        ones recorded in DEMO_VERIFICATION.md 3.x and 4.x; nothing here
-  *        changed in the move.
+  * @brief The Houdini base-station framer: the native TDD schedule (the
+  *        beacon strobe and the rx slots), the continuous BS receive, and the
+  *        per-frame cut of each rx slot from it. The mechanics and their
+  *        measured reasons are recorded in DEMO_VERIFICATION.md sections 3, 4
+  *        and 9.
   *
   * RENEW OPEN SOURCE LICENSE: http://renew-wireless.org/license
 */
@@ -220,8 +221,8 @@ void HoudiniFramer::start(void) {
 namespace {
 // 3.125 us anchor/strobe grid. NB the same driver constant appears as
 // houdini::sync::kHoudiniStrobeOffsetTicks (the one definition), a local kTddGridTicks in
-// clientTxPilots, and 3125 ns in ClientRadioSet::radioTx -- all four must
-// move together if the driver grid ever changes (Opus review LOW).
+// clientTxPilots, and kTddGridNs in RadioHoudini.cc -- all must move together
+// if the driver grid ever changes.
 constexpr long long kTddGridTicks = houdini::sync::kHoudiniStrobeOffsetTicks;
 constexpr long long kTddArmMargin = 36864000;  // ~300 ms of ticks
 }  // namespace
@@ -351,10 +352,10 @@ void HoudiniFramer::armTdd(void) {
       // TDD frame must EQUAL the sounder frame: the beacon fires once per TDD
       // frame, so a longer TDD frame makes the beacon period differ from the UE's
       // (sounder) frame and the pilot/data walk relative to the beacon -> noisy CSI.
-      // One symbol per sounder slot, beacon strobe on the schedule's B slot,
-      // rx bit on EVERY entry (see the function comment: a closed gate kills
-      // the continuous capture; the rx slots are still extracted from the
-      // continuous read in houdiniTddRx).
+      // One symbol per sounder slot, beacon strobe on the schedule's B slot;
+      // the rx bit on every other entry, or with bs_rx_slots on the rx slots
+      // only (the function comment says why). Either way rx() cuts the rx
+      // slots from one continuous read.
       const size_t spf_tdd = cfg_->slot_per_frame();
       const size_t b_pos = sched.find('B');
       const size_t beacon_slot = (b_pos == std::string::npos) ? 0 : b_pos;
@@ -509,7 +510,7 @@ void HoudiniFramer::armTdd(void) {
       htdd_rx_cursor_ = 0;
       MLPD_INFO(
           "Houdini BS TDD armed: sched=%s epoch=%lld frame=%lld ticks, "
-          "%zu pilot slot(s) %s beacon strobe %zu samp\n",
+          "%zu rx slot(s) %s beacon strobe %zu samp\n",
           tdd.c_str(), htdd_epoch_, htdd_frame_ticks_, htdd_rx_slots_.size(),
           htdd_rx_slots_.empty() ? "(none)" : "", n_load);
     }
@@ -590,7 +591,7 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
   // them; latch it before any later recv on this radio overwrites the radio's copy.
   htdd_frame_pad_ = r->lastPadSamples();
   if (cg < fn) {
-    // Short read: the frame is not fully covered. the slot placement clamps a slot start
+    // Short read: the frame is not fully covered. The slot placement clamps a slot start
     // to cg, so any slot past the received data would be extracted from the tail
     // and look perfectly valid downstream. Fold the shortfall into the frame's
     // untrusted count so consumers refuse those slots instead of trusting them.
@@ -663,7 +664,7 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
     }
     // The UE burst is searched for only where the schedule puts the pilot
     // (SH-347, the host half of "a TDD node receives only its RX slots"): the
-    // rx gate is open all frame, so over the air the BS's own beacon slot and
+    // rx gate is open all frame without bs_rx_slots, so over the air the BS's own beacon slot and
     // the guards carry whatever is on the air, and the whole-read search above
     // took the loudest of it (its own beacon through the adjacent antennas) for
     // the UE, cutting every lane there (O1a/O1b). The window is +-n/4 around
@@ -747,8 +748,10 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
   const double whole_best = ref.whole_best;
   const long long sched_expect = ref.sched_expect;
   const double pilot_rms = ref.pilot_rms;
-  // Noise floor from the QUIETEST slot-length window of the same read (27 of
-  // 30 slots are guard, so it measures the true floor, ~6 rms on this bench).
+  // Noise floor from the QUIETEST slot-length window of the same read: with
+  // every slot open most of the read is guard, so it measures the true floor
+  // (about 6 rms wired). In slots mode the guards are the device's cut, exact
+  // zeros, the floor reads 0, and the LTS check stands in (lanePresent).
   // The old gate compared against 4x the WHOLE-read mean, but that mean
   // includes the pilot+data burst energy itself, which put the threshold
   // right on top of a healthy pilot (measured: rms 1392 vs 4x355 = 1420) --

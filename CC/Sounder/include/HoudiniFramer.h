@@ -22,7 +22,8 @@ class HoudiniFramer : public BeaconFramer {
   HoudiniFramer(Config* cfg, Radios& radios) : BeaconFramer(cfg, radios) {}
 
   /// bs_hw_framer: the native TDD ring (beacon strobe on the B slot, rx on
-  /// every slot); otherwise the free-running replay beacon.
+  /// every other slot, or on the rx slots only with bs_rx_slots); otherwise
+  /// the free-running replay beacon.
   void arm() override;
   /// Start the continuous BS RX streams (they would overflow if started at
   /// construction); the armed framer gates them every frame.
