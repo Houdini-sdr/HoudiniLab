@@ -170,13 +170,14 @@ rc, rep, lv = run("--quick")
 det = [r["fix"] for r in rep["results"] if r["what"] == "plugin"]
 check(rc == 1 and lv.get("plugin") == "FAIL" and det and "HOUDINI_SOAPY_ROOT" in det[0],
       "no module in the venv and no HOUDINI_SOAPY_ROOT fails, naming the variable (mutation: the old advice)")
-os.rename(vmod + ".off", vmod)
-# The full check under HOUDINI_SOAPY_ROOT (the rig's only layout): the radios
-# are read through that prefix, and a steered node's release line carries it.
+# The full check under HOUDINI_SOAPY_ROOT with the venv's module still absent
+# (the rig's layout): the radios are read through that prefix, and a steered
+# node's release line carries it.
 json.dump({"127.0.0.1": clock_adj(404, 404), "127.0.0.2": clock_adj(411)}, open(clock_file, "w"))
 env_saved = env; env = dict(env_saved, HOUDINI_SOAPY_ROOT=rel)
 rc, rep, lv = run()
 env = env_saved
+os.rename(vmod + ".off", vmod)
 fix = [r["fix"] for r in rep["results"] if r["what"] == "clock 127.0.0.2"]
 check(lv.get("stack match") == "PASS" and fix and fix[0].startswith("Release it before the run: SOAPY_SDR_ROOT=%s SOAPY_SDR_PLUGIN_PATH= python3" % rel),
       "under HOUDINI_SOAPY_ROOT the full check reads the radios and the printed release carries the prefix "

@@ -39,9 +39,19 @@ cd "$SOUNDER_DIR" || { echo "no such directory: $SOUNDER_DIR" >&2; exit 1; }
 export SOAPY_SDR_PLUGIN_PATH="${SOAPY_SDR_PLUGIN_PATH:-$VENV/lib/SoapySDR/modules0.8-3}"
 export LD_LIBRARY_PATH="$VENV/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 # HOUDINI_SOAPY_ROOT: the release's host-plugin prefix (where the venv carries none).
-if [ -n "${HOUDINI_SOAPY_ROOT:-}" ]; then export SOAPY_SDR_ROOT=$HOUDINI_SOAPY_ROOT SOAPY_SDR_PLUGIN_PATH=; fi
-ls "${HOUDINI_SOAPY_ROOT:-$VENV}"/lib/SoapySDR/modules*/libHoudiniSDRSupport.so >/dev/null 2>&1 ||
-  { echo "no Houdini host plugin under ${HOUDINI_SOAPY_ROOT:-$VENV}: export HOUDINI_SOAPY_ROOT=<the release's host-plugin prefix>" >&2; exit 1; }
+# Refuse when no Houdini module is where SoapySDR will search: the prefix's
+# module dirs, else each directory of the plugin path.
+if [ -n "${HOUDINI_SOAPY_ROOT:-}" ]; then
+  export SOAPY_SDR_ROOT=$HOUDINI_SOAPY_ROOT SOAPY_SDR_PLUGIN_PATH=
+  SEARCH=$(ls -d "$HOUDINI_SOAPY_ROOT"/lib/SoapySDR/modules* 2>/dev/null)
+else
+  SEARCH=$(printf '%s\n' "$SOAPY_SDR_PLUGIN_PATH" | tr ':' '\n')
+fi
+FOUND=
+while IFS= read -r d; do [ -n "$d" ] && [ -f "$d/libHoudiniSDRSupport.so" ] && FOUND=$d; done <<EOF
+$SEARCH
+EOF
+[ -n "$FOUND" ] || { echo "no Houdini host plugin where SoapySDR will search (${HOUDINI_SOAPY_ROOT:-$SOAPY_SDR_PLUGIN_PATH}): export HOUDINI_SOAPY_ROOT=<the release's host-plugin prefix>" >&2; exit 1; }
 # Run until the wall clock says stop, never until max_frame.
 export HOUDINI_MAX_FRAME="${HOUDINI_MAX_FRAME:-2000000000}"
 

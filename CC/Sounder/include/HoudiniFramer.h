@@ -27,8 +27,9 @@ class HoudiniFramer : public BeaconFramer {
   /// Start the continuous BS RX streams (they would overflow if started at
   /// construction); the armed framer gates them every frame.
   void start() override;
-  /// The full teardown ladder on every radio (abort alone latches the gates
-  /// and skips TX_CLEAR: DEMO_VERIFICATION 3.2 + 4.24).
+  /// On every radio: the beacon's replay strobe disarmed, then the full
+  /// teardown ladder (abort alone latches the gates and skips TX_CLEAR:
+  /// DEMO_VERIFICATION 3.2 + 4.24).
   void stop() override;
   bool gatesRx() const override { return cfg_->bs_hw_framer(); }
   int rx(size_t radio_id, void* const* buffs, long long& frameTime) override;

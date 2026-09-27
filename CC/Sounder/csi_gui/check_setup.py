@@ -36,6 +36,7 @@ import glob
 import json
 import os
 import re
+import shlex
 import socket
 import subprocess
 import sys
@@ -158,7 +159,8 @@ def check_plugin(rep, venv):
     moddir = plugin_dir(root or venv)
     if not os.path.isdir(venv):
         rep.add("FAIL", "plugin", "venv %s not found" % venv,
-                "Install the SoapyHoudiniSDR host (walkthrough section 2.4) and pass its prefix as --venv.")
+                "Pass the SoapySDR venv as --venv (walkthrough section 2.4); the Houdini plugin's own prefix goes "
+                "in HOUDINI_SOAPY_ROOT, not here.")
         return
     mods = [m for m in glob.glob(os.path.join(moddir, "*.so")) if "houdini" in os.path.basename(m).lower()]
     if not mods:
@@ -350,7 +352,7 @@ def release_cmd(ip, port):
     """The shell line that releases a node's clock into its calibrated hold, in
     the plugin environment this check ran with (HOUDINI_SOAPY_ROOT's prefix)."""
     root = os.environ.get("HOUDINI_SOAPY_ROOT")
-    pre = "SOAPY_SDR_ROOT=%s SOAPY_SDR_PLUGIN_PATH= " % root if root else ""
+    pre = "SOAPY_SDR_ROOT=%s SOAPY_SDR_PLUGIN_PATH= " % shlex.quote(root) if root else ""
     return (pre + "python3 -c \"import SoapySDR as S; d = S.Device({'driver': 'houdinisdr', 'remote': "
             "'tcp://%s:%s', 'remote:driver': 'houdinisdr-device', 'remote:type': 'houdinisdr', 'timeout': "
             "'3000000'}); d.writeSetting('CLOCK_ADJ', 'release'); d.close()\"" % (ip, port))
@@ -427,7 +429,8 @@ def main():
                     help="the config you will run, relative to the sounder directory")
     ap.add_argument("--sounder-dir", default=_SOUNDER)
     ap.add_argument("--venv", default=os.environ.get("VIRTUAL_ENV") or os.path.expanduser("~/houdini_test"),
-                    help="the SoapyHoudiniSDR host prefix (default: $VIRTUAL_ENV, else %(default)s)")
+                    help="the SoapySDR venv (default: $VIRTUAL_ENV, else %(default)s); the Houdini plugin comes "
+                         "from HOUDINI_SOAPY_ROOT's prefix when that is set")
     ap.add_argument("--quick", action="store_true", help="skip check 7 (does not open the radios)")
     ap.add_argument("--json", action="store_true", help="print the report as JSON (for the dashboard)")
     ap.add_argument("--hwinfo", nargs=2, metavar=("IP", "PORT"), help=argparse.SUPPRESS)

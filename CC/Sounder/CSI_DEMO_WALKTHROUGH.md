@@ -18,8 +18,9 @@ Five placeholders appear throughout. Add your own values:
   network reach to both radios. This is normally your compute host, not a
   radio.
 - `<path-to-HoudiniLab>`: wherever you cloned this repository on `<host>`.
-- `<your-houdini-venv>`: the virtual environment prefix where the
-  SoapyHoudiniSDR host plugin is installed.
+- `<your-houdini-venv>`: the virtual environment prefix with SoapySDR and its
+  Python bindings (and the Houdini host plugin, unless the plugin has a prefix
+  of its own, `<host-plugin-prefix>`, section 2.4).
 
 Additional reference material lives in `../../docs/archive/UE_TX_FINE_GRID_TIMING.md`
 (why the client pilot lands on the fine timing grid) and
@@ -358,7 +359,7 @@ list shows. All of them run one client. Each names its own topology file in
 
 | Config | What it runs |
 |---|---|
-| `files/houdini-dualband-xw-steer-slots.json` | **The demo.** Sub-6 2425 MHz at 133 RB plus the X-band IF at 4380 MHz at 270 RB (97.2 MHz), 4096 FFT, 30 kHz spacing; the UE's clock steered onto the beacon; the base station receives only its rx slots and removes the carrier offset before the FFT. Needs a host plugin with the slots gate (0.3.0 or newer) (`HOUDINI_SOAPY_ROOT`, `DEMO_BENCH_RUNBOOK.md` A3) |
+| `files/houdini-dualband-xw-steer-slots.json` | **The demo.** Sub-6 2425 MHz at 133 RB plus the X-band IF at 4380 MHz at 270 RB (97.2 MHz), 4096 FFT, 30 kHz spacing; the UE's clock steered onto the beacon; the base station receives only its rx slots and removes the carrier offset before the FFT. Needs a host plugin with the slots gate, 0.3.0 or newer (`HOUDINI_SOAPY_ROOT`, `DEMO_BENCH_RUNBOOK.md` A3) |
 | `files/houdini-dualband-xw-steer-slots-fe.json` | The demo through an X-band front end held in a static TX/RX state for the session |
 | `files/houdini-dualband-xw-steer.json` | The demo's widths and steering, receiving every slot (the config of the earlier frozen fallback build) |
 | `files/houdini-dualband-xw-steer-fe.json` | That, through the X-band front end |
