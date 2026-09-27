@@ -620,7 +620,10 @@ Under the panels the quality line gives the lane's IF (NCO) and transmission
 bandwidth (in resource blocks when the tones make whole NR resource blocks),
 the MER and EVM (decision directed, averaged over about a second, over the
 tones within 8 dB of the median \|H\|), and the delay spread figures with
-their threshold and resolution.
+their threshold and resolution. The point count beside the MER steps between
+two values (for example 13,478 and 14,064): each constellation record carries a
+fixed number of points, and the one-second window holds one record more or less
+depending on when it closes. That is the averaging, not lost data.
 
 Guard band and DC null subcarriers are drawn as gaps in every per-subcarrier
 panel, never as zeros: nothing is transmitted there, so nothing is measured
