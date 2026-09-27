@@ -450,6 +450,14 @@ Moving the rig means rebooting the rig host, which re-draws the NIC's receive
 hashing (a node's RX flow can land on a pinned core) and can wedge a node's data
 egress (HS-225). Do every step, every power-up.
 
+On the demo rig, steps 1 to 4 are one command after the power-up: `~/start_demo.sh`
+(the software lane's demo-day card, `docs/DEMO_DAY_CARD.md` section 4 in SoapyHoudiniSDR).
+It refuses while a demo is up, runs `~/demo_check.sh` (a go/no-go over the rig host and both
+nodes: isolation, the 100G ports, roles, the XUD1A LO and its Table 7 filter, the power
+boards, the builds, the FPGA and the egress), then `check_setup.py`, then the dashboard with
+the line of step 4 on the X-band chain's config, in the foreground of its terminal: Stop on
+the page, then Ctrl-C there. The steps below are what it does, by hand.
+
 1. On the rig host: `cat /sys/devices/system/cpu/isolated` reads `15-19`.
 2. For the X-band RF chain only: the roles and the LO check (A2b steps 1 and 2:
    `houdini-role status` exits 0 on both nodes, and `.22`'s `houdini-xud1a pll
