@@ -160,7 +160,7 @@ export HOUDINI_CORE_MAP=main=15 HOUDINI_TX_CPU_AFFINITY=18,19   # isolated (A9);
 export HOUDINI_TX_HOST_STATUS=1   # logs the host pacer's state every health period (free)
 export HOUDINI_SOAPY_ROOT=$HOME/houdini_0.3.1   # the host plugin of the radios' release, for every config (A3)
 python3 csi_gui/check_setup.py --conf files/houdini-dualband-xw-steer-slots.json   # must print Ready, egress PASS on both nodes.
-python3 csi_gui/csi_server.py --control --http-host 0.0.0.0 --configs labelled --log-dir ~/demo_logs --conf files/houdini-dualband-xw-steer-slots.json   # served on every address (A5); one log per Start (A8c step 4)
+python3 csi_gui/csi_server.py --control --http-host 0.0.0.0 --configs labelled --replay "$HOME/demo_rec/F2B_031_60s.rec=Replay, X-band bench" --log-dir ~/demo_logs --conf files/houdini-dualband-xw-steer-slots.json   # served on every address (A5); one log per Start (A8c step 4)
 ```
 
 **Why the pinning.** Left to the kernel, the host plugin's two UE TX pacer
@@ -343,6 +343,13 @@ steered, cabled):
 
 ## A8b. The canned-data fallback
 
+From the dashboard: the demo launch (A4, A8c) offers "Replay, X-band bench" in the config list, a 60 s
+recording through the X-band chain on 0.3.1 (`~/demo_rec/F2B_031_60s.rec`: sub-6 about 37 dB, X-band
+about 31 dB). Stop, pick it, Start: it plays in a loop with no radio, no setup check and no teardown
+(a `--record` recording pauses while it plays); Stop ends it, and a demo config's Start goes live
+again. Add more with `--replay <file>=<label>`. Without the dashboard's control, or on a laptop with
+Python only, replay by hand as below.
+
 A recording of the dashboard's input from a good run, played back into the
 dashboard with no radios: every panel shows real rig data (channel,
 constellation, CIR, ADC, beacon sync).
@@ -452,7 +459,7 @@ egress (HS-225). Do every step, every power-up.
 
    ```sh
    export HOUDINI_CSI_RECORD=~/demo_rec/<name>.rec    # optional: records a fallback; a new name each start
-   python3 csi_gui/csi_server.py --control --http-host 0.0.0.0 --configs labelled --log-dir ~/demo_logs --conf files/houdini-dualband-xw-steer-slots.json
+   python3 csi_gui/csi_server.py --control --http-host 0.0.0.0 --configs labelled --replay "$HOME/demo_rec/F2B_031_60s.rec=Replay, X-band bench" --log-dir ~/demo_logs --conf files/houdini-dualband-xw-steer-slots.json
    ```
 
    `--log-dir` keeps each Start's sounder output in

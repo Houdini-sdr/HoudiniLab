@@ -406,6 +406,9 @@ def _parse(magic, data):
     return None, None
 
 
+_replaying = [False]  # set by the supervisor while a --replay entry plays into this dashboard
+
+
 def _udp_loop(bind_host, bind_port, recorder=None):
     global _seq
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -418,7 +421,7 @@ def _udp_loop(bind_host, bind_port, recorder=None):
             data, _ = sock.recvfrom(65535)
         except OSError:
             break
-        if recorder is not None:  # every datagram as received, parsed or not
+        if recorder is not None and not _replaying[0]:  # every datagram as received, never a replay
             recorder.write(time.monotonic(), data)
         if len(data) < 4:
             continue
@@ -824,6 +827,14 @@ class SounderSupervisor:
         # --configs labelled: the page offers only the configs carrying a short `_label`
         # (the demo's handful), not every files/houdini*.json.
         self.labelled_only = getattr(args, "configs", "all") == "labelled"
+        # --replay FILE[=LABEL]: a recording offered in the list; Start plays it in a loop
+        # into this dashboard's own UDP port, with no radio (no setup check, no teardown).
+        self.udp_dest = udp_dest
+        self.replays = {}
+        for spec in getattr(args, "replay", None) or []:
+            path, _, label = spec.partition("=")
+            path = os.path.abspath(os.path.expanduser(path))
+            self.replays["replay:" + path] = (path, label or "Replay, " + os.path.basename(path))
         self.td_text = ""  # the last teardown's output, the head of the next start's log
         self.proc = None
         self.stopping = False
@@ -841,7 +852,16 @@ class SounderSupervisor:
         """The command lines for one config. Tear down against the radios THIS
         run will use: the config names its own topology file, so a config
         pointed at a different bench tears down that bench rather than whatever
-        the default topology happens to list."""
+        the default topology happens to list. A replay entry has no teardown."""
+        if conf in self.replays:
+            host, port = self.udp_dest.rsplit(":", 1)
+            self.td_cmd = None
+            self.td_text = ""  # no teardown ahead of a replay's log
+            self.cmd = ["python3", "csi_gui/replay_feed.py", self.replays[conf][0], "--host", host,
+                        "--port", port, "--loop"]
+            self.conf = conf
+            self._set(conf=conf)
+            return
         topo = _topology_of(self.sd, conf)
         self.td_cmd = ["python3", "csi_gui/teardown_framer.py"]
         if topo:
@@ -873,15 +893,16 @@ class SounderSupervisor:
         found = {os.path.relpath(p, self.sd) for p in glob.glob(os.path.join(self.sd, "files", "houdini*.json"))}
         if self.labelled_only:
             found = {c for c in found if self._note(c, "_label")}
-        return sorted(found | {self.launch_conf})
+        return sorted(found | {self.launch_conf}) + list(self.replays)
 
     def descriptions(self):
         """Each offered config's one-line `_description`: the list entry's tooltip."""
-        return {c: self._note(c, "_description") for c in self.configs()}
+        return {c: ("Plays %s in a loop, no radio needed" % self.replays[c][0]) if c in self.replays
+                else self._note(c, "_description") for c in self.configs()}
 
     def labels(self):
         """Each offered config's short `_label`: the list entry's text ("" shows the file name)."""
-        return {c: self._note(c, "_label") for c in self.configs()}
+        return {c: self.replays[c][1] if c in self.replays else self._note(c, "_label") for c in self.configs()}
 
     def request(self, cmd, conf=None):
         """From any thread: queue start / stop / restart / check. Returns an error or None."""
@@ -889,6 +910,8 @@ class SounderSupervisor:
             return "unknown command"
         if conf is not None and conf not in self.configs():
             return "config not allowed: %s" % conf
+        if cmd == "check" and (conf if conf is not None else self.conf) in self.replays:
+            return "a replay opens no radio: nothing to check"
         # "exited" is the retry wait inside a session: a Start or Check queued then
         # would be dropped by _pending, so refuse it here instead.
         # "queued": a Start or Restart the main thread has not picked up yet. Set
@@ -1016,7 +1039,10 @@ class SounderSupervisor:
         return f
 
     def _start(self):
-        print("[csi] launching sounder --view in %s" % self.sd, flush=True)
+        replay = self.conf in self.replays
+        _replaying[0] = replay
+        print("[csi] launching %s in %s" % ("the replay of " + self.replays[self.conf][0] if replay
+                                            else "sounder --view", self.sd), flush=True)
         log = self._open_log()
         try:
             proc = subprocess.Popen(self.cmd, cwd=self.sd, env=self.env,
@@ -1026,7 +1052,7 @@ class SounderSupervisor:
             if log is not None:
                 log.close()
             raise
-        threading.Thread(target=_pump, args=(proc.stdout, "[sounder] ", log),
+        threading.Thread(target=_pump, args=(proc.stdout, "[replay] " if replay else "[sounder] ", log),
                          daemon=True).start()
         return proc
 
@@ -1037,11 +1063,12 @@ class SounderSupervisor:
         for attempt in range(1, self.ATTEMPTS + 1):
             if self.stopping:
                 return None
-            self._set(state="tearing down", attempt=attempt, pid=None, rc=None)
-            self._teardown()
-            c = self._wait(self.SETTLE_AFTER_TEARDOWN_S)
-            if c is not None or self.stopping:
-                return c
+            if self.td_cmd is not None:  # a replay opens no radio: nothing to tear down
+                self._set(state="tearing down", attempt=attempt, pid=None, rc=None)
+                self._teardown()
+                c = self._wait(self.SETTLE_AFTER_TEARDOWN_S)
+                if c is not None or self.stopping:
+                    return c
             self._set(state="starting")
             self.proc = self._start()
             self._set(state="running", pid=self.proc.pid)
@@ -1090,7 +1117,7 @@ class SounderSupervisor:
             elif cmd in ("start", "restart"):
                 # The quick check first (no radio opened): a missing build, plugin
                 # or server is named on the page instead of as a sounder exit code.
-                if not self._check(quick=True):
+                if self.conf not in self.replays and not self._check(quick=True):
                     self._set(state="check failed")
                     continue
                 c = self._pending()  # a Stop or Restart pressed during the check
@@ -1139,6 +1166,10 @@ def main():
                          "127.0.0.1 unless --http-host is given: use the SSH port-forward")
     ap.add_argument("--sounder-dir", default=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                     help="the sounder checkout to run (default: the one this file is in)")
+    ap.add_argument("--replay", action="append", default=[], metavar="FILE[=LABEL]",
+                    help="with --control, offer this recording in the page's list (repeatable); Start "
+                         "plays it in a loop into this dashboard, with no radio, no setup check and "
+                         "no teardown, and a --record recording pauses while it plays")
     ap.add_argument("--configs", choices=("all", "labelled"), default="all",
                     help="with --control, the configs the page offers: every files/houdini*.json "
                          "(all), or only those carrying a short `_label`, the demo's (labelled); "

@@ -302,5 +302,37 @@ srv.control = None
 check(get() == {"enabled": False}, "no --control: GET reports disabled")
 check(post({"cmd": "start"})[0] == 404, "no --control: POST is 404")
 srv.shutdown()
+# --replay: a recording offered in the list; Start plays it into this dashboard's
+# UDP port with no setup check and no teardown; the recorder pauses; Stop ends it.
+rec = os.path.join(sd, "bench.rec"); open(rec, "wb").write(b"HCSIREC1")
+with open(os.path.join(sd, "csi_gui", "replay_feed.py"), "w") as f:
+    f.write("import sys, time\nopen(%r, 'a').write('replay %%s\\n' %% ' '.join(sys.argv[1:]))\ntime.sleep(60)\n" % log)
+rs = cs.SounderSupervisor(types.SimpleNamespace(**dict(vars(args), replay=[rec + "=Bench replay"])), "127.0.0.1:9999")
+rs.SETTLE_AFTER_TEARDOWN_S = 0.2; rs.RETRY_DELAY_S = 0.2; rs.STOP_GRACE_S = 2.0
+key = "replay:" + rec
+check(rs.configs()[-1] == key and rs.labels()[key] == "Bench replay" and rec in rs.descriptions()[key],
+      "a --replay entry is offered with its label (mutation: replays not listed)")
+check(rs.request("check", key) is not None, "Check on a replay is refused: it opens no radio")
+open(log, "w").close(); rseen = {}
+def rdriver():
+    try:
+        rs.request("start", key)
+        rseen["run"] = wait_for(lambda: rs.snapshot()["state"] == "running")
+        rseen["pid"] = rs.snapshot()["pid"]
+        rseen["log"] = wait_for(lambda: "replay " in open(log).read()) and open(log).read()
+        rseen["paused"] = cs._replaying[0]
+        rs.request("stop")
+        rseen["stopped"] = wait_for(lambda: rs.snapshot()["state"] == "stopped")
+    finally:
+        rs.stop()
+threading.Thread(target=rdriver, daemon=True).start()
+rs.serve(autostart=False)
+ev = rseen.get("log") or ""
+check(rseen.get("run") and "replay %s --host 127.0.0.1 --port 9999 --loop" % rec in ev,
+      "Start on a replay plays it in a loop into the dashboard's UDP port (mutation: the sounder launched): %r" % ev)
+check("teardown" not in ev and "check" not in ev,
+      "a replay runs no setup check and no teardown: it needs no radio (mutation: the radio steps kept)")
+check(rseen.get("paused") is True, "the recorder pauses while a replay plays (mutation: a replay recorded)")
+check(rseen.get("stopped") and rseen.get("pid") and wait_for(lambda: not alive(rseen["pid"])), "Stop ends the replay")
 import shutil; shutil.rmtree(sd, ignore_errors=True)  # no temp dir left per run
 print("%d failure(s)" % fails); sys.exit(1 if fails else 0)

@@ -516,6 +516,8 @@ from before that path existed, and it is not part of this demo.
 | `--sounder-dir` | the checkout `csi_server.py` is in | Which checkout's `build/sounder` runs |
 | `--venv` | the activated venv, else `~/houdini_test` | The SoapySDR runtime the sounder runs with, and its Houdini plugin unless `HOUDINI_SOAPY_ROOT` names a release prefix |
 | `--log-dir` | off | Write each start's sounder output to `<dir>/sounder_<UTC>.log` |
+| `--replay FILE=LABEL` | none | With `--control`, a recording offered in the config list under LABEL (repeatable); Start plays it in a loop into this dashboard with no radio, no setup check and no teardown |
+| `--configs` | `all` | With `--control`, the configs the list offers: every `files/houdini*.json` (`all`), or only those carrying a short `_label` (`labelled`: the demo's four) |
 | `--record` | `$HOUDINI_CSI_RECORD`, else off | Record every datagram to a new file for `replay_feed.py` (a name that exists is refused, never overwritten) |
 | `--record-max-mb` | 2048 | Stop recording at this size |
 | `--dest-host` | 127.0.0.1 | Where the sounder sends datagrams, when using `--launch` |
