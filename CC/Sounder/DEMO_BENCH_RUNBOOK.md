@@ -60,25 +60,43 @@ the filters, is `DEMO_VERIFICATION.md` 9.15 to 9.24. The second sub-6 filter at 
 costs about 2 dB of level against the recorded wired baseline; compare a new
 cabled run's levels with 9.69 to 9.71, not with 9.60/9.61.
 
-## A2b. The X-band RF chain (X2b: through the XUD1A)
+## A2b. The X-band RF chain (F2b: through the XUD1A and both ADTR1107 boards)
 
-The X-band IF leaves `.21` DAC_A, goes up to RF in the XUD1A's channel A,
-over a direct cable into its channel B, back down to IF, and into `.22`
-ADC_B (VBFZ-4000-S+ at both IF ends). The ADTR1107 boards are powered and in
-their roles but out of the RF path (their antenna ports on the 40 dB pad).
-It needs:
+From device 0.3.1. The X-band IF leaves `.21` DAC_A, goes up to RF 9.5 GHz in
+the XUD1A's channel A and out through `.21`'s ADTR1107, crosses a 20 dB pad
+into `.22`'s ADTR1107, comes back down to IF in the XUD1A's channel B and
+reaches `.22` ADC_B:
+
+- `.21` DAC_A -> VBFZ-4000-S+ -> XUD1A J1 (channel A TX in); J1A -> `.21`
+  ADTR1107 TX_IN; its ANT -> 20 dB pad -> `.22` ADTR1107 ANT.
+- `.22` ADTR1107 RX_OUT -> XUD1A J1B (channel B RF in); J6 -> VBFZ-4000-S+ ->
+  VAT-10A+ -> `.22` ADC_B.
+- Both ADTR1107 CPLR_OUT ports terminated (unless `.21`'s is on an analyzer).
+
+The XUD1A is the reworked board (RF 9.5 GHz, LO 13.88 GHz). It needs:
 
 1. The roles applied: `sudo houdini-role status` exits 0 on both nodes. `.21`
    applies its role at boot. `.22` applies it BY HAND after the XUD1A's 12 V
    is on: boot `.22` with the 12 V off, switch the 12 V on, wait for clean SPI
-   (10 s to 2.5 min), then `sudo houdini-role apply bs`.
-2. The XUD1A LO for the chosen RF (the XUD1A board is chosen on the day, see
-   `DEMO_VERIFICATION.md` 9.67 and 9.68): the reworked board at RF 9.5 GHz
-   needs the LO at 13.88 GHz, `sudo houdini-xud1a pll tune --freq 13880000000
-   --out rf16` on `.22` with no stream open (it prints `LOCKED`; until the
-   role script carries 13.88, `houdini-role status` on `.22` reports the LO
-   not in effect). At RF 10 GHz this board measured about 9.5 dB weaker
-   (X-band MER 8-10 dB against 18.7-19.0 at 9.5 GHz).
+   (10 s to 2.5 min), then `sudo houdini-role apply bs`. On `.22` the role
+   also tunes the LO to 13.88 GHz on rf16 and loads the doubler tracking
+   filter from the XUD1A datasheet's Table 7; no manual LO tune is needed.
+   Reaching `.22` for this needs a shell on it: the rig host has no ssh key
+   for the nodes (the software lane's demo-day card says how at the venue).
+2. The LO check: on `.22`, `sudo houdini-xud1a pll status` shows
+   `lock_detect=1`, `rf16 ON at 13880000000...` and `doubler tracking table7
+   (REG0070 0x23, filter 1 bias 3, ...)`; on 0.3.1 `houdini-role status`
+   fails on `.22` unless the doubler reads table7. After any `houdini-xud1a
+   bist`, sweep or manual tune on `.22`, run `sudo houdini-role apply bs`
+   again before a run (bist parks the lines and turns the LO off).
+
+   Levels (the software lane's measurements): with Table 7 the XUD1A loop
+   reads about 22 dB stronger at RF 9.5 GHz than at 10 GHz (-32 against
+   -54.5 dBm; the earlier "about 9.5 dB weaker at 10 GHz" of
+   `DEMO_VERIFICATION.md` 9.68 was the automatic doubler filter's low state,
+   SH-451). Through the whole chain a -12 dBFS tone reads -28 dBm at ADC_B
+   with about 40 dB SNR in 100 MHz at attenuation 0. The sounder's MER through
+   this chain is not measured yet: the first `-fe` run is that measurement.
 3. A config with `xband_frontend_static` (AP-86: the session holds the UE's
    board in static TX and the BS's in static RX; without it `.21`'s guarded
    channel plays silence): `files/houdini-dualband-xw-steer-slots-fe.json`
@@ -404,7 +422,9 @@ hashing (a node's RX flow can land on a pinned core) and can wedge a node's data
 egress (HS-225). Do every step, every power-up.
 
 1. On the rig host: `cat /sys/devices/system/cpu/isolated` reads `15-19`.
-2. For the X-band RF chain only: the roles and the LO (A2b steps 1 and 2).
+2. For the X-band RF chain only: the roles and the LO check (A2b steps 1 and 2:
+   `houdini-role status` exits 0 on both nodes, and `.22`'s `houdini-xud1a pll
+   status` reads `doubler tracking table7`).
 3. The launch environment (A4), then the setup check:
 
    ```sh
