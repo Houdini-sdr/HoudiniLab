@@ -139,9 +139,10 @@ def plugin_dir(venv):
 def plugin_env(venv):
     """The environment that loads the Houdini plugin; csi_server.py runs the sounder in it.
 
-    HOUDINI_SOAPY_ROOT selects another host-plugin prefix (the slots plugin a
-    bs_rx_slots config runs on), exactly as tests/demo-verify/run_rung.sh does,
-    so the dashboard's Check and Start run the stack a scripted run validated.
+    HOUDINI_SOAPY_ROOT selects the release's host-plugin prefix (built with the
+    radios' device build; the venv then carries no Houdini module), exactly as
+    tests/demo-verify/run_rung.sh does, so the dashboard's Check and Start run
+    the stack a scripted run validated.
     """
     env = dict(os.environ, LD_LIBRARY_PATH=os.path.join(venv, "lib"), SOAPY_SDR_PLUGIN_PATH=plugin_dir(venv))
     root = os.environ.get("HOUDINI_SOAPY_ROOT")
@@ -345,6 +346,16 @@ def check_egress(rep, ip, raw):
             rep.add("PASS", "egress %s" % ip, "no data-path stall recorded")
 
 
+def release_cmd(ip, port):
+    """The shell line that releases a node's clock into its calibrated hold, in
+    the plugin environment this check ran with (HOUDINI_SOAPY_ROOT's prefix)."""
+    root = os.environ.get("HOUDINI_SOAPY_ROOT")
+    pre = "SOAPY_SDR_ROOT=%s SOAPY_SDR_PLUGIN_PATH= " % root if root else ""
+    return (pre + "python3 -c \"import SoapySDR as S; d = S.Device({'driver': 'houdinisdr', 'remote': "
+            "'tcp://%s:%s', 'remote:driver': 'houdinisdr-device', 'remote:type': 'houdinisdr', 'timeout': "
+            "'3000000'}); d.writeSetting('CLOCK_ADJ', 'release'); d.close()\"" % (ip, port))
+
+
 def check_clock(rep, ip, port, st):
     """A radio's CLOCK_ADJ state. A node left steered (a steering run that did
     not release, or a steering script) runs every later run off its
@@ -357,20 +368,14 @@ def check_clock(rep, ip, port, st):
         # Calibrated but out of its hold: PLL1 is tracking, so the tick is not at
         # the calibrated frequency (the device warns at make() too).
         rep.add("WARN", "clock %s" % ip, "ref=calibrated but the hold is not in force (CLOCK_ADJ %s)" % st,
-                "Release it back into the calibrated hold before the run: python3 -c \"import SoapySDR as S; "
-                "d = S.Device({'driver': 'houdinisdr', 'remote': 'tcp://%s:%s', 'remote:driver': "
-                "'houdinisdr-device', 'remote:type': 'houdinisdr', 'timeout': '3000000'}); "
-                "d.writeSetting('CLOCK_ADJ', 'release'); d.close()\"" % (ip, port))
+                "Release it back into the calibrated hold before the run: " + release_cmd(ip, port))
     elif not off.lstrip("-").isdigit():
         rep.add("INFO", "clock %s" % ip, "ref=%s: not held at a calibration code, no steering offset"
                 % f.get("ref", "?"))
     elif int(off) != 0:
         rep.add("WARN", "clock %s" % ip, "left steered %+d counts from its calibration code (CLOCK_ADJ %s)"
                 % (int(off), st),
-                "Release it before the run: python3 -c \"import SoapySDR as S; d = S.Device({'driver': "
-                "'houdinisdr', 'remote': 'tcp://%s:%s', 'remote:driver': 'houdinisdr-device', 'remote:type': "
-                "'houdinisdr', 'timeout': '3000000'}); d.writeSetting('CLOCK_ADJ', 'release'); "
-                "d.close()\"" % (ip, port))
+                "Release it before the run: " + release_cmd(ip, port))
     else:
         rep.add("INFO", "clock %s" % ip, "ref=%s, at its calibration code %s (offset 0)"
                 % (f.get("ref", "?"), f.get("cal_dac", "?")))

@@ -207,10 +207,17 @@ ls $SOAPY_SDR_PLUGIN_PATH      # must contain a Houdini .so module
 
 When the Houdini plugin is installed in a prefix of its own (a release built
 with the radios' device build) instead of the venv, the venv carries no Houdini
-module: export `HOUDINI_SOAPY_ROOT=<host-plugin-prefix>` and the setup check,
-the dashboard and the run scripts load it from there.
+module. Verify the prefix instead, and keep the export in every shell: the setup
+check, the dashboard and the run scripts load the plugin from it.
 
-If `SoapySDRUtil` is missing, or the module directory has no Houdini entry,
+```sh
+export HOUDINI_SOAPY_ROOT=<host-plugin-prefix>
+ls $HOUDINI_SOAPY_ROOT/lib/SoapySDR/modules0.8-3     # must contain a Houdini .so module
+SOAPY_SDR_ROOT=$HOUDINI_SOAPY_ROOT SOAPY_SDR_PLUGIN_PATH= SoapySDRUtil --info   # lists houdinisdr
+```
+
+If `SoapySDRUtil` is missing, or neither the venv's module directory nor the
+prefix has a Houdini entry,
 stop here and complete the SoapyHoudiniSDR host install first. Nothing in this
 walkthrough can work without it.
 
@@ -351,7 +358,7 @@ list shows. All of them run one client. Each names its own topology file in
 
 | Config | What it runs |
 |---|---|
-| `files/houdini-dualband-xw-steer-slots.json` | **The demo.** Sub-6 2425 MHz at 133 RB plus the X-band IF at 4380 MHz at 270 RB (97.2 MHz), 4096 FFT, 30 kHz spacing; the UE's clock steered onto the beacon; the base station receives only its rx slots and removes the carrier offset before the FFT. Needs the slots host plugin (`HOUDINI_SOAPY_ROOT`, `DEMO_BENCH_RUNBOOK.md` A3) |
+| `files/houdini-dualband-xw-steer-slots.json` | **The demo.** Sub-6 2425 MHz at 133 RB plus the X-band IF at 4380 MHz at 270 RB (97.2 MHz), 4096 FFT, 30 kHz spacing; the UE's clock steered onto the beacon; the base station receives only its rx slots and removes the carrier offset before the FFT. Needs a host plugin with the slots gate (0.3.0 or newer) (`HOUDINI_SOAPY_ROOT`, `DEMO_BENCH_RUNBOOK.md` A3) |
 | `files/houdini-dualband-xw-steer-slots-fe.json` | The demo through an X-band front end held in a static TX/RX state for the session |
 | `files/houdini-dualband-xw-steer.json` | The demo's widths and steering, receiving every slot (the config of the earlier frozen fallback build) |
 | `files/houdini-dualband-xw-steer-fe.json` | That, through the X-band front end |
@@ -506,7 +513,7 @@ from before that path existed, and it is not part of this demo.
 | `--control` | off | Start, Stop, Restart and Check buttons and a config list (the sounder's `files/houdini*.json`) in the page header; section 4.4 |
 | `--conf` | `files/houdini-1u.json` | The config to run (with `--launch` or `--control`), and the one the page's \|H\| axis top comes from (`dashboard_mag_top`) |
 | `--sounder-dir` | the checkout `csi_server.py` is in | Which checkout's `build/sounder` runs |
-| `--venv` | the activated venv, else `~/houdini_test` | The SoapySDR and Houdini plugin prefix the sounder runs with |
+| `--venv` | the activated venv, else `~/houdini_test` | The SoapySDR runtime the sounder runs with, and its Houdini plugin unless `HOUDINI_SOAPY_ROOT` names a release prefix |
 | `--log-dir` | off | Write each start's sounder output to `<dir>/sounder_<UTC>.log` |
 | `--record` | `$HOUDINI_CSI_RECORD`, else off | Record every datagram to a new file for `replay_feed.py` (a name that exists is refused, never overwritten) |
 | `--record-max-mb` | 2048 | Stop recording at this size |

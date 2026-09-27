@@ -8,10 +8,12 @@ cd "${SOUNDER_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}" || exit 1  # default: 
 rm -f "ap79_runs/$1.current" "ap79_runs/$1.pid" "ap79_runs/$1.csipid"  # a launch that fails below leaves no stale record to reuse
 source "${VENV:-$HOME/houdini_test}/bin/activate" || exit 1
 export LD_LIBRARY_PATH=$VIRTUAL_ENV/lib SOAPY_SDR_PLUGIN_PATH=$VIRTUAL_ENV/lib/SoapySDR/modules0.8-3
-# HOUDINI_SOAPY_ROOT: run under another host-plugin prefix instead (for example
-# the software lane's SH-347 slots build): SoapySDR then searches only that
-# prefix's modules (its root, with the plugin path emptied).
+# HOUDINI_SOAPY_ROOT: the release's host-plugin prefix (where the venv carries no
+# Houdini module): SoapySDR then searches only that prefix's modules (its root,
+# with the plugin path emptied).
 if [ -n "$HOUDINI_SOAPY_ROOT" ]; then export SOAPY_SDR_ROOT=$HOUDINI_SOAPY_ROOT SOAPY_SDR_PLUGIN_PATH=; fi
+ls "${HOUDINI_SOAPY_ROOT:-$VIRTUAL_ENV}"/lib/SoapySDR/modules*/libHoudiniSDRSupport.so >/dev/null 2>&1 ||
+  { echo "no Houdini host plugin under ${HOUDINI_SOAPY_ROOT:-the venv $VIRTUAL_ENV}: export HOUDINI_SOAPY_ROOT=<the release's host-plugin prefix>"; exit 1; }
 export HOUDINI_MAX_FRAME=2000000000 HOUDINI_UE_TX_DEBUG=1
 mkdir -p ap79_runs; export HOUDINI_DUMP_DIR=$PWD/ap79_runs
 if [ -n "$4" ]; then export HOUDINI_LINK_HEALTH_S=$4 HOUDINI_CFO_LOG_EVERY=100; else unset HOUDINI_LINK_HEALTH_S; fi

@@ -604,12 +604,12 @@ own UDP data planes to each board.
   reachable directly at `http://168.6.244.64:8080/` if the lab firewall allows
   it. Prefer the section B4 tunnel anyway: it works regardless of firewall and
   does not publish the panel on the lab network.
-- SoapySDR host stack: the Houdini host plugin lives ONLY in the release
-  prefix, `/home/houdini/houdini_0.3.1/lib/SoapySDR/modules0.8-3/`; the venv
-  `~/houdini_test` and the system SoapySDR at `/usr/local` carry none. Every
-  launch must carry `HOUDINI_SOAPY_ROOT=/home/houdini/houdini_0.3.1` (the
-  backend, the setup check and `run_rung.sh` turn it into `SOAPY_SDR_ROOT` for
-  the sounder). Without it every radio open fails with
+- SoapySDR host stack: the validated houdini HOST plugin lives ONLY at
+  `/home/houdini/houdini_test/lib/SoapySDR/modules0.8-3/`. The system
+  SoapySDR at `/usr/local` does NOT have it, so every launch must carry
+  `SOAPY_SDR_PLUGIN_PATH=/home/houdini/houdini_test/lib/SoapySDR/modules0.8-3`
+  (the backend's `--venv` default `~/houdini_test` sets this when launching
+  through it). Without it every radio open fails with
   `SoapySDR::Device::make() no match`.
 - Teardown helper: `csi_gui/teardown_framer.py` runs on the rig (it opens the
   boards, so it is device-touching).

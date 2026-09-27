@@ -63,6 +63,14 @@ static size_t beaconTxIndex(const Config* cfg, const std::vector<size_t>& bs_cha
   return bs_chans.empty() ? 0 : std::min(static_cast<size_t>(cfg->beacon_channel()), bs_chans.size() - 1);
 }
 
+// The PHYSICAL TX channel the beacon's replay strobe fires on: beacon_channel()
+// is the logical index within bs_channel, the strobe addresses the real DAC
+// (bs_channel "B" -> ch1). armTdd arms it there and stop() disarms it there.
+static size_t beaconTxChannel(const Config* cfg) {
+  const auto bs_chans = Utils::strToChannels(cfg->bs_tx_channel());
+  return bs_chans.empty() ? 0 : bs_chans.at(beaconTxIndex(cfg, bs_chans));
+}
+
 // Load the replay RAM with the beacon image `iq`. The beacon is single-antenna:
 // with per-channel TX streams (SH-235) its samples go at the beacon channel's
 // index and nullptr elsewhere, and xmit skips the null channels, so a
@@ -417,7 +425,7 @@ void HoudiniFramer::armTdd(void) {
       // The load lands only on the beacon channel's stream (loadBeaconRam),
       // and the strobe below targets tx_ch only, so a non-beacon TX stream is
       // never filled or armed.
-      const size_t tx_ch = bs_chans.empty() ? 0 : bs_chans.at(beacon_idx);
+      const size_t tx_ch = beaconTxChannel(cfg_);
       // The load/schedule/strobe sequence, re-runnable: the arm retry loop
       // re-invokes it after every teardown ladder (a ladder invalidates this
       // state, so a bare arm retry could arm a beaconless framer).
@@ -988,14 +996,26 @@ void HoudiniFramer::arm() {
 }
 
 void HoudiniFramer::stop() {
-  // Native TDD teardown so the next run can re-arm. Full ladder, not abort
+  // Native TDD teardown so the next run can re-arm. The beacon's replay strobe
+  // is disarmed first: TDD_CMD abort does not release it, and left armed the
+  // plugin disarms it at close and logs a leak. Then the full ladder, not abort
   // alone: abort latches gates_held on a running framer and skips TX_CLEAR
-  // (3.2 + 4.24 in DEMO_VERIFICATION.md).
+  // (3.2 + 4.24 in DEMO_VERIFICATION.md). The plugin's own idle path keeps
+  // the same order (strobe off, abort, TX_CLEAR, gate release).
+  const size_t tx_ch = beaconTxChannel(cfg_);
   for (size_t c = 0; c < radios_.size(); c++)
-    for (size_t i = 0; i < radios_.at(c).size(); i++)
-      if (radios_.at(c).at(i) != nullptr) {
+    for (size_t i = 0; i < radios_.at(c).size(); i++) {
+      SoapySDR::Device* dev = radios_.at(c).at(i) != nullptr ? radios_.at(c).at(i)->RawDev() : nullptr;
+      if (dev != nullptr) {
         try {
-          tddLadder(radios_.at(c).at(i)->RawDev(), cfg_->diag_skip_tx_clear());
+          dev->writeSetting("TDD_REPLAY_STROBE", "ch" + std::to_string(tx_ch) + ":off");
+        } catch (const std::exception& e) {
+          MLPD_WARN("BS: disarming the beacon strobe on radio %zu ch%zu failed (%s)\n", i, tx_ch, e.what());
+        } catch (...) {
+          MLPD_WARN("BS: disarming the beacon strobe on radio %zu ch%zu failed\n", i, tx_ch);
+        }
+        try {
+          tddLadder(dev, cfg_->diag_skip_tx_clear());
         } catch (const std::exception& e) {
           MLPD_WARN("BS: the TDD teardown of radio %zu failed (%s); the next run's arm may find the gates held\n",
                     i, e.what());
@@ -1003,6 +1023,7 @@ void HoudiniFramer::stop() {
           MLPD_WARN("BS: the TDD teardown of radio %zu failed; the next run's arm may find the gates held\n", i);
         }
       }
+    }
 }
 
 int HoudiniFramer::txBeacon(size_t radio_id, size_t cell_id, const void* const* buffs,

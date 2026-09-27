@@ -1130,9 +1130,10 @@ def main():
     ap.add_argument("--sounder-dir", default=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                     help="the sounder checkout to run (default: the one this file is in)")
     ap.add_argument("--venv", default=os.environ.get("VIRTUAL_ENV") or os.path.expanduser("~/houdini_test"),
-                    help="virtualenv prefix holding SoapySDR and the Houdini "
-                         "plugin, used when --launch or --control runs the sounder "
-                         "(default: the activated venv, else %(default)s)")
+                    help="virtualenv prefix holding SoapySDR (and the Houdini plugin, "
+                         "unless HOUDINI_SOAPY_ROOT names a release prefix), used when "
+                         "--launch or --control runs the sounder (default: the activated "
+                         "venv, else %(default)s)")
     ap.add_argument("--conf", default="files/houdini-1u.json")
     ap.add_argument("--storepath", default="/tmp/houdini_hdf5")
     ap.add_argument("--max-frame", type=int, default=2_000_000_000,

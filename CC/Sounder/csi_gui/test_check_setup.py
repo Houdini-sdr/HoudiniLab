@@ -43,7 +43,8 @@ open(os.path.join(fake, "SoapySDR.py"), "w").write(
     "import json\nclass Device:\n"
     "    def __init__(self, a):\n"
     "        import os\n"
-    "        assert os.environ.get('SOAPY_SDR_PLUGIN_PATH', '').endswith('modules0.8-3'), 'no plugin path'\n"
+    "        assert (os.environ.get('SOAPY_SDR_PLUGIN_PATH', '').endswith('modules0.8-3') or\n"
+    "                (os.environ.get('SOAPY_SDR_ROOT') and os.environ.get('SOAPY_SDR_PLUGIN_PATH') == '')), 'no plugin path'\n"
     "        assert int(a.get('timeout', '0')) >= 1000000, 'no timeout: the plugin default is 300 ms'\n"
     "        self.ip = a['remote'].split('//')[1].split(':')[0]\n"
     "    def getHardwareInfo(self): return json.load(open(%r))[self.ip]\n"
@@ -170,6 +171,17 @@ det = [r["fix"] for r in rep["results"] if r["what"] == "plugin"]
 check(rc == 1 and lv.get("plugin") == "FAIL" and det and "HOUDINI_SOAPY_ROOT" in det[0],
       "no module in the venv and no HOUDINI_SOAPY_ROOT fails, naming the variable (mutation: the old advice)")
 os.rename(vmod + ".off", vmod)
+# The full check under HOUDINI_SOAPY_ROOT (the rig's only layout): the radios
+# are read through that prefix, and a steered node's release line carries it.
+json.dump({"127.0.0.1": clock_adj(404, 404), "127.0.0.2": clock_adj(411)}, open(clock_file, "w"))
+env_saved = env; env = dict(env_saved, HOUDINI_SOAPY_ROOT=rel)
+rc, rep, lv = run()
+env = env_saved
+fix = [r["fix"] for r in rep["results"] if r["what"] == "clock 127.0.0.2"]
+check(lv.get("stack match") == "PASS" and fix and fix[0].startswith("Release it before the run: SOAPY_SDR_ROOT=%s SOAPY_SDR_PLUGIN_PATH= python3" % rel),
+      "under HOUDINI_SOAPY_ROOT the full check reads the radios and the printed release carries the prefix "
+      "(mutation: a bare python3 line, which finds no Houdini module on the rig): %s" % (fix[:1],))
+json.dump({"127.0.0.1": clock_adj(404, 404), "127.0.0.2": clock_adj(408)}, open(clock_file, "w"))
 # A host plugin that is not the radios' device build: a WARN per node.
 json.dump({"127.0.0.1": dict(same, host_build="v0"), "127.0.0.2": dict(same, host_build="v0")}, open(info_file, "w"))
 json.dump({"127.0.0.1": HEALTHY, "127.0.0.2": HEALTHY}, open(egress_file, "w"))

@@ -95,7 +95,9 @@ fi
 if [ "${1:-}" = "--remote" ]; then
   # The rig-host half, run by the local half below.
   WT=$2; BUNDLE=$3; REF=$4
-  cd "$WT" || { echo "FAIL: no worktree $WT"; exit 1; }
+  cd "$WT" || { echo "FAIL: no worktree $WT"; rm -f "$BUNDLE"; exit 1; }
+  # The preflight ran seconds ago; a sounder started since would lose its binary.
+  if pgrep -x sounder >/dev/null; then echo "FAIL: a sounder started on this host after the preflight; nothing changed"; rm -f "$BUNDLE"; exit 1; fi
   OLD=$(git rev-parse HEAD)
   rollback() {
     [ "$(git rev-parse HEAD)" = "$OLD" ] && return
@@ -135,9 +137,11 @@ if [ "$RIG_HEAD" != "$HEAD_LOCAL" ]; then
     { echo "FAIL: the rig worktree's HEAD ${RIG_HEAD:0:12} is not an ancestor of $BR (${HEAD_LOCAL:0:12}); move it first"
       ssh -o BatchMode=yes "$RIG" "rm -f $REMOTE_SELF"; exit 1; }
   B=$(mktemp /tmp/ship_to_rig_XXXX.bundle)
-  git bundle create -q "$B" "$RIG_HEAD..$BR" || { echo "FAIL: bundle $RIG_HEAD..$BR"; rm -f "$B"; exit 1; }
+  git bundle create -q "$B" "$RIG_HEAD..$BR" ||
+    { echo "FAIL: bundle $RIG_HEAD..$BR"; rm -f "$B"; ssh -o BatchMode=yes "$RIG" "rm -f $REMOTE_SELF"; exit 1; }
   BUNDLE_REMOTE=/tmp/ship_to_rig_$$.bundle
-  scp -q "$B" "$RIG:$BUNDLE_REMOTE" || { echo "FAIL: copy the bundle"; rm -f "$B"; exit 1; }
+  scp -q "$B" "$RIG:$BUNDLE_REMOTE" ||
+    { echo "FAIL: copy the bundle"; rm -f "$B"; ssh -o BatchMode=yes "$RIG" "rm -f $REMOTE_SELF $BUNDLE_REMOTE"; exit 1; }
   rm -f "$B"
   echo "shipping $BR ${RIG_HEAD:0:12}..${HEAD_LOCAL:0:12} to $RIG:$WT"
 else

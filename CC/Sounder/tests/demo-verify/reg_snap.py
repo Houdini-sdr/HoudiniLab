@@ -12,7 +12,12 @@ as check_setup opens a node, and closed cleanly. DEMO_VERIFICATION.md 9.70
 (SM1) is this tool's before/after reading of fpga 1.34.
 """
 import argparse
-import SoapySDR
+import os
+# The Houdini plugin lives in the release prefix HOUDINI_SOAPY_ROOT names (the
+# venv carries none): SoapySDR searches that root, the venv's plugin path emptied.
+if os.environ.get("HOUDINI_SOAPY_ROOT"):
+    os.environ.update(SOAPY_SDR_ROOT=os.environ["HOUDINI_SOAPY_ROOT"], SOAPY_SDR_PLUGIN_PATH="")
+import SoapySDR  # noqa: E402  after the plugin environment above
 
 ap = argparse.ArgumentParser(usage=__doc__.split("\n")[2])
 ap.add_argument("label")

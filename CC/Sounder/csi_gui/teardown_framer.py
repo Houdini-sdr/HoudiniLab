@@ -74,6 +74,11 @@ def _import_deps():
         return None, None
     import houdini_setup as hs
     global SOAPY_SDR_RX
+    # The Houdini plugin lives in the release prefix HOUDINI_SOAPY_ROOT names
+    # (the venv carries none): SoapySDR searches that root, the venv's plugin
+    # path emptied, as check_setup.plugin_env sets it for the dashboard.
+    if os.environ.get("HOUDINI_SOAPY_ROOT"):
+        os.environ.update(SOAPY_SDR_ROOT=os.environ["HOUDINI_SOAPY_ROOT"], SOAPY_SDR_PLUGIN_PATH="")
     import SoapySDR
     SOAPY_SDR_RX = SoapySDR.SOAPY_SDR_RX
     return hs, _teardown

@@ -38,6 +38,10 @@ cd "$SOUNDER_DIR" || { echo "no such directory: $SOUNDER_DIR" >&2; exit 1; }
 [ -f "$VENV/bin/activate" ] && . "$VENV/bin/activate"
 export SOAPY_SDR_PLUGIN_PATH="${SOAPY_SDR_PLUGIN_PATH:-$VENV/lib/SoapySDR/modules0.8-3}"
 export LD_LIBRARY_PATH="$VENV/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+# HOUDINI_SOAPY_ROOT: the release's host-plugin prefix (where the venv carries none).
+if [ -n "${HOUDINI_SOAPY_ROOT:-}" ]; then export SOAPY_SDR_ROOT=$HOUDINI_SOAPY_ROOT SOAPY_SDR_PLUGIN_PATH=; fi
+ls "${HOUDINI_SOAPY_ROOT:-$VENV}"/lib/SoapySDR/modules*/libHoudiniSDRSupport.so >/dev/null 2>&1 ||
+  { echo "no Houdini host plugin under ${HOUDINI_SOAPY_ROOT:-$VENV}: export HOUDINI_SOAPY_ROOT=<the release's host-plugin prefix>" >&2; exit 1; }
 # Run until the wall clock says stop, never until max_frame.
 export HOUDINI_MAX_FRAME="${HOUDINI_MAX_FRAME:-2000000000}"
 
