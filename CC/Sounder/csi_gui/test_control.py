@@ -33,11 +33,23 @@ with open(os.path.join(sd, "csi_gui", "check_setup.py"), "w") as f:
             "[{'level': 'FAIL' if bad else 'PASS', 'what': 'stand-in', 'detail': '', 'fix': ''}]}))\n" % (log, flag, slow))
 for n in ("houdini-a.json", "houdini-b.json", "other.json"):
     open(os.path.join(sd, "files", n), "w").write('{"_description": "desc of %s"}' % n)
+# houdini-b carries a short _label (a demo config); houdini-a and other do not.
+open(os.path.join(sd, "files", "houdini-b.json"), "w").write('{"_label": "B short", "_description": "desc of houdini-b.json"}')
 args = types.SimpleNamespace(sounder_dir=sd, max_frame=1, csi_fps=0, venv=sd,
                              conf="files/houdini-a.json", storepath=sd)
 # The operator's own --conf is offered even when it is not files/houdini*.json.
 check(cs.SounderSupervisor(types.SimpleNamespace(**dict(vars(args), conf="files/other.json")),
                            "x").configs()[-1] == "files/other.json", "the --conf config is always in the list")
+# --configs labelled: only the labelled configs, and always the --conf one.
+lab = cs.SounderSupervisor(types.SimpleNamespace(**dict(vars(args), conf="files/other.json", configs="labelled")), "x")
+check(lab.configs() == ["files/houdini-b.json", "files/other.json"],
+      "--configs labelled offers the labelled configs and the --conf one, not the rest (mutation: the filter "
+      "dropped): %s" % lab.configs())
+check(lab.labels() == {"files/houdini-b.json": "B short", "files/other.json": ""},
+      "each offered config's _label is served, empty without one (mutation: the description as the label)")
+check(lab.request("start", "files/houdini-a.json") == "config not allowed: files/houdini-a.json",
+      "an unlabelled config cannot be started through the API under --configs labelled (mutation: the page's "
+      "list not the allow-list)")
 sup = cs.SounderSupervisor(args, "127.0.0.1:1")
 sup.SETTLE_AFTER_TEARDOWN_S = 0.2; sup.RETRY_DELAY_S = 0.2; sup.STOP_GRACE_S = 2.0
 # Fails under: LD_LIBRARY_PATH or the plugin's ABI directory dropped or changed.
@@ -193,6 +205,8 @@ def driver():
         check(st["enabled"] and st["state"] == "stopped", "not autostarted: stopped until asked")
         check(st["configs"] == ["files/houdini-a.json", "files/houdini-b.json"], "only files/houdini*.json are offered")
         check(st["desc"]["files/houdini-b.json"] == "desc of houdini-b.json", "each config's _description is served")
+        check(st["labels"] == {"files/houdini-a.json": "", "files/houdini-b.json": "B short"},
+              "each config's short _label is served for the list text (mutation: labels not served)")
         # A failing quick check blocks Start and is shown; nothing launches.
         open(flag, "w").close()
         post({"cmd": "start"})

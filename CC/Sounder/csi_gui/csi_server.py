@@ -582,7 +582,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(403, {"enabled": False, "error": why})
             return
         st = sup.snapshot()
-        st.update({"enabled": True, "configs": sup.configs(), "desc": sup.descriptions()})
+        st.update({"enabled": True, "configs": sup.configs(), "desc": sup.descriptions(), "labels": sup.labels()})
         self._json(200, st)
 
     def do_POST(self):
@@ -821,6 +821,9 @@ class SounderSupervisor:
         if args.csi_fps:
             self.env["HOUDINI_CSI_FPS"] = str(args.csi_fps)
         self.log_dir = getattr(args, "log_dir", None)
+        # --configs labelled: the page offers only the configs carrying a short `_label`
+        # (the demo's handful), not every files/houdini*.json.
+        self.labelled_only = getattr(args, "configs", "all") == "labelled"
         self.td_text = ""  # the last teardown's output, the head of the next start's log
         self.proc = None
         self.stopping = False
@@ -856,22 +859,29 @@ class SounderSupervisor:
         with self.state_lock:
             return dict(self.state)
 
+    def _note(self, conf, key):
+        """A config's note (`_label`, `_description`), "" when absent or unreadable."""
+        try:
+            with open(os.path.join(self.sd, conf), encoding="utf-8") as f:
+                return str(json.load(f).get(key, "") or "")
+        except (OSError, ValueError):
+            return ""
+
     def configs(self):
-        """The configs the page may choose: the sounder's own files/houdini*.json."""
-        return sorted({os.path.relpath(p, self.sd)
-                       for p in glob.glob(os.path.join(self.sd, "files", "houdini*.json"))}
-                      | {self.launch_conf})
+        """The configs the page may choose: the sounder's own files/houdini*.json (with
+        --configs labelled, only those carrying a `_label`), and always the --conf one."""
+        found = {os.path.relpath(p, self.sd) for p in glob.glob(os.path.join(self.sd, "files", "houdini*.json"))}
+        if self.labelled_only:
+            found = {c for c in found if self._note(c, "_label")}
+        return sorted(found | {self.launch_conf})
 
     def descriptions(self):
-        """Each offered config's one-line `_description`, for the page's list."""
-        out = {}
-        for c in self.configs():
-            try:
-                with open(os.path.join(self.sd, c), encoding="utf-8") as f:
-                    out[c] = str(json.load(f).get("_description", ""))
-            except (OSError, ValueError):
-                out[c] = ""
-        return out
+        """Each offered config's one-line `_description`: the list entry's tooltip."""
+        return {c: self._note(c, "_description") for c in self.configs()}
+
+    def labels(self):
+        """Each offered config's short `_label`: the list entry's text ("" shows the file name)."""
+        return {c: self._note(c, "_label") for c in self.configs()}
 
     def request(self, cmd, conf=None):
         """From any thread: queue start / stop / restart / check. Returns an error or None."""
@@ -1129,6 +1139,10 @@ def main():
                          "127.0.0.1 unless --http-host is given: use the SSH port-forward")
     ap.add_argument("--sounder-dir", default=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                     help="the sounder checkout to run (default: the one this file is in)")
+    ap.add_argument("--configs", choices=("all", "labelled"), default="all",
+                    help="with --control, the configs the page offers: every files/houdini*.json "
+                         "(all), or only those carrying a short `_label`, the demo's (labelled); "
+                         "the --conf config is always offered")
     ap.add_argument("--venv", default=os.environ.get("VIRTUAL_ENV") or os.path.expanduser("~/houdini_test"),
                     help="virtualenv prefix holding SoapySDR (and the Houdini plugin, "
                          "unless HOUDINI_SOAPY_ROOT names a release prefix), used when "
@@ -2371,8 +2385,8 @@ async function pollCtl(){
       ctlConfs=key; sel.innerHTML='';
       for(const c of st.configs){
         const o=document.createElement('option'); o.value=c;
-        const d=st.desc[c]||'';
-        o.textContent=d?d:c.replace(/^files\//,''); o.title=c; sel.appendChild(o);
+        const d=st.desc[c]||'', name=c.replace(/^files\//,'').replace(/\.json$/,'');
+        o.textContent=(st.labels&&st.labels[c])||name; o.title=d?d+' ('+c+')':c; sel.appendChild(o);
       }
       sel.value=st.conf;
     }
