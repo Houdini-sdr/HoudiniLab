@@ -368,6 +368,11 @@ A recording of the dashboard's input from a good run, played back into the
 dashboard with no radios: every panel shows real rig data (channel,
 constellation, CIR, ADC, beacon sync).
 
+A recording starts when the dashboard starts, not at Start, and on freshly booted nodes the
+data can begin about 30 s after the page says running (the first radio opens are retried):
+time an event (a blockage, a hand on an antenna) from the first datagram, watching the file
+grow, not from the Start.
+
 1. Record during a good run: set `HOUDINI_CSI_RECORD` before the dashboard
    starts, in the same shell as the A4 exports (a scripted `fstage_run.sh` run
    inherits it too):
