@@ -160,7 +160,7 @@ export HOUDINI_CORE_MAP=main=15 HOUDINI_TX_CPU_AFFINITY=18,19   # isolated (A9);
 export HOUDINI_TX_HOST_STATUS=1   # logs the host pacer's state every health period (free)
 export HOUDINI_SOAPY_ROOT=$HOME/houdini_0.3.1   # the host plugin of the radios' release, for every config (A3)
 python3 csi_gui/check_setup.py --conf files/houdini-dualband-xw-steer-slots.json   # must print Ready, egress PASS on both nodes.
-python3 csi_gui/csi_server.py --control --log-dir ~/demo_logs --conf files/houdini-dualband-xw-steer-slots.json   # one log per Start (A8c step 4)
+python3 csi_gui/csi_server.py --control --http-host 0.0.0.0 --log-dir ~/demo_logs --conf files/houdini-dualband-xw-steer-slots.json   # served on every address (A5); one log per Start (A8c step 4)
 ```
 
 **Why the pinning.** Left to the kernel, the host plugin's two UE TX pacer
@@ -228,13 +228,18 @@ run's pid and record). `--replay <log>` applies the same rule to a finished log.
 
 From your workstation:
 
+The demo serves the dashboard on all addresses (`--http-host 0.0.0.0` in A4
+and A8c, the user's choice for demo day): open `http://168.6.244.26:8080/` on
+the lab network or `http://192.168.10.26:8080/` on the rig network. Anyone who
+reaches those addresses can Start and Stop the radios. Without `--http-host`,
+`--control` listens on 127.0.0.1 only, and an ssh tunnel is the way in:
+
 ```sh
 ssh -L 8080:localhost:8080 houdini@168.6.244.26
 ```
 
-then open `http://localhost:8080/`. With `--control` the backend listens on
-127.0.0.1 only, so the tunnel is the way in. Pick the config in the header list
-and press Start.
+then open `http://localhost:8080/`. Pick the config in the header list and
+press Start.
 
 ## A6. What good looks like
 
@@ -444,7 +449,7 @@ egress (HS-225). Do every step, every power-up.
 
    ```sh
    export HOUDINI_CSI_RECORD=~/demo_rec/<name>.rec    # optional: records a fallback; a new name each start
-   python3 csi_gui/csi_server.py --control --log-dir ~/demo_logs --conf files/houdini-dualband-xw-steer-slots.json
+   python3 csi_gui/csi_server.py --control --http-host 0.0.0.0 --log-dir ~/demo_logs --conf files/houdini-dualband-xw-steer-slots.json
    ```
 
    `--log-dir` keeps each Start's sounder output in
