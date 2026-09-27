@@ -160,7 +160,13 @@ export HOUDINI_CORE_MAP=main=15 HOUDINI_TX_CPU_AFFINITY=18,19   # isolated (A9);
 export HOUDINI_TX_HOST_STATUS=1   # logs the host pacer's state every health period (free)
 export HOUDINI_SOAPY_ROOT=$HOME/houdini_0.3.1   # the host plugin of the radios' release, for every config (A3)
 python3 csi_gui/check_setup.py --conf files/houdini-dualband-xw-steer-slots.json   # must print Ready, egress PASS on both nodes.
-python3 csi_gui/csi_server.py --control --http-host 0.0.0.0 --configs labelled --replay "$HOME/demo_rec/F2B_031_60s.rec=Replay, X-band bench" --log-dir ~/demo_logs --conf files/houdini-dualband-xw-steer-slots.json   # served on every address (A5); one log per Start (A8c step 4)
+# served on every address (A5); the four demo configs and the replays in the list (A8b); one log per Start (A8c step 4)
+python3 csi_gui/csi_server.py --control --http-host 0.0.0.0 --configs labelled \
+  --replay "$HOME/demo_rec/replays/xband_chain_bench_60s.rec=Replay, X-band bench" \
+  --replay "$HOME/demo_rec/replays/xband_ota_60s.rec=Replay, X-band over the air" \
+  --replay "$HOME/demo_rec/replays/xband_ota_blockage_30s.rec=Replay, over the air with blockage" \
+  --replay "$HOME/demo_rec/replays/xband_ota_noisy_sub6_60s.rec=Replay, over the air, noisy sub-6" \
+  --log-dir ~/demo_logs --conf files/houdini-dualband-xw-steer-slots.json
 ```
 
 **Why the pinning.** Left to the kernel, the host plugin's two UE TX pacer
@@ -343,9 +349,17 @@ steered, cabled):
 
 ## A8b. The canned-data fallback
 
-From the dashboard: the demo launch (A4, A8c) offers "Replay, X-band bench" in the config list, a 60 s
-recording through the X-band chain on 0.3.1 (`~/demo_rec/F2B_031_60s.rec`: sub-6 about 37 dB, X-band
-about 31 dB). Stop, pick it, Start: it plays in a loop with no radio, no setup check and no teardown
+From the dashboard: the demo launch (A4, A8c) offers four replays in the config list, recorded through
+the X-band chain on 0.3.1 and kept under `~/demo_rec/replays/`:
+
+| In the list | File | What it shows |
+|---|---|---|
+| Replay, X-band bench | `xband_chain_bench_60s.rec` | 60 s through the chain with a 20 dB pad: sub-6 about 37 dB, X-band about 31 dB |
+| Replay, X-band over the air | `xband_ota_60s.rec` | 60 s over the air (antennas about 1 m apart, aligned): sub-6 about 37 dB, X-band about 27 dB |
+| Replay, over the air with blockage | `xband_ota_blockage_30s.rec` | 30 s over the air with the path blocked from +6 to +15 s: X-band 27, then about 10, then 28 dB |
+| Replay, over the air, noisy sub-6 | `xband_ota_noisy_sub6_60s.rec` | 60 s over the air with a degraded sub-6 cable path: sub-6 about 16 dB, X-band about 27 dB |
+
+Stop, pick one, Start: it plays in a loop with no radio, no setup check and no teardown
 (a `--record` recording pauses while it plays); Stop ends it, and a demo config's Start goes live
 again. Add more with `--replay <file>=<label>`. Without the dashboard's control, or on a laptop with
 Python only, replay by hand as below.
@@ -459,7 +473,12 @@ egress (HS-225). Do every step, every power-up.
 
    ```sh
    export HOUDINI_CSI_RECORD=~/demo_rec/<name>.rec    # optional: records a fallback; a new name each start
-   python3 csi_gui/csi_server.py --control --http-host 0.0.0.0 --configs labelled --replay "$HOME/demo_rec/F2B_031_60s.rec=Replay, X-band bench" --log-dir ~/demo_logs --conf files/houdini-dualband-xw-steer-slots.json
+   python3 csi_gui/csi_server.py --control --http-host 0.0.0.0 --configs labelled \
+     --replay "$HOME/demo_rec/replays/xband_chain_bench_60s.rec=Replay, X-band bench" \
+     --replay "$HOME/demo_rec/replays/xband_ota_60s.rec=Replay, X-band over the air" \
+     --replay "$HOME/demo_rec/replays/xband_ota_blockage_30s.rec=Replay, over the air with blockage" \
+     --replay "$HOME/demo_rec/replays/xband_ota_noisy_sub6_60s.rec=Replay, over the air, noisy sub-6" \
+     --log-dir ~/demo_logs --conf files/houdini-dualband-xw-steer-slots.json
    ```
 
    `--log-dir` keeps each Start's sounder output in
