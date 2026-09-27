@@ -81,9 +81,9 @@ The XUD1A is the reworked board (RF 9.5 GHz, LO 13.88 GHz). It needs:
    (10 s to 2.5 min), then `sudo houdini-role apply bs`. On `.22` the role
    also tunes the LO to 13.88 GHz on rf16 and loads the doubler tracking
    filter from the XUD1A datasheet's Table 7; no manual LO tune is needed.
-   Reaching `.22` for this needs a shell on it: the rig host has no ssh key
-   for the nodes (the software lane's demo-day card says how at the venue).
-2. The LO check: on `.22`, `sudo houdini-xud1a pll status` shows
+   From the rig host (its key is on both nodes; password login is the
+   backup): `ssh houdini@192.168.10.22 'sudo houdini-role apply bs'`.
+2. The LO check: `ssh houdini@192.168.10.22 'sudo houdini-xud1a pll status'` shows
    `lock_detect=1`, `rf16 ON at 13880000000...` and `doubler tracking table7
    (REG0070 0x23, filter 1 bias 3, ...)`; on 0.3.1 `houdini-role status`
    fails on `.22` unless the doubler reads table7. After any `houdini-xud1a
