@@ -454,7 +454,8 @@ On the demo rig, steps 1 to 4 are one command after the power-up: `~/start_demo.
 (the software lane's demo-day card, `docs/DEMO_DAY_CARD.md` section 4 in SoapyHoudiniSDR).
 It refuses while a demo is up, runs `~/demo_check.sh` (a go/no-go over the rig host and both
 nodes: isolation, the 100G ports, roles, the XUD1A LO and its Table 7 filter, the power
-boards, the builds, the FPGA and the egress), then `check_setup.py`, then the dashboard with
+boards, the builds, the FPGA and the egress, each radio opened with retries), then `check_setup.py --quick`
+(its radios just proven by the go/no-go), then the dashboard with
 the line of step 4 on the X-band chain's config, in the foreground of its terminal: Stop on
 the page, then Ctrl-C there. The steps below are what it does, by hand.
 
