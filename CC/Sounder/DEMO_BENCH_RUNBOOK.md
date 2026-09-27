@@ -508,6 +508,11 @@ the page, then Ctrl-C there. The steps below are what it does, by hand.
    10 dB steps when its trace leaves the axis (at most every 3 s); a card that
    keeps its old values while its age grows is stale (the badge shows).
 7. Anything that cannot be fixed in a minute: the canned-data fallback (A8b).
+8. After the demo: Stop on the page, Ctrl-C in `start_demo.sh`'s terminal, then
+   `~/power_down.sh` (the card's section 6). It refuses while a sounder or dashboard is
+   up, turns the XUD1A's LO off and the X-band power boards down, powers the nodes
+   off, and pauses for each switch you flip (the XUD1A, the nodes, the boards' 12 V);
+   last it offers the rig host's own poweroff.
 
 ## A9. The CPU isolation experiment (checklist)
 
