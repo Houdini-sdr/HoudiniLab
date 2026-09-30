@@ -109,9 +109,10 @@ The XUD1A is the reworked board (RF 9.5 GHz, LO 13.88 GHz). It needs:
 ## A3. What runs on the rig host
 
 - **Checkouts.** `~/repos/HoudiniLab` belongs to its owner: do not change it.
-  The demo runs from `~/repos/HoudiniLab-rxwin`, the demo head
-  (`arc/dualband-demo`, checked out there under that name). `--sounder-dir` and the
-  checkout the dashboard lives in decide which binary runs. Superseded run
+  The demo runs from `~/repos/HoudiniLab-rxwin` on develop, checked out
+  there as the branch `rig/develop` (the owner's checkout holds `develop`).
+  `--sounder-dir` and the checkout the dashboard lives in decide which binary
+  runs. Superseded run
   directories are filed under `~/app_archive` (its `INDEX.md` maps them).
 - **Shipping a build.** From the lane's checkout, `tools/ship_to_rig.sh
   <user>@<rig-host> <rig worktree> [<branch>]` does all of it and fails closed
@@ -443,7 +444,7 @@ quarter of the beacons to nearby emitters (`DEMO_VERIFICATION.md` 9.62 to
 
 ## A8c. Demo day: bring-up at the venue (in order)
 
-**The demo build:** the demo head `arc/dualband-demo` in
+**The demo build:** develop in
 `~/repos/HoudiniLab-rxwin` (the X-band at 270 RB beside the sub-6 at 133 RB,
 steered, the BS receiving only its rx slots): cabled, config
 `files/houdini-dualband-xw-steer-slots.json`; through the XUD1A (A2b),
