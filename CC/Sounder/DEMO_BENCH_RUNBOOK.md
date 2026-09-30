@@ -304,8 +304,10 @@ steered, cabled):
   lane's residual offset before the FFT (`bs_cfo_pre_fft`) and widen the
   steering deadband to 0.12 ppm (one DAC count moves about 0.19 ppm, SH-462).
 - **Host timing.** One run in several shows a single UE TX late-release event of
-  a frame or two mid-run with no visible effect (9.71). The durable guard is
-  keeping every NIC receive queue off the pacer cores (A8c step 4).
+  a frame or two mid-run with no visible effect (9.71). After a rig-host reboot
+  with the pinning unchecked, the demo run had 25 such events, 63 frames in
+  71 min (9.82): run `pacer_core_check.py` after every boot (A8c step 5). The
+  durable guard is keeping every NIC receive queue off the pacer cores (AP-106).
 - **Egress drop counters saturate (HS-212).** Each radio's per-port egress
   drop counters, and its one marked-frame counter (a single count after the
   ports merge; device builds before 0.3.1 print it per port), stop at 255; a
