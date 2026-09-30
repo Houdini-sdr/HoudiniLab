@@ -1,9 +1,8 @@
 /** @file HoudiniFramer.h
   * @brief The Houdini base-station framer: the beacon in the TX replay RAM,
   *        the native TDD ring with its strobe grid, the gated receive slots
-  *        extracted from one continuous read per frame. Moved out of
-  *        BaseRadioSet (seam step S2); the mechanics and their measured
-  *        reasons are unchanged.
+  *        extracted from one continuous read per frame. The mechanics and
+  *        their measured reasons are in HoudiniFramer.cc.
   *
   * RENEW OPEN SOURCE LICENSE: http://renew-wireless.org/license
 */
@@ -22,13 +21,15 @@ class HoudiniFramer : public BeaconFramer {
   HoudiniFramer(Config* cfg, Radios& radios) : BeaconFramer(cfg, radios) {}
 
   /// bs_hw_framer: the native TDD ring (beacon strobe on the B slot, rx on
-  /// every slot); otherwise the free-running replay beacon.
+  /// every other slot, or on the rx slots only with bs_rx_slots); otherwise
+  /// the free-running replay beacon.
   void arm() override;
   /// Start the continuous BS RX streams (they would overflow if started at
   /// construction); the armed framer gates them every frame.
   void start() override;
-  /// The full teardown ladder on every radio (abort alone latches the gates
-  /// and skips TX_CLEAR: DEMO_VERIFICATION 3.2 + 4.24).
+  /// On every radio: the beacon's replay strobe disarmed, then the full
+  /// teardown ladder (abort alone latches the gates and skips TX_CLEAR:
+  /// DEMO_VERIFICATION 3.2 + 4.24).
   void stop() override;
   bool gatesRx() const override { return cfg_->bs_hw_framer(); }
   int rx(size_t radio_id, void* const* buffs, long long& frameTime) override;
@@ -51,7 +52,7 @@ class HoudiniFramer : public BeaconFramer {
   long long armTddOnce(SoapySDR::Device* dev, const std::function<void()>& resetup,
                        long long symbol_ticks, long long symbols_per_frame);
 
-  // Native-TDD framer state (single-cell single-radio HIL for now).
+  // Native-TDD framer state (one BS radio in one cell: armTdd refuses more).
   double htdd_tick_rate_ = 122.88e6;
   long long htdd_epoch_ = 0;         // TDD_ARM epoch (ticks)
   long long htdd_frame_ticks_ = 0;   // symbols_per_frame * symbol_ticks
@@ -61,9 +62,9 @@ class HoudiniFramer : public BeaconFramer {
   size_t htdd_rx_cursor_ = 0;
   std::vector<int16_t> htdd_slot_cache_;  // extracted rx slots for the current frame
   long long htdd_cache_frame_ = 0;        // frame_id tag shared by a frame's slots
-  long long htdd_last_win_tick_ = 0;
   long long htdd_frame_counter_ = 0;  // 0,1,2,... like the Iris framer's frame_id
   std::vector<int16_t> htdd_cap_buf_;  // reused generous rx capture
+  std::vector<std::vector<double>> htdd_lane_cse_;  // per lane cumulative energy, reused
   // One continuous read yields EVERY rx slot of the frame, so a gap in that
   // read taints the whole frame. Held per frame and handed to each slot (AP-10).
   size_t htdd_frame_pad_ = 0;

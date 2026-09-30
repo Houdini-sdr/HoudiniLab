@@ -216,7 +216,7 @@ def check_transport(codes, magic):
         time.sleep(1.0)
         rec = read_one_event("http://127.0.0.1:%d/stream" % http_port)
         if rec is None:
-            # Observed 2026-09-02: admitting a NaN into a record produces
+            # Observed: admitting a NaN into a record produces
             # exactly this, a stream of keepalives and no data line at all. The
             # non-finite filter in _parse_syn is what prevents it, and one bad
             # float costs the WHOLE push rather than one field, so check that

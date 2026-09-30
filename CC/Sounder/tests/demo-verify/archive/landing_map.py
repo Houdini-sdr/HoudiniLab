@@ -39,8 +39,8 @@ def read_meta(path):
                 meta["rx_slots"] = [int(x) for x in parts[1:]]
             else:
                 # Preserve fractions: int(float(x)) truncated snr 31.8 -> 31
-                # and the loss was then attributed to the replica (Opus
-                # review H4).
+                # and the loss was then attributed to the replica (review
+                # H4).
                 v = float(parts[1])
                 meta[parts[0]] = int(v) if v.is_integer() else v
     return meta
@@ -65,7 +65,7 @@ def selfsim(w, lag=SYM):
 def refine_edge(x, approx, rising, thr, span=96):
     """Sample-accurate edge from RAW |x|^2 around the smoothed-envelope edge
     (the 64-tap centered envelope biases onsets ~29 samples early and ends
-    ~28 late, Opus review H5)."""
+    ~28 late, review H5)."""
     p = np.abs(x) ** 2
     lo, hi = max(0, approx - span), min(len(x), approx + span)
     seg = p[lo:hi]
@@ -133,7 +133,7 @@ def mode_a(dump_dir):
             kind = "P(pilot)" if sim >= 0.5 else "U(data)"
             key = "P" if sim >= 0.5 else "U"
             # Fold the onset to a signed in-slot offset so a burst starting
-            # just before its boundary reads -6, not +4090 (Opus review LOW).
+            # just before its boundary reads -6, not +4090 (review LOW).
             o0s = int(o0) - n if o0 > n // 2 else int(o0)
             if o0 > n // 2:
                 s0 = (s0 + 1) % (fr // n)
@@ -165,7 +165,7 @@ def mode_a(dump_dir):
 
 def snr_db(w, end_idx, core_len, guard=8):
     """Replicates receiver.cc beaconSnrDb INCLUDING its 8-sample guard band
-    (Opus review H3: the guardless replica re-measured the very cliff the
+    (review H3: the guardless replica re-measured the very cliff the
     guard removed)."""
     lo = end_idx - core_len
     if lo < 0 or end_idx > len(w):
@@ -200,7 +200,7 @@ def mode_b(dump_dir, core_path):
         # place the true core: correlate the exact waveform
         sc = np.abs(np.correlate(w, core, mode="valid"))
         t0 = int(np.argmax(sc))
-        # Peak-to-sidelobe gate (Opus review): without it a beacon-free
+        # Peak-to-sidelobe gate (review): without it a beacon-free
         # window confidently confirms a noise peak as the real beacon.
         # The beacon core's 15x STS16 block self-correlates every 16 samples
         # out to +-240, so the sidelobe exclusion must span the STS block or

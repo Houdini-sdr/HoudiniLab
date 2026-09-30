@@ -17,10 +17,30 @@
 #include <algorithm>
 #include <atomic>
 #include <vector>
+#include <limits>
+#include <map>
 
 #include "sync/beacon_shape.h"
 #include "sync/rx_path_fixes.h"
 #include "sync/sync_config.h"
+
+/// One band's OFDM waveform (AP-85): everything derived from its tone count.
+/// Band 0 is `ofdm_data_num`, the band of every channel without an override in
+/// `channel_ofdm_data_num`; the legacy accessors (pilot_ci16(), data_ind(),
+/// ...) are band 0. Built once by Config::buildBand, so the bands cannot
+/// differ in anything but their tone count.
+struct OfdmBand {
+  size_t data_num = 0;                              ///< occupied tones
+  float tx_scale = 0.0f;                            ///< the pilot's scale (peak at FS / 2)
+  std::vector<std::vector<float>> pilot_sym_t;      ///< [I, Q] x fft_size
+  std::vector<std::vector<float>> pilot_sym_f;      ///< [I, Q] x fft_size, DC-centred
+  std::vector<std::complex<int16_t>> pilot_ci16;    ///< the pilot slot
+  std::vector<std::complex<float>> pilot_sc;        ///< the data symbols' pilot tones
+  std::vector<size_t> pilot_sc_ind;
+  std::vector<size_t> data_ind;
+  std::vector<std::complex<int16_t>> ue_data_ci16;  ///< the UE uplink-data slot
+  std::vector<std::complex<float>> ue_data_f;       ///< its frequency-domain reference
+};
 
 class Config {
  public:
@@ -53,7 +73,13 @@ class Config {
   inline size_t num_cells(void) const { return this->num_cells_; }
   inline size_t guard_mult(void) const { return this->guard_mult_; }
   inline bool bs_hw_framer(void) const { return this->bs_hw_framer_; }
+  /// AP-87: the BS receives only its rx slots (the real pattern, SH-347 slots mode).
+  inline bool bs_rx_slots(void) const { return this->bs_rx_slots_; }
+  /// The BS removes each lane's pilot-measured carrier offset before the FFT.
+  inline bool bs_cfo_pre_fft(void) const { return this->bs_cfo_pre_fft_; }
   inline bool hw_framer(void) const { return this->hw_framer_; }
+  /// AP-86: the X-band RF front end attached (per-session static state).
+  inline bool xband_frontend_static(void) const { return this->xband_frontend_static_; }
   // Radio backend selector within the SoapySDR (non-UHD) path: "iris" (default)
   // drives the Iris HW correlator/TDD; "houdini" drives the Houdini RFSoC over
   // SoapyHoudiniSDR with software beacon sync (find_beacon). See ClientRadioSet.
@@ -83,6 +109,20 @@ class Config {
   inline double bw_filter(void) const { return this->bw_filter_; }
   inline double freq(void) const { return this->freq_; }
   inline double nco(void) const { return this->nco_; }
+  // AP-79 mode V (see config.cc for the rules).
+  inline double tx_rate(void) const { return this->tx_rate_; }
+  inline double adc_fs_hz(void) const { return this->adc_fs_hz_; }
+  inline double dac_fs_hz(void) const { return this->dac_fs_hz_; }
+  inline bool mode_v(void) const { return this->adc_fs_hz_ > 0.0; }
+  inline const std::map<size_t, double>& channel_nco(void) const { return this->channel_nco_; }
+  inline double houdini_tx_gain_db(void) const { return this->houdini_tx_gain_db_; }
+  inline double houdini_rx_gain_db(void) const { return this->houdini_rx_gain_db_; }
+  /// Half the bandwidth the OFDM waveform occupies (data subcarriers), Hz.
+  inline double occupied_half_bw_hz(void) const {
+    return fft_size_ == 0 ? 0.0
+                          : static_cast<double>(symbol_data_subcarrier_num_) * rate_ /
+                                static_cast<double>(fft_size_) / 2.0;
+  }
   inline double radio_rf_freq(void) const { return this->radio_rf_freq_; }
   inline bool single_gain(void) const { return this->single_gain_; }
   inline bool cl_agc_en(void) const { return this->cl_agc_en_; }
@@ -158,24 +198,23 @@ class Config {
   inline const std::string& beacon_type(void) const { return beacon_type_; }
   /// The UE synchronisation configuration: the JSON `sync` block, validated,
   /// resolved against the shape, with every value's provenance
-  /// (sync/sync_config.h). One home for what used to be thirty HOUDINI_*
-  /// environment reads.
+  /// (sync/sync_config.h). The one home of the sync settings; their HOUDINI_*
+  /// environment names are overrides applied there.
   inline const houdini::sync::SyncConfig& sync(void) const { return sync_; }
   /// The configured beacon as one object (sync/beacon_shape.h): waveform,
   /// replica, field geometry and the index convention. beacon_size() is its
-  /// core length, kept for the framer callers that predate it.
+  /// core length, kept for the framer callers.
   inline const houdini::sync::BeaconShape& shape(void) const { return *shape_; }
   inline houdini::sync::Platform platform(void) const {
     return is_houdini() ? houdini::sync::Platform::kHoudini
                         : houdini::sync::Platform::kIrisUhd;
   }
   /// The client's synchronisation model, which is what the receiver's
-  /// remaining platform branches are about (seam step S4): the Iris/UHD
-  /// framer triggers the client and the base station transmits the beacon
-  /// and the uplink data from files per frame; the Houdini client anchors a
-  /// tracked frame grid on beacon timestamps, composes its bursts in
-  /// process, and resyncs on a wall-clock cadence. Two algorithms, not two
-  /// devices; unifying them is a later phase.
+  /// remaining platform branches are about: the Iris/UHD framer triggers the
+  /// client and the base station transmits the beacon and the uplink data
+  /// from files per frame; the Houdini client anchors a tracked frame grid on
+  /// beacon timestamps, composes its bursts in process, and resyncs on a
+  /// wall-clock cadence. Two algorithms, not two devices.
   enum class SyncModel { kTriggerFramed, kStampAnchored };
   inline SyncModel sync_model(void) const {
     return is_houdini() ? SyncModel::kStampAnchored : SyncModel::kTriggerFramed;
@@ -205,25 +244,23 @@ class Config {
     return this->bs_array_frames_;
   }
 
-  //TODO split the following (4) in accessor and setter
+  //TODO split the following non-const accessors into accessor and setter
   inline std::vector<std::complex<int16_t>>& beacon_ci16(void) {
     return this->beacon_ci16_;
   }
   inline std::vector<std::complex<int16_t>>& neg_beacon_ci16(void) {
     return this->neg_beacon_ci16_;
   }
-  inline std::vector<std::vector<std::complex<float>>>& tx_data(void) {
-    return this->tx_data_;
-  };
   inline std::vector<std::complex<int16_t>>& pilot_ci16(void) {
-    return this->pilot_ci16_;
+    return this->bands_.at(0).pilot_ci16;
   }
-  // Self-contained UE uplink-data slot for viewing mode (random modulated symbols
-  // on the data subcarriers, one OFDM symbol repeated across the slot) + its
-  // modulation order (2/4/6 = QPSK/16/64-QAM). Transmitted continuously in the U
-  // slot; the BS equalizes it with the pilot CSI to show the constellation.
+  // Self-contained UE uplink-data slot for viewing mode (a distinct random
+  // modulated OFDM symbol per symbol of the slot, with the pilot tones at their
+  // known values; Config::buildBand) + its modulation order (2/4/6 =
+  // QPSK/16/64-QAM). Transmitted in the U slot; the BS equalizes it with the
+  // pilot CSI to show the constellation.
   inline std::vector<std::complex<int16_t>>& ue_data_ci16(void) {
-    return this->ue_data_ci16_;
+    return this->bands_.at(0).ue_data_ci16;
   }
   inline int ue_data_mod_order(void) const { return this->ue_data_mod_order_; }
   inline std::vector<size_t>& n_bs_sdrs(void) { return this->n_bs_sdrs_; }
@@ -257,7 +294,7 @@ class Config {
   }
 
   inline const std::vector<size_t>& data_ind(void) const {
-    return this->data_ind_;
+    return this->bands_.at(0).data_ind;
   }
   inline const std::vector<uint32_t>& coeffs(void) const {
     return this->coeffs_;
@@ -274,17 +311,34 @@ class Config {
   }
 
   inline std::vector<std::vector<float>>& pilot_sym_t(void) {
-    return this->pilot_sym_t_;
+    return this->bands_.at(0).pilot_sym_t;
   };
   inline std::vector<std::vector<float>>& pilot_sym_f(void) {
-    return this->pilot_sym_f_;
+    return this->bands_.at(0).pilot_sym_f;
   };
   inline std::vector<std::complex<float>>& pilot_sc(void) {
-    return this->pilot_sc_;
+    return this->bands_.at(0).pilot_sc;
   };
   inline std::vector<size_t>& pilot_sc_ind(void) {
-    return this->pilot_sc_ind_;
+    return this->bands_.at(0).pilot_sc_ind;
   };
+
+  // AP-85: per-band channel widths. A channel is a converter channel index
+  // (A = 0); one without a `channel_ofdm_data_num` entry carries band 0.
+  /// The band channel `ch` carries.
+  const OfdmBand& band(size_t ch) const {
+    const auto it = band_of_channel_.find(ch);
+    return bands_.at(it == band_of_channel_.end() ? 0 : it->second);
+  }
+  /// The band of BS antenna `ant`: its RX channel, rx_channel's letter at
+  /// ant % bs_rx_ch (the recorder's antenna order).
+  const OfdmBand& bsRxBand(size_t ant) const;
+  /// The band of UE TX lane `lane`: ue_tx_channel's letter at `lane`.
+  const OfdmBand& ueTxBand(size_t lane) const;
+  inline size_t num_bands(void) const { return bands_.size(); }
+  /// The occupied half bandwidth of each channel with an override, Hz (the
+  /// radio's per-channel plan; the others use occupied_half_bw_hz()).
+  std::map<size_t, double> channel_half_bw_hz(void) const;
 
   inline const std::vector<std::vector<std::string>>& bs_sdr_ids(void) const {
     return this->bs_sdr_ids_;
@@ -320,34 +374,17 @@ class Config {
     return this->cal_tx_gain_;
   }
 
-  inline const std::vector<std::vector<std::complex<float>>>& txdata_freq_dom(
-      void) const {
-    return this->txdata_freq_dom_;
-  }
-
-  inline const std::vector<std::vector<std::complex<float>>>&
-  dl_txdata_freq_dom(void) const {
-    return this->dl_txdata_freq_dom_;
-  }
-
   inline double tx_scale(void) const { return this->tx_scale_; }
-  inline double pilot_scale(void) const { return this->pilot_scale_; }
   inline size_t getPacketDataLength() const {
     return (2 * this->samps_per_slot_ * sizeof(short));
   }
 
-  /// Return the slot duration in seconds
-  inline double getSlotDurationSec() const {
-    return ((this->symbol_per_slot_ * this->samps_per_slot_) / this->rate_);
-  }
   /// Return the frame duration in seconds
   inline double getFrameDurationSec() const {
     return ((this->samps_per_frame()) / this->rate_);
   }
   inline size_t getTxFrameDelta() const { return tx_frame_delta_; }
 
-  size_t getNumAntennas();
-  size_t getMaxNumAntennas();
   size_t getNumBsSdrs();
   size_t getTotNumAntennas();
   size_t getNumRecordedSdrs();
@@ -362,6 +399,9 @@ class Config {
   unsigned getCoreCount();
 
   void genPilots();
+  /// One band's pilot and data at `data_num` tones; `tx_scale_cfg` is the
+  /// configured tx_scale (0 = derive the band's own).
+  OfdmBand buildBand(size_t data_num, float tx_scale_cfg) const;
   void loadULData();
   void loadDLData();
 
@@ -384,9 +424,14 @@ class Config {
   // common features
   double freq_;
   double nco_;  // baseband frequency controlled by NCO
+  double tx_rate_ = 0.0;     // AP-79: TX stream rate (sample_rate or twice it)
+  double adc_fs_hz_ = 0.0;   // AP-79: RF-ADC / RF-DAC Fs; 0 = leave the device's
+  double dac_fs_hz_ = 0.0;
+  std::map<size_t, double> channel_nco_;  // AP-79: per-channel NCO overrides
+  double houdini_tx_gain_db_ = 0.0;       // AP-79: NaN = not written
+  double houdini_rx_gain_db_ = 0.0;
   double rate_;
-  double
-      radio_rf_freq_;  // RF frequency set frame_modeon the radio after NCO adjustments
+  double radio_rf_freq_;  // RF frequency set on the radio after NCO adjustments
   double bw_filter_;
   size_t fft_size_;
   size_t cp_size_;
@@ -404,7 +449,6 @@ class Config {
   size_t ul_slot_per_frame_;
   size_t dl_slot_per_frame_;
   float tx_scale_;
-  float pilot_scale_;
   std::string pilot_seq_;
   std::string beacon_seq_;
   std::string beacon_type_;
@@ -418,8 +462,6 @@ class Config {
   // BS features
   size_t num_cells_;
   size_t guard_mult_;
-  std::vector<std::string> bs_sdr_file_;  // No accessor
-  std::string hub_file_;                  // No accessor
   size_t bs_sdr_ch_;
   size_t bs_tx_ch_;
   size_t bs_rx_ch_;
@@ -445,7 +487,10 @@ class Config {
   std::string bs_rx_channel_;
   std::string frame_mode_;
   bool bs_hw_framer_;
+  bool bs_rx_slots_ = false;  // AP-87
+  bool bs_cfo_pre_fft_ = false;
   bool hw_framer_;
+  bool xband_frontend_static_ = false;  // AP-86
   std::string radio_type_;
   std::string remote_port_;
   bool ue_tdd_pilot_ = false;
@@ -458,7 +503,7 @@ class Config {
       pilot_slots_;  // Accessed through getClientId
   std::vector<std::vector<size_t>> noise_slots_;
   std::vector<std::vector<size_t>>
-      ul_slots_;  // Accessed through getUlSFIndex()
+      ul_slots_;  // Accessed through getUlSlotIndex()
   std::vector<std::vector<size_t>> dl_slots_;
   bool single_gain_;
   std::vector<double> tx_gain_;
@@ -493,22 +538,13 @@ class Config {
   std::vector<int> tx_advance_;
   std::vector<float> corr_scale_;
   std::vector<float> corr_scale_init_;
-  std::vector<size_t> data_ind_;
   std::vector<uint32_t> coeffs_;
-  std::vector<std::complex<int16_t>> pilot_ci16_;
-  std::vector<std::complex<int16_t>> ue_data_ci16_;  // viewing-mode UE UL data slot
-  std::vector<std::complex<float>> ue_data_f_;  // its freq-domain ref (ul_data_f_*.bin)
   int ue_data_mod_order_ = 2;                        // QPSK by default
   std::vector<uint32_t> pilot_;
-  std::vector<std::complex<float>> pilot_sc_;
-  std::vector<size_t> pilot_sc_ind_;
-  std::vector<std::vector<float>> pilot_sym_t_;
-  std::vector<std::vector<float>> pilot_sym_f_;
-  std::vector<std::vector<std::complex<float>>> tx_data_;
-  std::vector<std::vector<std::complex<float>>> txdata_freq_dom_;
-  std::vector<std::vector<std::complex<float>>> txdata_time_dom_;
-  std::vector<std::vector<std::complex<float>>> dl_txdata_freq_dom_;
-  std::vector<std::vector<std::complex<float>>> dl_txdata_time_dom_;
+  // AP-85: the bands (band 0 = ofdm_data_num), and the channels overriding it.
+  std::vector<OfdmBand> bands_;
+  std::map<size_t, size_t> channel_data_num_;  // channel -> tone count, as configured
+  std::map<size_t, size_t> band_of_channel_;   // channel -> index into bands_
 
   std::vector<std::string> cl_frames_;
   std::vector<std::vector<size_t>> cl_pilot_slots_;

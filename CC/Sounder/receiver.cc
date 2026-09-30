@@ -16,19 +16,20 @@
 
 #include <atomic>
 #include <chrono>
-#include <climits>
 #include <limits>
 #include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
-#include <random>
 
 #include "SoapySDR/Errors.hpp"
 #include "SoapySDR/Time.hpp"
 #include "include/comms-lib.h"
 #include "include/logger.h"
 #include "include/macros.h"
+#include "include/houdini/pilot_ladder.h"
+#include "include/houdini/resync_window.h"
+#include "include/sync/clock_steer.h"
 #include "include/node_version.h"
 #include "sync/grid_tracker.h"
 #include "sync/resync_policy.h"
@@ -38,44 +39,29 @@
 //Default to detect the beacon on first channel
 static constexpr size_t kSyncDetectChannel = 0;
 static constexpr float kBeaconDetectWindowScaler = 2.33f;
-// Beacon core geometry, mirrored from Config::genBeacon (config.cc): 15 reps of
-// STS(16) then 2 reps of gold(128). The estimator (sync/cfo_estimator.h) correlates BOTH structures
-// and guards on the total at runtime.
-// The legacy beacon's layout, kept ONLY as the reference the sync-geometry
-// constants are written against. The CFO estimator no longer uses them: it
-// reads the configured shape's geometry from Config, because `beacon_type`
-// now selects between four beacons (include/sync/beacon_shapes.h).
-// The beacon-CFO log line is throttled by sync.cfo.log_every (1 in N); the
-// panel gets every sample regardless. 1 makes it dense, for a calibration run.
 
-// Where the beacon END sits relative to the slot-0 start, per the
-// TRANSMITTED layout -- the constant the UE subtracts from sync_index to
-// derive its slot grid. Houdini: the strobe burst is stamped at
-// window_open + 384 ticks (BaseRadioSet kTddGridTicks) with NO prefix, so
-// the core ends at slot_start + 384 + beacon_size. Iris: [prefix][beacon]
-// at the slot head. The old code used the Iris constant on Houdini too,
-// baking a 256-sample model error into the UE grid that tx_advance then had
-// to absorb (DEMO_VERIFICATION.md 4.28/4.29). The residual after this fix is
-// pure pipeline/path latency (~1 us class, measured ~122 samples on-board),
-// which is exactly what tx_advance / ue_tx_advance_ticks calibrate.
-// (The 384-tick strobe offset is houdini::sync::kHoudiniStrobeOffsetTicks.)
-
-// The detector's threshold form and pick rule are configuration now
-// (sync.detector.threshold / sync.detector.pick, with HOUDINI_BEACON_THRESH and
-// HOUDINI_BEACON_PICK as logged overrides while allow_env_overrides holds) and
-// are resolved ONCE into sync_detector_ in the constructor. The reasoning that
-// used to live here -- why first-crossing false-locks on a strong link, why the
-// power-ratio form is a different test at every level, why a single-copy
-// replica forces the coherence form -- is in sync/detector.h,
-// CommsLib::BeaconPick / BeaconThresh and DEMO_VERIFICATION 8.138-8.154.
-// The expected beacon end in a slot-aligned window is
-// config_->shape().expectedEndOffset(): the strobe offset + core on Houdini,
-// core + prefix on Iris/UHD. One definition, in sync/beacon_shape.h.
-
-// The in-window SNR confirm is sync::SnrWindowGuard (sync/confirm.h), built
-// once in the constructor with the configured floor and a guard that covers the
-// first-path back window (8.151). Reached through sync_guard_.
-
+// The sync path's building blocks, each built ONCE in the constructor from the
+// configured beacon shape and the sync block:
+//   - the detector (sync/detector.h): the threshold form and the pick rule
+//     (sync.detector.threshold / sync.detector.pick, HOUDINI_BEACON_THRESH and
+//     HOUDINI_BEACON_PICK as logged overrides while allow_env_overrides
+//     holds). Why first-crossing false-locks on a strong link, why the
+//     power-ratio form is a different test at every level, and why a
+//     single-copy replica forces the coherence form are there, in
+//     CommsLib::BeaconPick / BeaconThresh and in DEMO_VERIFICATION
+//     8.138-8.154.
+//   - the in-window SNR confirm, sync::SnrWindowGuard (sync/confirm.h), with
+//     a guard that covers the first-path back window (8.151).
+//   - the carrier estimator, sync::RepetitionPhaseEstimator
+//     (sync/cfo_estimator.h), on the configured shape's geometry.
+// The expected beacon END in a slot-aligned window is
+// config_->shape().expectedEndOffset() (sync/beacon_shape.h): the strobe
+// offset + core on Houdini (the strobe plays at window_open + 384 ticks with
+// NO prefix), core + prefix on Iris/UHD. Using the Iris constant on Houdini
+// bakes a 256-sample model error into the UE grid that tx_advance then has to
+// absorb (DEMO_VERIFICATION.md 4.28/4.29); what is left is pipeline/path
+// latency (about 1 us, measured about 122 samples on-board), which is what
+// tx_advance / ue_tx_advance_ticks calibrate.
 // Every tunable of the sync path is a sync.* knob (sync/sync_config.h): JSON
 // first, environment as a logged override while allow_env_overrides holds.
 
@@ -105,7 +91,7 @@ Receiver::Receiver(
   } catch (std::exception& e) {
     // The client set may exist when the base set's construction throws: stop
     // it (the hardware-framer disable it needs is not in its destructor)
-    // before the exception continues (confirmation review, item 2).
+    // before the exception continues.
     if (client_radio_set_ != nullptr) {
       try {
         client_radio_set_->radioStop();
@@ -119,8 +105,8 @@ Receiver::Receiver(
   // station's Houdini ladder, and on Iris with ue_hw_framer the client's
   // correlator and TDD engine disable (its radio destructor only deactivates
   // streams). Both sets are stopped first, each caught and reported, since a
-  // destructor must not throw while the stack unwinds (S3 review item 5, S4
-  // review item 2, P3 review item 1). Disarmed on the constructor's last line.
+  // destructor must not throw while the stack unwinds. Disarmed on the
+  // constructor's last line.
   struct StopOnThrow {
     Receiver* self;
     bool armed = true;
@@ -203,7 +189,7 @@ Receiver::Receiver(
   Sounder::NodeVersions::instance().checkAndWarn();
 
   this->initBuffers();
-  stop_on_throw.armed = false;  // construction complete (S4 review, item 1)
+  stop_on_throw.armed = false;  // construction complete
   MLPD_TRACE("Construction complete\n");
 }
 
@@ -240,18 +226,14 @@ void Receiver::initBuffers() {
       throw std::runtime_error("Error allocating memory");
     }
   }
-  pilotbuffA_.at(0) = config_->pilot_ci16().data();
+  // Each TX lane's pilot is its own channel's band (AP-85; one band unless
+  // channel_ofdm_data_num widens a channel).
+  pilotbuffA_.at(0) = const_cast<std::complex<int16_t>*>(config_->ueTxBand(0).pilot_ci16.data());
   if (config_->cl_tx_ch() == 2) {  // UE transmits a pilot on each TX channel
     pilotbuffA_.at(1) = zeros_.at(0);
-    pilotbuffB_.at(1) = config_->pilot_ci16().data();
+    pilotbuffB_.at(1) = const_cast<std::complex<int16_t>*>(config_->ueTxBand(1).pilot_ci16.data());
     pilotbuffB_.at(0) = zeros_.at(1);
   }
-  // Viewing-mode UE uplink-data slot buffer (ch A). Transmitted continuously in
-  // the U slot alongside the pilot so the BS can equalize it and show the
-  // constellation. Empty (0-length data()) when the config has no data slot.
-  ue_databuffA_.resize(2);
-  ue_databuffA_.at(0) = config_->ue_data_ci16().data();
-  ue_databuffA_.at(1) = zeros_.at(0);
 }
 
 std::vector<pthread_t> Receiver::startClientThreads(SampleBuffer* rx_buffer,
@@ -260,7 +242,6 @@ std::vector<pthread_t> Receiver::startClientThreads(SampleBuffer* rx_buffer,
   cl_tx_buffer_ = tx_buffer;
   std::vector<pthread_t> client_threads;
   if (config_->client_present() == true) {
-    client_threads.resize(config_->num_cl_sdrs());
     for (unsigned int i = 0; i < config_->num_cl_sdrs(); i++) {
       pthread_t cl_thread_;
       // record the thread id
@@ -272,14 +253,19 @@ std::vector<pthread_t> Receiver::startClientThreads(SampleBuffer* rx_buffer,
       // start socket thread
       if (pthread_create(&cl_thread_, NULL, Receiver::clientTxRx_launch,
                          context) != 0) {
+        delete context;
         MLPD_ERROR(
             "Socket client thread create failed in start client "
             "threads");
+        // The UE threads already running are stopped and joined before the
+        // caller can tear down their radios.
+        config_->running(false);
+        completeRecvThreads(client_threads);
         throw std::runtime_error(
             "Socket client thread create failed "
             "in start client threads");
       }
-      client_threads[i] = cl_thread_;
+      client_threads.push_back(cl_thread_);
     }
   }
   return client_threads;
@@ -293,7 +279,6 @@ std::vector<pthread_t> Receiver::startRecvThreads(SampleBuffer* rx_buffer,
   thread_num_ = n_rx_threads;
   bs_tx_buffer_ = tx_buffer;
   std::vector<pthread_t> created_threads;
-  created_threads.resize(this->thread_num_);
   for (size_t i = 0; i < this->thread_num_; i++) {
     // record the thread id
     ReceiverContext* context = new ReceiverContext;
@@ -302,15 +287,25 @@ std::vector<pthread_t> Receiver::startRecvThreads(SampleBuffer* rx_buffer,
     context->tid = i;
     context->buffer = rx_buffer;
     // start socket thread
-    if (pthread_create(&created_threads.at(i), NULL, Receiver::loopRecv_launch,
-                       context) != 0) {
+    pthread_t t;
+    if (pthread_create(&t, NULL, Receiver::loopRecv_launch, context) != 0) {
+      delete context;
       MLPD_ERROR("Socket recv thread create failed");
+      // The threads already created wait on `cond`: stop them, release them
+      // the way the normal path does, and join them before the caller can
+      // tear down what they use.
+      config_->running(false);
+      sleep(1);
+      pthread_cond_broadcast(&cond);
+      completeRecvThreads(created_threads);
       throw std::runtime_error("Socket recv thread create failed");
     }
+    created_threads.push_back(t);
   }
   sleep(1);
   pthread_cond_broadcast(&cond);
-  go();
+  // The caller starts the radios (go()) once it holds these threads, so a
+  // throw from the start still joins them.
   return created_threads;
 }
 
@@ -441,7 +436,17 @@ void* Receiver::loopRecv_launch(void* in_context) {
   auto core_id = context->core_id;
   auto buffer = context->buffer;
   delete context;
-  me->loopRecv(tid, core_id, buffer);
+  // As clientTxRx_launch: an exception escaping the start routine terminates
+  // without unwinding (AP-79 R3: "buffer full" took the run down, no teardown).
+  try {
+    me->loopRecv(tid, core_id, buffer);
+  } catch (const std::exception& e) {
+    MLPD_ERROR("BS receive thread %zu stopped by an exception: %s\n", static_cast<size_t>(tid), e.what());
+    me->config_->running(false);
+  } catch (...) {
+    MLPD_ERROR("BS receive thread %zu stopped by an exception of unknown type\n", static_cast<size_t>(tid));
+    me->config_->running(false);
+  }
   return 0;
 }
 
@@ -498,20 +503,6 @@ void Receiver::loopRecv(int tid, int core_id, SampleBuffer* rx_buffer) {
       tid, radio_ids_in_thread.front(), radio_ids_in_thread.back(), num_radios,
       thread_num_);
 
-  // prepare BS beacon in host buffer
-  std::vector<void*> beaconbuff(2);
-  void* zeroes_memory = calloc(config_->samps_per_slot(), sizeof(int16_t) * 2);
-
-  if (zeroes_memory == NULL) {
-    throw std::runtime_error("Memory allocation error");
-  }
-
-  MLPD_SYMBOL(
-      "Process %d -- Loop Rx Allocated memory at: %p, approx size: %lu\n", tid,
-      zeroes_memory, (sizeof(int16_t) * 2) * config_->samps_per_slot());
-  beaconbuff.at(0u) = config_->beacon_ci16().data();
-  beaconbuff.at(1u) = zeroes_memory;
-
   long long rxTimeBs(0);
 
   // read rx_offset to align the FPGA time of the BS
@@ -524,9 +515,9 @@ void Receiver::loopRecv(int tid, int core_id, SampleBuffer* rx_buffer) {
   samp_buffer[0] = samp_buffer0.data();
   if (num_channels == 2) samp_buffer[1] = samp_buffer1.data();
   // Scratch for the channel the reference antenna does NOT receive on. It has
-  // to outlive the radioRx() call that writes into it: this used to be a
-  // std::vector temporary, so samp[] held a dangling pointer and the radio
-  // wrote into freed memory.
+  // to outlive the radioRx() call that writes into it: as a temporary,
+  // samp[] would hold a dangling pointer and the radio would write into
+  // freed memory.
   std::vector<char> unused_channel_buffer(packetLength);
 
   int cell = 0;
@@ -546,7 +537,7 @@ void Receiver::loopRecv(int tid, int core_id, SampleBuffer* rx_buffer) {
       }
       size_t radio_id = it - config_->n_bs_sdrs_agg().at(cell);
       bs_sync_ret = -1;
-      while (bs_sync_ret < 0) {
+      while (bs_sync_ret < 0 && config_->running()) {  // a stopped run ends the wait (its join needs it)
         bs_sync_ret =
             this->base_radio_set_->radioRx(radio_id, cell, samp_buffer.data(),
                                            config_->samps_per_slot(), rxTimeBs);
@@ -559,6 +550,19 @@ void Receiver::loopRecv(int tid, int core_id, SampleBuffer* rx_buffer) {
   size_t slot_id = 0;
   size_t ant_id = 0;
   cell = 0;
+  // Release the `n_pk` buffers reserved at the cursor for a round that builds
+  // no packet; one that was not reserved is a bookkeeping fault.
+  auto releaseReserved = [&](size_t n_pk) {
+    for (size_t ch = 0; ch < n_pk; ++ch) {
+      const int bit = 1 << (cursor + ch) % sizeof(std::atomic_int);
+      const int offs = (cursor + ch) / sizeof(std::atomic_int);
+      const int old = std::atomic_fetch_and(&pkt_buf_inuse[offs], ~bit);  // now empty
+      if ((old & bit) != bit) {
+        MLPD_ERROR("thread %d freed buffer when already free\n", tid);
+        throw std::runtime_error("buffer empty during free\n");
+      }
+    }
+  };
   MLPD_INFO("Start BS main recv loop in thread %d\n", tid);
   while (config_->running() == true) {
     // Global updates of frame and slot IDs for USRPs
@@ -659,18 +663,7 @@ void Receiver::loopRecv(int tid, int core_id, SampleBuffer* rx_buffer) {
         }
         if (!config_->isPilot(cell, radio_id, slot_id) &&
             !config_->isUlData(cell, radio_id, slot_id)) {
-          for (size_t ch = 0; ch < num_packets; ++ch) {
-            const int bit = 1 << (cursor + ch) % sizeof(std::atomic_int);
-            const int offs = (cursor + ch) / sizeof(std::atomic_int);
-            const int old =
-                std::atomic_fetch_and(&pkt_buf_inuse[offs], ~bit);  // now empty
-            // if buffer was empty, exit
-            if ((old & bit) != bit) {
-              MLPD_ERROR("thread %d freed buffer when already free\n", tid);
-              throw std::runtime_error("buffer empty during free\n");
-            }
-            // Reserved until marked empty by consumer
-          }
+          releaseReserved(num_packets);
           continue;
         }
 
@@ -681,15 +674,14 @@ void Receiver::loopRecv(int tid, int core_id, SampleBuffer* rx_buffer) {
         // A negative return is RECOVERABLE, not fatal. The combined multi-channel
         // RX stream realigns the channels after a packet loss on one of them and
         // reports it (OVERFLOW / a realign code, Tier-1 SH-160); a read that
-        // finds nothing reports TIMEOUT. A single one used to stop the whole
-        // sounder (running(false)), which is why a 2-channel run died ~1 s after
-        // sync. Drop the round and keep running -- the receive loop must not kill
-        // the sounder on a transient RX hiccup. Log the code, throttled, so a
-        // persistent error is still visible.
+        // finds nothing reports TIMEOUT. Stopping the sounder on one kills a
+        // 2-channel run about 1 s after sync. Drop the round and keep running --
+        // the receive loop must not kill the sounder on a transient RX hiccup.
+        // Log the code, throttled, so a persistent error is still visible.
         if (rx_ret < 0) {
           static std::atomic<long long> negc{0};
           const long long n = negc.fetch_add(1);
-          if ((n % 200) == 0) {  // braces load-bearing: MLPD_WARN is multi-stmt
+          if ((n % 200) == 0) {
             MLPD_WARN(
                 "BS recv: radioRx returned %d (%s), occurrence %lld -- dropping "
                 "the round (recoverable; combined-RX realign or empty read)\n",
@@ -705,9 +697,8 @@ void Receiver::loopRecv(int tid, int core_id, SampleBuffer* rx_buffer) {
           // reserved buffers and move on (AP-10).
           //
           // Say so, throttled. Dropping the packet is right, but doing it
-          // SILENTLY turned a dead RX stream into a run that printed nothing at
-          // all and looked alive -- worse to diagnose than the garbage packets
-          // this replaced. Braces matter: MLPD_WARN is multi-statement.
+          // SILENTLY turns a dead RX stream into a run that prints nothing at
+          // all and looks alive.
           static std::atomic<long long> noslot{0};
           const long long n_noslot = noslot.fetch_add(1);
           if ((n_noslot % 2000) == 0) {
@@ -718,16 +709,7 @@ void Receiver::loopRecv(int tid, int core_id, SampleBuffer* rx_buffer) {
                 "(check the BS opened and its data-plane egress).\n",
                 radio_id, n_noslot + 1);
           }
-          for (size_t ch = 0; ch < num_packets; ++ch) {
-            const int bit = 1 << (cursor + ch) % sizeof(std::atomic_int);
-            const int offs = (cursor + ch) / sizeof(std::atomic_int);
-            const int old =
-                std::atomic_fetch_and(&pkt_buf_inuse[offs], ~bit);  // now empty
-            if ((old & bit) != bit) {
-              MLPD_ERROR("thread %d freed buffer when already free\n", tid);
-              throw std::runtime_error("buffer empty during free\n");
-            }
-          }
+          releaseReserved(num_packets);
           continue;
         }
 
@@ -775,7 +757,6 @@ void Receiver::loopRecv(int tid, int core_id, SampleBuffer* rx_buffer) {
       const uint32_t rx_pad = static_cast<uint32_t>(
           this->base_radio_set_->lastRxPadSamples(radio_id, cell));
       for (size_t ch = 0; ch < num_packets; ++ch) {
-        // new (pkt[ch]) Packet(frame_id, slot_id, 0, ant_id + ch);
         new (pkt[ch]) Packet(frame_id, slot_id, cell, ant_id + ch, rx_pad);
         // push kEventRxSymbol event into the queue
         this->notifyPacket(kBS, frame_id, slot_id, ant_id + ch,
@@ -791,9 +772,6 @@ void Receiver::loopRecv(int tid, int core_id, SampleBuffer* rx_buffer) {
       slot_id++;
     }
   }
-  MLPD_SYMBOL("Process %d -- Loop Rx Freed memory at: %p\n", tid,
-              zeroes_memory);
-  free(zeroes_memory);
 }
 
 void* Receiver::clientTxRx_launch(void* in_context) {
@@ -803,10 +781,21 @@ void* Receiver::clientTxRx_launch(void* in_context) {
   auto core_id = context->core_id;
   auto buffer = context->buffer;
   delete context;
-  if (me->config_->hw_framer())
-    me->clientTxRx(tid);
-  else
-    me->clientSyncTxRx(tid, core_id, buffer);
+  // An exception escaping a thread's start routine is std::terminate WITHOUT
+  // unwinding, so the scope guards in the thread (the clock-steering release,
+  // AP-79) would never run. Catch here: log, stop the run, and let it unwind.
+  try {
+    if (me->config_->hw_framer())
+      me->clientTxRx(tid);
+    else
+      me->clientSyncTxRx(tid, core_id, buffer);
+  } catch (const std::exception& e) {
+    MLPD_ERROR("UE thread %zu stopped by an exception: %s\n", static_cast<size_t>(tid), e.what());
+    me->config_->running(false);
+  } catch (...) {
+    MLPD_ERROR("UE thread %zu stopped by an exception of unknown type\n", static_cast<size_t>(tid));
+    me->config_->running(false);
+  }
   return 0;
 }
 
@@ -840,16 +829,6 @@ void Receiver::clientTxRx(int tid) {
     ul_txbuff.at(ch) =
         std::calloc(config_->samps_per_slot(), sizeof(int16_t) * 2);
   }
-  //size_t slot_byte_size = config_->samps_per_slot() * sizeof(int16_t) * 2;
-  //if (tx_slots > 0) {
-  //  size_t txIndex = tid * config_->cl_sdr_ch();
-  //  for (size_t ch = 0; ch < config_->cl_sdr_ch(); ch++) {
-  //    std::memcpy(ul_txbuff.at(ch),
-  //                config_->txdata_time_dom().at(txIndex + ch).data(),
-  //                slot_byte_size);
-  //  }
-  //  MLPD_INFO("%zu uplink slots will be sent per frame...\n", tx_slots);
-  //}
 
   int all_trigs = 0;
   struct timespec tv, tv2;
@@ -891,7 +870,6 @@ void Receiver::clientTxRx(int tid) {
       txTime = firstRxTime & 0xFFFFFFFF00000000;
       txTime += ((long long)this->txFrameDelta_ << 32);
       txTime += ((long long)txStartSym << 16);
-      //printf("rxTime %llx, txTime %llx \n", firstRxTime, txTime);
       for (size_t i = 0; i < tx_slots; i++) {
         int r;
         r = client_radio_set_->radioTx(tid, ul_txbuff.data(), NUM_SAMPS, 1,
@@ -918,36 +896,38 @@ void Receiver::clientTxPilots(size_t user_id, long long base_time,
   long long txTime = base_time +
                      config_->cl_pilot_slots().at(user_id).at(0) * num_samps -
                      config_->tx_advance(user_id);
-  // AP-78: give every pilot burst extra HOST LEAD so both per-channel writes
-  // clear their tick. xmit writes the streams back-to-back at the same tick, and
-  // the SECOND write was missing the deadline by a razor-thin margin -> its bank
-  // never started and zero-filled (confirmed: reversing the write order moved the
-  // dead lane). The lead is added in WHOLE FRAMES so the pilot's seating (its
-  // position modulo the BS frame, and thus which rx_gate slot it lands in) is
-  // unchanged. Tunable while calibrating the threshold; default 0 = old behavior.
-  static const long long lead_frames = [] {
-    const char* e = std::getenv("HOUDINI_PILOT_LEAD_FRAMES");
-    return e != nullptr ? std::atoll(e) : 0;
-  }();
-  if (lead_frames > 0)
-    txTime += lead_frames * static_cast<long long>(config_->samps_per_frame());
-  // Houdini pilot-only closed loop: the BS and UE loops are async and slower than
-  // real-time (recvHoudini drains before it reads), so a single once-per-loop timed
-  // pilot rarely lands in the frame the BS happens to arm its rx_gate on. With the
-  // boards frequency-locked (CFO ~0, no drift) the pilot offset is stable, so emit
-  // it on EVERY frame across a horizon ahead of real time -- then whichever frame
-  // the BS listens on, a pilot is there. A per-thread cursor keeps the schedule
-  // continuous and non-overlapping (each client tid runs this on one thread).
-  // Viewing mode also sends an uplink DATA slot (U) each frame so the BS can
-  // equalize it and render the constellation. It rides the same continuous burst,
-  // offset from the pilot by (U_slot - P_slot) slots.
+  // Houdini seated bursts: the BS and UE loops are async and slower than
+  // real time (RadioHoudini::recv drains before it reads), so a single
+  // once-per-loop timed pilot rarely lands in the frame the BS happens to be
+  // reading. So emit it on EVERY frame across a horizon ahead of real time --
+  // then whichever frame the BS listens on, a pilot is there. A per-thread
+  // cursor keeps the schedule continuous and non-overlapping (each client tid
+  // runs this on one thread).
+  // Viewing mode also sends uplink DATA (U) each frame so the BS can equalize
+  // it and render the constellation. It rides the same continuous burst,
+  // offset from the pilot by (U_slot - P_slot) slots. EVERY U slot of the
+  // schedule carries data (AP-79; the same data in each), on every TX
+  // channel, so both bands send P + U in the same slots.
   const bool ul_present = !config_->cl_ul_slots().at(user_id).empty() &&
                           config_->ue_data_ci16().size() >= (size_t)num_samps;
-  const long long ul_off =
-      ul_present ? (static_cast<long long>(config_->cl_ul_slots().at(user_id).at(0)) -
-                    static_cast<long long>(config_->cl_pilot_slots().at(user_id).at(0))) *
-                       num_samps
-                 : 0;
+  std::vector<long long> ul_offs;
+  if (ul_present) {
+    const long long p0 = static_cast<long long>(config_->cl_pilot_slots().at(user_id).at(0));
+    for (const auto u : config_->cl_ul_slots().at(user_id)) {
+      const long long off = (static_cast<long long>(u) - p0) * num_samps;
+      // A U slot before (or on) the first pilot cannot ride this burst, which
+      // starts at the pilot: say so once rather than drop it silently.
+      if (off >= num_samps) {
+        ul_offs.push_back(off);
+      } else {
+        static std::atomic<bool> warned{false};  // every UE client thread runs this
+        if (!warned.exchange(true)) {
+          MLPD_WARN("UE uplink: U slot %zu precedes the first pilot slot %lld and is not sent; "
+                    "put the U slots after the P slot\n", static_cast<size_t>(u), p0);
+        }
+      }
+    }
+  }
   static const int horizon_env = [] {
     const char* he = std::getenv("HOUDINI_PILOT_HORIZON");
     return he != nullptr ? std::atoi(he) : -1;
@@ -955,44 +935,40 @@ void Receiver::clientTxPilots(size_t user_id, long long base_time,
   const int horizon =
       horizon_env >= 0 ? horizon_env : config_->ue_pilot_horizon();
   if (horizon > 0 && stampAnchored()) {  // Houdini seated-burst path (any TX ch)
-    // AP-31(c). This ladder used to step by samps_per_frame, on the assumption
-    // stated in the comment above -- "with the boards frequency-locked (CFO ~0,
-    // no drift) the pilot offset is stable". On free-running clocks it is not,
-    // and because `cur` starts at max(pilot_cursor + frame, txTime) the cursor
-    // wins that max for a whole horizon at a time, so a base_time riding the
-    // tracked grid was being ignored for ~96 frames and the pilot walked at the
-    // clock rate even with the UE's own sync loop locked (measured -1.58
-    // samples per frame on 2026-09-01 with the tracker holding resid inside
-    // +-68). Step by the tracked period instead, and index off txTime so the
-    // rounding never accumulates: at 122881.0588 a per-step llround would
-    // shed 0.0588 samples every frame, which is ~59 samples per second.
+    // AP-31(c): the ladder steps by the TRACKED frame period, not
+    // samps_per_frame. The pilot offset is stable across frames only when the
+    // two boards share a reference; on free-running clocks a nominal-period
+    // ladder, which the cursor keeps winning for a whole horizon at a time,
+    // walks the pilot at the clock rate even with the UE's own sync loop
+    // locked (measured -1.58 samples per frame with the tracker holding resid
+    // inside +-68). Index off txTime so the rounding never accumulates: at
+    // 122881.0588 a per-step llround would shed 0.0588 samples every frame,
+    // which is about 59 samples per second.
     const double frame_d = (frame_period > 0.0)
                                ? frame_period
                                : static_cast<double>(config_->samps_per_frame());
-    const long long frame = llround(frame_d);
     // The driver only ACCEPTS burst anchors on the 384-tick / 3125 ns grid
     // (the finest ns-exact grid, TxTickAnchor SH-248), but a burst's INTERIOR
     // advances tick-exactly. So compose ONE burst per frame -- [front-pad
     // zeros | pilot slot | gap zeros | data slot] -- anchored at the grid
     // point floored below the desired start: the pad places the pilot to the
-    // sample and the data rides at EXACTLY ul_off from it. Both snap draws
-    // measured in ledger 4.44 (the +-192 per-run seat window and the bimodal
-    // -128/+256 P->U differential) die here. [user 2026-08-30: "work around
-    // the TX burst seam by zero padding".]
+    // sample and the data rides at EXACTLY ul_off from it. This removes both
+    // snap draws of DEMO_VERIFICATION 4.44 (the +-192 per-run seat window and
+    // the bimodal -128/+256 P->U differential).
     //
-    // The pad is NOT constant any more, and the comment that said it was
-    // predated the tracker. The ladder steps by the TRACKED period (122881.05,
-    // not the 122880 = 320*384 that divided the grid exactly), so `cur` advances
-    // ~1 tick past the 384 grid per burst and `pad` changes on essentially every
-    // one: the assign plus two memcpys run per scheduled frame rather than once
-    // per run. Still correct, and measured cost is what decides whether it is
-    // worth caching by pad (AP-54); do not re-assert the old property.
+    // The pad is NOT constant: the ladder steps by the TRACKED period (e.g.
+    // 122881.05, not a multiple of the 384 grid), so `cur` advances about 1
+    // tick past the grid per burst and `pad` changes on essentially every one:
+    // the assign plus the memcpys run per scheduled frame rather than once per
+    // run. Still correct; whether caching by pad is worth it is a cost
+    // question (AP-54). The radio's x2 interpolator places a shifted burst by
+    // content (houdini/tx_rx_boundary.h) rather than recomputing it.
     constexpr long long kTddGridTicks = houdini::sync::kHoudiniStrobeOffsetTicks;
     thread_local long long pilot_cursor = 0;  // last-scheduled txTime (samples)
-    // One burst PER TX channel: each carries the SAME pilot sequence but seated
-    // in that channel's own pilot slot (cl_pilot_slots[c]), so the channels are
-    // time-orthogonal and the BS estimates each path from its slot. Single-
-    // channel is one burst -- identical to before.
+    // One burst PER TX channel: each carries its band's pilot seated in that
+    // channel's own pilot slot (cl_pilot_slots[c]), so the channels are
+    // time-orthogonal and the BS estimates each path from its slot. A single
+    // channel is one burst.
     const auto& pslots = config_->cl_pilot_slots().at(user_id);
     // Transmit on EVERY TX channel. When there are fewer pilot slots than TX
     // channels (one shared pilot slot for a spatially-separated 2-channel link:
@@ -1000,8 +976,8 @@ void Receiver::clientTxPilots(size_t user_id, long long base_time,
     // need not be time-orthogonal -- firing both in the SAME slot lets the BS
     // separate them in space, and the per-antenna view then has one clean pilot
     // per antenna instead of one valid + one noise slot), channels past the last
-    // slot reuse it. With one slot per channel this is the original
-    // time-orthogonal path unchanged.
+    // slot reuse it. With one slot per channel the channels are
+    // time-orthogonal.
     const size_t num_tx = std::max<size_t>(1, config_->cl_tx_ch());
     const long long base_slot =
         pslots.empty() ? 0 : static_cast<long long>(pslots.at(0));
@@ -1013,31 +989,26 @@ void Receiver::clientTxPilots(size_t user_id, long long base_time,
     };
     thread_local std::vector<std::vector<std::complex<int16_t>>> bursts;
     thread_local long long burst_pad = -1;
-    // An anchor change must reach the WIRE: the cursor otherwise keeps
-    // winning the max() below for ~horizon frames and the pilots stay on the
-    // stale grid (Opus review finding 4). On an escalation re-anchor, resume
-    // on the NEW grid at the first slot AFTER everything already queued:
-    // jumping back to txTime would command times behind bursts the driver
-    // already accepted (a late-start throw -> BAD Write -> a stalled cursor
-    // retrying the same overlap forever, Opus review M2), and nothing here
-    // can flush the driver's queue -- the stale-grid bursts simply drain
-    // (up to ~horizon frames) while the new grid takes over behind them.
+    // An anchor change must reach the WIRE: a cursor that only ever advances
+    // by its own frames keeps the pilots on the stale grid for about a
+    // horizon. On an escalation re-anchor, resume on the NEW grid at the first
+    // slot AFTER everything already queued: jumping back to txTime would
+    // command times behind bursts the driver already accepted (a late-start
+    // throw -> BAD Write -> a stalled cursor retrying the same overlap
+    // forever), and nothing here can flush the driver's queue -- the
+    // stale-grid bursts simply drain (up to about a horizon of frames) while
+    // the new grid takes over behind them.
     const long long end = txTime + llround(horizon * frame_d);
     // Every burst is txTime + i * tracked_period for integer i, so the whole
     // ladder rides the tracked grid and no rounding accumulates along it.
-    long long i0 = 0;
-    if (pilot_cursor + frame > txTime) {
-      i0 = static_cast<long long>(std::ceil(
-          static_cast<double>(pilot_cursor + frame - txTime) / frame_d));
-    }
-    // There used to be a re-anchor flag set by the escalation and consumed
-    // here. i0 above subsumes it: it ALWAYS resumes on the current grid at the
-    // first index past what is already queued, which is exactly what the flag
-    // triggered. It was kept for a while as write-only state, which is worse
-    // than either keeping or removing it, because an atomic that nothing reads
-    // still looks load-bearing to the next reader.
+    // Resume at the first burst more than half a frame past the cursor
+    // (houdini/pilot_ladder.h: a ceil(cursor + frame) rule skips a frame
+    // whenever this call's txTime lands a fraction of a sample early on the
+    // tracked grid, which left 25 % of frames without a pilot, AP-79 R0/R1).
+    // It ALWAYS resumes on the current grid at the first index past what is
+    // already queued, so an escalation re-anchor needs no flag of its own.
+    const long long i0 = houdini::ladder::resumeIndex(pilot_cursor, txTime, frame_d);
     int nsched = 0;
-    const bool ul_fits = ul_present && ul_off >= num_samps;
     for (long long i = i0;; ++i) {
       const long long cur = txTime + llround(static_cast<double>(i) * frame_d);
       if (cur > end) break;
@@ -1046,14 +1017,15 @@ void Receiver::clientTxPilots(size_t user_id, long long base_time,
       if (pad != burst_pad) {
         // The burst spans from the pad to the last content: the furthest pilot
         // slot (channels are time-orthogonal) or the uplink slot, whichever is
-        // later. Each channel gets its pilot at its own slot offset; the uplink
-        // data (ch A's) rides on every channel at the same U-slot offset.
+        // later. Each channel gets its pilot at its own slot offset and its
+        // uplink data at the same U-slot offsets, both from its own band
+        // (AP-85: the X-band at 270 RB beside the sub-6 at 133).
         long long span = num_samps;
         for (size_t c = 0; c < num_tx; ++c) {
           const long long off = (pslot_of(c) - base_slot) * num_samps;
           span = std::max(span, off + num_samps);
         }
-        if (ul_fits) span = std::max(span, ul_off + num_samps);
+        for (const long long off : ul_offs) span = std::max(span, off + num_samps);
         const size_t total = static_cast<size_t>(pad) + static_cast<size_t>(span);
         // total kept even so the burst ends on a whole 2-sample TX unit; the
         // trailing zero does not move any signal.
@@ -1061,11 +1033,11 @@ void Receiver::clientTxPilots(size_t user_id, long long base_time,
         for (size_t c = 0; c < num_tx; ++c) {
           bursts[c].assign(total + (total & 1), std::complex<int16_t>(0, 0));
           const long long poff = pad + (pslot_of(c) - base_slot) * num_samps;
-          std::memcpy(bursts[c].data() + poff, config_->pilot_ci16().data(),
+          const OfdmBand& band = config_->ueTxBand(c);
+          std::memcpy(bursts[c].data() + poff, band.pilot_ci16.data(),
                       static_cast<size_t>(num_samps) * 4);
-          if (ul_fits) {
-            std::memcpy(bursts[c].data() + pad + ul_off,
-                        ue_databuffA_.at(0),
+          for (const long long off : ul_offs) {  // the same data in every U slot
+            std::memcpy(bursts[c].data() + pad + off, band.ue_data_ci16.data(),
                         static_cast<size_t>(num_samps) * 4);
           }
         }
@@ -1170,24 +1142,36 @@ ssize_t Receiver::syncSearch(const std::complex<int16_t>* check_data,
                              size_t search_window, float corr_scale,
                              houdini::sync::PickRule pick,
                              houdini::sync::Detection* detection) {
-  // One detector for BOTH search paths: acquisition and resync agree about what
-  // the threshold means, which form the replica supports, and where the beacon
-  // END sits relative to the correlator's index (the replica tail) -- all
-  // resolved once in the constructor (sync/detector.h). The CUDA path is not
-  // wired through the library yet: it still returns the first crossing and
-  // needs the argmax-by-ratio change before it can serve acquisition.
+  // One detector for BOTH search paths and every backend: acquisition and
+  // resync agree about what the threshold means, which form the replica
+  // supports, and where the beacon END sits relative to the correlator's index
+  // (the replica tail) -- all resolved once in the constructor
+  // (sync/detector.h), the index convention applied in one place. The CUDA
+  // correlator (USE_CUDA) is a backend inside it that still returns the first
+  // crossing under the power-ratio form and ignores the configured threshold
+  // and pick (the start-up log warns when it is the backend).
   assert(search_window <= config_->samps_per_frame());
-  // One detector for every backend: the CUDA correlator (USE_CUDA) is a
-  // backend inside it, and the index convention is applied in one place.
   const char* kPath = sync_detector_->backendName();
   const houdini::sync::Detection det =
       sync_detector_->run(check_data, search_window, corr_scale, pick);
   const ssize_t sync_index = det.end_index;
   if (detection != nullptr) *detection = det;
+  if (det.found()) {
+    // AP-79: the raw decision statistic against its bar, so the band-limited
+    // beacon's thresholds (derived in simulation, detection_calibration_test)
+    // can be checked on the rig at acquisition. The first five, then 1 in 100.
+    static std::atomic<unsigned> n_found{0};
+    const unsigned k = n_found.fetch_add(1);
+    if (k < 5 || k % 100 == 0) {
+      MLPD_INFO("syncSearch: detection #%u statistic %.4f vs bar %.4f (%s), idx %ld in %zu\n", k + 1,
+                det.statistic, det.bar, houdini::sync::name(sync_detector_->form()),
+                static_cast<long>(sync_index), search_window);
+    }
+  }
   static const bool kSyncDebug = std::getenv("HOUDINI_SYNC_DEBUG") != nullptr;  // read once
   if (kSyncDebug) {
     static std::atomic<int> c{0};
-    if ((c.fetch_add(1) % 20) == 0) {  // braces load-bearing (macro)
+    if ((c.fetch_add(1) % 20) == 0) {
       MLPD_INFO("syncSearch[%s]: window=%zu corr_scale=%.3f (applied %.3f) gold=%zu "
                 "pick=%d -> idx=%ld\n",
                 kPath, search_window, corr_scale,
@@ -1205,10 +1189,10 @@ ssize_t Receiver::syncSearch(const std::complex<int16_t>* check_data,
 // connected UDP socket to the SAME destination (HOUDINI_CSI_UDP) and emits one
 // small datagram per resync DETECTION.
 //
-// Per detection, never sampled at display cadence: detections run ~9/s, slower
-// than the 30 fps display throttle, so resampling would alias exactly the thing
-// the panel exists to show (the bug f8ba2b4 fixed on the retired H-stability
-// strip). At ~9/s x 44 bytes this costs nothing.
+// Per detection, never sampled at display cadence: detections run slower than
+// the 30 fps display throttle, so resampling would alias exactly the thing the
+// panel exists to show. At a few 48-byte datagrams a second this costs
+// nothing.
 static int syncTelemetrySock(void) {
   static const int fd = [] {
     const char* dst = std::getenv("HOUDINI_CSI_UDP");
@@ -1372,58 +1356,49 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   }
 
   //-------------------- New sync
-  // ACQUISITION window = one whole frame. The beacon repeats every
+  // ACQUISITION window = one whole frame (Houdini). The beacon repeats every
   // samps_per_frame, so a full-frame read contains one with probability 1
   // (bar the ~0.4% that straddle the boundary, which simply retries at a new
   // phase) instead of the 7.4% a 2.33-slot window gets. Measured costs put the
   // optimum exactly here: expected time = F*a_read/W + F*(b_read+b_corr), so it
   // falls with W until the hit probability saturates at W = F, and reading
-  // beyond a frame buys nothing. 15.5 ms -> 4.5 ms, and deterministic.
-  // DERIVED BEFORE ACQUISITION, because acquisition needs it. The
-  // acquisition gate is CLAMPED by the tracking gate (confirm <= scatter),
-  // and houdiniAcquireAnchor used to re-derive its own copy with the
-  // scatter tolerance hardcoded to the default -- so sweeping
-  // HOUDINI_SCATTER_TOL_US, which the walkthrough documents and session-plan
-  // leg 9 does, silently inverted the two gates and would have produced a
-  // lock that escalates immediately, forever. One derivation, passed in.
-  // DEFAULT LOWERED 8.3333 -> 2.0 us [user 2026-09-02, "a conservative value"].
-  // 8.3333 us = 1024 samples was never derived from a measurement of this gate;
-  // it dated from the pre-targeting era when find_beacon could anchor hundreds
-  // of samples early. With targeted resync the measured detection residual is
-  // -2 to +3 samples across ~20 runs, worst |resid| 6, so 1024 was ~170x the
-  // worst case and the row AP-52 calls it "demote from control law to a tighter
-  // outlier reject".
+  // beyond a frame buys nothing (measured 15.5 ms -> 4.5 ms, and deterministic).
+  // The geometry is DERIVED BEFORE ACQUISITION, because acquisition needs it:
+  // the acquisition gate is CLAMPED by the tracking gate (confirm <= scatter),
+  // and a second derivation with the scatter tolerance hardcoded to its
+  // default would invert the two gates whenever the tolerance is swept
+  // (HOUDINI_SCATTER_TOL_US, which the walkthrough documents): a lock that
+  // escalates immediately, forever. One derivation, passed in.
   //
-  // 2.0 us = 246 samples is 41x the worst observed residual AND is the only
-  // tighter value with silicon evidence: the AP-52 sweep ran it for 60 s with 0
-  // escalations, 0 off-grid, the same residual spread, and 153 accepted
-  // detections against the baseline's 91 -- because a tighter tolerance shrinks
-  // kLead/kTail and therefore WIDENS the accept window, 42.2 % of the slot to
-  // 80.2 %. Tighter still would be untested, which is the argument against it.
+  // sync.resync.scatter_tol_us, default 2.0 us = 246 samples: 41x the worst
+  // detection residual measured under targeted resync (-2 to +3 samples
+  // across about 20 runs, worst |resid| 6), and the tightest value with
+  // silicon evidence (AP-52: 60 s with 0 escalations, 0 off-grid, the same
+  // residual spread, and 153 accepted detections against 91 at 8.33 us,
+  // because a tighter tolerance shrinks kLead/kTail and therefore WIDENS the
+  // accept window, 42.2 % of the slot to 80.2 %). Tighter still is untested.
+  // 8.33 us (1024 samples) is about 170x the worst case: an outlier reject,
+  // not a control law (AP-52).
   const double kScatterTolUs = config_->sync().resync.scatter_tol_us;
   // The same argument that made kScatterTol a TIME (AP-40): what the
   // acquisition gate admits is detector scatter plus path, both properties of
   // the correlator and the cable measured in microseconds, so a fixed sample
   // count silently retunes it at every rate while the tracking gate scales.
-  // 5.2083 us reproduces the old 640 samples exactly at 122.88 MSPS.
+  // The default 5.2083 us is 640 samples at 122.88 MSPS.
   const double kConfirmTolUs = config_->sync().resync.confirm_tol_us;
   // Resolved by Config: a quarter of the OFDM zero prefix unless configured.
   double sync_tol_samples = config_->sync().resync.sync_tol_samples;
-  // DEFAULT LOWERED 1.0 -> 0.1 ppm [user 2026-09-02, "a conservative value,
-  // maybe 10x"]. This is the assumed worst-case clock error AFTER tracking, and
-  // it sets the cadence: 1.0 ppm gave a 260 ms resync, which AP-53(a) showed is
-  // ~75-100x more often than the oscillator requires.
-  //
-  // What the measurement says, three 300 s captures with the binning artifact
-  // fixed: the ADEV minimum sits at tau = 2 s, drift there is 0.46 / 0.58 /
-  // 0.49 samples, and at tau = 20 s it is 18.1 / 23.5 / 20.3 against our
-  // 32-sample budget. That implies an effective residual rate of 0.002 ppm at
-  // 2 s and 0.008 ppm at 20 s -- so the 1.0 ppm assumption was 120-500x
-  // pessimistic. 0.1 ppm gives a 2.6 s cadence and still leaves 12-50x margin
-  // on the measured rate and ~45x on the 32-sample tolerance itself. The full
-  // measured margin would be 0.01 ppm and a 26 s cadence; that is deliberately
-  // NOT taken, because 20 s is where the ADEV data ends and beyond it we would
-  // be extrapolating.
+  // sync.resync.residual_ppm, default 0.1: the assumed worst-case clock error
+  // AFTER tracking, which sets the cadence (0.1 ppm gives a 2.6 s resync).
+  // Measured (three 300 s captures): the ADEV minimum sits at tau = 2 s, where
+  // drift is 0.46 / 0.58 / 0.49 samples, and at tau = 20 s it is 18.1 / 23.5 /
+  // 20.3 against the 32-sample budget: an effective residual rate of
+  // 0.002 ppm at 2 s and 0.008 ppm at 20 s. So 0.1 ppm leaves 12-50x margin on
+  // the measured rate and about 45x on the 32-sample tolerance itself.
+  // 1.0 ppm (a 260 ms resync) looks about 75-100x more often than the
+  // oscillator requires (AP-53(a)); 0.01 ppm (a 26 s cadence) is NOT taken,
+  // because 20 s is where the ADEV data ends and beyond it would be
+  // extrapolation.
   double sync_residual_ppm = config_->sync().resync.residual_ppm;
   // Both inputs are validated: a zero or negative ppm makes the cadence
   // quotient infinite, and a config without `ofdm_tx_zero_prefix` gives a zero
@@ -1487,7 +1462,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   assert(config_->samps_per_frame() >= beacon_detect_window);
   // Houdini acquisition anchor, set by the stamp-based confirm loop below and
   // consumed by the main loop (counted-sample alignment cannot survive
-  // recvHoudini's drain, so the anchor is pure timestamp arithmetic).
+  // RadioHoudini::recv's drain, so the anchor is pure timestamp arithmetic).
   long long houdini_anchor = 0;
   bool houdini_anchored = false;
   // Seeded by the acquisition confirm (AP-31b bootstrap); nominal until then.
@@ -1531,43 +1506,36 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   // Main client read/write loop.
   size_t frame_id = 0;
   size_t buffer_offset = 0;
-  //sync on the first beacon after initial detection
-  // AP-52 [user]: the escalation net was tuned against a grid that walked out
-  // of the gate in ~1 s. Steered, it holds for MINUTES, so these numbers are
-  // now absurdly conservative -- but the net stays, it is only retuned, and
-  // retuning it wants an A/B on live silicon rather than a guess here. Knobs,
-  // shipped at the values that were gated, so the default build is unchanged
-  // and the sweep costs no rebuild.
   // The resync bar: the configured policy (sync.detector.corr_scale, relaxed
   // by one per retry) for a single client. With several clients the legacy
   // per-client array keeps its say, because the policy holds one value.
   const auto resyncScale = [this, tid](size_t retry) -> float {
     if (config_->num_cl_sdrs() > 1) {
-      return config_->corr_scale(tid) + static_cast<float>(retry);
+      // The per-client value, relaxed the same way and held at the policy's
+      // min_bar like the single-client path (AP-79).
+      houdini::sync::ThresholdPolicy p = config_->sync().detector.bar;
+      p.corr_scale = config_->corr_scale(tid);
+      return static_cast<float>(p.relaxed(static_cast<int>(retry)));
     }
     return static_cast<float>(
         config_->sync().detector.bar.relaxed(static_cast<int>(retry)));
   };
-  size_t cfo_log_cnt = 0;  // throttles the beacon-CFO line
+  // The beacon-CFO log line is throttled by sync.cfo.log_every (1 in N); the
+  // panel gets every sample regardless. 1 makes it dense, for a calibration run.
+  size_t cfo_log_cnt = 0;
   const size_t kCfoLogEvery =
       static_cast<size_t>(config_->sync().cfo.log_every);
-  // Liveness accept/reject half-width. Shipped ON THE WIRE so the panel draws
-  // the band it actually illustrates rather than a hardcoded copy (AP-31
-  // proposes retuning this, after which a page-side constant would silently lie).
-  // AP-40: the scatter tolerance is a PHYSICAL quantity -- detector scatter,
-  // cable and RF-chain delay -- so it belongs in TIME, not samples. As a sample
-  // constant its physical meaning shrank every rung up the rate ladder (1024
-  // samples is 8.33 us at 122.88 MSPS but 2.08 us at 491.52), tightening the
-  // gate for no physical reason and making the loop twitchier at high rates.
-  // The default is the 8.33 us that 1024 samples meant at the rate this was
-  // tuned on, so behaviour here is unchanged and only the scaling is fixed.
-  //
-  // Note what does NOT move with it: the correlator run-up below is a property
-  // of the 128-tap gold sequence and is genuinely a sample count, and the
-  // resync PERIOD is already rate-invariant because the frame itself is defined
-  // in samples (30 slots x 4096). Only this tolerance was wrong.
-  // Single place that knows the wire's fixed fields, so no call site can forget
-  // the geometry the page needs to convert to ppm.
+  // The liveness accept/reject half-width (kScatterTol) is shipped ON THE WIRE
+  // so the panel draws the band it actually illustrates rather than a
+  // hardcoded copy that a retune would make lie. It is a PHYSICAL quantity
+  // (AP-40) -- detector scatter, cable and RF-chain delay -- so it is
+  // configured in TIME, not samples: a sample constant would tighten the gate
+  // at every rung up the rate ladder for no physical reason. What does NOT
+  // scale with it: the correlator run-up inside geom.lead is a property of
+  // the gold sequence and genuinely a sample count, and the resync PERIOD is
+  // rate-invariant because the frame itself is defined in samples.
+  // emitSync is the single place that knows the wire's fixed fields, so no
+  // call site can forget the geometry the page needs to convert to ppm.
   // WEAK is the only branch that does not clear `resync`, so it repeats at the
   // in-window ATTEMPT rate rather than once per resync period. Unthrottled it
   // evicts the whole LOCKED trace from the page's 240-deep history within
@@ -1605,29 +1573,27 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   // How often to LOOK at the beacon, derived rather than hardcoded (see
   // sync_geometry.h for the derivation and the test that covers it).
   //
-  // The old form was `1e9 / (max_cfo_ppb * samps_per_frame)` with max_cfo = 100
-  // ppb "For Iris", which decodes as "resync once the drift reaches ONE
-  // sample". Both halves were wrong for this hardware: the tolerance is not one
-  // sample but the slot's zero padding, and 100 ppb is neither our clock
-  // (8520 ppb measured) nor a crystal spec (a +-25 ppm pair is 50000 ppb). The
-  // real tolerance is the timing slack built into the slot: 48 symbols x (fft
-  // 64 + cp 16) + prefix 128 + postfix 128 = 4096 = a slot, so the burst may
-  // shift +-ofdm_tx_zero_prefix samples before OFDM content crosses the slot
-  // boundary. A quarter of that is budgeted to inter-observation drift.
+  // The tolerance is the timing slack built into the slot, not one sample:
+  // the slot is its OFDM symbols plus a zero prefix and postfix, so the burst
+  // may shift +-ofdm_tx_zero_prefix samples before OFDM content crosses the
+  // slot boundary. A quarter of that is budgeted to inter-observation drift.
+  // (Upstream's `1e9 / (max_cfo_ppb * samps_per_frame)` with 100 ppb "For
+  // Iris" resyncs once the drift reaches ONE sample, and 100 ppb is neither
+  // this clock, 8520 ppb measured, nor a crystal spec.)
   //
   // The rate error is the RESIDUAL after tracking, not the raw offset:
   // measured 0.036 ppm against a raw 8.52 ppm. What bounds this cadence is not
   // accuracy at all, it is how long we are willing to not notice the beacon is
   // gone, and (on the read side) that each radioRx costs ~855 us fixed.
   //
-  // TIMED, NOT COUNTED. The model is expressed in REAL frames while `frame_id`
-  // counts LOOP ITERATIONS, and the loop runs slower than real time (measured
-  // 412-746 iter/s against 1000 frames/s), so triggering on the counter
-  // stretched the interval by that ratio and the grid drifted 1.3-2.4x further
-  // than the tolerance it was derived from. Iris/UHD keeps its own frame-count
-  // cadence: everything above is Houdini clock physics, and applying it there
-  // unconditionally had moved those backends from 81 to 260 with nothing
-  // measured about them to justify it.
+  // TIMED, NOT COUNTED (Houdini). The model is expressed in REAL frames while
+  // `frame_id` counts LOOP ITERATIONS, and the loop runs slower than real time
+  // (measured 412-746 iter/s against 1000 frames/s), so triggering on the
+  // counter would stretch the interval by that ratio and let the grid drift
+  // 1.3-2.4x further than the tolerance it was derived from. Iris/UHD keeps
+  // its own frame-count cadence (resync_period): the derivation above is
+  // Houdini clock physics, with nothing measured about those backends to
+  // justify applying it there.
   const double resync_interval_s = geom.resync_interval_s;
   const size_t resync_period = static_cast<size_t>(geom.resync_period_iters);
   // THE RESYNC STATE MACHINE (sync/resync_policy.h): when to look, the miss
@@ -1656,15 +1622,13 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
         houdini_boot_period - static_cast<double>(config_->samps_per_frame()),
         sync_tol_samples, sync_residual_ppm);
   }
-  // AP-31 loop profile. The UE iterates SLOWER than real time -- measured
-  // 205-417 iterations/s against 1000 frames/s, and the ratio moves ~2x with
-  // HOUDINI_COALESCE_SLOTS, so quote the measurement not a single figure. That
-  // is
-  // WHY recvHoudini drains and therefore why the read lands at an arbitrary
-  // frame phase and the beacon is only in the accept band ~1.4% of the time.
-  // The drain is a symptom; this measures where the iteration actually goes so
-  // the cause is traced rather than assumed. Four buckets, mean us per
-  // iteration, logged every HOUDINI_LOOP_PROFILE iterations (0 = off).
+  // AP-31 loop profile. The UE iterates SLOWER than real time (the ratio
+  // moves about 2x with HOUDINI_COALESCE_SLOTS, so quote the measurement, not a
+  // single figure), which is why RadioHoudini::recv drains and an unplaced
+  // read lands at an arbitrary frame phase. This measures where the iteration
+  // actually goes so the cause is traced rather than assumed. Four buckets,
+  // mean us per iteration, logged every HOUDINI_LOOP_PROFILE iterations
+  // (0 = off).
   const size_t loop_profile_every = [] {
     const char* e = getenv("HOUDINI_LOOP_PROFILE");
     return e != nullptr ? static_cast<size_t>(atol(e)) : 0;
@@ -1684,25 +1648,24 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   //Always decreases the requested rx samples
   size_t beacon_adjust = 0;
 
-  // Houdini: recvHoudini drains the FIFO then reads, so the per-frame RX read
-  // timestamp (rx_beacon_time) is real-time accurate but at an ARBITRARY frame
-  // phase -- the pilot TX time (rx_beacon_time + txTimeDelta) then jitters across
-  // the whole frame and never seats in the BS rx_gate. With the boards
-  // frequency-locked (shared 10 MHz ref) the frame period IS exactly
-  // samps_per_frame, so we ANCHOR a beacon-locked frame start on each successful
-  // (re)sync and, at pilot TX, SNAP the current read timestamp to that grid
-  // (anchor + k*frame) -- see the clientTxPilots call below. (Iris keeps the raw
-  // per-frame read timestamp -- its HW framer delivers frame-locked reads.)
+  // Houdini: RadioHoudini::recv drains the FIFO then reads, so the per-frame
+  // RX read timestamp (rx_beacon_time) is real-time accurate but at an
+  // ARBITRARY frame phase -- the pilot TX time (rx_beacon_time + txTimeDelta)
+  // would then jitter across the whole frame and never seat in the BS rx
+  // slot. So the UE ANCHORS a beacon-locked frame start at acquisition, tracks
+  // it (ref, period) below, and at pilot TX SNAPS the current read timestamp
+  // to that grid (ref + k*period) -- see the clientTxPilots call below. (Iris
+  // keeps the raw per-frame read timestamp -- its HW framer delivers
+  // frame-locked reads.)
   long long houdini_pilot_ref = houdini_anchor;      // from confirmed acquisition
   bool houdini_pilot_ref_valid = houdini_anchored;
   // AP-31 two-state grid tracker. The UE estimates the BS clock in its OWN
-  // sample units as (ref, period) and derives EVERY prediction from it. The
-  // old code fixed period at samps_per_frame -- "with the boards
-  // frequency-locked the frame period IS exactly samps_per_frame" -- which is
-  // true only on a shared reference. MEASURED on internal clocks 2026-09-01:
-  // eps = -8.52 ppm, so the BS frame period is 122881.047 UE samples, the
-  // anchored grid walks out of the +-kScatterTol gate in about 1.0 s, and the
-  // UE re-acquires roughly once a second forever (DEMO_VERIFICATION 8.4).
+  // sample units as (ref, period) and derives EVERY prediction from it. A
+  // period fixed at samps_per_frame holds only on a shared reference: on
+  // internal clocks eps = -8.52 ppm was measured, so the BS frame period is
+  // 122881.047 UE samples at a 122880-sample frame, a fixed grid walks out of
+  // the +-kScatterTol gate in about 1.0 s, and the UE re-acquires roughly once
+  // a second forever (DEMO_VERIFICATION 8.4).
   //
   // alpha-beta rather than per-detection correction: the arrival jitter is
   // 8-23 samples rms while the per-update drift is ~120 samples, so the SLOPE
@@ -1750,10 +1713,9 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   const houdini::sync::TrackerConfig tracker_cfg(
       config_->sync().tracker, static_cast<double>(config_->samps_per_frame()));
   {
-    // THE ACTIVE DETECTOR, ON EVERY RUN. The env overrides each warn when set,
-    // so taking the same values BY DEFAULT logged nothing at all and a run's
-    // log carried no record of which rule produced its numbers -- in a change
-    // whose other half exists because a run's identity was not recorded.
+    // THE ACTIVE DETECTOR, ON EVERY RUN. The env overrides each warn only when
+    // set, so without this line a run on the defaults would carry no record
+    // of which rule produced its numbers.
     {
       char bar_text[64];
       if (sync_detector_->backendAppliesConfig() && sync_detector_->barFromPfa()) {
@@ -1797,6 +1759,26 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   }
   houdini::sync::GridTracker tracker;
   tracker.reset(tracker_cfg);
+  // AP-79: the in-sounder clock steering (sync/clock_steer.h), off by default.
+  // It lives here because this thread owns the tracked period, so a push's
+  // known frequency step is fed forward into it with no lock; the session runs
+  // each CLOCK_ADJ write as a job off this thread and releases the node to its
+  // calibrated hold however this thread exits, unless steer.keep.
+  IClientRadioSet* steer_set = client_radio_set_.get();
+  houdini::sync::ClockSteerSession steer(
+      config_->sync().steer,
+      [steer_set, tid] { return steer_set->readRadioSetting(static_cast<size_t>(tid), "CLOCK_ADJ"); },
+      [steer_set, tid](const std::string& v) {
+        return steer_set->writeRadioSetting(static_cast<size_t>(tid), "CLOCK_ADJ", v);
+      },
+      [tid](bool warn, const std::string& m) {
+        if (warn) {
+          MLPD_WARN("Clock steering [%d]: %s\n", tid, m.c_str());
+        } else {
+          MLPD_INFO("Clock steering [%d]: %s\n", tid, m.c_str());
+        }
+      });
+  if (stampAnchored()) steer.arm();
   // Frame-start grid point n frames after the tracked reference.
   auto houdiniGridStart = [&](long long n) {
     return houdini_pilot_ref + llround(static_cast<double>(n) *
@@ -1807,24 +1789,24 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
     return llround(static_cast<double>(t - houdini_pilot_ref) /
                    houdini_frame_period);
   };
-  // Resync hold-off state [user 2026-08-30]: a large offset is applied only
-  // after MORE THAN ONE consecutive consistent observation of it; a lone
-  // large offset (artifact, scatter) is held, logged, and not applied.
-  // AP-18 escalation [user]: give up on resync and return to the full
-  // sliding-window acquisition when the anchored grid has plausibly lost the
-  // beacon. Triggers: 2 CONSECUTIVE exhausted episodes OR >= 4 SNR-valid
-  // detections held without agreeing with each other (incoherent state).
+  // Resync hold-off and escalation (the rules are ResyncPolicy's,
+  // sync/resync_policy.h). A large offset is never applied from one
+  // observation: an off-grid detection is held, logged, and not applied, and
+  // sync.resync.hold_offgrid consecutive ones mean the beacon MOVED (one is
+  // scatter, DEMO_VERIFICATION 4.18). AP-18 escalation: give up on resync and
+  // return to the full sliding-window acquisition when the beacon MOVED or is
+  // LOST (sync.resync.escalate_episodes consecutive exhausted episodes).
   // Under TARGETED resync an attempt only counts when the grid predicted the
-  // full beacon inside the window (~2% of windows), so one exhausted episode
-  // means ~100 predicted-position windows in a row failed to detect -- at a
-  // healthy SNR that is not chance but a dead or moved beacon; two episodes
-  // are pure confirmation (Opus review M4: the old ~4.7%-by-chance figure
-  // described the pre-targeting whole-window search). Hold-off itself
-  // already covers the beacon-MOVED case; this covers beacon-LOST.
-  // How many consecutive off-grid detections before the beacon counts as
-  // MOVED. One is scatter (ledger 4.18); the shipped rule is two. Steered, an
-  // off-grid detection is far more surprising than it was, so this is the
-  // other half of the AP-52 retune and it sweeps with the same A/B.
+  // full beacon inside the window (every placed window, AP-80: an episode
+  // takes about 100 loop iterations, about 0.3 s at R2 and 1-2 s at R3, and a
+  // lost beacon escalates about 3 s after the loss since episodes start on
+  // the 2.6 s cadence; the attempts are back to back, so the hold-off's two
+  // consecutive detections are a few frames apart), so one exhausted episode
+  // means about 100 predicted-position windows in a row failed to detect --
+  // at a healthy SNR that is not chance but a dead or moved beacon; two
+  // episodes are pure confirmation. Steered, the grid holds for minutes and
+  // these values are conservative; retuning them wants an A/B on silicon
+  // (AP-52).
   const size_t beacon_detect_window_esc = static_cast<size_t>(
       static_cast<float>(config_->samps_per_slot()) *
       kBeaconDetectWindowScaler);
@@ -1872,10 +1854,10 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
       // permanent: escalation re-anchors the offset, keeps the bad period, and
       // the grid walks out again forever.
       // Clamp FIRST, then measure the disagreement, so the ppm printed below
-      // is reproducible from the two periods on the same line. Computing it
-      // from the unclamped value and printing the clamped one made the message
-      // internally inconsistent whenever the clamp bit, which is reachable by
-      // setting HOUDINI_ACQ_MAX_PPM above HOUDINI_GRID_MAX_PPM.
+      // is reproducible from the two periods on the same line: computed from
+      // the unclamped value, the message would be internally inconsistent
+      // whenever the clamp bites (reachable with sync.resync.acq_max_ppm
+      // above sync.tracker.max_ppm).
       fresh_period = std::min(kGridPeriodHi, std::max(kGridPeriodLo, fresh_period));
       const double disagree_ppm =
           std::fabs(fresh_period - houdini_frame_period) /
@@ -1888,6 +1870,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
               houdini_frame_period, fresh_period, disagree_ppm, tid);
         }
         houdini_frame_period = fresh_period;
+        steer.periodReplaced();  // a push in flight may already be in it
         houdini_grid_updates = 0;
       }
       houdini_pilot_ref = fresh;
@@ -1916,6 +1899,13 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   };
 
   while (config_->running() == true) {
+    // Clock steering: land a finished push and feed its step forward into the
+    // tracked period (sync/clock_steer.h). Polled once a frame.
+    const double steer_scale = steer.poll();
+    if (steer_scale != 1.0) {
+      houdini_frame_period =
+          std::min(kGridPeriodHi, std::max(kGridPeriodLo, houdini_frame_period * steer_scale));
+    }
     if (config_->max_frame() > 0 && frame_id >= config_->max_frame()) {
       MLPD_WARN(
           "Client sync loop: frame_id (%zu) >= max_frame (%zu), tid %d -- "
@@ -1927,6 +1917,18 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
     //Slot 0 / Beacon...
     const auto prof_t0 = loop_profile_every > 0 ? profile_clock::now() : profile_clock::time_point{};
     const int request_samples = samples_per_slot - beacon_adjust;
+    // AP-80: a due re-sync PLACES its window so the grid's next predicted
+    // beacon end sits in the middle of the band the targeted check accepts
+    // (houdini/resync_window.h), instead of waiting for a random phase: the
+    // loop locks to whole frames, and a random-phase window then missed the
+    // beacon for 15-25 s at a time (DEMO_VERIFICATION 9.16).
+    if (policy.looking() && stampAnchored() && houdini_pilot_ref_valid) {
+      const long long beacon_end = static_cast<long long>(config_->shape().expectedEndOffset());
+      const long long want = houdini::sync::placedWant(geom.lead, geom.tail, request_samples);
+      client_radio_set_->placeNextRx(tid, [&, beacon_end, want](long long head) {
+        return houdini::sync::placedWindowStart(head, houdini_pilot_ref, houdini_frame_period, beacon_end, want);
+      });
+    }
     const int rx_status = client_radio_set_->radioRx(
         tid, rxbuff.data(), request_samples, rx_beacon_time);
     beacon_adjust = 0;
@@ -1954,40 +1956,34 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
       houdini::sync::Detection resync_det;  // the targeted search's evidence
       if (stampAnchored() && houdini_pilot_ref_valid) {
         // TARGETED liveness check: the anchored grid predicts exactly where
-        // the beacon END lands in this (drained, random-phase) window, so
-        // only attempt when it is inside (~1.4% of frames at kLead=1280 -- the others count
-        // as NO attempt, so an exhausted episode really means "the beacon
-        // was absent at its predicted spot ~100 times"), and search only
-        // that neighborhood. A whole-window earliest-crossing search kept
-        // losing the race to ~11 dB detections at the window edge (best
-        // reading: the beacon itself straddling the edge with partial core
-        // energy -- same-board TX coupling measured cold, ledger 4.40), so
-        // an attempt only counts when the full beacon is predicted inside.
+        // the beacon END lands in this window, which the read PLACED on it
+        // (AP-80, above), so only attempt when it is inside (a placed window
+        // always is, unless its read hit a gap -- the others count as NO
+        // attempt, so an exhausted episode really means "the beacon was
+        // absent at its predicted spot ~100 times"), and search only that
+        // neighborhood. A whole-window earliest-crossing search loses the
+        // race to ~11 dB detections at the window edge (best reading: the
+        // beacon itself straddling the edge with partial core energy --
+        // same-board TX coupling measured cold, DEMO_VERIFICATION 4.40), so an
+        // attempt only counts when the full beacon is predicted inside.
         // PREDICTIVE (AP-31b): extrapolate the grid by the ESTIMATED period to
-        // the first beacon due at or after this window's start. The modulo
-        // form this replaces folded on samps_per_frame, which silently assumed
-        // period == nominal -- on free-running clocks that walks off the beacon
-        // within a second and the tracker then never gets another observation.
+        // the first beacon due at or after this window's start. Do not fold on
+        // samps_per_frame: that assumes period == nominal, which on
+        // free-running clocks walks off the beacon within a second, and the
+        // tracker then never gets another observation.
         const long long beacon_end =
             static_cast<long long>(config_->shape().expectedEndOffset());
-        const double n_due =
-            std::ceil(static_cast<double>(rx_beacon_time - houdini_pilot_ref -
-                                          beacon_end) /
-                      houdini_frame_period);
-        const long long off =
-            houdiniGridStart(static_cast<long long>(n_due)) + beacon_end -
-            rx_beacon_time;
-        // The slice must be able to PRESENT every residual the liveness
-        // gate can accept (+-kScatterTol = 1024) plus ~256 samples of
-        // gold context for the correlator; a 700-sample lead left
-        // residuals in [-1024,-444] undetectable (Opus review M3).
-        // DERIVED from the tolerance rather than hand-tuned: the slice must be
-        // able to PRESENT every residual the gate can accept, so a retune of
-        // kScatterTol (AP-31) has to move these with it, or the panel draws a
-        // band wider than the detector can ever fill.
-        // A sample count by nature: the matched filter needs 2 gold lengths of
-        // run-up regardless of how fast we sample, so this one does NOT scale
-        // with the rate the way kScatterTol does.
+        const long long off = houdini::sync::beaconEndOffset(
+            rx_beacon_time, houdini_pilot_ref, houdini_frame_period, beacon_end);
+        // The slice (geom.lead / geom.tail, sync/sync_geometry.h) must be able
+        // to PRESENT every residual the liveness gate can accept
+        // (+-kScatterTol) plus gold context for the correlator, so it is
+        // DERIVED from the tolerance rather than hand-tuned: a lead shorter
+        // than the tolerance leaves part of the accepted band undetectable,
+        // and the panel then draws a band wider than the detector can ever
+        // fill. The run-up part is a sample count by nature: the matched
+        // filter needs 2 gold lengths of run-up regardless of how fast we
+        // sample, so it does NOT scale with the rate the way kScatterTol does.
         const long long kLead = geom.lead;
         const long long kTail = geom.tail;
         if (off >= kLead && off + kTail <= request_samples) {
@@ -1997,18 +1993,18 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
           const ssize_t slice_len = kLead + kTail;
           prof_sync_searched++;
           // TARGETED slice: lead+tail is far shorter than the beacon copy
-          // spacing of one full frame (122880 samples), so the strongest
-          // crossing is unambiguous and the earliest one is the STS preamble.
-          // See CommsLib::BeaconPick.
+          // spacing of one full frame, so the strongest crossing is
+          // unambiguous and the earliest one is the STS preamble. See
+          // CommsLib::BeaconPick.
           //
-          // HOUDINI_BEACON_PICK=first restores the pre-2026-09-02 rule ON THE
+          // HOUDINI_BEACON_PICK=first selects the first-crossing rule ON THE
           // SAME BINARY. That is not a compatibility escape hatch, it is what
-          // makes the fix gateable: PRE and POST on one build removes the
+          // makes the pick gateable: both rules on one build removes the
           // "different binary, different day" confound that a two-build gate
-          // carries, and it is the only way this bench can show the OLD rule
+          // carries, and it is the only way this bench can show first-crossing
           // failing at all. The bench runs below the level where kFirstCrossing
-          // breaks, but the threshold test is `corr_scale * peak > energy`, so
-          // raising corr_scale is arithmetically identical to raising the
+          // breaks, but the power-ratio test is `corr_scale * peak > energy`,
+          // so raising corr_scale is arithmetically identical to raising the
           // received level -- and corr_scale is already a config knob. Sweep it
           // with this set to `first` and the false lock appears on silicon.
           const ssize_t idx = this->syncSearch(
@@ -2043,9 +2039,10 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
             static_cast<size_t>(request_samples), sync_index);
         MLPD_INFO("Re-sync frame %zu: detection idx %ld snr %.1f dB, tid %d\n",
                   frame_id, sync_index, snr, tid);
-        // Ledger 4.42 instrument: dump this window + the verdict inputs so the
-        // offline analyzer can place the TRUE core by exact-waveform
-        // correlation and recompute the SNR without the detector-index bias.
+        // DEMO_VERIFICATION 4.42 instrument: dump this window + the verdict
+        // inputs so the offline analyzer can place the TRUE core by
+        // exact-waveform correlation and recompute the SNR without the
+        // detector-index bias.
         const char* rwdir = getenv("HOUDINI_DUMP_RESYNC_WIN");
         if (rwdir != nullptr) {
           static std::atomic<int> rwn{0};
@@ -2127,7 +2124,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
               static_cast<long long>(config_->sync().cfo.index_guard);
           long long cfo_index = sync_index - resid + cfo_guard;
           // BOTH bounds. An out-of-range index would otherwise cost the
-          // estimate entirely (estimateCFO now returns NaN rather than a
+          // estimate entirely (the estimator returns NaN rather than a
           // fabricated zero), and the fallback below keeps a usable reading in
           // the very line whose job is to keep the disagreement visible. resid
           // is only bounded by half a frame at this
@@ -2161,18 +2158,18 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
           //     divide out (DEMO_VERIFICATION 8.6).
           //   - the timing channel agrees with a completely independent, RF-free
           //     hardware-clock ratio to <= 0.05 ppm, and the tracked residual is
-          //     0.036 ppm = ~18 Hz at 500 MHz. SCOPE, ADDED 2026-09-02: that
-          //     agreement was established on legs where eps was 7-8 ppm and it
-          //     does NOT transfer to a sub-ppm pair. `hwtime_rate_probe` reads
+          //     0.036 ppm = ~18 Hz at 500 MHz. SCOPE: that agreement was
+          //     established on legs where eps was 7-8 ppm and it does NOT
+          //     transfer to a sub-ppm pair. `hwtime_rate_probe` reads
           //     two host-referenced rates that each wander ~3 ppm between runs,
           //     so differencing them leaves ~+-0.26 ppm -- measured, two
           //     consecutive runs 0.87 ppm apart with a sign flip on a 0.25 ppm
           //     pair (DEMO_VERIFICATION 8.91). Do not cite it below ~1 ppm.
           // Both are logged so the disagreement stays visible rather than
-          // becoming folklore. AP-34(b) is FIXED as of 2026-09-02: the ladder's
-          // stage 3 now agrees with the timing channel to 0.02 ppm over four
-          // paired runs, so the estimator's own bias is measurable rather than
-          // merely known about (8.100, 8s).
+          // becoming folklore. AP-34(b): the ladder's stage 3 agrees with the
+          // timing channel to 0.02 ppm over four paired runs, so the
+          // estimator's own bias is measurable rather than merely known about
+          // (DEMO_VERIFICATION 8.100, 8s).
           const double eps_tracked =
               (houdini_frame_period > 0.0)
                   ? (static_cast<double>(config_->samps_per_frame()) /
@@ -2187,26 +2184,25 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
                 frame_id, cfo_tracked_hz, eps_tracked * 1e6, cfo_hz, cfo_ppm,
                 cfo_hz - cfo_tracked_hz, resid, snr, tid);
           }
-          // Liveness model, not micro-correction: with locked clocks + MTS
-          // the drift is ~0, while INDEPENDENT detections of the same beacon
-          // scatter by +-hundreds of samples (the earliest-crossing/STS
-          // class, ledger 4.18) -- a tight drift gate rejected every real
-          // hit and the escalation churned ~every 1.7 s. A SNR-passing hit
-          // within the scatter tolerance = beacon ALIVE on the anchored
-          // grid, touch nothing; two consecutive hits beyond it = beacon
-          // MOVED -> escalate straight to re-acquisition, whose confirm
-          // loop is immune to the common detector bias.
+          // Liveness verdict: a SNR-passing hit within the scatter tolerance =
+          // beacon ALIVE on the anchored grid (and a tracker update, below);
+          // hold_offgrid consecutive hits beyond it = beacon MOVED -> escalate
+          // straight to re-acquisition, whose confirm loop is immune to the
+          // common detector bias. The gate is a tolerance, not a drift bound:
+          // a gate as tight as the drift rejects real hits whenever the
+          // detector scatters (the earliest-crossing/STS class,
+          // DEMO_VERIFICATION 4.18), and the escalation then churns (about
+          // every 1.7 s).
           if (std::llabs(resid) <= kScatterTol) {
             long long applied_shift = 0;  // reported on the LOCKED record
-            // Accepted observation: advance the tracked grid. The gate keeps
-            // its old role as the alive/moved verdict AND becomes the tracker's
-            // outlier reject -- a rejected detection updates nothing rather
-            // than levering the rate estimate (AP-31).
+            // Accepted observation: advance the tracked grid. The gate is both
+            // the alive/moved verdict AND the tracker's outlier reject -- a
+            // rejected detection updates nothing rather than levering the rate
+            // estimate (AP-31).
             if (kf > 0 && tracker.update(kf, static_cast<double>(resid))) {
-              // This IS a schedule move, up to kGridAlpha * kScatterTol = 512
-              // samples in one step, and it used to be reported as shift = 0
-              // while only the escalation's move was shown. Carry it out to
-              // emitSync so the panel sees every move the UE makes.
+              // This IS a schedule move, up to kGridAlpha * kScatterTol samples
+              // in one step: carry it out to emitSync so the panel sees every
+              // move the UE makes, not only the escalation's.
               applied_shift = llround(tracker.shift());
               houdini_pilot_ref = houdiniGridStart(kf) + applied_shift;
               // The absolute band below is a PLAUSIBILITY bound and cannot
@@ -2223,15 +2219,17 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
                   std::min(kGridPeriodHi, std::max(kGridPeriodLo,
                                                    houdini_frame_period));
               houdini_grid_updates++;
+              if (steer.armed()) {
+                // The sensor is the tracked rate itself, the eps logged above.
+                steer.onUpdate((static_cast<double>(config_->samps_per_frame()) / houdini_frame_period - 1.0) *
+                               1e6);
+              }
             } else if (kf > 0) {
               // Only the kalman arm reaches here: its innovation gate rejected
               // the observation. The detection is still ALIVE on the grid --
               // the outer gate said so, and every counter below still clears --
               // it simply does not inform the state.
               houdini_grid_innov_rej++;
-              // Braces load-bearing: MLPD_WARN is three statements with no
-              // do/while wrapper, so unbraced the throttle governs only the
-              // header (the flood recorder_worker.cc already documented).
               if (houdini_grid_innov_rej == 1 ||
                   houdini_grid_innov_rej % 50 == 0) {
                 MLPD_WARN(
@@ -2252,10 +2250,6 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
               // one landing BEFORE the tracked reference, which is reachable
               // just after a re-anchor and means something quite else.
               houdini_grid_starved++;
-              // Braces are load-bearing: MLPD_WARN expands to three statements
-              // with no do/while wrapper, so unbraced only the header is
-              // throttled and the body prints on every pass (the flood this
-              // repo already hit at recorder_worker.cc's HOUDINI_CSI_R_DEBUG).
               if (houdini_grid_starved == 1 ||
                   houdini_grid_starved % 100 == 0) {
                 MLPD_WARN(
@@ -2320,11 +2314,9 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
             policy.onMiss(stampAnchored() && houdini_pilot_ref_valid);
         if (act == houdini::sync::ResyncAction::kExhausted ||
             act == houdini::sync::ResyncAction::kEscalate) {
-          // Under recvHoudini's drain the per-frame slot-0 window carries
-          // the beacon only a few percent of the time, so long miss runs
-          // are NORMAL. The anchored grid keeps the pilots seated (drift
-          // measured ~0), so log and retry next period instead of killing
-          // the run; consecutive exhausted episodes escalate.
+          // An exhausted episode does not end the run: the anchored grid
+          // keeps the pilots seated meanwhile, so log and retry next period;
+          // consecutive exhausted episodes escalate.
           MLPD_WARN(
               "Re-sync: %zu misses this period for client %d (successes "
               "%zu); anchored grid keeps flying, retrying next period "
@@ -2350,9 +2342,9 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
     const auto prof_t2 = loop_profile_every > 0 ? profile_clock::now() : profile_clock::time_point{};
     // schedule all TX slot
     // config_->tx_advance() needs calibration based on SDR model and sampling rate
-    // Houdini always uses the continuous P(+U) burst below (clientTxPilots now
-    // transmits the uplink-data slot too); the file-based clientTxData path is for
-    // Iris/UHD.
+    // Houdini always uses the continuous P(+U) burst below (clientTxPilots
+    // transmits the uplink-data slot too); the file-based clientTxData path is
+    // for Iris/UHD.
     if (config_->ul_data_slot_present() == true && !stampAnchored()) {
       int tx_return = 0;
       while (tx_return >= 0) {
@@ -2361,15 +2353,16 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
     } else {
       if (config_->cl_pilot_slots().at(tid).size() > 0) {
         // Houdini: the per-frame read timestamp (rx_beacon_time) is real-time
-        // accurate but at an ARBITRARY frame phase (recvHoudini drains then reads),
-        // so SNAP it to the beacon-locked frame grid (anchor + k*frame) -- keeps
-        // real-time tracking (the loop rate != real-time because of the drain) AND
-        // a constant frame phase, so the pilot lands at the same BS-frame position.
+        // accurate but at an ARBITRARY frame phase (RadioHoudini::recv drains
+        // then reads), so SNAP it to the beacon-locked frame grid (ref +
+        // k*period) -- keeps real-time tracking (the loop rate != real-time
+        // because of the drain) AND a constant frame phase, so the pilot lands
+        // at the same BS-frame position.
         long long pilot_base = rx_beacon_time;
         if (stampAnchored() && houdini_pilot_ref_valid) {
           // Snap to the TRACKED grid, not a nominal-period one: on free-running
-          // clocks a nominal snap drifts out of the BS rx_gate at the same
-          // 1.047 samples per frame the beacon does.
+          // clocks a nominal snap drifts out of the BS rx slot at the same
+          // rate the beacon does (1.047 samples per frame at -8.52 ppm).
           pilot_base = houdiniGridStart(houdiniGridIndex(rx_beacon_time));
         }
         this->clientTxPilots(tid, pilot_base + txTimeDelta_,
@@ -2442,10 +2435,15 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
         for (size_t ch = 0; ch < num_rx_buffs; ++ch) {
           tb.at(ch) = throwaway.data() + ch * want;
         }
+        // These samples are thrown away: skip the RX channel filter for them
+        // (AP-79; ~29 of every 30 slots on the UE, ~1.2 cores for a
+        // continuously read lane).
+        this->client_radio_set_->setRxFilter(tid, false);
         const int got = this->client_radio_set_->radioRx(
             tid, tb.data(), static_cast<int>(want), rx_data_time);
+        this->client_radio_set_->setRxFilter(tid, true);
         // Advance by the slots ACTUALLY consumed. A short read (rx_gap_break
-        // truncates; ret=2032 against a 12288 request observed live) would
+        // truncates; ret=2032 against a 12288 request has been measured) would
         // otherwise skip slots whose samples are still in the stream, putting
         // the slot index and the stream position permanently out of step.
         size_t whole = (got > 0) ? static_cast<size_t>(got) / samples_per_slot
@@ -2453,19 +2451,16 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
         if (whole > run) whole = run;
         // Report the read as GOOD whenever whole slots were consumed and the
         // slot index was advanced to match, because that case is handled and
-        // expected: rx_gap_break truncates (ret=2032 against a 12288 request,
-        // observed live). Passing `got` through instead tripped the caller's
-        // `!= samples_per_slot` check and printed BAD Receive(20480/4096) on a
-        // path that had just done the right thing, at loop rate. A short read
+        // expected (rx_gap_break truncates). Passing `got` through would trip
+        // the caller's `!= samples_per_slot` check and print BAD Receive on a
+        // path that has just done the right thing, at loop rate. A short read
         // still says so, below, with the numbers that describe it. Only a read
         // that yielded no whole slot at all is a genuine bad receive.
         rx_data_status = (whole >= 1) ? static_cast<int>(samples_per_slot) : got;
         // THROTTLED. Both of these sit in the per-slot RX loop, and the
-        // condition they report (rx_gap_break truncating a read) is PERSISTENT
-        // rather than one-shot -- ret=2032 against a 12288 request was observed
-        // continuously, which at loop rate is ~400 lines/s. That is the flood
-        // hazard the rest of this file guards against with exactly this idiom,
-        // and I added these two without it.
+        // condition they report (rx_gap_break truncating a read) can be
+        // PERSISTENT rather than one-shot, which unthrottled at loop rate is
+        // about 400 lines/s.
         static std::atomic<size_t> short_cnt{0};
         const size_t sc = short_cnt.fetch_add(1);
         if (whole < run && got > 0 && (sc == 0 || sc % 200 == 0)) {
@@ -2478,13 +2473,13 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
         // The SUB-SLOT remainder is consumed from the stream and not accounted
         // for: after a short read of `got` we are `got % samples_per_slot`
         // samples into the next slot, and the slot index says we are at its
-        // start. Harmless on today's schedule -- these are discarded slots, and
-        // the Houdini sync path re-anchors from each read's OWN timestamp
-        // rather than from an accumulated position -- but a schedule that
-        // carries DL data slots would window them short by that remainder. Say
-        // so when it happens rather than leaving it to be discovered by a
-        // mis-decoded DL slot (AP row filed; the realignment needs a DL
-        // schedule to validate against, and none exists yet).
+        // start. Harmless on a schedule without DL data slots -- these are
+        // discarded slots, and the Houdini sync path re-anchors from each
+        // read's OWN timestamp rather than from an accumulated position -- but
+        // a schedule that carries DL data slots would window them short by
+        // that remainder. Say so when it happens rather than leaving it to be
+        // discovered by a mis-decoded DL slot (AP-55; the realignment needs a
+        // DL schedule to validate against).
         const size_t rem = (got > 0) ? static_cast<size_t>(got) % samples_per_slot : 0;
         if (rem != 0 && (sc == 0 || sc % 200 == 0)) {
           MLPD_WARN(
@@ -2539,9 +2534,10 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
 }
 
 //Blocking function for beacon detected or exit()
-// Full acquisition [user 2026-08-30]: hunt in the wide sliding window, take
-// the first detection's stamped absolute time, then require two further
-// detections to land on that lock's frame grid before trusting it. A false
+// Full acquisition: hunt in the detect window, take the first detection's
+// stamped absolute time, then require two further detections to land on that
+// lock's frame grid, the last at least acq_refine_span frames on (the rate
+// baseline), before trusting it. A false
 // first lock (the artifact class, or a scatter outlier) gives
 // grid-inconsistent residuals and restarts the hunt; false-anchor odds with
 // two confirms are ~1e-4 even before the SNR floor. Used at startup and by
@@ -2553,25 +2549,25 @@ bool Receiver::houdiniAcquireAnchor(int tid, size_t detect_window,
                                     const houdini::sync::SyncGeometry& geom,
                                     long long& anchor_out,
                                     double* period_out) {
-  // Detector scatter (ledger 4.18) plus path, expressed in TIME so it scales
-  // with the rate the way the tracking gate does. TAKEN FROM THE CALLER'S
-  // geometry, not re-derived: the acquisition gate is clamped by the tracking
-  // one (confirm <= scatter), so a second derivation that did not see the same
-  // HOUDINI_SCATTER_TOL_US inverted them, which is a lock that escalates
-  // immediately and forever. sync_geometry.h is the one derivation (AP-56).
+  // Detector scatter (DEMO_VERIFICATION 4.18) plus path, expressed in TIME so
+  // it scales with the rate the way the tracking gate does. TAKEN FROM THE
+  // CALLER'S geometry, not re-derived: the acquisition gate is clamped by the
+  // tracking one (confirm <= scatter), so a second derivation that did not see
+  // the same scatter tolerance would invert them, which is a lock that
+  // escalates immediately and forever. sync_geometry.h is the one derivation
+  // (AP-56).
   const long long kConfirmTol = geom.confirm_tol;
   // The refine stage wants a LONG baseline, because the rate error is the
   // detection-pair noise divided by the span and that noise is sub-sample
   // (measured 0.15-0.94 across four acquisitions). k ~ 20 gives ~4% rate
   // error; k >= 200 gives ~0.4%. The stage exists because a full-frame
-  // detect window would otherwise SHORTEN the span: today's k of 17-37 is an
-  // accident of the hunt needing ~13.6 windowed reads to find the beacon at
-  // all, and a guaranteed first hit removes exactly that accident.
+  // detect window makes the first hit near-certain, so each hunt advances k
+  // by only a few frames and the confirms alone would end on a short span.
   const long long kRefineSpan =
       static_cast<long long>(config_->sync().resync.acq_refine_span);
-  // Budget must scale with the span it now has to reach. With a full-frame
+  // Budget must scale with the span it has to reach. With a full-frame
   // window every hunt is a near-certain hit, so k advances only by the wall
-  // time of one read (a few frames) per hunt -- the old flat 200 could expire
+  // time of one read (a few frames) per hunt -- a flat 200 could expire
   // before the baseline was met, and exceeding it THROWS at the caller
   // ("beacon acquisition: no confirmed lock") rather than retrying.
   const int kMaxHunts =
@@ -2616,12 +2612,12 @@ bool Receiver::houdiniAcquireAnchor(int tid, size_t detect_window,
       ++confirms;
       // Every accepted detection improves the rate: resid/k is the period error
       // over a span of k REAL frames -- but the gain is 1/k and k is SMALL
-      // early, which the full-frame window made the common case rather than the
-      // rare one (each hunt is about one read, so k advances a few frames at a
-      // time). A scatter outlier accepted at k=4 with resid at the 640
-      // tolerance moves the period by 160 samples/frame, about 1300 ppm and 150
-      // times the real offset. Bound it to a physically plausible band, the
-      // same guard the tracker applies to its own updates.
+      // early, the common case with the full-frame window (each hunt is about
+      // one read, so k advances a few frames at a time). A scatter outlier
+      // accepted at k=4 with resid at a 640-sample tolerance moves the period
+      // by 160 samples/frame, about 1300 ppm and 150 times the real offset.
+      // Bound it to a physically plausible band, the same guard the tracker
+      // applies to its own updates.
       const double cand =
           period + static_cast<double>(resid) / static_cast<double>(k);
       const double lo = static_cast<double>(fr) * (1.0 - kAcqMaxPpm * 1e-6);
@@ -2652,12 +2648,12 @@ bool Receiver::houdiniAcquireAnchor(int tid, size_t detect_window,
       first_abs = abs_end;
       confirms = 0;
       // Keep the refined period across a failed confirm ONLY while it is still
-      // plausible. The original reasoning holds -- the failure says the ANCHOR
-      // was wrong and the oscillators did not change -- but it assumed the
-      // period could not itself be the cause. It can: a bad refinement makes
-      // every later prediction wrong, so every confirm fails, and keeping it
-      // unconditionally made that state PERMANENT with no way back short of a
-      // restart. Two consecutive failures means the rate is the suspect.
+      // plausible. A failure usually says the ANCHOR was wrong and the
+      // oscillators did not change -- but the period can itself be the cause:
+      // a bad refinement makes every later prediction wrong, so every confirm
+      // fails, and keeping it unconditionally would make that state PERMANENT
+      // with no way back short of a restart. Two consecutive failures means
+      // the rate is the suspect.
       if (++consecutive_fails >= 2) {
         MLPD_WARN(
             "houdiniAcquireAnchor [%d]: %d consecutive confirm failures -- "
@@ -2703,21 +2699,19 @@ ssize_t Receiver::clientSyncBeacon(size_t radio_id, size_t sample_window,
 
         // Acquisition. Everything downstream is measured from this index, and
         // unlike a resync it is anchored ONCE and never revisited -- so it is
-        // the one place a false lock is unrecoverable, and it was the one place
-        // the 2026-09-02 fix had not been applied.
+        // the one place a false lock is unrecoverable, and it takes the
+        // configured pick like the targeted resync.
         //
-        // The multi-copy argument for kFirstClusterRefined no longer holds. It
-        // dates from the loops=forever era that filled a symbol with ~15 copies
-        // 4096 apart; the strobe now plays loops=1 once per TDD frame, so copies
-        // are 122880 samples apart while the acquisition window is at most
-        // samps_per_frame (122880) and the escalation window 9543. Both hold at
-        // most ONE copy, so there is no copy ambiguity to be repeatable about
-        // and the targeted rule's precondition holds here too.
+        // There is no multi-copy argument for a cluster-refined earliest pick:
+        // the strobe plays loops=1 once per TDD frame, so copies are a frame
+        // apart, while the acquisition window is at most samps_per_frame and
+        // the escalation window 2.33 slots. Each holds at most ONE copy, so
+        // there is no copy ambiguity to be repeatable about and the targeted
+        // rule's precondition holds here too.
         //
-        // Iris/UHD keeps the old rule: different hardware, different framer, and
-        // this bench cannot exercise it.
-        // NOTE the earlier corr_scale_init change did NOT resolve the run-to-run
-        // constellation split it was investigated for -- see config.cc.
+        // Iris/UHD keeps first_crossing through its platform default
+        // (SyncConfig): different hardware, different framer, and this bench
+        // cannot exercise it.
         sync_index = syncSearch(syncbuffmem.at(kSyncDetectChannel).data(),
                                 sample_window,
                                 config_->num_cl_sdrs() > 1

@@ -7,6 +7,7 @@
 ---------------------------------------------------------------------
 */
 
+#include "houdini/rx_packet.h"
 #include "include/config.h"
 
 #include <cerrno>
@@ -16,6 +17,8 @@
 #include <optional>
 #include <random>
 
+#include "houdini/rf_plan.h"
+#include "houdini/tx_rx_boundary.h"
 #include "sync/beacon_shapes.h"
 #include "sync/detector.h"
 #include "include/comms-lib.h"
@@ -27,9 +30,9 @@
 using json = nlohmann::json;
 
 static size_t kFpgaTxRamSize = 4096;
-static size_t kMaxSupportedFFTSize = 2048;
+static size_t kMaxSupportedFFTSize = 4096;  // AP-79: the 5G-like fft 4096
 static size_t kMinSupportedFFTSize = 64;
-static size_t kMaxSupportedCPSize = 128;
+static size_t kMaxSupportedCPSize = 512;  // AP-79: CP 288 at fft 4096
 
 Config::Config(const std::string& jsonfile, const std::string& directory,
                const bool bs_only, const bool client_only, const bool calibrate)
@@ -96,12 +99,12 @@ Config::Config(const std::string& jsonfile, const std::string& directory,
   num_bs_antennas_all_ = 0;
   num_cl_sdrs_ = 0;
 
-  // `channel` is the legacy single knob that sets BOTH directions. TX and RX may
-  // now be given independently via `tx_channel` / `rx_channel` (and the UE's
-  // `ue_tx_channel` / `ue_rx_channel`), each defaulting to `channel`, so every
-  // existing config is unchanged. This lets a node transmit on one channel set
-  // and receive on another -- required where a converter is RX-only (the
-  // RFSoC4x2 has 2 DACs but 4 ADCs) or the TX and RX antenna counts differ.
+  // `channel` is the single knob that sets BOTH directions. TX and RX may be
+  // given independently via `tx_channel` / `rx_channel` (and the UE's
+  // `ue_tx_channel` / `ue_rx_channel`), each defaulting to `channel`. This lets
+  // a node transmit on one channel set and receive on another, required where a
+  // converter is RX-only (the RFSoC4x2 has 2 DACs but 4 ADCs) or the TX and RX
+  // antenna counts differ.
   // Each spec is letters A-D (any subset, in order); the count feeds the
   // recorder/antenna accounting (RX) and the stream setup (per direction).
   const auto valid_ch = [](const std::string& s) {
@@ -144,13 +147,156 @@ Config::Config(const std::string& jsonfile, const std::string& directory,
   freq_ = tddConf.value("frequency", 2.5e9);
   rate_ = tddConf.value("sample_rate", 5e6);
   nco_ = tddConf.value("nco_frequency", 0.75 * rate_);
+  // AP-79 mode V, all optional (absent = one rate, one NCO, as before). The TX
+  // stream may run at twice the RX/tick rate: every TX waveform is still built
+  // at sample_rate and doubled by the x2 interpolator at the radio boundary
+  // (dsp/band_filters.h), so no other ratio is accepted.
+  tx_rate_ = tddConf.value("tx_sample_rate", rate_);
+  if (tx_rate_ != rate_ && tx_rate_ != 2.0 * rate_) {
+    throw std::invalid_argument(
+        "tx_sample_rate must equal sample_rate or twice it (the x2 TX "
+        "interpolator is the only one built)");
+  }
+  adc_fs_hz_ = tddConf.value("rfdc_adc_fs_mhz", 0.0) * 1e6;
+  dac_fs_hz_ = tddConf.value("rfdc_dac_fs_mhz", 0.0) * 1e6;
+  if ((adc_fs_hz_ > 0.0) != (dac_fs_hz_ > 0.0)) {
+    throw std::invalid_argument(
+        "rfdc_adc_fs_mhz and rfdc_dac_fs_mhz are set together or not at all");
+  }
+  // Only the NCO is per channel (the config stays common; only what must
+  // differ is split); zone, calibration mode, inverse sinc and the RX filter
+  // are derived from it (houdini/rf_plan.h).
+  if (tddConf.contains("channel_nco_frequency")) {
+    const auto& m = tddConf["channel_nco_frequency"];
+    if (!m.is_object()) {
+      throw std::invalid_argument(
+          "channel_nco_frequency must be an object of channel letter -> Hz");
+    }
+    for (auto it = m.begin(); it != m.end(); ++it) {
+      const auto chs = Utils::strToChannels(it.key());
+      if (chs.size() != 1 || !it.value().is_number()) {
+        throw std::invalid_argument("channel_nco_frequency: key \"" + it.key() +
+                                    "\" must be ONE letter A-D with a value in Hz");
+      }
+      channel_nco_[chs.front()] = it.value().get<double>();
+    }
+  }
+  houdini_tx_gain_db_ = tddConf.value("houdini_tx_gain_db",
+                                      std::numeric_limits<double>::quiet_NaN());
+  houdini_rx_gain_db_ = tddConf.value("houdini_rx_gain_db",
+                                      std::numeric_limits<double>::quiet_NaN());
+  if (adc_fs_hz_ > 0.0 && tddConf.value("radio_type", "iris") != std::string("houdini")) {
+    throw std::invalid_argument("rfdc_*_fs_mhz (mode V) is Houdini-only");
+  }
+  if (adc_fs_hz_ > 0.0 && (tddConf.value("fft_size", 0) <= 0 ||
+                           tddConf.value("ofdm_data_num", 0) <= 0)) {
+    // The per-channel plan is checked against the waveform's occupied band.
+    throw std::invalid_argument(
+        "mode V (rfdc_*_fs_mhz) needs fft_size and ofdm_data_num: the channel "
+        "plan is checked against the band the waveform occupies");
+  }
+  if (!(adc_fs_hz_ > 0.0) &&
+      (tddConf.contains("channel_nco_frequency") || tddConf.contains("houdini_tx_gain_db") ||
+       tddConf.contains("houdini_rx_gain_db"))) {
+    // These are applied only by the mode-V bring-up; without it they would
+    // silently do nothing (every channel on nco_frequency, make()'s gains).
+    throw std::invalid_argument(
+        "channel_nco_frequency and houdini_tx/rx_gain_db need the mode-V converter "
+        "plan (rfdc_adc_fs_mhz / rfdc_dac_fs_mhz); without it they are not applied");
+  }
+  if (tx_rate_ != rate_ && !(adc_fs_hz_ > 0.0)) {
+    throw std::invalid_argument(
+        "tx_sample_rate != sample_rate needs the mode-V converter plan "
+        "(rfdc_adc_fs_mhz / rfdc_dac_fs_mhz); without it the TX rate is not applied");
+  }
   symbol_per_slot_ = tddConf.value("ofdm_symbol_per_slot", 1);
   fft_size_ = tddConf.value("fft_size", 0);
   cp_size_ = tddConf.value("cp_size", 0);
   dl_pilots_en_ = tddConf.value("enable_dl_pilots", false);
   prefix_ = tddConf.value("ofdm_tx_zero_prefix", 0);
+  if (adc_fs_hz_ > 0.0 && tx_rate_ != rate_) {
+    // The TX interpolator (RadioHoudini) needs zeros around every burst's
+    // content, on either lane path (prefiltered, or the wide halfband of
+    // AP-85), and the slot's zero prefix/postfix are what provide them; too
+    // few and the filter's ramps are cut off at the buffer edge, bringing back
+    // the splatter the prefilter exists to remove.
+    const int need_pre = static_cast<int>(houdini::boundary::TxBurstInterpolator::maxLead());
+    const int need_post = static_cast<int>(houdini::boundary::TxBurstInterpolator::maxTail());
+    if (tddConf.value("ofdm_tx_zero_prefix", 0) < need_pre ||
+        tddConf.value("ofdm_tx_zero_postfix", 0) < need_post) {
+      throw std::invalid_argument(
+          "mode V with tx_sample_rate = 2 x sample_rate needs ofdm_tx_zero_prefix >= " +
+          std::to_string(need_pre) + " and ofdm_tx_zero_postfix >= " + std::to_string(need_post) +
+          " (the TX prefilter and interpolator margins)");
+    }
+  }
   postfix_ = tddConf.value("ofdm_tx_zero_postfix", 0);
   symbol_data_subcarrier_num_ = tddConf.value("ofdm_data_num", fft_size_);
+  // AP-85: a tone count per channel, keyed like channel_nco_frequency (the
+  // X-band at 270 RB beside the sub-6 at 133); absent, every channel carries
+  // ofdm_data_num. Mode V only: its per-channel plan and TX lanes are what
+  // apply a per-channel width.
+  if (tddConf.contains("channel_ofdm_data_num")) {
+    const auto& m = tddConf["channel_ofdm_data_num"];
+    if (!(adc_fs_hz_ > 0.0)) {
+      throw std::invalid_argument(
+          "channel_ofdm_data_num needs the mode-V converter plan (rfdc_adc_fs_mhz / "
+          "rfdc_dac_fs_mhz); without it a per-channel width is not applied");
+    }
+    if (!m.is_object()) {
+      throw std::invalid_argument("channel_ofdm_data_num must be an object of channel letter -> tones");
+    }
+    if (fft_size_ == Consts::kFftSize_80211) {
+      throw std::invalid_argument("channel_ofdm_data_num needs a Zadoff-Chu pilot (fft_size other than 64)");
+    }
+    for (auto it = m.begin(); it != m.end(); ++it) {
+      const auto chs = Utils::strToChannels(it.key());
+      // Whole RBs (12 tones): the pilot tones sit at each RB's centre, and
+      // the ZC generator reads past its sequence for an odd count.
+      if (chs.size() != 1 || !it.value().is_number_unsigned() || it.value().get<size_t>() == 0 ||
+          it.value().get<size_t>() % 12 != 0 || it.value().get<size_t>() > fft_size_) {
+        throw std::invalid_argument("channel_ofdm_data_num: key \"" + it.key() +
+                                    "\" must be ONE letter A-D with a whole number of RBs (a multiple of 12 "
+                                    "tones) up to fft_size");
+      }
+      channel_data_num_[chs.front()] = it.value().get<size_t>();
+    }
+  }
+  if (adc_fs_hz_ > 0.0) {
+    // Every channel's band inside the RX decimator's passband, which is also
+    // the wide TX halfband's design edge (dsp/band_filters.h).
+    const double max_half = houdini::rfplan::Rules{}.decim_pass_frac * rate_;
+    auto half = [this](size_t n) { return static_cast<double>(n) * rate_ / static_cast<double>(fft_size_) / 2.0; };
+    std::map<size_t, size_t> tones;  // every channel either node opens, and every override
+    for (const auto* spec : {&bs_tx_channel_, &bs_rx_channel_, &cl_tx_channel_, &cl_rx_channel_})
+      for (const size_t ch : Utils::strToChannels(*spec)) tones[ch] = symbol_data_subcarrier_num_;
+    for (const auto& [ch, n] : channel_data_num_) tones[ch] = n;
+    for (const auto& [ch, n] : tones) {
+      if (half(n) > max_half) {
+        throw std::invalid_argument("channel " + std::string(1, static_cast<char>('A' + ch)) + ": " +
+                                    std::to_string(n) + " tones occupy +-" + std::to_string(half(n) / 1e6) +
+                                    " MHz, beyond the decimator's passband +-" + std::to_string(max_half / 1e6) +
+                                    " MHz (0.4 x sample_rate)");
+      }
+    }
+    // Channels on one NCO are one band (in mode V the NCO is the band's
+    // centre), so they carry one tone count: this is what ties the UE's TX
+    // B to the BS's RX C, and a file that widens one and not the other would
+    // have the BS estimate the X-band against the wrong pilot.
+    auto nco_of = [this](size_t ch) {
+      const auto it = channel_nco_.find(ch);
+      return it != channel_nco_.end() ? it->second : nco_;
+    };
+    for (const auto& [a, na] : tones)
+      for (const auto& [b, nb] : tones)
+        if (a < b && nco_of(a) == nco_of(b) && na != nb) {
+          throw std::invalid_argument(
+              "channels " + std::string(1, static_cast<char>('A' + a)) + " and " +
+              std::string(1, static_cast<char>('A' + b)) + " share the NCO " + std::to_string(nco_of(a) / 1e6) +
+              " MHz but carry " + std::to_string(na) + " and " + std::to_string(nb) +
+              " tones; set both in channel_ofdm_data_num");
+        }
+  }
   pilot_seq_ = tddConf.value("pilot_seq", "lts");
   data_mod_ = tddConf.value("modulation", "QPSK");
   single_gain_ = tddConf.value("single_gain", true);
@@ -182,7 +328,7 @@ Config::Config(const std::string& jsonfile, const std::string& directory,
   beam_sweep_ = tddConf.value("beamsweep", false);
   // WHICH beacon waveform. Parsed here because this is where tddConf lives;
   // genPilots builds from it. Unknown names throw there rather than falling
-  // back, so a typo cannot quietly ship the old beacon.
+  // back, so a typo cannot quietly ship the default beacon.
   // sync.beacon.type, or the legacy top-level "beacon_type" (SyncConfig
   // accepts either and refuses the two disagreeing).
   beacon_type_ = sync_.beacon.type;
@@ -196,6 +342,12 @@ Config::Config(const std::string& jsonfile, const std::string& directory,
     max_frame_ = static_cast<size_t>(std::strtoull(mf, nullptr, 10));
   }
   bs_hw_framer_ = tddConf.value("bs_hw_framer", true);
+  // AP-87: the BS receives only its rx slots (the real TDD pattern and the
+  // device's SH-347 slots mode); checked below once the slot size is known.
+  bs_rx_slots_ = tddConf.value("bs_rx_slots", false);
+  // The BS removes each lane's pilot-measured carrier offset before the FFT
+  // (houdini/pre_cfo.h), not only per symbol after it.
+  bs_cfo_pre_fft_ = tddConf.value("bs_cfo_pre_fft", false);
 
   // Load/Build BS and Client SDRs' Schedules
   bs_array_frames_.resize(num_cells_);
@@ -257,14 +409,25 @@ Config::Config(const std::string& jsonfile, const std::string& directory,
   cl_power_ramp_hi_ = tddConf.value("ue_ramp_max_gain", 42);
   frame_mode_ = tddConf.value("frame_mode", "continuous_resync");
   hw_framer_ = tddConf.value("ue_hw_framer", false);
+  // AP-86: the X-band RF front end (XUD1A + ADTR1107) is attached. Each node
+  // holds its board STATIC for the session (BS rx, UE tx; the mode V bring-up,
+  // step 1b). The UE must never arm a TDD schedule then: the device's arm gate
+  // refuses it under a static source with a guarded channel.
+  xband_frontend_static_ = tddConf.value("xband_frontend_static", false);
+  if (xband_frontend_static_ && !mode_v()) {
+    throw std::invalid_argument("xband_frontend_static needs the mode-V converter plan (rfdc_adc_fs_mhz / rfdc_dac_fs_mhz)");
+  }
+  if (xband_frontend_static_ && hw_framer_) {
+    throw std::invalid_argument("xband_frontend_static: ue_hw_framer must be false (the UE must not arm a TDD schedule while its board is held static)");
+  }
   radio_type_ = tddConf.value("radio_type", "iris");
   remote_port_ = tddConf.value("remote_port", "55132");
   ue_tdd_pilot_ = tddConf.value("ue_tdd_pilot", false);
   ue_tx_advance_ticks_ = tddConf.value("ue_tx_advance_ticks", 0);
   // The driver accepts TX anchors only on the 384-tick grid, so this knob is
   // quantized: values below 192 vanish in the round-to-nearest, larger ones
-  // jump whole grid steps (Opus review M6). Fine seating comes from the
-  // zero-padded burst composition; leave this at 0 unless you know why not.
+  // jump whole grid steps. Fine seating comes from the zero-padded burst
+  // composition; leave this at 0 unless you know why not.
   if (ue_tx_advance_ticks_ != 0 && ue_tx_advance_ticks_ % 384 != 0) {
     MLPD_WARN(
         "ue_tx_advance_ticks=%lld is not a multiple of 384 ticks and will be "
@@ -289,7 +452,7 @@ Config::Config(const std::string& jsonfile, const std::string& directory,
     corr_scale_.resize(num_cl_sdrs_, 1);
   } else {
     if (client_present_ && corr_scale.size() != num_cl_sdrs_) {
-      MLPD_ERROR("tx_advance size must be same as the number of clients!\n");
+      MLPD_ERROR("corr_scale size must match the number of clients!\n");
       exit(1);
     }
     corr_scale_.assign(corr_scale.begin(), corr_scale.end());
@@ -297,20 +460,11 @@ Config::Config(const std::string& jsonfile, const std::string& directory,
   // Acquisition gets its own threshold. The re-sync path deliberately RELAXES on
   // every retry (corr_scale + resync_retry_cnt) because there getting a lock back
   // beats stalling; acquisition is the opposite case, because the frame anchor it
-  // produces is what every slot boundary in the frame is measured from. Measured on
-  // the bench the two populations are cleanly separated: windows with no beacon peak
-  // at a ratio of 3.4e-07, windows with one peak at 0.31 to 4.2 (median 2.8), and the
-  // shipped corr_scale of 100 puts the bar at 0.01 -- far below anything real, which
-  // is what let sidelobes cross first. Defaults to corr_scale when unset, so this is
+  // produces is what every slot boundary in the frame is measured from. On the
+  // bench, beacon windows peak at a ratio of 0.31 to 4.2 while a corr_scale of 100
+  // puts the bar at 0.01, low enough for sidelobes to cross first
+  // (DEMO_VERIFICATION.md 4.14). Defaults to corr_scale when unset, so this is
   // inert until a config asks for it.
-  //
-  // WHAT THIS DID NOT FIX: it was investigated as the cause of the run-to-run
-  // constellation split (some restarts give clean QPSK, others a ring) and it is NOT
-  // that cause. With this in place the split persists. Measured afterwards: SNR is
-  // 27..31 dB in good and bad runs alike, the pilot slot is captured every run, and
-  // the fault is that each DATA subcarrier goes incoherent across the symbols of the
-  // U slot (per-tone coherence 0.63 vs 0.997) while the pilot tones in those same
-  // symbols stay perfect. The change here is still correct on its own terms.
   auto corr_scale_init = tddConf.value("corr_scale_init", json::array());
   if (corr_scale_init.empty() == true) {
     corr_scale_init_ = corr_scale_;
@@ -374,6 +528,33 @@ Config::Config(const std::string& jsonfile, const std::string& directory,
   ofdm_symbol_size_ = fft_size_ + cp_size_;
   slot_samp_size_ = symbol_per_slot_ * ofdm_symbol_size_;
   samps_per_slot_ = slot_samp_size_ + prefix_ + postfix_;
+  if (bs_rx_slots_ && !bs_hw_framer_) {
+    throw std::invalid_argument("bs_rx_slots needs bs_hw_framer (the native TDD framer arms the pattern)");
+  }
+  if (bs_rx_slots_ && houdini::rxpkt::tiledPacketOrDefault(samps_per_slot_) == 0) {
+    throw std::invalid_argument("bs_rx_slots needs packets that tile the slot (the device cuts whole packets at the "
+                                "slot edges); a " + std::to_string(samps_per_slot_) + "-sample slot has no such packet");
+  }
+  // The Houdini TDD framer cuts ONE pilot slot per frame: it keeps the
+  // schedule's 'P' as the pilot and centres the burst search on it, so a
+  // second 'P' sits where the search assumes silence and misplaces every cut,
+  // unflagged. With bs_rx_slots the beacon strobe is armed on the 'B' slot, so
+  // a schedule without one plays no beacon.
+  if (is_houdini() && bs_hw_framer_ && !internal_measurement_) {
+    for (const auto& cell : bs_array_frames_) {
+      for (const auto& sched : cell) {
+        const auto np = std::count(sched.begin(), sched.end(), 'P');
+        if (np != 1) {
+          throw std::invalid_argument("frame_schedule '" + sched + "': the Houdini TDD framer cuts exactly one pilot "
+                                      "slot ('P') per frame; this schedule has " + std::to_string(np));
+        }
+        if (bs_rx_slots_ && sched.find('B') == std::string::npos) {
+          throw std::invalid_argument("frame_schedule '" + sched + "': bs_rx_slots arms the beacon strobe on the "
+                                      "schedule's 'B' slot, and this schedule has none");
+        }
+      }
+    }
+  }
   assert((internal_measurement_ && num_cl_antennas_ == 0) || (dl_pilots_en_) ||
          (num_cl_sdrs_ > 0 && slot_per_frame_ == cl_frames_.at(0).size()));
 
@@ -844,18 +1025,16 @@ void Config::genPilots() {
   std::vector<std::complex<int16_t>> prefix_zpad(prefix_, 0);
   std::vector<std::complex<int16_t>> postfix_zpad(postfix_, 0);
 
-  // Compose the beacon slot. WHICH beacon is a config choice since 2026-09-02
-  // ("beacon_type": legacy | legacy_guard | dot11 | nr), and every candidate is
-  // defined once in include/sync/beacon_shapes.h -- the same header the offline
-  // geometry test and the bench probes build from, so the waveform this
-  // transmits is sample-for-sample the waveform they measured. That agreement
-  // is the point: AP-34(a) cost a bench session because the bench and the build
-  // disagreed about a beacon.
+  // Compose the beacon slot. WHICH beacon is a config choice (sync.beacon.type,
+  // or the top-level beacon_type), and every candidate is defined once in
+  // include/sync/beacon_shapes.h: the same header the offline geometry test and
+  // the bench probes build from, so the waveform this transmits is
+  // sample-for-sample the waveform they measured, and the bench and the build
+  // cannot disagree about a beacon.
   //
-  // DEFAULT IS `legacy`, WHICH IS BIT-IDENTICAL TO WHAT THIS FUNCTION BUILT
-  // BEFORE (asserted by beacon_geometry_test against this very recipe), because
-  // it measured the best detection margin of the four and every prior result in
-  // DEMO_VERIFICATION was taken against it. See 8.111-8.116 for the comparison.
+  // The default is `legacy` (beacon_geometry_test pins its recipe bit for bit):
+  // the reference every result in DEMO_VERIFICATION.md before the shape choice
+  // was taken against (8.111-8.116 compare the shapes).
   srand(time(NULL));
   // The configured beacon as ONE object (sync/beacon_shape.h): waveform,
   // replica, field geometry and the index convention every consumer rests
@@ -870,13 +1049,27 @@ void Config::genPilots() {
   shape_ = std::make_unique<houdini::sync::BeaconShape>(
       houdini::sync::BeaconShape::make(beacon_type_, platform(), num));
   const houdini::sync::BeaconShape& shape = *shape_;
+  if (mode_v()) {
+    // AP-79: in mode V the sub-6 RX lanes are filtered to +-24 MHz and the TX
+    // is prefiltered to it, so a beacon wider than that is cut on both ends
+    // while the detector still correlates against its full-band replica.
+    const double half = shape.occupiedHalfBwHz();
+    const double pass = houdini::rfplan::Rules{}.filter_pass_hz;
+    if (!(half > 0.0) || half > pass) {
+      throw std::invalid_argument(
+          "mode V needs a band-limited beacon inside +-" + std::to_string(pass / 1e6) +
+          " MHz (sync.beacon.type nr_pss_bl); " + beacon_type_ + " occupies " +
+          (half > 0.0 ? "+-" + std::to_string(half / 1e6) + " MHz" : std::string("the whole output")));
+    }
+  }
 
   // NOTE THE REPLICA'S SCALE IS LOAD-BEARING, and do not "tidy" it to unit
-  // power. find_beacon's test is `corr_scale * |gc|^2|gc_lag|^2 > sum|gc|^2`,
-  // 4th order against 2nd, so scaling the replica by k scales the decision ratio
-  // by k^2. Every detector ratio in DEMO_VERIFICATION 8.112 was measured with
-  // the replica exactly as it comes out of beacon_shapes, and renormalising it
-  // would move every threshold without touching a threshold.
+  // power. The power-ratio form's test is `corr_scale * |gc|^2|gc_lag|^2 >
+  // sum|gc|^2`, 4th order against 2nd, so scaling the replica by k scales the
+  // decision ratio by k^2 (the normalised forms divide the scale out). Every
+  // detector ratio in DEMO_VERIFICATION.md 8.112 was measured with the replica
+  // exactly as it comes out of beacon_shapes, and renormalising it would move
+  // every power-form threshold without touching a threshold.
   auto gold_ifft_ci16 = Utils::cfloat_to_cint16(shape.replica());
   gold_cf32_.assign(shape.replica().begin(), shape.replica().end());
   // The sentinels resolve against the shape and the slot layout now that both
@@ -926,20 +1119,11 @@ void Config::genPilots() {
     }
   }
 
-  // HISTORICAL NOTE, kept because it names a cause that turned out to be wrong.
-  // A 32-sample cyclic guard was inserted between the STS run and the gold field
-  // (the 802.11 GI2 pattern) and reverted on 2026-08-31, because the returned
-  // detector index moved by a measured -274 samples and the invariant the whole
-  // timing chain rests on -- sync_index == houdiniBeaconEnd() == strobe +
-  // beacon_size -- stopped holding, so beaconSnrDb measured pre-beacon noise and
-  // the 30 dB floor rejected every resync while acquisition still worked. THE
-  // GUARD WAS NOT THE CAUSE. The resync search took the EARLIEST threshold
-  // crossing, and the STS preamble is 16-periodic against a 128-sample
-  // correlator lag, so it is perfectly lag-128 self-coherent and manufactures
-  // crossings hundreds of samples early once the link is strong enough. The
-  // guard only lowered the level at which that happens. Fixed 2026-09-02 by
-  // CommsLib::BeaconPick::kTargetedArgmax; `legacy_guard` is now a selectable
-  // shape and measures the same index as every other. See BACKLOG AP-34.
+  // A detector index hundreds of samples early on a strong link is the
+  // earliest-crossing pick locking onto the STS preamble (16-periodic, so
+  // lag-128 self-coherent), not the beacon's cyclic guard: `legacy_guard`
+  // measures the same index as every other shape under
+  // CommsLib::BeaconPick::kTargetedArgmax (comms-lib.h; BACKLOG AP-34).
   beacon_ci16_ = Utils::cfloat_to_cint16(shape.core());
   beacon_size_ = beacon_ci16_.size();
   if (getenv("HOUDINI_DUMP_GOLD") != nullptr) {
@@ -947,7 +1131,7 @@ void Config::genPilots() {
     // the shape's own scale) -- what buildHoudiniBeacon conjugates and scales
     // into the replay RAM. Lets offline tools (tests/demo-verify) construct the
     // exact TX waveform. Length is beacon_size(), NOT a constant: 496 for
-    // legacy, 528 / 320 / 272 for the others.
+    // legacy, the shape's own for the others.
     FILE* f = std::fopen(Utils::dumpPath("beacon_core.bin").c_str(), "wb");
     if (f == nullptr) {
       MLPD_WARN("HOUDINI_DUMP_GOLD: cannot open %s (%s)\n",
@@ -987,36 +1171,107 @@ void Config::genPilots() {
   }
 
   // compose pilot slot
+  // Refuse rather than clamp: a silent clamp leaves ofdm_data_num, the slot
+  // length and every derived bandwidth describing a waveform that is not the
+  // one generated (fft 4096 clamped to 2048 doubles the computed occupancy).
   if (fft_size_ > kMaxSupportedFFTSize) {
-    fft_size_ = kMaxSupportedFFTSize;
-    std::cout << "Unsupported fft size! Setting fft size to "
-              << kMaxSupportedFFTSize << "..." << std::endl;
+    throw std::invalid_argument("fft_size " + std::to_string(fft_size_) + " above " +
+                                std::to_string(kMaxSupportedFFTSize));
   }
-
+  // Below the floor, samps_per_slot_ was already sized from the configured
+  // fft_size while the pilot is built at 64 points, so the pilot-slot length
+  // check in buildBand refuses the config (if the slot-size check above has
+  // not already).
   if (fft_size_ < kMinSupportedFFTSize) {
     fft_size_ = kMinSupportedFFTSize;
     std::cout << "Unsupported fft size! Setting fft size to "
               << kMinSupportedFFTSize << "..." << std::endl;
   }
-
   if (cp_size_ > kMaxSupportedCPSize) {
-    cp_size_ = 0;
-    std::cout << "Invalid cp size! Setting cp size to " << cp_size_ << "..."
-              << std::endl;
+    throw std::invalid_argument("cp_size " + std::to_string(cp_size_) + " above " +
+                                std::to_string(kMaxSupportedCPSize));
   }
 
+
+  // The pilot and the UE data slot, per band (AP-85). Band 0 is ofdm_data_num
+  // and the single-band accessors read it (pilot_ci16(), data_ind(), ...); a
+  // channel with a channel_ofdm_data_num entry carries the band of its tone
+  // count. One construction serves every band, so a config without the key
+  // builds band 0 alone.
+  ue_data_mod_order_ = (cl_data_mod_ == "QAM64")   ? 6
+                       : (cl_data_mod_ == "QAM16") ? 4
+                                                   : 2;  // bits/symbol (QPSK)
+  const float tx_scale_cfg = tx_scale_;  // 0 = each band derives its own
+  bands_.clear();
+  band_of_channel_.clear();
+  bands_.push_back(buildBand(symbol_data_subcarrier_num_, tx_scale_cfg));
+  symbol_data_subcarrier_num_ = bands_.at(0).data_num;  // 52 at fft 64 (802.11)
+  tx_scale_ = bands_.at(0).tx_scale;
+
+  pilot_ = Utils::cint16_to_uint32(bands_.at(0).pilot_ci16, false, "QI");
+
+  // Pad to the Iris FPGA TX_RAM (4096 words), only when the pilot is shorter: a
+  // longer slot (the 5G-like numerology's 61440 samples) is left as it is.
+  // Houdini does not use this RAM image.
+  if (pilot_.size() < kFpgaTxRamSize) pilot_.resize(kFpgaTxRamSize, 0);
+#if DEBUG_PRINT
+  for (size_t j = 0; j < bands_.at(0).pilot_ci16.size(); j++) {
+    std::cout << "Pilot[" << j << "]: \t " << bands_.at(0).pilot_ci16.at(j) << std::endl;
+  }
+#endif
+
+  for (const auto& [ch, n] : channel_data_num_) {
+    size_t b = 0;
+    while (b < bands_.size() && bands_.at(b).data_num != n) ++b;
+    if (b == bands_.size()) {
+      std::printf("Channel %c band: %zu tones (+-%.3f MHz)\n", static_cast<char>('A' + ch), n,
+                  static_cast<double>(n) * rate_ / static_cast<double>(fft_size_) / 2.0 / 1e6);
+      bands_.push_back(buildBand(n, tx_scale_cfg));
+    }
+    band_of_channel_[ch] = b;
+  }
+}
+
+OfdmBand Config::buildBand(size_t data_num, float tx_scale_cfg) const {
+  std::vector<std::complex<int16_t>> prefix_zpad(prefix_, 0);
+  std::vector<std::complex<int16_t>> postfix_zpad(postfix_, 0);
+  OfdmBand band;
+  band.data_num = data_num;
   if (fft_size_ == 64) {
-    pilot_sym_f_ = CommsLib::getSequence(CommsLib::LTS_SEQ_F);
-    pilot_sym_t_ = CommsLib::getSequence(CommsLib::LTS_SEQ);
-    symbol_data_subcarrier_num_ = Consts::kNumMappedSubcarriers_80211;
+    band.pilot_sym_f = CommsLib::getSequence(CommsLib::LTS_SEQ_F);
+    band.pilot_sym_t = CommsLib::getSequence(CommsLib::LTS_SEQ);
+    band.data_num = Consts::kNumMappedSubcarriers_80211;
   } else {  // Construct Zadoff-Chu-based pilot
-    pilot_sym_f_ = CommsLib::getSequence(CommsLib::LTE_ZADOFF_CHU_F,
-                                         symbol_data_subcarrier_num_);
-    pilot_sym_t_ = CommsLib::getSequence(CommsLib::LTE_ZADOFF_CHU,
-                                         symbol_data_subcarrier_num_);
+    // The ZC tones on the data_num CENTRE subcarriers of an fft_size grid (the
+    // placement getDataSc uses), and the symbol the IFFT of that grid at
+    // fft_size. Do not take the generator's time-domain symbol: it pads its
+    // tones to the next power of two ABOVE data_num, which equals fft_size only
+    // when data_num does (at fft 256 with 96 tones that is a 128-point symbol,
+    // with the wrong slot length and twice the tone spacing).
+    const auto zc = CommsLib::getSequence(CommsLib::LTE_ZADOFF_CHU_F, data_num);
+    const size_t padded = zc.at(0).size();
+    const size_t lead = (padded - data_num) / 2;  // the generator's own centring
+    const size_t start = (fft_size_ - data_num) / 2;
+    if (data_num > fft_size_) {
+      throw std::invalid_argument("ofdm_data_num " + std::to_string(data_num) + " exceeds fft_size " +
+                                  std::to_string(fft_size_));
+    }
+    band.pilot_sym_f.assign(2, std::vector<float>(fft_size_, 0.0f));
+    std::vector<std::complex<float>> grid(fft_size_, std::complex<float>(0.0f, 0.0f));
+    for (size_t i = 0; i < data_num; ++i) {
+      band.pilot_sym_f[0][start + i] = zc[0][lead + i];
+      band.pilot_sym_f[1][start + i] = zc[1][lead + i];
+      grid[start + i] = std::complex<float>(zc[0][lead + i], zc[1][lead + i]);
+    }
+    const auto t = CommsLib::IFFT(grid, static_cast<int>(fft_size_), 1.f / static_cast<float>(fft_size_), false, true);
+    band.pilot_sym_t.assign(2, std::vector<float>(fft_size_, 0.0f));
+    for (size_t i = 0; i < fft_size_; ++i) {
+      band.pilot_sym_t[0][i] = t[i].real();
+      band.pilot_sym_t[1][i] = t[i].imag();
+    }
   }
 
-  auto iq_tmp_ci16 = Utils::float_to_cint16(pilot_sym_t_);
+  auto iq_tmp_ci16 = Utils::float_to_cint16(band.pilot_sym_t);
   auto iq_cf = Utils::cint16_to_cfloat(iq_tmp_ci16);
   float max_amp = 0;
   for (size_t i = 0; i < iq_cf.size(); i++) {
@@ -1024,73 +1279,76 @@ void Config::genPilots() {
     if (this_amp > max_amp) max_amp = this_amp;
   }
   std::printf("Max pilot amplitude = %.2f\n", max_amp);
-  // Amplitude backoff: houdini targets ~1/2 FS [user 2026-08-30] -- its data
-  // slot is separately normalized below to the same realized peak, and
-  // cfloat_to_cint16 saturates. Iris/UHD keep the original x4: their
-  // file-based UL data (data_generator.cc) inherits tx_scale with NO peak
-  // normalization, so halving the backoff there would clip real PAPR
-  // (Opus review finding 1).
+  // Amplitude backoff: houdini targets ~1/2 FS; its data slot is separately
+  // normalized below to the same realized peak, and cfloat_to_cint16
+  // saturates. Iris/UHD keep x4: their file-based UL data (data_generator.cc)
+  // inherits tx_scale with NO peak normalization, so halving the backoff there
+  // would clip real PAPR. Each band is normalized on its own (AP-85).
   const float ofdm_pwr_scale_lin = is_houdini() ? 2.0f : 4.0f;
-  if (tx_scale_ == 0) {
-    tx_scale_ = 1 / (ofdm_pwr_scale_lin * max_amp);
+  band.tx_scale = tx_scale_cfg;
+  if (band.tx_scale == 0) {
+    band.tx_scale = 1 / (ofdm_pwr_scale_lin * max_amp);
   }
   for (size_t i = 0; i < iq_cf.size(); i++) {
-    iq_cf.at(i) *= tx_scale_;
+    iq_cf.at(i) *= band.tx_scale;
   }
   auto iq_ci16 = Utils::cfloat_to_cint16(iq_cf);
   // copy the CP via a temp: inserting a container's own tail into its front
-  // is UB ([sequence.reqmts]); it only worked here by reallocation luck
+  // is UB ([sequence.reqmts])
   {
     std::vector<std::complex<int16_t>> cp_tmp(iq_ci16.end() - cp_size_,
                                               iq_ci16.end());
     iq_ci16.insert(iq_ci16.begin(), cp_tmp.begin(), cp_tmp.end());
   }
 
-  pilot_ci16_.clear();
-  pilot_ci16_.insert(pilot_ci16_.begin(), prefix_zpad.begin(),
-                     prefix_zpad.end());
+  band.pilot_ci16.insert(band.pilot_ci16.begin(), prefix_zpad.begin(), prefix_zpad.end());
   for (size_t i = 0; i < symbol_per_slot_; i++)
-    pilot_ci16_.insert(pilot_ci16_.end(), iq_ci16.begin(), iq_ci16.end());
-  pilot_ci16_.insert(pilot_ci16_.end(), postfix_zpad.begin(),
-                     postfix_zpad.end());
-
-  pilot_ = Utils::cint16_to_uint32(pilot_ci16_, false, "QI");
-
-  size_t remain_size =
-      kFpgaTxRamSize - pilot_.size();  // 4096 is the size of TX_RAM in the FPGA
-  for (size_t j = 0; j < remain_size; j++) pilot_.push_back(0);
-#if DEBUG_PRINT
-  for (size_t j = 0; j < pilot_ci16_.size(); j++) {
-    std::cout << "Pilot[" << j << "]: \t " << pilot_ci16_.at(j) << std::endl;
+    band.pilot_ci16.insert(band.pilot_ci16.end(), iq_ci16.begin(), iq_ci16.end());
+  band.pilot_ci16.insert(band.pilot_ci16.end(), postfix_zpad.begin(), postfix_zpad.end());
+  // Every consumer (the UE's burst composition copies samps_per_slot samples
+  // from it, the BS's CSI windows fft_size bodies against pilot_sym_f) takes
+  // the pilot slot to be exactly one slot long: refuse anything else here,
+  // where the numbers are known, rather than on the rig.
+  if (band.pilot_ci16.size() != samps_per_slot_) {
+    throw std::invalid_argument("pilot slot is " + std::to_string(band.pilot_ci16.size()) + " samples, the slot " +
+                                std::to_string(samps_per_slot_) + " (fft_size " + std::to_string(fft_size_) +
+                                ", cp_size " + std::to_string(cp_size_) + ")");
   }
-#endif
 
-  data_ind_ = CommsLib::getDataSc(fft_size_, symbol_data_subcarrier_num_);
-  pilot_sc_ = CommsLib::getPilotScValue(fft_size_, symbol_data_subcarrier_num_);
-  pilot_sc_ind_ =
-      CommsLib::getPilotScIndex(fft_size_, symbol_data_subcarrier_num_);
+  band.data_ind = CommsLib::getDataSc(fft_size_, band.data_num);
+  band.pilot_sc_ind = CommsLib::getPilotScIndex(fft_size_, band.data_num);
+  if (fft_size_ == Consts::kFftSize_80211) {
+    band.pilot_sc = CommsLib::getPilotScValue(fft_size_, band.data_num);
+  } else {
+    // The data symbols' pilot tones carry the PILOT's own values at those
+    // subcarriers: the ZC grid built above (DC-centred, unit magnitude, the
+    // placement the data symbol uses). Not getPilotScValue: it reads an FFT of
+    // the generator's power-of-two time sequence at natural bins, which at
+    // fft != ofdm_data_num lands mostly between its spectral lobes (near-zero
+    // pilot tones, so the BS's timing fit and phase fix would run on noise).
+    for (const size_t k : band.pilot_sc_ind)
+      band.pilot_sc.push_back(std::complex<float>(band.pilot_sym_f.at(0).at(k), band.pilot_sym_f.at(1).at(k)));
+  }
 
   // UE uplink-data slot (symbol U): a DISTINCT random modulated OFDM symbol per
-  // symbol slot (so the BS tells it from the identical-LTS pilot by self-similarity),
-  // built exactly like Config::DataGenerator so plot_hdf5.py can demodulate it:
+  // symbol slot (so the BS tells it from the identical-symbol pilot by
+  // self-similarity), demodulable offline (plot_hdf5.py) against the reference
+  // loadULData writes:
   //   data subcarriers  <- modulated symbols (modulate() takes SYMBOL INDICES 0..M-1,
   //                        NOT bits), and
   //   pilot subcarriers <- the known OFDM pilot values (for per-symbol phase tracking).
-  // ue_data_f_ keeps the freq-domain reference to write ul_data_f_*.bin.
-  ue_data_mod_order_ = (cl_data_mod_ == "QAM64")   ? 6
-                       : (cl_data_mod_ == "QAM16") ? 4
-                                                   : 2;  // bits/symbol (QPSK)
+  // ue_data_f keeps the freq-domain reference to write ul_data_f_*.bin.
+  // Every band draws from the same fixed seed; the BS separates the bands by
+  // channel, so nothing couples them (AP-85: independent data per band).
   const int mod_alph = 1 << ue_data_mod_order_;  // 4 / 16 / 64
-  const size_t n_data = data_ind_.size();
+  const size_t n_data = band.data_ind.size();
   std::mt19937 rng(0xC0FFEE);  // fixed seed -> reproducible constellation
-  ue_data_ci16_.clear();
-  ue_data_f_.clear();
-  ue_data_ci16_.insert(ue_data_ci16_.end(), prefix_zpad.begin(), prefix_zpad.end());
+  band.ue_data_ci16.insert(band.ue_data_ci16.end(), prefix_zpad.begin(), prefix_zpad.end());
   // Two passes: build every symbol's time-domain float first and find the
   // slot's global peak, then scale the whole slot so its REALIZED peak equals
-  // the pilot's (tx_scale x max_amp). One shared tx_scale used to leave the
-  // data at its raw OFDM PAPR (~2x the pilot peak); both now exercise the
-  // same DAC range [user 2026-08-30].
+  // the pilot's (tx_scale x max_amp), so both exercise the same DAC range (the
+  // pilot's tx_scale alone leaves the data at its raw OFDM PAPR, about twice
+  // the pilot peak).
   std::vector<std::vector<std::complex<float>>> data_syms_t;
   float data_gmax = 0.0f;
   for (size_t sym = 0; sym < symbol_per_slot_; ++sym) {
@@ -1099,17 +1357,17 @@ void Config::genPilots() {
     auto mod_data = CommsLib::modulate(syms_in, ue_data_mod_order_);
     std::vector<std::complex<float>> ofdm_sym(fft_size_, {0.0f, 0.0f});  // DC-centered
     for (size_t j = 0; j < n_data && j < mod_data.size(); ++j)
-      ofdm_sym[data_ind_.at(j)] = mod_data[j];
-    for (size_t c = 0; c < pilot_sc_.size(); ++c)  // OFDM pilot subcarriers
-      ofdm_sym[pilot_sc_ind_.at(c)] = pilot_sc_.at(c);
-    ue_data_f_.insert(ue_data_f_.end(), ofdm_sym.begin(), ofdm_sym.end());
+      ofdm_sym[band.data_ind.at(j)] = mod_data[j];
+    for (size_t c = 0; c < band.pilot_sc.size(); ++c)  // OFDM pilot subcarriers
+      ofdm_sym[band.pilot_sc_ind.at(c)] = band.pilot_sc.at(c);
+    band.ue_data_f.insert(band.ue_data_f.end(), ofdm_sym.begin(), ofdm_sym.end());
     auto data_t = CommsLib::IFFT(ofdm_sym, fft_size_, 1.0f / fft_size_, false, true);
     for (const auto& v : data_t) data_gmax = std::max(data_gmax, std::abs(v));
     data_syms_t.push_back(std::move(data_t));
   }
-  const float pilot_peak_f = tx_scale_ * max_amp;  // the pilot's realized peak
+  const float pilot_peak_f = band.tx_scale * max_amp;  // the pilot's realized peak
   const float dscale = (data_gmax > 0.0f) ? pilot_peak_f / data_gmax
-                                          : ((tx_scale_ > 0.0f) ? tx_scale_ : 0.5f);
+                                          : ((band.tx_scale > 0.0f) ? band.tx_scale : 0.5f);
   for (auto& data_t : data_syms_t) {
     for (auto& v : data_t) v *= dscale;
     auto data_iq = Utils::cfloat_to_cint16(data_t);
@@ -1118,34 +1376,33 @@ void Config::genPilots() {
                                                 data_iq.end());
       data_iq.insert(data_iq.begin(), cp_tmp.begin(), cp_tmp.end());
     }
-    ue_data_ci16_.insert(ue_data_ci16_.end(), data_iq.begin(), data_iq.end());
+    band.ue_data_ci16.insert(band.ue_data_ci16.end(), data_iq.begin(), data_iq.end());
   }
-  ue_data_ci16_.insert(ue_data_ci16_.end(), postfix_zpad.begin(), postfix_zpad.end());
+  band.ue_data_ci16.insert(band.ue_data_ci16.end(), postfix_zpad.begin(), postfix_zpad.end());
 
-  // Report the realized TX peaks in DAC counts (the ONLY level control on
-  // Houdini -- gains are no-ops end to end). The data slot is normalized to
-  // the pilot's realized peak above; print both so any regression in that
-  // equalization is visible against measured numbers.
+  // Report the realized TX peaks in DAC counts, the waveform's digital level
+  // (the analog gains are houdini_tx_gain_db / houdini_rx_gain_db, mode V
+  // only). The data slot is normalized to the pilot's realized peak above;
+  // print both so any regression in that equalization is visible.
   auto peak_counts = [](const std::vector<std::complex<int16_t>>& v) {
     int p = 0;
     for (const auto& s : v)
       p = std::max({p, std::abs((int)s.real()), std::abs((int)s.imag())});
     return p;
   };
-  const int pilot_pk = peak_counts(pilot_ci16_);
-  const int data_pk = peak_counts(ue_data_ci16_);
+  const int pilot_pk = peak_counts(band.pilot_ci16);
+  const int data_pk = peak_counts(band.ue_data_ci16);
   std::printf(
       "TX peaks (int16 counts): pilot %d (%.1f%% FS), UE data %d (%.1f%% FS), "
       "tx_scale %.4f\n",
       pilot_pk, 100.0 * pilot_pk / 32768.0, data_pk,
-      100.0 * data_pk / 32768.0, tx_scale_);
+      100.0 * data_pk / 32768.0, band.tx_scale);
+  return band;
 }
 
 void Config::loadULData() {
   // compose data slot
   if (ul_data_slot_present_) {
-    txdata_time_dom_.resize(num_cl_antennas_);
-    txdata_freq_dom_.resize(num_cl_antennas_);
     // For now, we're reading one frame worth of data
     for (size_t i = 0; i < num_cl_sdrs_; i++) {
       std::string filename_tag = cl_data_mod_ + "_" +
@@ -1163,22 +1420,23 @@ void Config::loadULData() {
           directory_ + "/ul_data_t_" + filename_tag;
       ul_tx_td_data_files_.push_back(filename_ul_data_t);
 
-      // Houdini transmits the in-process UE data slot (ue_data_f_), so write its
+      // Houdini transmits the in-process UE data slot (band 0's ue_data_f), so write its
       // freq-domain reference to the ul_data_f_*.bin that TX_FD_DATA_FILENAMES points
       // to -- plot_hdf5.py needs it to demodulate (the file-based DataGenerator path
       // is bypassed on Houdini). Layout matches the reader: [frame][slot][ch][sym]
-      // [fft] interleaved f32 I/Q; ue_data_f_ is one frame/slot/ch (sym x fft).
-      if (is_houdini() && !ue_data_f_.empty()) {
+      // [fft] interleaved f32 I/Q; ue_data_f is one frame/slot/ch (sym x fft).
+      const auto& ue_data_f = bands_.at(0).ue_data_f;
+      if (is_houdini() && !ue_data_f.empty()) {
         FILE* fp = std::fopen(filename_ul_data_f.c_str(), "wb");
         if (fp != nullptr) {
-          for (const auto& v : ue_data_f_) {
+          for (const auto& v : ue_data_f) {
             const float re = v.real(), im = v.imag();
             std::fwrite(&re, sizeof(float), 1, fp);
             std::fwrite(&im, sizeof(float), 1, fp);
           }
           std::fclose(fp);
           MLPD_INFO("Wrote UE UL freq-domain reference (%zu complex) to %s\n",
-                    ue_data_f_.size(), filename_ul_data_f.c_str());
+                    ue_data_f.size(), filename_ul_data_f.c_str());
         } else {
           MLPD_WARN("Could not write UL reference %s (plot_hdf5 demod unavailable)\n",
                     filename_ul_data_f.c_str());
@@ -1191,8 +1449,6 @@ void Config::loadULData() {
 void Config::loadDLData() {
   // compose data slot
   if (dl_data_slot_present_) {
-    dl_txdata_time_dom_.resize(num_bs_antennas_all_);
-    dl_txdata_freq_dom_.resize(num_bs_antennas_all_);
     // For now, we're reading one frame worth of data
     for (size_t i = 0; i < num_bs_sdrs_all_; i++) {
       std::string filename_tag =
@@ -1213,34 +1469,20 @@ void Config::loadDLData() {
   }
 }
 
-size_t Config::getNumAntennas() {
-  size_t ret;
-  if (this->bs_present_ == false) {
-    ret = 1;
-  } else {
-    ret = (n_bs_sdrs_.at(0) * bs_channel_.length());
-  }
-  return ret;
+const OfdmBand& Config::bsRxBand(size_t ant) const {
+  const auto chs = Utils::strToChannels(bs_rx_channel_);
+  return band(chs.at(ant % chs.size()));
 }
 
-size_t Config::getMaxNumAntennas() {
-  size_t ret;
-  /* Max number of antennas across cells */
-  if (this->bs_present_ == false) {
-    ret = 1;
-  } else {
-    size_t max_num_sdr = 0;
-    for (size_t i = 0; i < this->num_cells_; i++) {
-      if (max_num_sdr < this->n_bs_sdrs_.at(i)) {
-        max_num_sdr = this->n_bs_sdrs_.at(i);
-      }
-      if (internal_measurement_ == true && ref_node_enable_ == true) {
-        max_num_sdr--;  // exclude the ref sdr
-      }
-    }
-    ret = (max_num_sdr * bs_channel_.length());
-  }
-  return ret;
+const OfdmBand& Config::ueTxBand(size_t lane) const {
+  return band(Utils::strToChannels(cl_tx_channel_).at(lane));
+}
+
+std::map<size_t, double> Config::channel_half_bw_hz(void) const {
+  std::map<size_t, double> m;
+  for (const auto& [ch, n] : channel_data_num_)
+    m[ch] = static_cast<double>(n) * rate_ / static_cast<double>(fft_size_) / 2.0;
+  return m;
 }
 
 size_t Config::getNumBsSdrs() {

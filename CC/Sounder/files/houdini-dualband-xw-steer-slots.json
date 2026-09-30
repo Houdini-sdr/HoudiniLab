@@ -1,0 +1,101 @@
+{
+ "_label": "Demo, cabled",
+ "_description": "THE DEMO, cabled: sub-6 2425 MHz at 133 RB + X-band IF 4380 MHz at 270 RB, 4096 FFT, 30 kHz, steered, the BS receiving only its rx slots (needs a host plugin with the slots gate, 0.3.0 or newer, via HOUDINI_SOAPY_ROOT)",
+ "_comment": "AP-79 dual-band demo, HS-202 mode V: sub-6 ISM 2.4 (2400 to 2450 MHz, NCO 2425) both ways plus the X-band IF (NCO 4380) UE to BS, one numerology on both bands. BS: TX ch0 (A, sub-6 beacon), RX ch0 (A, sub-6 uplink) + ch2 (C, X-IF uplink). UE: RX ch0 (A, sub-6 beacon), TX ch0 (A, sub-6) + ch1 (B, X-IF). Cabling (HS-202 plan section 6, Houdini-Streaming docs/DEMO_FREQUENCY_PLAN.md): BS DAC_B -> UE ADC_D (sub-6 downlink), UE DAC_B -> BS ADC_D (sub-6 uplink), UE DAC_A -> BS ADC_B (X-IF uplink); on the lab bench the BS is .22 and the UE .21 (topology-houdini-dualband.json, runbook A1 and A2).",
+ "_status": "VALIDATED: the demo config on the cable (DEMO_VERIFICATION 9.69 CR2 on fpga 1.33; 9.70, 9.71 VL1 35 min, 9.72 the operator path and 9.73 RV1 on fpga 1.34). Needs a host plugin with the slots gate, the release built with the radios' device build (0.3.0 or newer; HOUDINI_SOAPY_ROOT, runbook A3) and packets that tile the slot (the BS opens with HOUDINI_MTU 7738). houdini-dualband-xw-steer.json plus bs_rx_slots (AP-87: the BS arms the pattern its schedule means, the beacon slot strobe, P and U rx, guards closed, with the device's SH-347 slots mode), bs_cfo_pre_fft and the steering deadband at 0.12 ppm.",
+ "serial_file": "files/topology-houdini-dualband.json",
+ "dashboard_mag_top": 115,
+ "_dashboard_note": "dashboard_mag_top: where each dashboard card's |H| axis starts, in dB (csi_gui/csi_server.py; --mag-top overrides, the span is --mag-span, 40); the axis then steps by 10 dB when a trace leaves it. At this numerology |H| reads 97-104 dB on both antennas (DEMO_VERIFICATION 9.48), above the dashboard's default top of 90.",
+ "radio_type": "houdini",
+ "remote_port": "55132",
+ "bs_hw_framer": true,
+ "bs_rx_slots": true,
+ "bs_cfo_pre_fft": true,
+ "ue_tdd_pilot": true,
+ "ue_tx_advance_ticks": 0,
+ "_rates_note": "sample_rate stays 122.88e6: it is the RX rate AND the device tick, and every slot/frame count below is in those ticks. The TX stream runs at tx_sample_rate; every TX waveform is generated at 122.88 and x2 interpolated at the radio boundary (include/dsp/band_filters.h). DAC 5898.24 / interpolation 24, ADC 4915.2 / decimation 40.",
+ "sample_rate": 122880000.0,
+ "tx_sample_rate": 245760000.0,
+ "rfdc_adc_fs_mhz": 4915.2,
+ "rfdc_dac_fs_mhz": 5898.24,
+ "_frequency_note": "Common NCO is the sub-6 2425 MHz; only the X-band channels override it (TX ch1 = B, RX ch2 = C). Zone, ADC calibration mode, inverse sinc and the +-24 MHz RX channel filter are DERIVED per channel from the NCO and the converter rates (PG269 rules), not configured: sub-6 -> zone 1, cal mode 1, filter on; X-IF -> zone 2, cal mode 2, filter off. frequency is the carrier the CFO ppm is quoted against (the sub-6 beacon link).",
+ "frequency": 2425000000.0,
+ "nco_frequency": 2425000000.0,
+ "channel_nco_frequency": {
+  "B": 4380000000.0,
+  "C": 4380000000.0
+ },
+ "_width_note": "AP-85, HS-202 plan section 3.3: the X-band at 270 RB = 3240 subcarriers = 97.2 MHz (+-48.6 MHz, inside the RFDC decimator's 80 % passband, +-49.152), the sub-6 at 133 RB. Keyed per channel like channel_nco_frequency, and the channels on one NCO must agree (UE TX B, BS RX C). Each band has its own ZC pilot and QPSK data, each peak-normalized to half full scale, so the X-band carries 2.85 dB less per tone than at 133 RB. The UE's TX lane B takes the wide 47-tap halfband and no channel prefilter. The BS framer places the burst from the lane with the cleanest pilot (AP-90; the lanes are sample-aligned), so tx_advance is unchanged. Design: PER_BAND_BW_DESIGN.md.",
+ "channel_ofdm_data_num": {
+  "B": 3240,
+  "C": 3240
+ },
+ "_gain_note": "houdini_rx_gain_db / houdini_tx_gain_db: one value per direction, written to every channel the radio opens and read back at start, so attenuating the sub-6 RX attenuates the X-band RX too. RX is minus the step attenuator's attenuation (0 = none); TX 0 dB = maximum VOP, where the software lane measured linearity (W2). The device's make() resets RX DSA to 0 dB and TX VOP to 20 mA before they are written. The ue_*_gain_* fields below are Iris units and inert on Houdini.",
+ "houdini_tx_gain_db": 0.0,
+ "houdini_rx_gain_db": 0.0,
+ "channel": "A",
+ "tx_channel": "A",
+ "rx_channel": "AC",
+ "ue_channel": "A",
+ "ue_tx_channel": "AB",
+ "ue_rx_channel": "A",
+ "_numerology_note": "5G-like, fixed CP [user; plan section 3.3]: SCS 30 kHz = 122.88 MHz / 4096, CP 288 (NR normal), symbol 4384 ticks. 14 symbols = 61376 ticks + zero prefix 32 + postfix 32 = 61440 ticks = exactly 0.5 ms (NR's slot) = 160 x 384, so every slot starts on the 384-tick TDD grid, as the old 1 ms frame did. 1596 data subcarriers = 133 RB = 47.88 MHz (+-23.94, inside the +-24 MHz filter passband). Rollback 40 MHz: ofdm_data_num 1272 (106 RB) with nco_frequency 2420e6 (houdini-dualband-40.json).",
+ "fft_size": 4096,
+ "cp_size": 288,
+ "ofdm_symbol_per_slot": 14,
+ "ofdm_data_num": 1596,
+ "ofdm_tx_zero_prefix": 32,
+ "ofdm_tx_zero_postfix": 32,
+ "_schedule_note": "B, G, P, U then guards: 20 slots x 0.5 ms = 10 ms (NR's radio frame). The UE sends its pilot in slot 2 and uplink data in slot 3 on BOTH its TX channels (sub-6 and X-IF; the BS separates them by channel, as in AP-78's shared pilot slot).",
+ "frame_schedule": [
+  "BGPUGGGGGGGGGGGGGGGG"
+ ],
+ "ue_frame_schedule": [
+  "GGPUGGGGGGGGGGGGGGGG"
+ ],
+ "ue_modulation": "QPSK",
+ "_beacon_note": "nr_pss_bl: the band-limited beacon (AP-79): the 127-tone NR PSS at 240 kHz behind NR's 36-sample CP, then a guarded TRS pair on the central 96 tones (+-23 MHz); 1076 ticks. tx_full_scale 0.34 = -16 dBFS RMS at its 6.6 dB PAPR, the plan's DAC back-off. The argmax pick: the shipped first_path rule lands 2 samples early on this lobe (beacon_bandlimit_test).",
+ "sync": {
+  "steer": {
+   "enable": true,
+   "deadband_ppm": 0.12
+  },
+  "beacon": {
+   "type": "nr_pss_bl",
+   "tx_full_scale": 0.34
+  },
+  "detector": {
+   "pick": "argmax",
+   "min_bar": 0.1
+  },
+  "confirm": {
+   "snr_floor_db": 25.0
+  }
+ },
+ "max_frame": 2000,
+ "beamsweep": false,
+ "_carried_note": "tx_advance is re-measured at mode V (169, see _tx_advance_note). The detection thresholds are DERIVED for nr_pss_bl on a simulated link (tests/comms-func/detection_calibration_test.cc): corr_scale 5 (coherence bar 0.2; noise-only max 0.080 of 400 windows, a beacon 30 dB under bench level 0.90), snr_floor_db 25 (legacy's 30 shifted by the measured -5.2 dB for this beacon at 0.34 peak on the filtered lane, 16.6 dB margin). detector.min_bar 0.1 stops the resync retry relaxation (+1 on corr_scale per retry) from walking the bar into the noise (at corr_scale 5 it moves it 20% a retry). ue_pilot_horizon counts FRAMES.",
+ "_tx_advance_note": "BENCH CALIBRATION, mode-V converter path: 169 = 247 (the one-rate path's value) + the mean pilot_grid_off of -78 samples (sd 3.8, no drift over 80 s) measured at R1 with HOUDINI_BS_RX_DEBUG=1 once the BS framer placed the pilot by its leading edge (DEMO_VERIFICATION 9.4). Mode V moves the pilot 78 samples EARLY against the one-rate path: the x24 DAC interpolation and x40 ADC decimation carry a different pipeline latency. With 169 the seat reads -2.2 +- 0.8 at R3a, -1.0 +- 0.9 at R3 and 0.2 +- 0.7 at R3-40 (9.4), -2/-3 cabled on fpga 1.33 and 0..+2 on 1.34 (9.69-9.71), inside the +-32 slot margin; it moves by a few samples between sessions, untraced (9.73). Re-derive after any cabling or converter change: run with HOUDINI_BS_RX_DEBUG=1 across a few restarts and shift tx_advance by the mean pilot_grid_off.",
+ "tx_advance": [
+  169
+ ],
+ "corr_scale": [
+  5
+ ],
+ "corr_scale_init": [
+  5
+ ],
+ "ue_pilot_horizon": 10,
+ "ue_rx_gain_a": [
+  65
+ ],
+ "ue_tx_gain_a": [
+  81
+ ],
+ "ue_rx_gain_b": [
+  65
+ ],
+ "ue_tx_gain_b": [
+  81
+ ]
+}

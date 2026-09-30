@@ -1,6 +1,6 @@
 # The sync library: architecture and migration plan
 
-Status: P1 LANDED and gated (DEMO_VERIFICATION 8.170), then reworked to the architecture review of 2026-09-03 and gated again (8.175-8.176): `BeaconShape`, `Detection` with evidence, the schema/values split, `ResyncPolicy`, `sim::Channel` and `Numerology` exist; P3 (the pfa-derived bar) landed offline on 2026-09-03 (`06dcac5`, silicon gate 8ae pending); P5 (`PhaseTracker`) remains. Written 2026-09-03 as the plan to roll the beacon,
+Status: P1 LANDED and gated (DEMO_VERIFICATION 8.170), then reworked after an architecture review and gated again (8.175-8.176): `BeaconShape`, `Detection` with evidence, the schema/values split, `ResyncPolicy`, `sim::Channel` and `Numerology` exist; P3 (the pfa-derived bar) landed (`06dcac5`) and passed its silicon gate 8ae (8.193); P5 (`PhaseTracker`) remains, as BACKLOG AP-74. Written as the plan to roll the beacon,
 detector, confirm, carrier and grid-tracking code and everything the ledger has
 measured about it into one classed, configured, tested library. Section 8 lists
 the decisions that are the user's to make; everything else is a proposal with a
@@ -183,7 +183,7 @@ Rules:
 | P4 numerology | rate and spacing as data; remove literals from tests and probes; rate-ladder test | ladder test; one run at the shipped rate unchanged |
 | P5 extend | `PhaseTracker` (AP-67), `SequenceConfirm` and `SymbolPairPhase` for SSB-lite (AP-68), behind configuration | their own pre-registered campaigns |
 
-Each phase ends with an Opus code review of the diff, repeated until a pass
+Each phase ends with an independent code review of the diff, repeated until a pass
 reports no new finding, before the silicon gate runs; a review finding that
 changes behaviour re-runs the offline suite first.
 

@@ -4,12 +4,10 @@
  *        replica, the field geometry, and the index convention every consumer
  *        rests on.
  *
- * Until 2026-09-03 these facts were spread over eight scalars in Config, a
- * file-static in receiver.cc (the strobe offset and the Houdini/Iris branch of
- * the expected beacon end), the Detector (the replica tail) and the Python
- * probe (a third convention, the START of the matched field). Four homes for
- * one index is the class of defect AP-34(a) cost a bench session; this object
- * is the one home.
+ * One home for these facts, on purpose: an index convention defined in
+ * several places (config scalars, the receiver, the detector, a Python probe
+ * counting from the START of the matched field) is the class of defect
+ * AP-34(a) cost a bench session. Nothing else in the tree may redefine them.
  *
  * THE INDEX CONVENTION. The correlator reports the LAST SAMPLE of the matched
  * field (measured, beacon_geometry_test kEndConvention: a core placed at pos
@@ -21,7 +19,7 @@
  * one-sample convention, calibrated into the UE's tx_advance and asserted by
  * the geometry test; it is documented here rather than corrected because
  * correcting it moves the anchor by one sample and re-derives the pilot
- * timing on silicon. Nothing else in the tree may define the convention.
+ * timing on silicon.
  *
  * The platform decides two defaults the shapes predate: on Iris/UHD the
  * replica tail is zero (that framer never had one) and the beacon end in a
@@ -58,7 +56,7 @@ constexpr long long kHoudiniStrobeOffsetTicks = 384;
 
 class BeaconShape {
  public:
-  /// Build from a shape name (legacy, legacy_guard, dot11, nr, nr_pss).
+  /// Build from a shape name (legacy, legacy_guard, dot11, nr, nr_pss, nr_pss_bl).
   /// Throws std::invalid_argument naming the valid names: a typo that quietly
   /// ships the old beacon is exactly the failure the parameter exists to
   /// make visible.
@@ -70,8 +68,6 @@ class BeaconShape {
 
   const std::string& name() const { return name_; }
   Platform platform() const { return platform_; }
-  size_t prefixSamples() const { return num_.prefix_samples; }
-  const Numerology& numerology() const { return num_; }
   /// False when an NR shape could not hold the numerology's subcarrier
   /// spacing at this rate and built the shipped 128-point symbols instead.
   bool numerologyHeld() const { return numerology_held_; }
@@ -90,6 +86,8 @@ class BeaconShape {
   bool singleCopy() const { return replica_reps_ < 2; }
   size_t guardLen() const { return guard_len_; }
   double paprDb() const { return papr_db_; }
+  /// Half the band the core occupies, Hz; 0 = the whole output (AP-79).
+  double occupiedHalfBwHz() const { return occupied_half_bw_hz_; }
 
   /// Samples from the correlator's index to the beacon end: zero for every
   /// shape whose replica is its trailing field and on Iris/UHD; 144 for
@@ -101,8 +99,8 @@ class BeaconShape {
   ssize_t endFromCorrelatorIndex(ssize_t idx, size_t window_len) const;
   /// Where a slot-aligned window is expected to hold the beacon end.
   ssize_t expectedEndOffset() const;
-  /// The first-path back window's default: half the replica, what the
-  /// pre-library correlator derived (64 at 128 taps, 32 at 64).
+  /// The first-path back window's default: half the replica (64 at 128
+  /// taps, 32 at 64).
   int defaultFirstPathWindow() const { return static_cast<int>(replica_.size() / 2); }
   /// The estimator's field layout.
   const FieldGeometry& geometry() const { return geometry_; }
@@ -116,6 +114,7 @@ class BeaconShape {
   std::vector<std::complex<float>> core_, replica_;
   size_t replica_off_ = 0, replica_reps_ = 0, guard_len_ = 0, tail_ = 0;
   double papr_db_ = 0.0;
+  double occupied_half_bw_hz_ = 0.0;
   FieldGeometry geometry_;
 };
 

@@ -1,6 +1,6 @@
-# Opus code review, 2026-08-30: feat/csi-gui-tabler, range 1ae17ad..HEAD
+# Code review, 2026-08-30: feat/csi-gui-tabler, range 1ae17ad..HEAD
 
-Verbatim findings from the independent Opus review of the day's ~70 commits.
+Verbatim findings from the independent review of the day's ~70 commits.
 Disposition of every item is recorded in DEMO_VERIFICATION.md row 4.56; the
 burn-down landed in the commits immediately following this file's addition.
 Severity: HIGH = wrong behavior possible on this bench, MED = latent/edge,

@@ -8,10 +8,14 @@ script clears that: for each radio in the topology it issues the framer abort,
 clears the transmit RAM, and releases the gate.
 
 `csi_server.py --launch` runs this before each sounder attempt. You can also run
-it by hand after any run that ended abnormally:
+it by hand after any run that ended abnormally, naming the radios:
 
-    python3 csi_gui/teardown_framer.py                     # radios from the topology file
-    python3 csi_gui/teardown_framer.py --node 10.0.0.5     # or name them explicitly
+    python3 csi_gui/teardown_framer.py --conf <config>       # the topology the config names
+    python3 csi_gui/teardown_framer.py --topology <file>     # a topology file
+    python3 csi_gui/teardown_framer.py --node <address>      # or the radios themselves
+
+With none of the three it refuses: the shipped topologies name different
+benches, so a default would tear down whichever bench that file lists.
 
 Exit status is 0 only when every radio was torn down. Any radio that could not
 be opened or torn down makes the exit status non-zero, so a caller can tell the
@@ -43,12 +47,17 @@ _EXAMPLES = os.environ.get(
     "HOUDINI_EXAMPLES",
     os.path.expanduser("~/repos/SoapyHoudiniSDR/host/examples"))
 
-DEFAULT_TOPOLOGY = os.path.join(_SOUNDER, "files", "topology-houdini.json")
 SOAPY_SDR_RX = None   # bound in _import_deps once SoapySDR is importable
 
 
 def _import_deps():
     """Import the two dependencies, with a message that says how to fix a miss."""
+    # The Houdini plugin lives in the release prefix HOUDINI_SOAPY_ROOT names
+    # (the venv carries none): SoapySDR searches that root, the venv's plugin
+    # path emptied, as check_setup.plugin_env sets it for the dashboard. Set before
+    # anything imports SoapySDR (houdini_setup and beacon_tdd both do).
+    if os.environ.get("HOUDINI_SOAPY_ROOT"):
+        os.environ.update(SOAPY_SDR_ROOT=os.environ["HOUDINI_SOAPY_ROOT"], SOAPY_SDR_PLUGIN_PATH="")
     for p in (_HIL, _EXAMPLES):
         if p not in sys.path:
             sys.path.insert(0, p)
@@ -76,38 +85,66 @@ def _import_deps():
     return hs, _teardown
 
 
-def nodes_from_topology(path):
-    """Collect every radio address in a topology file, base stations first.
+def roles_from_topology(topo):
+    """(base station addresses, client addresses) from a parsed topology.
 
     Tolerant of both shapes seen in the shipped files: a "Clients" block that is
     a dict with an "sdr" list, or a bare list.
     """
-    with open(path, encoding="utf-8") as f:
-        topo = json.load(f)
-    found = []
-
-    def _add(v):
+    def _addrs(v):
         if isinstance(v, str):
-            found.append(v)
-        elif isinstance(v, list):
-            found.extend(x for x in v if isinstance(x, str))
+            return [v]
+        if isinstance(v, list):
+            return [x for x in v if isinstance(x, str)]
+        return []
 
-    for bs in (topo.get("BaseStations") or {}).values():
-        if isinstance(bs, dict):
-            _add(bs.get("sdr"))
+    bs = []
+    for cell in (topo.get("BaseStations") or {}).values():
+        if isinstance(cell, dict):
+            bs += _addrs(cell.get("sdr"))
     clients = topo.get("Clients")
-    if isinstance(clients, dict):
-        _add(clients.get("sdr"))
-    else:
-        _add(clients)
+    ue = _addrs(clients.get("sdr") if isinstance(clients, dict) else clients)
+    return bs, ue
 
+
+def nodes_from_topology(path):
+    """Every radio address in a topology file, base stations first."""
+    with open(path, encoding="utf-8") as f:
+        bs, ue = roles_from_topology(json.load(f))
     # Preserve order, drop duplicates (a single-board bench lists one address twice).
-    seen, ordered = set(), []
-    for ip in found:
-        if ip not in seen:
-            seen.add(ip)
-            ordered.append(ip)
-    return ordered
+    return list(dict.fromkeys(bs + ue))
+
+
+def resolve_nodes(node, topology, conf, sounder_dir=_SOUNDER):
+    """(radio addresses, None) from --node, else --topology, else the topology
+    --conf's serial_file names (relative to the sounder checkout, as the
+    sounder resolves it); ([], the error to print) when none is given or the
+    file cannot be read."""
+    if node:
+        return node, None
+    if not topology and conf:
+        try:
+            with open(conf, encoding="utf-8") as f:
+                topology = json.load(f).get("serial_file")
+        except (OSError, ValueError, AttributeError) as e:
+            return [], "error: cannot read the config %s (%s)\n" % (conf, e)
+        if not topology:
+            return [], "error: %s names no serial_file: pass --topology or --node\n" % conf
+        if not os.path.isabs(topology):
+            topology = os.path.join(sounder_dir, topology)
+    if not topology:
+        return [], ("error: name the radios: --conf <config> (the topology it names), "
+                    "--topology <file>, or --node <address>\n")
+    try:
+        nodes = nodes_from_topology(topology)
+    except FileNotFoundError:
+        return [], ("error: no topology file at %s\n"
+                    "  Pass --topology, or name radios with --node.\n" % topology)
+    except (ValueError, KeyError, TypeError, AttributeError) as e:
+        return [], "error: cannot read radios from %s (%s)\n" % (topology, e)
+    if not nodes:
+        return [], "error: no radio addresses found in %s\n" % topology
+    return nodes, None
 
 
 def teardown_node(hs, teardown, ip, ch, passes):
@@ -153,15 +190,11 @@ def teardown_node(hs, teardown, ip, ch, passes):
     except Exception as e:  # noqa: BLE001
         if "stream is open" in str(e):
             # THE HOLDER IS USUALLY A LOCAL PROCESS, SO SAY THAT FIRST.
-            # Restarting the server was the only advice here, and it needs a
-            # sudo password this bench does not grant. In every case seen on
-            # 2026-09-02 the stream was held by an orphaned sounder on THIS
-            # host: csi_server.py --launch runs the sounder as a grandchild
-            # under a bash retry loop, so killing the server orphans the loop,
-            # the loop restarts a sounder, and that sounder holds both boards.
-            # Killing it releases the stream immediately -- no server restart.
-            # Six consecutive runs were refused that way before anyone noticed,
-            # because a refused run writes an EMPTY log rather than an error.
+            # Restarting the server needs a sudo password this bench does not
+            # grant, and in every case seen the stream was held by a sounder
+            # left running on THIS host; stopping it releases the stream at
+            # once, no server restart. A refused run writes an EMPTY log rather
+            # than an error, so this is where the operator hears about it.
             print("  %s: WARNING an RX stream is still open on the device.%s\n"
                   "      This teardown cannot close another process's stream, and "
                   "the next run will fail\n"
@@ -171,6 +204,8 @@ def teardown_node(hs, teardown, ip, ch, passes):
                   "      whose launcher was killed. Try this first, no sudo "
                   "needed:\n"
                   "          python3 tools/rig_release_holders.py\n"
+                  "      (it stops EVERY sounder and dashboard on this host, "
+                  "including a running --control dashboard)\n"
                   "      Only if that finds nothing does the server itself need "
                   "restarting:\n"
                   "          sudo systemctl restart SoapySDRServer   (on %s)"
@@ -186,34 +221,22 @@ def main():
     ap = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--topology", default=DEFAULT_TOPOLOGY,
-                    help="topology JSON to read radio addresses from "
-                         "(default: %(default)s)")
+    ap.add_argument("--topology",
+                    help="topology JSON to read radio addresses from")
+    ap.add_argument("--conf",
+                    help="sounder config: tear down the radios of the topology its "
+                         "serial_file names (used when --topology is not given)")
     ap.add_argument("--node", action="append", metavar="ADDR",
-                    help="radio address; repeatable. Overrides --topology.")
+                    help="radio address; repeatable. Overrides --topology and --conf.")
     ap.add_argument("--ch", type=int, default=1,
                     help="channel to open (default: %(default)s)")
     ap.add_argument("--passes", type=int, default=2,
                     help="teardown repeats per radio (default: %(default)s)")
     args = ap.parse_args()
 
-    if args.node:
-        nodes = args.node
-    else:
-        try:
-            nodes = nodes_from_topology(args.topology)
-        except FileNotFoundError:
-            sys.stderr.write("error: no topology file at %s\n"
-                             "  Pass --topology, or name radios with --node.\n"
-                             % args.topology)
-            return 2
-        except (ValueError, KeyError, TypeError) as e:
-            sys.stderr.write("error: cannot read radios from %s (%s)\n"
-                             % (args.topology, e))
-            return 2
-
-    if not nodes:
-        sys.stderr.write("error: no radio addresses found in %s\n" % args.topology)
+    nodes, err = resolve_nodes(args.node, args.topology, args.conf)
+    if err:
+        sys.stderr.write(err)
         return 2
 
     hs, teardown = _import_deps()

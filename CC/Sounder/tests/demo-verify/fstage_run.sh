@@ -1,0 +1,48 @@
+#!/bin/bash
+# usage: [FILTERS=<state>] fstage_run.sh <stage F0..F4b> <rung tag> <conf> <secs>
+# One filter-staging run (Houdini-Streaming docs/DEMO_FREQUENCY_PLAN.md 6.1b): run_rung.sh with the
+# measurement dumps on, then every per-run artefact moved into
+# ap79_runs/<stage>/<tag>_<T>/ so runs never overwrite. Rig tool: it runs the
+# checkout it lives in (see run_rung.sh). Analyse with run_summary.py or
+# fstage_report.py.
+set -u
+HERE=$(cd "$(dirname "$0")" && pwd)
+ST=$1; TAG=$2; CONF=$3; SECS=$4
+cd "${SOUNDER_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}" || exit 1  # default: this checkout; SOUNDER_DIR: another worktree's build
+D=ap79_runs
+rm -f "$D"/cns_dump*.bin "$D/beacon_ram.bin" "$D/gold.bin"
+# State records already here belong to a run this script did not launch (a
+# direct run_rung.sh): set them aside, or the filing below takes them as this
+# run's own.
+mkdir -p "$D/unfiled" && mv "$D"/rfdc_*.txt "$D"/modev_*.txt "$D/unfiled/" 2>/dev/null
+RW=$(mktemp -d /tmp/rw_XXXX)
+export HOUDINI_CSI_DUMP=${HOUDINI_CSI_DUMP:-60} HOUDINI_BS_RX_DEBUG=1 HOUDINI_DUMP_BEACON=1 HOUDINI_DUMP_RESYNC_WIN=$RW
+# SYN retransmits on this host around the run: an open that stalls about 1 s
+# before connecting (cause unmeasured; a lost SYN is one candidate) races the
+# A/B build's 1 s device timeout and reads as "Radios Not Found".
+SYN0=$(nstat -az TcpExtTCPSynRetrans 2>/dev/null | awk '/SynRetrans/{print $2}')
+# HEALTH_S: the link-health period, s. A launch that failed wrote no record:
+# stop here rather than file into the previous run's directory.
+# SOUNDER_DIR is passed as the absolute path already entered (run_rung.sh cds again).
+SOUNDER_DIR="$PWD" bash "$HERE/run_rung.sh" "$TAG" "$CONF" "$SECS" "${HEALTH_S:-5}" || { rmdir "$RW"; echo "run_rung.sh failed; nothing filed"; exit 1; }
+# Wait for THIS run's sounder (run_rung.sh recorded its pid), not any sounder on the host.
+SP=$(cat "$D/$TAG.pid")
+while [ -n "$SP" ] && [ "$(cat "/proc/$SP/comm" 2>/dev/null)" = sounder ]; do sleep 5; done; sleep 3
+# A sounder that exits early (a radio that would not open) leaves this run's
+# dashboard up until its own timeout, holding the ports the next run needs.
+CP=$(cat "$D/$TAG.csipid" 2>/dev/null)
+[ -n "$CP" ] && [ "$(cat "/proc/$CP/comm" 2>/dev/null)" = timeout ] && kill -INT "$CP" 2>/dev/null
+R=$(cat "$D/$TAG.current"); T=${R#"${TAG}"_}
+O=$D/$ST/$R; mkdir -p "$O"
+mv "$D/$R.log" "$D/${TAG}_csi_$T.log" "$D/${TAG}_cpu_$T.log" "$D/${TAG}_threads_$T.log" "$O/" 2>/dev/null
+mv "$D"/cns_dump*.bin "$D/beacon_ram.bin" "$O/" 2>/dev/null
+# The per-node RFDC state records (RFDC_SNAPSHOT: the MTS and tile state,
+# written at stream start and at the end of the run under HOUDINI_DUMP_DIR):
+# a run that moves between sessions (a pilot seat, a level) is traced from them.
+mv "$D"/rfdc_*.txt "$O/" 2>/dev/null
+mv "$D"/modev_*.txt "$O/" 2>/dev/null  # each node's mode-V bring-up record
+mv "$RW" "$O/resync"
+SYN1=$(nstat -az TcpExtTCPSynRetrans 2>/dev/null | awk '/SynRetrans/{print $2}')
+echo "stage $ST filters: ${FILTERS:-unset}" > "$O/stage.txt"
+echo "TcpExtTCPSynRetrans before ${SYN0:-?} after ${SYN1:-?}" >> "$O/stage.txt"
+echo "done $O $(date -u +%H:%M:%S)"

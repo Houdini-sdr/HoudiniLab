@@ -12,10 +12,6 @@
 ---------------------------------------------------------------------
 */
 
-// NO INCLUDE GUARD until 2026-09-02. Every translation unit included this once
-// and directly, so it never bit; the first HEADER to include it (receiver.h,
-// which now names CommsLib::BeaconPick in a signature) would have made the class
-// definition arrive twice in most of the build.
 #pragma once
 
 #include <complex.h>
@@ -39,13 +35,6 @@ static constexpr size_t kDefaultPilotScOffset = 6;
 
 static inline double computeAbs(std::complex<double> x) { return std::abs(x); }
 
-//template <typename T>
-//static inline T computeAbs(std::complex<T> x) { return std::abs(x); }
-static inline double computePower(std::complex<double> x) {
-  return std::pow(std::abs(x), 2);
-}
-static inline double computeSquare(double x) { return x * x; }
-
 class CommsLib {
  public:
   enum SequenceType {
@@ -60,16 +49,12 @@ class CommsLib {
 
   enum ModulationOrder { QPSK = 2, QAM16 = 4, QAM64 = 6 };
 
-  CommsLib(std::string);
-  ~CommsLib();
-
   static std::vector<std::vector<float>> getSequence(size_t type,
                                                      size_t seq_len = 0);
   static std::vector<std::complex<float>> modulate(std::vector<uint8_t>, int);
   static std::vector<size_t> getDataSc(
       size_t fftSize, size_t DataScNum,
       size_t PilotScOffset = kDefaultPilotScOffset);
-  static std::vector<size_t> getNullSc(size_t fftSize, size_t DataScNum);
   static std::vector<std::complex<float>> getPilotScValue(
       size_t fftSize, size_t DataScNum,
       size_t PilotScOffset = kDefaultPilotScOffset);
@@ -83,11 +68,7 @@ class CommsLib {
       bool normalize = true, bool fft_shift = false);
 
   static int findLTS(const std::vector<std::complex<float>>& iq, int seqLen);
-  static size_t find_pilot_seq(const std::vector<std::complex<float>>& iq,
-                               const std::vector<std::complex<float>>& pilot,
-                               size_t seqLen);
   template <typename T>
-  //static std::vector<T> convolve(std::vector<T> const& f, std::vector<T> const& g);
   static std::vector<T> convolve(std::vector<T> const& f,
                                  std::vector<T> const& g) {
     /* Convolution of two vectors
@@ -107,7 +88,6 @@ class CommsLib {
     }
     return out;
   }
-  static float find_max_abs(const std::vector<std::complex<float>>& in);
   static std::vector<std::complex<float>> csign(
       const std::vector<std::complex<float>>& iq);
   static inline int hadamard2(int i, int j) {
@@ -130,8 +110,8 @@ class CommsLib {
   // on its own preamble, and the right answer differs between a wide window that
   // may hold several beacon copies and a targeted slice that provably holds one.
   enum class BeaconPick {
-    // Earliest crossing in the window, unrefined. HISTORICAL, and unsafe on a
-    // strong link -- see kTargetedArgmax.
+    // Earliest crossing in the window, unrefined. The default of the overloads
+    // that take no pick, and unsafe on a strong link: see kTargetedArgmax.
     kFirstCrossing,
     // Earliest crossing, then the best ratio within one sequence length of it.
     // Selects the earliest beacon COPY (repeatable across restarts, which the
@@ -142,11 +122,9 @@ class CommsLib {
     // cannot hold two beacon copies -- true of the targeted resync slice, which
     // is lead+tail (~812 samples at shipped defaults) against a copy spacing of
     // one FULL FRAME, 122880 samples: the strobe plays loops=1 once per TDD
-    // frame, so there is exactly one beacon per millisecond. (The old
-    // loops=forever era filled a symbol with ~15 copies 4096 apart and that
-    // number got repeated here by habit -- it is 30x too conservative, which
-    // matters because this precondition is what makes the rule legal and
-    // over-the-air drift will want a wider slice.) There the earliest-crossing rule is actively wrong: the beacon's
+    // frame, so there is exactly one beacon per millisecond. This precondition
+    // is what makes the rule legal, and over-the-air drift will want a wider
+    // slice. There the earliest-crossing rule is actively wrong: the beacon's
     // own STS preamble is 16-periodic, 16 divides the 128-sample correlator lag,
     // so the STS field is lag-128 self-coherent and manufactures crossings a few
     // hundred samples before the true peak. Whether they cross is a function of
@@ -194,19 +172,20 @@ class CommsLib {
     // over the same sweep: 0.9845 to 0.9843, a spread of 1.00. The preamble
     // plateau lands at 1/L^2 -- also level-independent -- so one threshold
     // separates them everywhere.
-    kNormalized,
-    // The one above is WRONG AS FORMULATED, kept because the measurement that
-    // killed it is worth keeping. Schmidl & Cox's R(d) is the LOCAL SIGNAL
-    // ENERGY of the repeated half-symbol; `thresh` here is the trailing energy
-    // of the MATCHED FILTER OUTPUT, which is not the same quantity, and the
-    // algebra does not carry over. Measured: it makes the peak statistic
-    // level-invariant (spread 1.00 against 4136) and then selects the WRONG
-    // peak on the shorter guarded beacons -- dot11 lands at -65, exactly one
-    // fine-field length early, on every seed at every level, because dividing
-    // by a squared trailing sum favours the index with less preceding
-    // correlation energy, which is the FIRST repetition.
     //
-    // This is the normalised CROSS-CORRELATION, which is the right shape for a
+    // WRONG AS FORMULATED, and no configuration selects it (the threshold
+    // names are auto, power, xcorr and coherence); kept because the
+    // measurement that killed it is worth keeping. Schmidl & Cox's R(d) is the
+    // LOCAL SIGNAL ENERGY of the repeated half-symbol; `thresh` here is the
+    // trailing energy of the MATCHED FILTER OUTPUT, which is not the same
+    // quantity, and the algebra does not carry over. Measured: it makes the
+    // peak statistic level-invariant (spread 1.00 against 4136) and then
+    // selects the WRONG peak on the shorter guarded beacons: dot11 lands at
+    // -65, exactly one fine-field length early, on every seed at every level,
+    // because dividing by a squared trailing sum favours the index with less
+    // preceding correlation energy, which is the FIRST repetition.
+    kNormalized,
+    // The normalised CROSS-CORRELATION, which is the right shape for a
     // matched filter: |gc[i]|^2 / (E_raw[i] * E_rep) is a coherence in [0,1],
     // level-invariant because both numerator and denominator are 2nd order in
     // received amplitude. The repeat check is then the product of the two
@@ -238,20 +217,15 @@ class CommsLib {
     // The other trade is discrimination against the preamble: the lag product
     // puts the preamble plateau ~1/L^2 below the peak, and without it the
     // separation is only ~1/L, 21 dB instead of 42.
-    kCoherence,  // (was kXCorrNoLag; "nolag" survives only as the env alias)
+    kCoherence,  // HOUDINI_BEACON_THRESH=nolag is an alias of "coherence"
   };
 
   // Functions using AVX
-  static int find_beacon(const std::vector<std::complex<float>>& raw_samples);
   static int find_beacon_avx(
       const std::vector<std::complex<float>>& raw_samples,
       const std::vector<std::complex<float>>& match_samples, float corr_scale,
       BeaconPick pick = BeaconPick::kFirstCrossing,
       BeaconThresh thresh_form = BeaconThresh::kPowerRatio);
-
-  ///Find Beacon with raw samples from the radio
-  static int find_beacon(const std::complex<int16_t>* raw_samples,
-                         size_t check_window);
 
   static ssize_t find_beacon_avx(
       const std::complex<int16_t>* raw_samples,
@@ -259,11 +233,11 @@ class CommsLib {
       size_t check_window, float corr_scale,
       BeaconPick pick = BeaconPick::kFirstCrossing,
       BeaconThresh thresh_form = BeaconThresh::kPowerRatio);
-  // The first-path knobs made EXPLICIT. The two-argument-shorter overloads
-  // above use the defaults (half the replica, kDefaultFirstPathFloorDb); the
-  // configured values come through sync::SyncConfig and the library passes
-  // them here, so a run has ONE source of truth and nothing in the correlator
-  // reads the environment.
+  // The first-path knobs made EXPLICIT. The overloads above use the defaults
+  // (half the replica, kDefaultFirstPathFloorDb); the configured values come
+  // through sync::SyncConfig and the library passes them here, so a run has
+  // ONE source of truth and the correlator reads no first-path setting from
+  // the environment.
   static constexpr double kDefaultFirstPathFloorDb = -9.0;
 
   /// Threads for correlate_mt (sync.detector.corr_threads); 0 leaves the
@@ -305,10 +279,8 @@ class CommsLib {
   // and 3 a three-sample one (measured), so the JSON schema refuses them and
   // the environment reader clamps them to 1 with a warning.
   //
-  // A guard of 0 is the behaviour every release so far has shipped and remains
-  // the default until the silicon gate of DEMO_VERIFICATION 8ak says
-  // otherwise, because a guard of 1 moves the reported index on 22 % to 36 %
-  // of arrival phases, by shape.
+  // The default is 0 (DEMO_VERIFICATION.md 8ak): a guard of 1 moves the
+  // reported index on 22 % to 36 % of arrival phases, by shape.
   //   first_path_window  samples of back-search from the peak (0..2*seqLen)
   //   first_path_db      how much weaker an earlier path may be, dB <= 0
   //   first_path_guard   samples immediately before the peak the back-search
@@ -394,8 +366,4 @@ class CommsLib {
   static std::vector<std::complex<float>> complex_mult(
       const std::vector<std::complex<float>>& f,
       const std::vector<std::complex<float>>& g, bool conj);
-  //private:
-  //    static inline float** init_qpsk();
-  //    static inline float** init_qam16();
-  //    static inline float** init_qam64();
 };

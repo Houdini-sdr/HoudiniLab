@@ -1,6 +1,6 @@
 # BS (168.6.244.21) device state through the sounder init sequence
 
-Captured 2026-08-30 by `tests/demo-verify/bs_init_walk.py` on rig host .64.
+Captured 2026-08-30 by `tests/demo-verify/archive/bs_init_walk.py` on rig host .64.
 Two consecutive runs (`walk_full_run1.jsonl`, `walk_full_run2.jsonl`, on the
 rig under `~/demo-verify-evidence/phase2/`) produced identical behavior; the
 values below are from run 2. The script replays exactly the calls

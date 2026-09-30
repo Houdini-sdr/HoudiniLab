@@ -56,6 +56,12 @@ class Scheduler {
   const unsigned int kMainDispatchCore;
   const unsigned int kSchedulerCore;
   const unsigned int kRecvCore;
+  /* The cores actually used: the defaults above unless HOUDINI_CORE_MAP
+   * names the role (houdini/core_map.h). Each is the role's base core. */
+  unsigned int main_core_;
+  unsigned int recorder_core_;
+  unsigned int bsrx_core_;
+  unsigned int ue_core_;
 };     /* class Scheduler */
 };     // namespace Sounder
 #endif /* SOUNDER_SCHEDULER_H_ */

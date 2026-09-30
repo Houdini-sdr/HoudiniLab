@@ -3,29 +3,29 @@
  * @brief The UE's estimate of the BS frame grid: (reference, period), with two
  *        interchangeable estimators behind one interface.
  *
- * The shipped estimator is alpha-beta. AP-41 proposes a Kalman, NOT for
- * smoothing but for three things alpha-beta structurally cannot do:
+ * Alpha-beta is the default (`sync.tracker.type`). The Kalman (AP-41: about
+ * 1.7x better on silicon, its innovation gate unproven in the field) exists
+ * NOT for smoothing but for three things alpha-beta structurally cannot do:
  *
- *   (a) IRREGULAR dt. Observations arrive at a median 179 frames but range 10
- *       to 831, and fixed gains are optimal only for UNIFORM spacing. A Kalman
- *       carries dt in its transition and its process noise, so a long gap
- *       widens the covariance and the next observation is weighted accordingly;
- *       alpha-beta applies the same 0.5 / 0.1 to a 10-frame gap and an
- *       831-frame one.
+ *   (a) IRREGULAR dt. Observations were measured arriving at a median 179
+ *       frames apart but anywhere from 10 to 831, and fixed gains are optimal
+ *       only for UNIFORM spacing. A Kalman carries dt in its transition and
+ *       its process noise, so a long gap widens the covariance and the next
+ *       observation is weighted accordingly; alpha-beta applies the same
+ *       gains (0.5 / 0.1 by default) to a 10-frame gap and an 831-frame one.
  *   (b) COVARIANCE. An honest "how well do I know the time" number is what an
  *       adaptive cadence and a principled innovation gate are built from. The
- *       shipped +-kScatterTol gate is a fixed 1024 samples chosen for the
- *       alive/moved verdict, and using it as the outlier reject is what let a
- *       single edge-of-gate detection kick the rate 3.2 ppm (8.56).
+ *       caller's fixed +-scatter_tol gate is chosen for the alive/moved
+ *       verdict, and using it as the outlier reject is what let a single
+ *       edge-of-gate detection kick the rate 3.2 ppm (8.56).
  *   (c) a DOPPLER state for OTA, later.
  *
- * BOTH LIVE HERE, SELECTED AT RUNTIME, because "which is better" is a question
- * for the bench and not for this comment. Header-only and dependency-free so
+ * BOTH LIVE HERE, SELECTED AT RUNTIME. Header-only and dependency-free so
  * grid_tracker_test can A/B them on synthetic traces with no radio.
  *
- * NOT IN SCOPE: fusing the beacon CARRIER channel. AP-41 is explicit that a
- * Kalman weights by inverse variance, so a BIASED sensor actively degrades the
- * state, and the carrier estimator is biased until AP-34(b) lands.
+ * NOT IN SCOPE: fusing the beacon CARRIER channel. A Kalman weights by
+ * inverse variance, so a BIASED sensor actively degrades the state; a carrier
+ * channel is fused only once its bias is measured to be bounded.
  */
 #ifndef GRID_TRACKER_H_
 #define GRID_TRACKER_H_
@@ -38,7 +38,6 @@
 
 namespace houdini {
 namespace sync {
-
 
 /// The estimator's input. Its values have ONE owner, GridTrackerConfig in
 /// sync_config.h (the JSON `tracker` block): construct from it, with the frame
@@ -60,30 +59,29 @@ struct TrackerConfig {
   double beta;
   double step_limit;   ///< samples/frame per update; 0 = off
   // kalman
-  double meas_var;     ///< R, samples^2. Detector scatter: sd 0.63-0.70
-                             ///< measured post-fix, so ~0.5 is the variance.
-  double rate_rw;     ///< q, samples^2/frame^3. Rate random walk: eps
-                             ///< moved 0.23 ppm across a session, which is
-                             ///< 0.028 samples/frame over ~6e5 frames, so
-                             ///< q ~ 0.028^2/6e5 ~ 1.3e-9.
+  double meas_var;     ///< R, samples^2. Detector scatter measures sd
+                       ///< 0.63-0.70, so ~0.5 is the variance.
+  double rate_rw;      ///< q, samples^2/frame^3. Rate random walk: eps
+                       ///< moved 0.23 ppm across a session, which is
+                       ///< 0.028 samples/frame over ~6e5 frames, so
+                       ///< q ~ 0.028^2/6e5 ~ 1.3e-9.
   double innov_gate;   ///< sigmas; 0 = off. A principled outlier reject.
   // NOTE: there is deliberately NO period band here. The plausibility clamp
   // lives with the caller that owns the period (receiver.cc), because this
-  // class holds no state to clamp -- it returns GAINS. Fields named period_lo
-  // and period_hi used to sit here, unread, which made them look enforced: a
-  // caller could set them, drop its own clamp, and lose the band with no
-  // compile or runtime signal. grid_tracker_test applies the clamp in its
-  // harness for the same reason.
+  // class holds no state to clamp -- it returns GAINS. Do not add unread
+  // period_lo / period_hi fields: they look enforced, so a caller could set
+  // them, drop its own clamp, and lose the band with no compile or runtime
+  // signal. grid_tracker_test applies the clamp in its harness for the same
+  // reason.
 };
 
 /**
  * The GAINS only. The caller keeps `ref` and `period` and applies the
  * corrections with its own arithmetic, so switching estimators cannot change
- * the shipped path's rounding: `receiver.cc` rounds `kf * period` to a whole
- * sample before adding the shift, and reproducing that inside a double-valued
- * tracker would have been a silent one-sample behaviour change on the arm that
- * is already gated. The estimator does not need the state anyway -- the caller
- * folds it into `resid` before calling.
+ * the path's rounding: `receiver.cc` rounds `kf * period` to a whole sample
+ * before adding the shift, and a double-valued tracker holding the state
+ * would move the applied shift by up to a sample. The estimator does not need
+ * the state anyway -- the caller folds it into `resid` before calling.
  */
 class GridTracker {
  public:

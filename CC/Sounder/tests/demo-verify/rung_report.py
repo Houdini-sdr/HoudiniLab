@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+"""AP-79 rung report: every pass-criterion number from one sounder log.
+Throttled warnings (powers of two, or every Nth) are read by their LAST
+occurrence number, never by counting lines."""
+import os, re, sys, statistics as st
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from sounder_log import alarm_kinds, cns_total, tx_totals  # noqa: E402
+
+
+def acquisitions(L):
+    """(statistic, bar) of every acquisition detection, whatever bar the config set."""
+    return [(float(m.group(1)), float(m.group(2))) for l in L
+            for m in [re.search(r"syncSearch: detection #\d+ statistic ([\d.]+) vs bar ([\d.]+)", l)] if m]
+
+
+def ue_tx0_totals(L):
+    """The UE's tx0 late, under and zerofill increments, summed over the UE's own
+    link-health lines (the BS prints the same keys for its beacon stream)."""
+    t = tx_totals(L)
+    return tuple(t[("UE", "tx0." + k)] for k in ("late", "under", "zerofill"))
+
+
+def main(path):
+    L = open(path, errors="replace").read().splitlines()
+    def last_occ(pat):
+        v = 0
+        for l in L:
+            m = re.search(pat + r".*?occurrence (\d+)", l)
+            if m: v = max(v, int(m.group(1)))
+        return v
+    def grab(pat, conv=float):
+        return [conv(m.group(1)) for l in L for m in [re.search(pat, l)] if m]
+    print("== %s (%d lines)" % (path, len(L)))
+    acq = acquisitions(L)
+    print("acquisition statistics (coherence) vs bar %s:" % sorted({b for _, b in acq}), [a for a, _ in acq][:5])
+    alive = [(int(m.group(1)), int(m.group(2)), float(m.group(3))) for l in L
+             for m in [re.search(r"Re-sync frame (\d+): beacon alive .*?resid ([+-]?\d+).*?snr ([\d.]+) dB", l)] if m]
+    if alive:
+        r = [a[1] for a in alive]; s = [a[2] for a in alive]
+        w2 = sum(abs(x) <= 2 for x in r); w4 = sum(abs(x) <= 4 for x in r)
+        print("re-syncs alive %d; resid %d..%d, |r|<=2 %.0f%%, |r|<=4 %.0f%%; beacon SNR %.1f/%.1f/%.1f dB" %
+              (len(r), min(r), max(r), 100.0 * w2 / len(r), 100.0 * w4 / len(r), min(s), st.median(s), max(s)))
+    print("BAD SYNC %d, PILOT LOST %d, escalations %d" % (sum("BAD SYNC" in l for l in L),
+          sum("UE PILOT LOST" in l for l in L), sum(bool(re.search(r"escalat(e|ion) (to|#)|ESCALAT", l)) for l in L)))
+    print("BS no-UE-burst skips >= %d; LTS-untrusted >= %d; CNS low %s" % (
+          last_occ("no UE burst in frame read"), last_occ("failed the LTS check"),
+          (lambda t: "%d of %d (summary)" % (t[1], t[0]) if t else "none")(cns_total(L))))
+    ev = [(int(m.group(1)), int(m.group(2))) for l in L for m in [re.search(r"UE pilot burst: scheduled (\d+) frames up to (\d+)", l)] if m]
+    if len(ev) > 2:
+        fr = 122880.0
+        m = re.search(r'"frame_schedule":\["([A-Z]+)"', "\n".join(L[:10]))
+        if m: fr = 122880.0 if len(m.group(1)) == 30 else 1228800.0 if len(m.group(1)) == 20 else fr
+        span = (ev[-1][1] - ev[0][1]) / fr
+        print("UE pilot coverage %.1f%%" % (100.0 * (sum(a for a, _ in ev) - ev[0][0]) / span))
+    clamped = grab(r"clamped=(\d+)", int); seat = grab(r"pilot_grid_off=([-\d]+)", int)
+    if clamped: print("BS slots clamped past the capture edge: %d of %d sampled frames" % (sum(c > 0 for c in clamped), len(clamped)))
+    if seat: print("pilot seat: mean %.1f, sd %.1f, range %d..%d (n %d)" % (st.mean(seat), st.pstdev(seat), min(seat), max(seat), len(seat)))
+    cfo = [l for l in L if "Beacon CFO frame" in l]
+    if cfo: print("clock:", re.sub(r"^.*?Beacon CFO", "Beacon CFO", cfo[-1])[:160])
+    # The sounder raises a health line to WARN exactly when an item is new or an
+    # app counter moved (RadioHoudini's health thread): a line whose device
+    # side reads "clean" can still carry app counters, so the level decides.
+    alarms = [l for l in L if "WARNG" in l and "link health: [" in l]
+    kinds = alarm_kinds(alarms)
+    sat = sum("saturated" in l for l in alarms)
+    print("health alarm lines %d (%d carry the standing egress-saturation item); kinds: %s" % (len(alarms), sat, dict(kinds)))
+    print("UE tx0 totals: late %d, under %d, zerofill %d; TX status events %d" % (ue_tx0_totals(L) + (sum("TX status:" in l for l in L),)))
+    print("state records:", sum("RFDC state record" in l for l in L), "| CSI dump:", any("CSI dump written" in l for l in L))
+
+
+if __name__ == "__main__":
+    main(sys.argv[1])

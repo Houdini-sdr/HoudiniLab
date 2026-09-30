@@ -7,7 +7,6 @@
 
 #include <algorithm>
 #include <cctype>
-#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <sstream>
@@ -27,7 +26,7 @@ const char* const kTrackerNames[] = {"alpha_beta", "kalman", nullptr};
 const char* const kSourceNames[] = {"default", "json", "env", "derived"};
 const char* const kPlatformNames[] = {"houdini", "iris_uhd"};
 
-// The environment spellings that predate the table.
+// Environment spellings accepted as aliases of the table's enum names.
 struct EnvAlias {
   const char* env;
   const char* value;  // env spelling
@@ -213,14 +212,14 @@ const std::vector<SyncConfig::Spec>& SyncConfig::schema() {
   static const std::vector<Spec> kSchema = {
       // beacon
       {"beacon.type", nullptr, 0, 0,
-       "Which beacon waveform the base station transmits (legacy, legacy_guard, dot11, nr, nr_pss).",
+       "Which beacon waveform the base station transmits (legacy, legacy_guard, dot11, nr, nr_pss, nr_pss_bl; nr_pss_bl is the band-limited mode-V beacon, AP-79).",
        KNOB_ACCESS(std::string, beacon.type), nullptr, EP::kClamp},
       {"beacon.tx_full_scale", "HOUDINI_BEACON_FS", 1e-3, 1.0,
        "Transmit peak of the beacon as a fraction of DAC full scale. 0.6 shipped; lower it to stand in for path loss on a cable.",
        KNOB_ACCESS(double, beacon.tx_full_scale), nullptr, EP::kIgnoreOutOfRange},
       // detector
       {"detector.threshold", "HOUDINI_BEACON_THRESH", 0, 0,
-       "Decision statistic: auto picks coherence for a single-copy replica and the normalised cross-correlation otherwise; power is the pre-2026-09 form and the Iris/UHD default.",
+       "Decision statistic: auto picks coherence for a single-copy replica and the normalised cross-correlation otherwise; power is the original level-dependent form (4th order in amplitude against 2nd) and the Iris/UHD default.",
        KNOB_ACCESS(ThresholdForm, detector.threshold), kThresholdNames, EP::kClamp},
       {"detector.pfa_per_window", nullptr, 1e-9, 0.5,
        "The coherence form's bar when set: the false-alarm probability per search window, turned into a bar by the replica and window lengths (8.163). Unset, corr_scale applies; ignored for the repeated-field forms.",
@@ -235,7 +234,7 @@ const std::vector<SyncConfig::Spec>& SyncConfig::schema() {
        "How much weaker, in dB of path power, an earlier arrival may be and still be taken as the first path.",
        KNOB_ACCESS(double, detector.first_path_floor_db), nullptr, EP::kIgnoreOutOfRange},
       {"detector.first_path_guard", "HOUDINI_FIRST_PATH_GUARD", 0, 1,
-       "Samples immediately before the peak the first-path search skips. A beacon between samples splits its peak over two adjacent taps and the earlier one is the SAME arrival, not an earlier one; 1 skips it. Only 0 and 1: 2 loses a genuine two-sample-earlier arrival and 3 a three-sample one (measured). 0, the default, is what every release so far has shipped.",
+       "Samples immediately before the peak the first-path search skips. A beacon between samples splits its peak over two adjacent taps and the earlier one is the SAME arrival, not an earlier one; 1 skips it. Only 0 and 1: 2 loses a genuine two-sample-earlier arrival and 3 a three-sample one (measured). 0 is the default (DEMO_VERIFICATION.md 8ak).",
        KNOB_ACCESS(int, detector.first_path_guard), nullptr, EP::kClamp},
       {"detector.corr_scale", nullptr, 1e-4, 1e7,
        "Resync detection threshold: the bar is 1 / corr_scale, relaxed by one per retry. Read from the legacy per-client top-level array when absent.",
@@ -243,6 +242,9 @@ const std::vector<SyncConfig::Spec>& SyncConfig::schema() {
       {"detector.corr_scale_init", nullptr, 1e-4, 1e7,
        "Acquisition detection threshold (bar 1 / corr_scale_init); defaults to corr_scale.",
        KNOB_ACCESS(double, detector.bar.corr_scale_init), nullptr, EP::kClamp},
+      {"detector.min_bar", nullptr, 0.0, 1.0,
+       "The lowest bar the resync retry relaxation (+1 on corr_scale per retry) may reach; 0 = no limit. Set it with a small corr_scale, where +1 per retry would walk the bar into the noise.",
+       KNOB_ACCESS(double, detector.bar.min_bar), nullptr, EP::kClamp},
       {"detector.corr_threads", "SOUNDER_CORR_THREADS", 1, 256,
        "Threads for the correlator's matched filter. 1 shipped; measured a net loss below ~4 on the rig host.",
        KNOB_ACCESS(int, detector.corr_threads), nullptr, EP::kClamp},
@@ -288,6 +290,31 @@ const std::vector<SyncConfig::Spec>& SyncConfig::schema() {
       {"tracker.kalman.innov_gate", "HOUDINI_KF_INNOV_GATE", 0.0, 100.0,
        "Kalman only: sigmas an observation may sit from the prediction before it is ignored. 0 disables.",
        KNOB_ACCESS(double, tracker.kf_innov_gate), nullptr, EP::kClamp},
+      // steer (AP-79)
+      {"steer.enable", "HOUDINI_CLOCK_STEER", 0, 0,
+       "Steer the UE's clock onto the beacon's with CLOCK_ADJ, from the tracked grid rate, inside the sounder. Needs the UE's clock_ref to be calibrated. Off by default; keep it off for A/B and regression runs of the TX path (SH-427): each CLOCK_ADJ RPC holds the device's stream lock about 200 ms, and each push is a rate step the host pacer re-learns.",
+       KNOB_ACCESS(bool, steer.enable), nullptr, EP::kClamp},
+      {"steer.period_s", "HOUDINI_CLOCK_STEER_PERIOD_S", 2.0, 3600.0,
+       "Seconds between steering decisions; the tracked rate is averaged over each. A held oscillator drifts slowly, so this need not be short.",
+       KNOB_ACCESS(double, steer.period_s), nullptr, EP::kClamp},
+      {"steer.gain", nullptr, 0.05, 1.0,
+       "Fraction of the averaged offset removed at each push.",
+       KNOB_ACCESS(double, steer.gain), nullptr, EP::kClamp},
+      {"steer.deadband_ppm", nullptr, 0.0, 10.0,
+       "Offsets smaller than this are left alone: half the actuator quantum is the floor of what a push can fix.",
+       KNOB_ACCESS(double, steer.deadband_ppm), nullptr, EP::kClamp},
+      {"steer.max_offset", nullptr, 0, 400,
+       "Bounded authority: never steer further than this many counts from the calibration point.",
+       KNOB_ACCESS(int, steer.max_offset), nullptr, EP::kClamp},
+      {"steer.max_push", nullptr, 1, 4,
+       "Most counts one push may move, so no single frequency step is large. At most 4: the step is fed forward when the push lands, about 0.2 s after the DAC moves (up to 0.4 s when a failed write is read back), so 4 counts (0.5 ppm) leave 12 to 25 samples of grid error, well inside the 246-sample re-sync gate; 50 would leave 150 to 300.",
+       KNOB_ACCESS(int, steer.max_push), nullptr, EP::kClamp},
+      {"steer.ppm_per_count", nullptr, 0.001, 10.0,
+       "Actuator gain, ppm per CLOCK_ADJ count (magnitude; +1 count raises the UE clock). Measured 0.1251 (AP-48).",
+       KNOB_ACCESS(double, steer.ppm_per_count), nullptr, EP::kClamp},
+      {"steer.keep", nullptr, 0, 0,
+       "Leave the steered code in place when the sounder exits instead of releasing to the calibrated hold.",
+       KNOB_ACCESS(bool, steer.keep), nullptr, EP::kClamp},
       // resync
       {"resync.residual_ppm", "HOUDINI_SYNC_RESIDUAL_PPM", 1e-4, 1000.0,
        "Assumed worst-case clock error after tracking; with sync_tol_samples it sets how often the beacon is looked at.",
@@ -497,8 +524,7 @@ SyncConfig SyncConfig::load(const std::optional<std::string>& sync_block_json,
 }
 
 void SyncConfig::resolve(const ResolveContext& ctx) {
-  // -1 means "half the replica length": what the pre-library correlator
-  // derived by default (64 at 128 taps, 32 at 64).
+  // -1 means "half the replica length" (64 at 128 taps, 32 at 64).
   if (detector.first_path_window < 0 && ctx.replica_len > 0) {
     detector.first_path_window = static_cast<int>(ctx.replica_len / 2);
     setProvenance("detector.first_path_window", Source::kDerived);
@@ -508,10 +534,9 @@ void SyncConfig::resolve(const ResolveContext& ctx) {
     resync.sync_tol_samples = ctx.prefix_samples / 4.0;
     setProvenance("resync.sync_tol_samples", Source::kDerived);
   }
-  // The Iris/UHD defaults are the rules that framer has always run (master
-  // returned the first threshold crossing under the power-ratio form); the
-  // Houdini defaults are the measured ones. A value the JSON sets is honoured
-  // on either platform, which is what makes the change a choice.
+  // The Iris/UHD defaults are the rules that framer runs (the first
+  // threshold crossing under the power-ratio form); the Houdini defaults are
+  // the measured ones. A value the JSON sets is honoured on either platform.
   if (ctx.platform == Platform::kIrisUhd) {
     if (!wasSet("detector.pick")) {
       detector.pick = PickRule::kFirstCrossing;
@@ -581,6 +606,10 @@ void SyncConfig::validate() {
          (platform_ == Platform::kIrisUhd
               ? "; it is the Iris/UHD default, the form that framer has always run"
               : "; diagnostic only on Houdini"));
+  }
+  if (detector.bar.min_bar > 0.0 && 1.0 / detector.bar.corr_scale < detector.bar.min_bar) {
+    note("detector.min_bar is above the resync bar 1 / corr_scale: the bar stays as configured "
+         "and the retry relaxation is off");
   }
   if (detector.first_path_window > 512) {
     note("detector.first_path_window above 512 reaches past any preamble plateau and widens "

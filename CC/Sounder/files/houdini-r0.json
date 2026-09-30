@@ -1,0 +1,54 @@
+{
+    "_description": "R0 control: legacy 500 MHz, 64 FFT, on the dual-band bench roles",
+    "_status": "RAN on the filtered sub-6 chain (DEMO_VERIFICATION 9.40): it does not acquire there, because the VBF-2450+ bandpasses block its 500 MHz beacon (the filters, not the stack). The control only with those filters out.",
+    "_comment": "AP-79 ladder rung R0, the CONTROL: the legacy single-band link (houdini-1u.json: 122.88 MSPS both ways, NCO 500 MHz, fft 64, the legacy beacon, no mode-V keys) on the dual-band roles and cabling, so a failure at R1 can be pinned on mode V rather than on the stack or the rig. Only the roles and channels change from houdini-1u.json: the dual-band topology (topology-houdini-dualband.json) and channel A (ch0) on both nodes, the sub-6 cables (BS DAC_B -> UE ADC_D, UE DAC_B -> BS ADC_D). Its 500 MHz beacon does not pass the VBF-2450+ bandpasses of the filtered sub-6 chain, so it is the control only with those filters out (runbook A4). Run procedure: CSI_DEMO_WALKTHROUGH.md.",
+    "serial_file": "files/topology-houdini-dualband.json",
+    "radio_type": "houdini",
+    "remote_port": "55132",
+    "bs_hw_framer": true,
+    "ue_tdd_pilot": true,
+    "_ue_tdd_pilot_note": "UE streams its pilot with the tdd=1 TX stream arg: the driver's TxTickAnchor accepts beacon-referenced starts on the 3.125 us (384-tick) TDD grid (SH-248/SH-301). ue_tx_advance_ticks is QUANTIZED to that grid (values under 192 vanish; leave 0). Fine seating comes from the zero-padded burst; tx_advance=247 is the bench calibration (DEMO_VERIFICATION.md 4.48).",
+    "ue_tx_advance_ticks": 0,
+    "_bs_hw_framer_note": "true selects the BS native-Houdini TDD framer: one TDD symbol per sounder slot (4096 ticks), the beacon strobe on the B slot and the rx gate on every other slot; the pilot and data slots are cut from one continuous read (DEMO_VERIFICATION.md 4.12/4.16). samps_per_slot must stay <= 4096 (FPGA TX_RAM depth, else genPilots' size_t remain_size underflows): 48 x 80 + 128 + 128 = 4096.",
+    "frequency": 500000000.0,
+    "nco_frequency": 500000000.0,
+    "sample_rate": 122880000.0,
+    "channel": "A",
+    "frame_schedule": [
+        "BGPGGGGGGGGGGGGGGGGGGGGGGGGGGG"
+    ],
+    "max_frame": 600,
+    "ofdm_symbol_per_slot": 48,
+    "fft_size": 64,
+    "cp_size": 16,
+    "ofdm_tx_zero_prefix": 128,
+    "ofdm_tx_zero_postfix": 128,
+    "beamsweep": false,
+    "ue_channel": "A",
+    "ue_rx_gain_a": [
+        65
+    ],
+    "ue_tx_gain_a": [
+        81
+    ],
+    "ue_rx_gain_b": [
+        65
+    ],
+    "ue_tx_gain_b": [
+        81
+    ],
+    "ue_frame_schedule": [
+        "GGPGGGGGGGGGGGGGGGGGGGGGGGGGGG"
+    ],
+    "tx_advance": [
+        247
+    ],
+    "corr_scale": [
+        100
+    ],
+    "_corr_scale_init_note": "Acquisition-only detection threshold; SMALLER is STRICTER (test: corr_scale * peak > trailing local energy). 10 puts the bar at 0.1, between the populations measured on the legacy link (no beacon 3.4e-07, beacon 0.31 to 4.2), where 100 let sidelobes cross first. Acquisition also requires the 30 dB in-window SNR floor (sync.confirm.snr_floor_db) and two grid-consistent confirms, which is what rejects the noise-artifact class (DEMO_VERIFICATION.md 4.25/4.32). Re-sync uses corr_scale and relaxes per retry, gated by the same floor.",
+    "corr_scale_init": [
+        10
+    ],
+    "ue_pilot_horizon": 96
+}

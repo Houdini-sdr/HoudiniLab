@@ -16,7 +16,8 @@
 #   OUT=logs/shape_<date>       log directory
 #   ATTEMPTS=3                  launch attempts per run before giving up (1 for
 #                               a level sweep where "no lock" IS the result)
-#   SOUNDER_DIR / VENV          as run_pad_campaign.sh
+#   SOUNDER_DIR                 the checkout to run (default: this one)
+#   VENV                        the Soapy venv prefix (default ~/houdini_test)
 #
 # Output: $OUT/<shape>_r<k>.log per run, $OUT/campaign.log, and a gate_summary
 # over all logs at the end. Exit code is non-zero if any run failed to START
@@ -37,6 +38,20 @@ cd "$SOUNDER_DIR" || { echo "no such directory: $SOUNDER_DIR" >&2; exit 1; }
 [ -f "$VENV/bin/activate" ] && . "$VENV/bin/activate"
 export SOAPY_SDR_PLUGIN_PATH="${SOAPY_SDR_PLUGIN_PATH:-$VENV/lib/SoapySDR/modules0.8-3}"
 export LD_LIBRARY_PATH="$VENV/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+# HOUDINI_SOAPY_ROOT: the release's host-plugin prefix (where the venv carries none).
+# Refuse when no Houdini module is where SoapySDR will search: the prefix's
+# module dirs, else each directory of the plugin path.
+if [ -n "${HOUDINI_SOAPY_ROOT:-}" ]; then
+  export SOAPY_SDR_ROOT=$HOUDINI_SOAPY_ROOT SOAPY_SDR_PLUGIN_PATH=
+  SEARCH=$(ls -d "$HOUDINI_SOAPY_ROOT"/lib/SoapySDR/modules* 2>/dev/null)
+else
+  SEARCH=$(printf '%s\n' "$SOAPY_SDR_PLUGIN_PATH" | tr ':' '\n')
+fi
+FOUND=
+while IFS= read -r d; do [ -n "$d" ] && [ -f "$d/libHoudiniSDRSupport.so" ] && FOUND=$d; done <<EOF
+$SEARCH
+EOF
+[ -n "$FOUND" ] || { echo "no Houdini host plugin where SoapySDR will search (${HOUDINI_SOAPY_ROOT:-$SOAPY_SDR_PLUGIN_PATH}): export HOUDINI_SOAPY_ROOT=<the release's host-plugin prefix>" >&2; exit 1; }
 # Run until the wall clock says stop, never until max_frame.
 export HOUDINI_MAX_FRAME="${HOUDINI_MAX_FRAME:-2000000000}"
 
@@ -104,10 +119,11 @@ for ((k = 0; k < ROUNDS; ++k)); do
       # that and the aggregate refused to run over nine empty "runs".
       timeout 90 python3 csi_gui/teardown_framer.py --topology "$TOPO" > "$OUT/td-${s}-$((k + 1)).txt" 2>&1
       sleep 5
-      # SIGTERM at the wall clock is the demo launcher's own shutdown path, so
-      # streams close the way they do in the demo; a hard kill 15 s later is
-      # the backstop. rc 124 (timed out) is therefore the SUCCESS code here.
-      timeout -k 15 "$RUN_S" ./build/sounder --view --conf_file "${conf_of[$s]}" > "$f" 2>&1
+      # SIGINT at the wall clock is the dashboard's own stop (the sounder's
+      # only signal handler), so streams close the way they do in the demo and
+      # the end-of-run checks print; a hard kill 15 s later is the backstop.
+      # rc 124 (timed out) is therefore the SUCCESS code here.
+      timeout -s INT -k 15 "$RUN_S" ./build/sounder --view --conf_file "${conf_of[$s]}" > "$f" 2>&1
       rc=$?
       if [ "$rc" -eq 124 ] || grep -q "lock CONFIRMED" "$f"; then started=1; break; fi
       echo "  attempt $attempt rc=$rc (no lock, run ended early), retrying" | tee -a "$log"

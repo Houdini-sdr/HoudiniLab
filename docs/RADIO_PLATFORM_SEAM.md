@@ -1,7 +1,8 @@
 # The radio platform seam: design and verification plan
 
-Status: PLAN, 2026-09-03, decided with the user after the review-fix round
-(DEMO_VERIFICATION 8.175 to 8.182). Companion to
+Status: steps S1 to S3 are done and on `develop` (the step table in section 4 gives
+their commits); S0 and S4 are not marked done. Decided with the user after the
+review-fix round (DEMO_VERIFICATION 8.175 to 8.182). Companion to
 `SYNC_LIBRARY_ARCHITECTURE.md` (the sync library) and
 `SOUNDER_CHANGE_PACKAGING.md` (fixes against features).
 
@@ -72,7 +73,7 @@ struct RadioParams {                // what a radio needs to open: no Config poi
   double rx_gain, tx_gain; std::string bw / antenna facts; stream arguments
 };
 class Radio {                       // abstract and NARROW: streams, time, device facts
-  enum class Type { kSoapyIris, kSoapyHoudini, kUhdNative };
+  enum class Type { kSoapyIris, kSoapyHoudini };   // a native-UHD type was planned; the PURE_UHD build uses its own sets
   static std::unique_ptr<Radio> create(Type, const RadioParams&);   // the one place that knows the type
   // pure virtual: recv (one form), xmit, activateRecv/Xmit, deactivateRecv/Xmit,
   //   getTriggers, setup (gains), drain_buffers
@@ -117,7 +118,7 @@ the build matrix.
 | S3 | an abstract set interface per role (the ten base-station and six client methods the receiver calls) with the Soapy sets and the native-UHD sets as implementations, chosen by a factory; the receiver's `#if USE_UHD` type switch goes. CORRECTED 2026-09-03 after reading the UHD sets: the native UHD base set holds ONE multi-board device object (`multi_usrp`, `get_num_mboards`), not one radio per board, so it cannot sit behind the per-radio `BaseRadioSet` as a `RadioUhd`; it is its own set, which is exactly Agora's `RadioSetUhd` shape (DONE `a3e6b2c`: `RadioSetInterfaces.h`, `RadioSetFactory.cc`; matrix green; review applied in the S4 commit) | matrix (compile-only for UHD); suites; 3 runs |
 | S4 | the receiver's remaining branches keyed on the sync model (`Config::sync_model()`), the recorder's Houdini fixes as `RxPathFixes` (`sync/rx_path_fixes.h`); `is_houdini()` only where the platform is defined (BUILT in the S4 commit; matrix green; 48 sites to 4) | same |
 
-Reviews: Opus after each step until a round reports nothing new, as for
+Reviews: an independent code review after each step until a round reports nothing new, as for
 the library. Retractions and corrections go in the ledger as before.
 
 ## 5. Out of scope here

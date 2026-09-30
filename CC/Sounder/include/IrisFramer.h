@@ -1,8 +1,8 @@
 /** @file IrisFramer.h
   * @brief The Iris (and Soapy-UHD) base-station framer: the TDD JSON, the
-  *        beacon RAM and weights, the trigger, the sync delays. Moved out of
-  *        BaseRadioSet (seam step S2) without change; this path has no
-  *        hardware on this bench and is compile-only (build matrix).
+  *        beacon RAM and weights, the trigger, the sync delays. There is no
+  *        Iris or UHD hardware on the demo bench: this path is compile-only
+  *        there (build matrix).
   *
   * Copyright (c) 2018-2022, Rice University
   * RENEW OPEN SOURCE LICENSE: http://renew-wireless.org/license

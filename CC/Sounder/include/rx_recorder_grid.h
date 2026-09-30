@@ -3,16 +3,17 @@
  RENEW OPEN SOURCE LICENSE: http://renew-wireless.org/license
 
 ----------------------------------------------------------------------
- Sample-time grid bookkeeping for the rx-recorder tool.
+ Sample-time grid bookkeeping, ported from the rx-recorder tool
+ (arc/rx-recorder); RadioHoudini keeps one tracker per RX window.
 
- The capture file promises a linear map: sample k lives at hardware
- time t0 + k/rate. TimeGridTracker anchors t0 at the first stamped
- read and, at every later stamp, compares where the read's samples
- WOULD land (the emit position) against where the timestamp says they
+ A window promises a linear map: sample k lives at hardware time
+ t0 + k/rate. TimeGridTracker anchors t0 at the first stamped read
+ and, at every later stamp, compares where the read's samples WOULD
+ land (the emit position) against where the timestamp says they
  BELONG. A positive difference is a stream gap (dropped packets): the
- capture loop inserts that many placeholder zeros first, so one gap
- cannot time-shift the whole remainder of the file. Extents of
- untrusted samples are recorded for the file's /Data/Gaps table.
+ reader inserts that many placeholder zeros first, so one gap cannot
+ time-shift the rest of the window. Extents of untrusted samples are
+ recorded for the HDF5 file's /Data/Gaps table (rx_gap_sink.h).
 ---------------------------------------------------------------------
 */
 #ifndef SOUNDER_RX_RECORDER_GRID_H_
@@ -25,7 +26,9 @@
 
 namespace Sounder {
 
-// Why samples in a /Data/Gaps extent are untrusted.
+// Why samples in a /Data/Gaps extent are untrusted. The sounder produces
+// kGapTimeJump (RadioHoudini) and kGapUntrustedPilot (HoudiniFramer); the rest
+// are the rx-recorder tool's, kept so the GAP_COLUMNS legend stays one format.
 enum GapCause : int64_t {
   kGapTimeJump = 0,    // stream gap detected via timestamps (UDP/kernel loss)
   kGapHostRing = 1,    // host ring wrapped; slot never recorded (row zeroed)
@@ -49,6 +52,7 @@ struct GridCheck {
   size_t pad_samples = 0;  // zeros to emit BEFORE the read's samples
   bool backward = false;   // timestamp moved backward (no pad)
   bool resync = false;     // time-base jump: t0 re-anchored (no pad)
+  int64_t delta = 0;       // the read's stamp minus the count, in samples (0 on the count)
 };
 
 // The one grid<->file time convention: sample index -> nanoseconds at
@@ -62,9 +66,9 @@ class TimeGridTracker {
  public:
   // Jitter tolerance: timeNs is integer nanoseconds and both the stamp and
   // the t0 anchor round independently (+-1 ns each), so above ~1 GSPS the
-  // quantization exceeds one sample period — tolerate 2 ns worth of
-  // samples, floor 1. (Measured: false +-2-sample backward jumps at
-  // 1.966 GSPS with a fixed +-1 tolerance.) This is also the DETECTION
+  // quantization exceeds one sample period: tolerate 2 ns worth of samples,
+  // floor 1 (a fixed +-1 tolerance reports false +-2-sample backward jumps
+  // at 1.966 GSPS). This is also the DETECTION
   // RESOLUTION: a real drop of <= tolerance_ samples is indistinguishable
   // from stamp rounding and is absorbed as a bounded standing offset until
   // cumulative drift exceeds the tolerance, at which point the FULL
@@ -104,6 +108,7 @@ class TimeGridTracker {
       return result;
     }
     const int64_t delta = static_cast<int64_t>(std::llround(delta_d));
+    result.delta = delta;
     // |delta| <= tolerance_: timestamp rounding jitter, not a real gap.
     if (delta > tolerance_) {
       result.pad_samples = static_cast<size_t>(delta);

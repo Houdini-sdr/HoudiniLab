@@ -3,13 +3,13 @@ cmake_minimum_required(VERSION 3.10)
 cmake_policy(SET CMP0048 NEW)
 project(Sounder VERSION 1.2.0)
 
-if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER 7.0)
-  set(GCC_COVERAGE_COMPILE_FLAGS "-faligned-new")
-endif()
-
 configure_file(${CMAKE_SOURCE_DIR}/include/version_config.h.in ${CMAKE_SOURCE_DIR}/include/version_config.h)
 
-option(FORCE_BUILD_PATH "Hardcode the build directory path to be 'build/'" ON)
+# Off by default: on, every build directory wrote its libraries into the
+# source tree's build/, so a second build directory (a Debug or sanitizer
+# build) overwrote the first one's archive and the first then linked it.
+# The usual build in build/ is the same either way.
+option(FORCE_BUILD_PATH "Hardcode the build directory path to be 'build/'" OFF)
 if(FORCE_BUILD_PATH)
   message(STATUS "Setting the build directory to build folder")
   set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/build)
@@ -52,12 +52,15 @@ if(${CMAKE_C_COMPILER_ID} STREQUAL "GNU")
   # on here to keep a shadowed declaration from silently hiding an outer one:
   # the tree was clean of all 7 when it was turned on, and third_party/ is a
   # SYSTEM include below, so it contributes no noise.
-  set(CMAKE_CXX_FLAGS "-std=c++17 -Wall -Wextra -Wshadow ${ARCH_FLAGS}")
+  # -Wno-psabi: GCC's x86 note that passing a struct with a std::complex<float>
+  # member (the detector's Detection) "changed ABI in GCC 4.4" matters only when
+  # linking against objects built with a GCC older than 4.4; it printed once per
+  # call site on every x86 build and buried real warnings. The ARM build never
+  # printed it.
+  set(CMAKE_CXX_FLAGS "-std=c++17 -Wall -Wextra -Wshadow -Wno-psabi ${ARCH_FLAGS}")
   set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -O0")
 else()
   message(FATAL_ERROR "Unsupported version of compiler")
-  set(CMAKE_CXX_STANDARD 17)
-  set(CMAKE_CXX_STANDARD_REQUIRED ON)
 endif()
 
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
@@ -204,7 +207,7 @@ if (HOUDINI_USE_CUDA)
   add_definitions(-DUSE_CUDA)
   # The kernel is a backend of houdini_sync's Detector (sync/detector.cc), so
   # it is compiled into the library, not into the sounder's sources: every
-  # consumer of the library then links (review round 4, HIGH 3).
+  # consumer of the library then links.
   set(HOUDINI_CUDA_SOURCES find_beacon_cuda.cu)
   message(STATUS "GPU beacon correlator: ENABLED (CUDA arch ${CMAKE_CUDA_ARCHITECTURES})")
 endif()
@@ -224,7 +227,7 @@ else()
         ${CMAKE_SOURCE_DIR}/mufft/libmuFFT-avx.a)
 endif()
 
-target_link_libraries(sounder houdini_sync -lpthread --enable-threadsafe ${GFLAGS_LIBRARIES} ${UHD_LIBRARIES}
+target_link_libraries(sounder houdini_sync -lpthread ${GFLAGS_LIBRARIES} ${UHD_LIBRARIES}
     ${SoapySDR_LIBRARIES}
     ${HDF5_LIBRARIES}
     ${MUFFT_LIBRARIES})
@@ -232,17 +235,13 @@ target_link_libraries(sounder houdini_sync -lpthread --enable-threadsafe ${GFLAG
 add_library(sounder_module MODULE
     ${SOUNDER_SOURCES})
 
-target_link_libraries(sounder_module houdini_sync -lpthread --enable-threadsafe ${GFLAGS_LIBRARIES} ${UHD_LIBRARIES}
+target_link_libraries(sounder_module houdini_sync -lpthread ${GFLAGS_LIBRARIES} ${UHD_LIBRARIES}
     -Wl,--whole-archive
     ${MUFFT_LIBRARIES}
     -Wl,--no-whole-archive
     ${HDF5_LIBRARIES}
     ${SoapySDR_LIBRARIES})
 
-# Radio-free unit test: the UE beacon-sync geometry across the whole rate
-# ladder. Links NOTHING (sync_geometry.h is header-only and dependency-free) so
-# it builds and runs anywhere, which is the point -- the two defects it covers
-# were only visible by running a UE against silicon at one rate.
 enable_testing()
 # ---- houdini_sync: the UE synchronisation library ---------------------------
 # One classed home for the beacon shapes, the detector, the confirm, the carrier
@@ -251,7 +250,7 @@ enable_testing()
 # comms-lib and utils are compiled HERE and nowhere else: the sounder, the
 # module, the two HIL tools, the geometry test, the dumper and the beacon TX
 # tool all take them from this library, so there is one find_beacon_avx in
-# the tree (review rounds 2 and 3).
+# the tree.
 add_library(houdini_sync STATIC
     sync/sync_config.cc
     sync/beacon_shape.cc
@@ -281,6 +280,10 @@ target_link_libraries(golden_window_test houdini_sync -lpthread)
 add_test(NAME golden_window COMMAND golden_window_test
          ${CMAKE_CURRENT_SOURCE_DIR}/tests/comms-func/fixtures/golden)
 
+# The UE beacon-sync geometry across the whole rate ladder. Links NOTHING
+# (sync_geometry.h is header-only and dependency-free) so it builds and runs
+# anywhere, which is the point: the defects it covers were only visible by
+# running a UE against silicon at one rate.
 add_executable(sync_geometry_test tests/comms-func/sync_geometry_test.cc)
 target_include_directories(sync_geometry_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 add_test(NAME sync_geometry COMMAND sync_geometry_test)
@@ -296,6 +299,177 @@ add_executable(grid_tracker_test tests/comms-func/grid_tracker_test.cc)
 target_include_directories(grid_tracker_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 add_test(NAME grid_tracker COMMAND grid_tracker_test)
 
+# AP-79: the x2 TX interpolator and the sub-6 RX channel filter, measured on
+# the implementation, with the mutation matrix. Header-only; no radio.
+add_executable(band_filters_test tests/comms-func/band_filters_test.cc)
+target_include_directories(band_filters_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_test(NAME band_filters COMMAND band_filters_test)
+
+# AP-79: the per-channel RF-DC plan (zone, calibration mode, RX filter)
+# derived from the NCO, checked against the HS-202 plan's table.
+add_executable(rf_plan_test tests/comms-func/rf_plan_test.cc)
+target_include_directories(rf_plan_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_test(NAME rf_plan COMMAND rf_plan_test)
+
+# AP-79: the mode-V bring-up order and values against a recording fake device.
+add_executable(mode_v_bringup_test tests/comms-func/mode_v_bringup_test.cc)
+target_include_directories(mode_v_bringup_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(mode_v_bringup_test ${SoapySDR_LIBRARIES})
+add_test(NAME mode_v_bringup COMMAND mode_v_bringup_test)
+
+# AP-79: the TX burst interpolation and RX lane filtering at the radio boundary.
+add_executable(tx_rx_boundary_test tests/comms-func/tx_rx_boundary_test.cc)
+target_include_directories(tx_rx_boundary_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_test(NAME tx_rx_boundary COMMAND tx_rx_boundary_test)
+# The same test under AddressSanitizer whatever the build type: its cache
+# over-read case keeps the output right, so only the sanitizer can fail it.
+include(CheckCXXSourceCompiles)
+set(CMAKE_REQUIRED_FLAGS "-fsanitize=address,undefined")
+set(CMAKE_REQUIRED_LIBRARIES "-fsanitize=address,undefined")  # the link, on CMake 3.10
+check_cxx_source_compiles("int main() { return 0; }" SOUNDER_HAVE_ASAN)
+unset(CMAKE_REQUIRED_FLAGS)
+unset(CMAKE_REQUIRED_LIBRARIES)
+if (SOUNDER_HAVE_ASAN)
+  add_executable(tx_rx_boundary_asan_test tests/comms-func/tx_rx_boundary_test.cc)
+  target_include_directories(tx_rx_boundary_asan_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  target_compile_options(tx_rx_boundary_asan_test PRIVATE
+      -O1 -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer)
+  target_link_libraries(tx_rx_boundary_asan_test PRIVATE -fsanitize=address,undefined)
+  add_test(NAME tx_rx_boundary_asan COMMAND tx_rx_boundary_asan_test)
+else()
+  message(WARNING "no AddressSanitizer: tx_rx_boundary_asan is not built, so the TX interpolator's cache over-read case is uncovered")
+endif()
+
+# AP-79: the band-limited beacon: its band, its fit, and the real detector
+# through the channel-filtered lane.
+add_executable(beacon_bandlimit_test tests/comms-func/beacon_bandlimit_test.cc)
+target_link_libraries(beacon_bandlimit_test houdini_sync -lpthread ${MUFFT_LIBRARIES})
+add_test(NAME beacon_bandlimit COMMAND beacon_bandlimit_test)
+
+# AP-79: CommsLib::FFT / IFFT on an input shorter than the transform (the
+# inherited code overran the heap there).
+add_executable(commslib_fft_test tests/comms-func/commslib_fft_test.cc)
+target_link_libraries(commslib_fft_test houdini_sync -lpthread ${MUFFT_LIBRARIES})
+add_test(NAME commslib_fft COMMAND commslib_fft_test)
+
+# AP-79: the CSI view's per-symbol FFT against the DFT-matrix definition.
+add_executable(dc_fft_test tests/comms-func/dc_fft_test.cc)
+target_include_directories(dc_fft_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/mufft)
+target_link_libraries(dc_fft_test ${MUFFT_LIBRARIES})
+add_test(NAME dc_fft COMMAND dc_fft_test)
+add_executable(cir_test tests/comms-func/cir_test.cc)
+target_include_directories(cir_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/mufft)
+target_link_libraries(cir_test ${MUFFT_LIBRARIES})
+add_test(NAME cir COMMAND cir_test)
+# The Spectrum tab's Welch average of the pilot slot (SPC1): dBFS known answers.
+add_executable(spectrum_test tests/comms-func/spectrum_test.cc)
+target_include_directories(spectrum_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/mufft)
+target_link_libraries(spectrum_test ${MUFFT_LIBRARIES})
+add_test(NAME spectrum COMMAND spectrum_test)
+add_test(NAME csi_gui_metrics COMMAND python3 test_metrics.py WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/csi_gui)
+add_test(NAME csi_gui_control COMMAND python3 test_control.py WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/csi_gui)
+add_test(NAME csi_gui_check_setup COMMAND python3 test_check_setup.py WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/csi_gui)
+add_test(NAME csi_gui_record_replay COMMAND python3 test_record_replay.py WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/csi_gui)
+add_test(NAME rung_report COMMAND python3 rung_report_test.py WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/tests/demo-verify)
+add_test(NAME freeze_watch COMMAND python3 freeze_watch_test.py WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/tests/demo-verify)
+add_test(NAME pacer_core_check COMMAND python3 pacer_core_check_test.py WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/tests/demo-verify)
+add_test(NAME config_keys COMMAND python3 tests/config_keys_test.py WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME mer_sampler COMMAND python3 mer_sampler_test.py WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/tests/demo-verify)
+add_test(NAME run_summary COMMAND python3 run_summary_test.py WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/tests/demo-verify)
+add_test(NAME sounder_log COMMAND python3 sounder_log_test.py WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/tests/demo-verify)
+add_test(NAME syn1_wire COMMAND python3 syn1_wire_test.py WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/tests/demo-verify)
+# fstage_report needs numpy (the rig host's venv has it); registered only where it imports.
+execute_process(COMMAND python3 -c "import numpy" RESULT_VARIABLE HAVE_NUMPY_RC OUTPUT_QUIET ERROR_QUIET)
+if(HAVE_NUMPY_RC EQUAL 0)
+  add_test(NAME fstage_report COMMAND python3 fstage_report_test.py WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/tests/demo-verify)
+else()
+  message(STATUS "python3 has no numpy: the fstage_report test is not registered")
+endif()
+
+# AP-79: the link-health monitor port, pinned to the software lane's T0 cases
+# and to real captures from a streaming mode-V node.
+add_executable(link_health_test tests/comms-func/link_health_test.cc)
+target_include_directories(link_health_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_test(NAME link_health COMMAND link_health_test
+         ${CMAKE_CURRENT_SOURCE_DIR}/tests/comms-func/fixtures/link_health/mode_v_streaming_21.txt)
+
+# AP-79: the replay strobe offs/len in the driver's units.
+add_executable(replay_strobe_test tests/comms-func/replay_strobe_test.cc)
+target_include_directories(replay_strobe_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_test(NAME replay_strobe COMMAND replay_strobe_test)
+add_executable(pilot_ladder_test tests/comms-func/pilot_ladder_test.cc)
+target_include_directories(pilot_ladder_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_test(NAME pilot_ladder COMMAND pilot_ladder_test)
+add_executable(slot_align_test tests/comms-func/slot_align_test.cc)
+target_include_directories(slot_align_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_test(NAME slot_align COMMAND slot_align_test)
+add_executable(grid_check_test tests/comms-func/grid_check_test.cc)
+target_include_directories(grid_check_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME grid_check COMMAND grid_check_test)
+add_executable(pre_cfo_test tests/comms-func/pre_cfo_test.cc)
+target_include_directories(pre_cfo_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_test(NAME pre_cfo COMMAND pre_cfo_test)
+add_executable(bs_slots_test tests/comms-func/bs_slots_test.cc)
+target_include_directories(bs_slots_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_test(NAME bs_slots COMMAND bs_slots_test)
+add_executable(logger_macro_test tests/comms-func/logger_macro_test.cc)
+target_include_directories(logger_macro_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_test(NAME logger_macro COMMAND logger_macro_test)
+add_executable(rx_packet_test tests/comms-func/rx_packet_test.cc)
+target_include_directories(rx_packet_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_test(NAME rx_packet COMMAND rx_packet_test)
+add_executable(resync_window_test tests/comms-func/resync_window_test.cc)
+target_include_directories(resync_window_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_test(NAME resync_window COMMAND resync_window_test)
+add_executable(stream_args_test tests/comms-func/stream_args_test.cc)
+target_include_directories(stream_args_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_test(NAME stream_args COMMAND stream_args_test)
+add_executable(core_map_test tests/comms-func/core_map_test.cc)
+target_include_directories(core_map_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_test(NAME core_map COMMAND core_map_test)
+add_executable(pilot_slope_fit_test tests/comms-func/pilot_slope_fit_test.cc)
+target_include_directories(pilot_slope_fit_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_test(NAME pilot_slope_fit COMMAND pilot_slope_fit_test)
+add_executable(clock_steer_test tests/comms-func/clock_steer_test.cc)
+target_include_directories(clock_steer_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_test(NAME clock_steer COMMAND clock_steer_test)
+add_executable(cns_sample_test tests/comms-func/cns_sample_test.cc)
+target_include_directories(cns_sample_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_test(NAME cns_sample COMMAND cns_sample_test)
+
+# AP-79: nr_pss_bl's acquisition thresholds derived on a simulated link.
+add_executable(detection_calibration_test tests/comms-func/detection_calibration_test.cc)
+target_link_libraries(detection_calibration_test houdini_sync -lpthread ${MUFFT_LIBRARIES})
+add_test(NAME detection_calibration COMMAND detection_calibration_test)
+
+# AP-79: the run configs through the real Config (the pilot slot is one slot,
+# fft_size symbols, inside the channel). Builds the sounder's own sources.
+add_executable(config_pilot_test tests/comms-func/config_pilot_test.cc ${SOUNDER_SOURCES})
+target_include_directories(config_pilot_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(config_pilot_test houdini_sync -lpthread ${GFLAGS_LIBRARIES} ${UHD_LIBRARIES}
+    ${SoapySDR_LIBRARIES} ${HDF5_LIBRARIES} ${MUFFT_LIBRARIES})
+add_test(NAME config_pilot COMMAND config_pilot_test WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+
+# AP-85: per-band channel widths through the real Config: the backward
+# compatibility pin (the configs without per-band widths, byte for byte) and the wide band.
+add_executable(per_band_test tests/comms-func/per_band_test.cc ${SOUNDER_SOURCES})
+target_include_directories(per_band_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(per_band_test houdini_sync -lpthread ${GFLAGS_LIBRARIES} ${UHD_LIBRARIES}
+    ${SoapySDR_LIBRARIES} ${HDF5_LIBRARIES} ${MUFFT_LIBRARIES})
+add_test(NAME per_band COMMAND per_band_test WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+
+# RadioHoudini's device and stream arguments for the demo config, from the
+# static builders (no device). Builds the sounder's own sources.
+add_executable(radio_houdini_args_test tests/comms-func/radio_houdini_args_test.cc ${SOUNDER_SOURCES})
+target_include_directories(radio_houdini_args_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(radio_houdini_args_test houdini_sync -lpthread ${GFLAGS_LIBRARIES} ${UHD_LIBRARIES}
+    ${SoapySDR_LIBRARIES} ${HDF5_LIBRARIES} ${MUFFT_LIBRARIES})
+add_test(NAME radio_houdini_args COMMAND radio_houdini_args_test WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+# AP-85: the host cost of the UE's TX interpolation per lane path. Standalone,
+# not a test: run it on the rig host (./build/tx_interp_bench [rounds]).
+add_executable(tx_interp_bench tests/comms-func/tx_interp_bench.cc)
+target_include_directories(tx_interp_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
 # The index-convention check AP-34(a) did not have. Links the real CommsLib so
 # it exercises the REAL detector; a replica would agree with itself.
 add_executable(beacon_geometry_test
@@ -303,12 +477,14 @@ add_executable(beacon_geometry_test
 target_link_libraries(beacon_geometry_test houdini_sync -lpthread ${MUFFT_LIBRARIES})
 add_test(NAME beacon_geometry COMMAND beacon_geometry_test)
 
-# HIL helper: transmit the real Gold beacon from a Houdini board so a Houdini UE
-# running the unmodified receiver.cc client-sync path can acquire it.
+# Bench helper: each candidate beacon's TX core and correlator replica, written
+# from the one definition in include/sync/beacon_shapes.h for the probes to read.
 add_executable(beacon_shape_dump
     tests/comms-func/beacon_shape_dump.cc)
 target_link_libraries(beacon_shape_dump houdini_sync -lpthread ${MUFFT_LIBRARIES})
 
+# HIL helper: transmit the real Gold beacon from a Houdini board so a Houdini UE
+# running the unmodified receiver.cc client-sync path can acquire it.
 add_executable(beacon_tx_gold
     tests/comms-func/beacon_tx_gold.cc)
 target_link_libraries(beacon_tx_gold houdini_sync -lpthread
@@ -321,7 +497,7 @@ target_link_libraries(beacon_tx_gold houdini_sync -lpthread
 add_executable(houdini_bs_ue_sync
     tests/comms-func/houdini_bs_ue_sync.cc
     ${SOUNDER_SOURCES})
-target_link_libraries(houdini_bs_ue_sync houdini_sync -lpthread --enable-threadsafe ${GFLAGS_LIBRARIES} ${UHD_LIBRARIES}
+target_link_libraries(houdini_bs_ue_sync houdini_sync -lpthread ${GFLAGS_LIBRARIES} ${UHD_LIBRARIES}
     ${SoapySDR_LIBRARIES}
     ${HDF5_LIBRARIES}
     ${MUFFT_LIBRARIES})
@@ -331,7 +507,7 @@ target_link_libraries(houdini_bs_ue_sync houdini_sync -lpthread --enable-threads
 add_executable(houdini_loopback
     tests/comms-func/houdini_loopback.cc
     ${SOUNDER_SOURCES})
-target_link_libraries(houdini_loopback houdini_sync -lpthread --enable-threadsafe ${GFLAGS_LIBRARIES} ${UHD_LIBRARIES}
+target_link_libraries(houdini_loopback houdini_sync -lpthread ${GFLAGS_LIBRARIES} ${UHD_LIBRARIES}
     ${SoapySDR_LIBRARIES}
     ${HDF5_LIBRARIES}
     ${MUFFT_LIBRARIES})

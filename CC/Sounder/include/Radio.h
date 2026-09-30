@@ -14,13 +14,14 @@
   * platform's framer hooks. What a platform has and another does not (the
   * transmit time grid, the receive gap ledger, a hardware trigger, an AGC)
   * is a capability a backend reports: a query the caller can branch on, or
-  * an honest "none" (0 pad, 0 status events) where the old code reported the
-  * same. What there is not is a hook that claims to have acted and did not.
+  * an honest "none" (0 pad, 0 status events). What there is not is a hook
+  * that claims to have acted and did not.
   *
-  * Backends: RadioSoapy (Iris and SoapyUHD, the SoapySDR plumbing),
+  * Backends: RadioSoapy (Iris and SoapyUHD, the SoapySDR plumbing) and
   * RadioHoudini (RadioSoapy plus the Houdini stream arguments, the
-  * pre-stream rates, the drain and gap ledger, the TDD grid), and, when
-  * built with USE_UHD, the native UHD radio (seam step S3).
+  * pre-stream rates, the drain and gap ledger, the TDD grid). The native UHD
+  * build (RADIO_TYPE=PURE_UHD) is not a backend here: its radio sets
+  * implement RadioSetInterfaces.h directly.
 */
 #ifndef RADIO_H_
 #define RADIO_H_
@@ -29,6 +30,8 @@
 #include <cstdint>
 #include <cstdlib>
 #include <memory>
+#include <limits>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -54,19 +57,40 @@ struct RadioParams {
   double rx_freq_offset_hz = 0.0;  ///< deliberate detune for CFO validation (AP-33)
   double tx_freq_offset_hz = 0.0;
   // Houdini stream facts.
-  int rx_local_port = 10002;  ///< host UDP port the RX stream binds
   std::string tx_mode = "stream";  ///< "replay" (the BS beacon RAM) or "stream" (the UE)
   bool tdd = false;           ///< the driver's TDD tick anchor for the UE pilot
   bool mts = true;            ///< multi-tile sync on every stream (AP-23)
-  std::string timeout = "1000000";
+  // The device RPC timeout, us. Not 1 s: on the rig (SH-442) 2 of 7
+  // sounder launches lost the BS open on every attempt; the node saw each
+  // attempt's first connection accepted and then NO request for the whole 1 s,
+  // so the wait is inside this process (cause unmeasured). 3 s rides it out; a
+  // dead node takes 3 s to report, and a fresh process's first discovery
+  // sleeps the full 3 s by SoapyRemote's design.
+  std::string timeout = "3000000";
+  // AP-79 mode V (Houdini). adc_fs_hz > 0 selects the mode-V converter
+  // bring-up (houdini/mode_v_bringup.h) in place of the one-rate, one-NCO path.
+  double tx_rate_hz = 0.0;  ///< TX stream rate; 0 = rate_hz
+  double adc_fs_hz = 0.0;
+  double dac_fs_hz = 0.0;
+  std::map<size_t, double> nco_by_channel;  ///< per-channel overrides of nco_hz
+  double half_bw_hz = 0.0;  ///< occupied half bandwidth of the waveform
+  std::map<size_t, double> half_bw_by_channel;  ///< AP-85: per-channel overrides of half_bw_hz
+  double tx_gain_db = std::numeric_limits<double>::quiet_NaN();  ///< NaN: not written
+  double rx_gain_db = std::numeric_limits<double>::quiet_NaN();
+  /// Samples per packet asked of the device through HOUDINI_MTU at make(): the
+  /// device sizes RX packets from it and the host plugin sizes TX packets from
+  /// the same MTU, so one divisor of the slot tiles both (the TX slot is twice
+  /// the RX slot's samples). 0 = the driver's default MTU.
+  size_t packet_samples = 0;
+  std::string xband_fe_state;  ///< AP-86: the X-band front end's static state, "tx"/"rx"; empty = none
 };
 
 class Radio {
  public:
-  enum class Type { kSoapyIris, kSoapyUhd, kSoapyHoudini, kUhdNative };
+  enum class Type { kSoapyIris, kSoapyUhd, kSoapyHoudini };
 
   /// The one place that knows which backend a type is. Throws
-  /// std::invalid_argument for a type this build has no backend for.
+  /// std::invalid_argument for a value outside the enum.
   static std::unique_ptr<Radio> create(Type type, const RadioParams& params);
   static const char* name(Type type);
 
@@ -117,9 +141,10 @@ class Radio {
   virtual void drain_buffers(std::vector<void*> buffs, int symSamp) = 0;
   virtual void reset_DATA_clk_domain() = 0;
 
-  /// The SoapySDR device behind a Soapy backend, nullptr otherwise. Used by
-  /// the base-station framer code that still programs the Iris TDD block
-  /// directly; seam step S2 moves those callers into the framer objects.
+  /// The SoapySDR device behind a Soapy backend, nullptr otherwise. Used for
+  /// the device settings the seam does not model: the framers' TDD and
+  /// beacon programming, the client set's Iris framer and CLOCK_ADJ access,
+  /// and the calibration procedures.
   virtual SoapySDR::Device* RawDev() const { return nullptr; }
 
  protected:

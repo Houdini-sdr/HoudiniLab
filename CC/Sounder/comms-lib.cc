@@ -83,129 +83,6 @@ int CommsLib::findLTS(const std::vector<std::complex<float>>& iq, int seqLen) {
   return best_peak;
 }
 
-size_t CommsLib::find_pilot_seq(const std::vector<std::complex<float>>& iq,
-                                const std::vector<std::complex<float>>& pilot,
-                                size_t seq_len) {
-  // Re-arrange into complex vector, flip, and compute conjugate
-  std::vector<std::complex<float>> pilot_conj;
-  for (size_t i = 0; i < seq_len; i++) {
-    // conjugate
-    pilot_conj.push_back(std::conj(pilot[seq_len - i - 1]));
-  }
-
-  // Equivalent to numpy's sign function
-  auto iq_sign = CommsLib::csign(iq);
-
-  // Convolution
-  auto pilot_corr = CommsLib::convolve(iq_sign, pilot_conj);
-
-  std::vector<float> pilot_corr_abs(pilot_corr.size());
-  for (size_t i = 0; i < pilot_corr_abs.size(); i++)
-    pilot_corr_abs[i] = computePower(pilot_corr[i]);
-
-  // Find all peaks
-  auto best_peak =
-      std::max_element(pilot_corr_abs.begin(), pilot_corr_abs.end()) -
-      pilot_corr_abs.begin();
-  return best_peak;
-}
-
-int CommsLib::find_beacon(const std::complex<int16_t>* raw_samples,
-                          size_t check_window) {
-  return CommsLib::find_beacon(toCorrelatorScale(raw_samples, check_window));
-}
-
-int CommsLib::find_beacon(const std::vector<std::complex<float>>& iq) {
-  int best_peak;
-  std::queue<int> valid_peaks;
-
-  // Original LTS sequence
-  int seqLen = 128;
-  auto gold_seq = CommsLib::getSequence(GOLD_IFFT);
-  struct timespec tv, tv2;
-
-  // Re-arrange into complex vector, flip, and compute conjugate
-  std::vector<std::complex<float>> gold_sym(seqLen);
-  std::vector<std::complex<float>> gold_sym_conj(gold_sym.size());
-  for (int i = 0; i < seqLen; i++) {
-    // grab one symbol and flip around
-    gold_sym[i] = std::complex<float>(gold_seq[0][seqLen - 1 - i],
-                                      gold_seq[1][seqLen - 1 - i]);
-    // conjugate
-    gold_sym_conj[i] = std::conj(gold_sym[i]);
-  }
-
-  // Convolution
-  clock_gettime(CLOCK_MONOTONIC, &tv);
-  auto gold_corr = CommsLib::convolve(iq, gold_sym_conj);
-  clock_gettime(CLOCK_MONOTONIC, &tv2);
-#ifdef TEST_BENCH
-  double diff1 =
-      ((tv2.tv_sec - tv.tv_sec) * 1e9 + (tv2.tv_nsec - tv.tv_nsec)) / 1e3;
-#endif
-
-  size_t gold_corr_size = gold_corr.size();
-  size_t gold_corr_size_2 = gold_corr_size + seqLen;
-  std::vector<float> gold_corr_2(gold_corr_size_2);
-  clock_gettime(CLOCK_MONOTONIC, &tv);
-  for (size_t i = seqLen; i < gold_corr_size; i++) {
-    gold_corr_2[i] =
-        computePower(gold_corr[i] * std::conj(gold_corr[i - seqLen]));
-  }
-  clock_gettime(CLOCK_MONOTONIC, &tv2);
-#ifdef TEST_BENCH
-  double diff2 =
-      ((tv2.tv_sec - tv.tv_sec) * 1e9 + (tv2.tv_nsec - tv.tv_nsec)) / 1e3;
-#endif
-
-  std::vector<float> const1(seqLen, 1);
-
-  std::vector<float> corr_abs(gold_corr_size);
-  clock_gettime(CLOCK_MONOTONIC, &tv);
-  std::transform(gold_corr.begin(), gold_corr.end(), corr_abs.begin(),
-                 computePower);
-  auto corr_abs_filt = CommsLib::convolve<float>(corr_abs, const1);
-  corr_abs_filt.push_back(0);
-  clock_gettime(CLOCK_MONOTONIC, &tv2);
-#ifdef TEST_BENCH
-  double diff3 =
-      ((tv2.tv_sec - tv.tv_sec) * 1e9 + (tv2.tv_nsec - tv.tv_nsec)) / 1e3;
-#endif
-
-  std::vector<float> thresh(corr_abs_filt.begin(), corr_abs_filt.end());
-  // Find all peaks, and pairs that are lts_sym.size() samples apart
-  for (size_t i = seqLen; i < gold_corr_size; i++) {
-    if (gold_corr_2[i] > thresh[i] / seqLen) valid_peaks.push(i - seqLen);
-  }
-
-#ifdef TEST_BENCH
-  std::cout << "Convolution took " << diff1 << " usec" << std::endl;
-  std::cout << "Corr Abs took " << diff2 << " usec" << std::endl;
-  std::cout << "Thresh calc took " << diff3 << " usec" << std::endl;
-  printf("Saving Corr data\n");
-  std::string filename = "corr_data.bin";
-  FILE* fc = fopen(filename.c_str(), "wb");
-  float* cdata_ptr = (float*)gold_corr_2.data();
-  fwrite(cdata_ptr, gold_corr_2.size(), sizeof(float), fc);
-  fclose(fc);
-  filename = "thresh_data.bin";
-  FILE* fp = fopen(filename.c_str(), "wb");
-  float* tdata_ptr = (float*)thresh.data();
-  fwrite(tdata_ptr, thresh.size(), sizeof(float), fp);
-  fclose(fp);
-#endif
-
-  valid_peaks.push(0);
-  // Use first LTS found
-  if (valid_peaks.empty()) {
-    best_peak = -1;
-  } else {
-    best_peak = valid_peaks.front();
-  }
-
-  return best_peak;
-}
-
 std::vector<std::complex<float>> CommsLib::csign(
     const std::vector<std::complex<float>>& iq) {
   /*
@@ -228,17 +105,6 @@ std::vector<std::complex<float>> CommsLib::csign(
     }
   }
   return iq_sign;
-}
-
-float CommsLib::find_max_abs(const std::vector<std::complex<float>>& in) {
-  float max_val = 0;
-  for (size_t j = 0; j < in.size(); j++) {
-    auto cur_val = std::abs(in[j]);
-    if (cur_val > max_val) {
-      max_val = cur_val;
-    }
-  }
-  return max_val;
 }
 
 std::vector<float> CommsLib::magnitudeFFT(
@@ -338,21 +204,6 @@ std::vector<size_t> CommsLib::getDataSc(size_t fftSize, size_t DataScNum,
   return data_sc;
 }
 
-std::vector<size_t> CommsLib::getNullSc(size_t fftSize, size_t DataScNum) {
-  std::vector<size_t> null_sc;
-  if (fftSize == Consts::kFftSize_80211) {
-    // We follow 802.11 PHY format here
-    null_sc.assign(Consts::lts_null_ind,
-                   Consts::lts_null_ind + Consts::kNumNullSubcarriers_80211);
-  } else {  // Allocate the boundary subcarriers as null
-    size_t start_sc = (fftSize - DataScNum) / 2;
-    size_t stop_sc = start_sc + DataScNum;
-    for (size_t i = 0; i < start_sc; i++) null_sc.push_back(i);
-    for (size_t i = stop_sc; i < fftSize; i++) null_sc.push_back(i);
-  }
-  return null_sc;
-}
-
 std::vector<std::complex<float>> CommsLib::getPilotScValue(
     size_t fftSize, size_t DataScNum, size_t PilotScOffset) {
   std::vector<std::complex<float>> pilot_sc;
@@ -399,9 +250,12 @@ std::vector<size_t> CommsLib::getPilotScIndex(size_t fftSize, size_t DataScNum,
 }
 
 std::vector<std::complex<float>> CommsLib::IFFT(
-    const std::vector<std::complex<float>>& in, int fftSize, float scale,
+    const std::vector<std::complex<float>>& in_arg, int fftSize, float scale,
     bool normalize, bool fft_shift) {
-  std::vector<std::complex<float>> out(in.size());
+  // AP-79: fftSize points whatever the input length (see CommsLib::FFT).
+  std::vector<std::complex<float>> in(in_arg);
+  in.resize(static_cast<size_t>(fftSize), std::complex<float>(0.f, 0.f));
+  std::vector<std::complex<float>> out(static_cast<size_t>(fftSize));
 
   void* fft_in = mufft_alloc(fftSize * sizeof(std::complex<float>));
   void* fft_out = mufft_alloc(fftSize * sizeof(std::complex<float>));
@@ -440,8 +294,14 @@ std::vector<std::complex<float>> CommsLib::IFFT(
 }
 
 std::vector<std::complex<float>> CommsLib::FFT(
-    const std::vector<std::complex<float>>& in, int fftSize, bool fft_shift) {
-  std::vector<std::complex<float>> out(in.size());
+    const std::vector<std::complex<float>>& in_arg, int fftSize, bool fft_shift) {
+  // The transform is fftSize points whatever the input length: a shorter input
+  // is zero-padded (getPilotScValue passes ofdm_data_num samples against
+  // fft_size), a longer one truncated, which is the transform the callers mean.
+  // Do not size the buffers from the input: a shorter input then overruns them.
+  std::vector<std::complex<float>> in(in_arg);
+  in.resize(static_cast<size_t>(fftSize), std::complex<float>(0.f, 0.f));
+  std::vector<std::complex<float>> out(static_cast<size_t>(fftSize));
 
   void* fft_in = mufft_alloc(fftSize * sizeof(std::complex<float>));
   void* fft_out = mufft_alloc(fftSize * sizeof(std::complex<float>));
@@ -597,6 +457,19 @@ std::vector<std::vector<float>> CommsLib::getSequence(size_t type,
         break;
       }
     }
+    // AP-85: past the prime table (it ends at 2039), the largest prime below
+    // the length. A longer sequence must not fall through to 2039: at 3240
+    // tones (the X-band at 270 RB) that repeats it over 59 % of the band, 5.26
+    // dB PAPR where the length-3229 one has 3.69.
+    if (seq_len > Consts::prime[308]) {
+      auto is_prime = [](size_t n) {
+        for (size_t d = 2; d * d <= n; ++d)
+          if (n % d == 0) return false;
+        return n >= 2;
+      };
+      for (M = seq_len - 1; !is_prime(M); --M) {
+      }
+    }
     float qh = M * (u + 1) / 31;
     float q = std::floor(qh + 0.5) + v * std::pow(-1, std::floor(2 * qh));
     std::vector<std::complex<float>> zc_freq;
@@ -684,23 +557,3 @@ std::vector<std::vector<float>> CommsLib::getSequence(size_t type,
   return matrix;
 }
 
-/*
-int main(int argc, char* argv[])
-{
-    std::vector<std::vector<double>> sequence;
-    int type = CommsLib::LTE_ZADOFF_CHU; //atoi(argv[1]);
-    int N
-        = 304; //atoi(argv[2]); 	// If Hadamard, possible N: {2, 4, 8, 16, 32, 64}
-    sequence = CommsLib::getSequence(type, N);
-
-    std::vector<std::complex<double>> sequence_c;
-    for (int i = 0; i < sequence[0].size(); i++) {
-        sequence_c.push_back(
-            std::complex<double>(sequence[0][i], sequence[1][i]));
-    }
-    // double peak = CommsLib::findLTS(sequence_c, N);
-    // std::cout << "LTS PEAK: " << peak << std::endl;
-
-    return 0;
-}
-*/

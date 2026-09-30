@@ -2,25 +2,26 @@
  * @file golden_window_test.cc
  * @brief The library against resync windows recorded on silicon.
  *
- * The migration's byte-identity guard. Each fixture is one targeted resync
+ * The sync library's byte-identity guard. Each fixture is one targeted resync
  * window the sounder dumped (HOUDINI_DUMP_RESYNC_WIN) together with the index
- * and in-window SNR the shipped code computed for it, on 2026-09-03 on the
- * rig, stack fpga c88e0b5f / device+host 3a0aa361, at 0.6 FS. The library's
- * Detector and SnrWindowGuard must return the same index and the same SNR
- * (to 0.01 dB) for every window; the CFO estimator must return a finite value
- * within the link's plausible band. A refactor that moves any of these
- * numbers is a behaviour change and has to say so.
+ * and in-window SNR the sounder computed for it on the rig (stack fpga
+ * c88e0b5f / device+host 3a0aa361, 0.6 FS). The library's Detector and
+ * SnrWindowGuard must return the same index and the same SNR (to 0.01 dB) for
+ * every window; the CFO estimator must return a finite value within the
+ * link's plausible band. A refactor that moves any of these numbers is a
+ * behaviour change and has to say so.
  *
  * Fixture layout: <dir>/<shape>/resyncwin_NN.bin (complex<int16>, n samples)
- * and resyncwin_NN.txt (key value lines: n, sync_index, snr, ...). Windows
- * dumped after 2026-09-03 also carry the detector settings they were taken
- * under (corr_scale, thresh, pick, first_path_window, first_path_floor_db,
- * snr_floor_db, snr_guard, replica_tail, beacon_type), asserted below when
- * present. `first_path_guard` is written by the sounder as of 2026-09-04 but
- * NO fixture in the tree carries it yet, so that assertion is forward-looking
- * and currently runs on none of the windows. `cfo_hz` is NOT written by the
- * sounder: it is a baseline added by hand from the library at commit 10d0fe0,
- * so the estimator has an identity check rather than a plausibility band.
+ * and resyncwin_NN.txt (key value lines: n, sync_index, snr, ...). Each also
+ * carries the detector settings it was taken under (corr_scale, thresh, pick,
+ * first_path_window, first_path_floor_db, snr_floor_db, snr_guard,
+ * replica_tail, beacon_type), asserted below when present; legacy and nr_pss
+ * 06-11 and dot11 00-05 also carry the decision statistic and its bar. The
+ * sounder also writes `first_path_guard`, but NO fixture in the tree carries
+ * it, so that assertion runs on none of the windows. `cfo_hz` is NOT written
+ * by the sounder: it is a baseline added by hand from the library at commit
+ * 10d0fe0, so the estimator has an identity check rather than a plausibility
+ * band.
  */
 #include <cmath>
 #include <cstdio>
@@ -101,10 +102,10 @@ int main(int argc, char** argv) {
   using houdini::sync::Source;
   using houdini::sync::SyncConfig;
   using houdini::sync::ThresholdForm;
-  // The first-path window derives from the replica: 64 at 128 taps, 32 at 64.
-  // The pre-library correlator did exactly this (comms-lib-portable.cc
-  // firstPathWindow), and a fixed 64 would have doubled dot11's and nr's. The
-  // shape owns the default; resolve() and the detector both read it.
+  // The first-path window derives from the replica: 64 at 128 taps, 32 at 64,
+  // as find_beacon's own default does (comms-lib.h); a fixed 64 would double
+  // dot11's and nr's. The shape owns the default; resolve() and the detector
+  // both read it.
   for (const char* name : {"dot11", "nr", "legacy", "nr_pss"}) {
     const auto shape = BeaconShape::make(name, Platform::kHoudini, Numerology::houdiniDefault());
     auto cfg = SyncConfig::defaults();
@@ -120,7 +121,8 @@ int main(int argc, char** argv) {
   {
     bool threw = false;
     try { BeaconShape::make("legacyy", Platform::kHoudini, Numerology::houdiniDefault()); } catch (const std::invalid_argument&) { threw = true; }
-    check(threw && BeaconShape::names().size() == 5, "BeaconShape: an unknown name throws; five names");
+    // Six names, nr_pss_bl the band-limited mode-V beacon (AP-79).
+    check(threw && BeaconShape::names().size() == 6, "BeaconShape: an unknown name throws; six names (with nr_pss_bl, AP-79)");
     const auto h = BeaconShape::make("nr_pss", Platform::kHoudini, Numerology::houdiniDefault());
     const auto i = BeaconShape::make("nr_pss", Platform::kIrisUhd, Numerology::houdiniDefault());
     check(h.replicaTail() == 144 && i.replicaTail() == 0,
@@ -158,8 +160,8 @@ int main(int argc, char** argv) {
               Detector::resolveForm(ThresholdForm::kPowerRatio, false) == ThresholdForm::kPowerRatio &&
               Detector::resolveForm(ThresholdForm::kNormalizedXCorr, true) == ThresholdForm::kCoherence,
           "resolveForm: auto is xcorr, an explicit form is kept, a single-copy replica forces coherence");
-    // The Iris/UHD defaults are the framer's old rules, derived by resolve();
-    // a JSON value is honoured on either platform.
+    // The Iris/UHD defaults are that framer's rules, derived by resolve(); a
+    // JSON value is honoured on either platform.
     auto iris = SyncConfig::defaults();
     iris.resolve({128, 160.0, Platform::kIrisUhd});
     check(iris.detector.pick == PickRule::kFirstCrossing &&
@@ -250,8 +252,8 @@ int main(int argc, char** argv) {
   int windows = 0;
   int with_stat = 0;  // fixtures too old to carry a statistic are not silently counted
   std::map<std::string, int> per_shape;
-  // Windows per shape: legacy and nr_pss 00-05 (morning) + 06-11 (with the
-  // statistic); dot11 00-05 recorded after round 4 for the guard rule.
+  // Windows per shape: legacy and nr_pss 00-11 (06-11 with the statistic),
+  // dot11 00-05 (with the statistic).
   const std::map<std::string, int> kExpected = {{"legacy", 12}, {"nr_pss", 12}, {"dot11", 6}};
   for (const char* shape : {"legacy", "nr_pss", "dot11"}) {
     houdini::sync::shapes::Shape sh;
@@ -269,14 +271,12 @@ int main(int argc, char** argv) {
     // reproduce windows recorded by the one that applies them: under such a
     // build the replay is skipped, said once per shape, but the fixtures are
     // still OPENED and COUNTED, so a missing or half-populated set fails the
-    // count checks below rather than passing vacuously (round 7).
+    // count checks below rather than passing vacuously.
     const bool replay = det.backendAppliesConfig();
     if (!replay) {
       std::printf("SKIP  %s: backend %s does not apply the configuration; the windows are counted, not replayed\n",
                   shape, det.backendName());
     }
-    // 00-05 recorded 2026-09-03 morning (index and SNR); 06-11 that afternoon
-    // by the review-fix build, which also records the statistic and the bar.
     for (int i = 0; i < 12; ++i) {
       char nb[64];
       std::snprintf(nb, sizeof nb, "/resyncwin_%02d", i);
@@ -291,8 +291,8 @@ int main(int argc, char** argv) {
         check(false, std::string(shape) + " window " + std::to_string(i) + ": fixture txt lacks sync_index/snr");
         continue;
       }
-      // Fixtures recorded after 2026-09-03 carry the settings they were taken
-      // under; when present they must match what this test runs.
+      // A fixture that records its corr_scale is replayed at it; the others
+      // at kCorrScale.
       float corr_scale = kCorrScale;
       if (meta.has("corr_scale")) corr_scale = static_cast<float>(meta.at("corr_scale"));
       // Every recorded setting that moves the index or the SNR must match
@@ -310,8 +310,8 @@ int main(int argc, char** argv) {
         check(det.firstPathWindow() == static_cast<int>(meta.at("first_path_window")), tag + ": recorded first-path window matches");
       // The guard changes sync_index on a quarter to a third of arrival
       // phases, so a window captured under one setting and replayed under the
-      // other must not pass quietly. Fixtures written before the knob existed
-      // carry no such line and are checked on the other two settings only.
+      // other must not pass quietly. Fixtures without the line are checked on
+      // the other settings only.
       if (meta.has("first_path_guard"))
         check(det.firstPathGuard() == static_cast<int>(meta.at("first_path_guard")),
               tag + ": recorded first-path guard matches");
@@ -329,9 +329,8 @@ int main(int argc, char** argv) {
       std::snprintf(what, sizeof what, "%s window %d: index %lld (recorded %lld)", shape, i,
                     static_cast<long long>(det_res.end_index), want);
       check(det_res.end_index == want, what);
-      // The statistic, when the fixture recorded one (dumps after the
-      // Detection widening of 2026-09-03): a change that leaves the argmax
-      // alone but moves the margin is visible here.
+      // The statistic, when the fixture recorded one: a change that leaves the
+      // index alone but moves the margin is visible here.
       if (meta.has("statistic") && std::isfinite(meta.at("statistic"))) {  // NaN = recorded by a backend without evidence
         ++with_stat;
         std::snprintf(what, sizeof what, "%s window %d: statistic %.5g (recorded %.5g)", shape, i,
@@ -371,7 +370,7 @@ int main(int argc, char** argv) {
   std::printf("INFO  %d of %d windows carry a recorded statistic; the rest check the index only\n",
               with_stat, windows);
   // Asserted, not merely printed: a fixture set that lost its statistics would
-  // otherwise report "0 of 30" and pass (review round 7).
+  // otherwise report "0 of 30" and pass.
   check(with_stat >= 18, "at least the 18 fixtures that recorded a statistic still carry one");
   for (const auto& kv : kExpected)
     check(per_shape[kv.first] == kv.second, kv.first + ": " + std::to_string(per_shape[kv.first]) + " of " +

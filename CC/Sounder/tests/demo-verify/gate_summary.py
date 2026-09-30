@@ -111,7 +111,8 @@ def analyse(path):
             # ONLY THE PERIODIC SUMMARY LINE CARRIES A TOTAL. The sounder emits
             # two CNS forms and they are NOT interchangeable:
             #   summary  "CNS score X rot Y deg at frame N (D datagrams, L low)"
-            #   warning  "CNS score X at frame N, r=Z (low occurrence K of D)"
+            #   warning  "CNS score X at frame N, r=Z (low #K of D datagrams; printed at
+            #            powers of two only ...)"  (was "low occurrence K of D" before 2026-09-23)
             # The warning is THROTTLED ON A DOUBLING SCHEDULE, so K is only ever
             # 1, 2, 4, 8, 16, 32 -- it reports which occurrence tripped the log,
             # not how many there were. Reading K as a count produced a table

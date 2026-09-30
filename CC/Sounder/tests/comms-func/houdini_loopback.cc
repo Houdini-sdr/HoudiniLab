@@ -1,6 +1,6 @@
 /**
  * @file houdini_loopback.cc
- * @brief Closed-loop HIL test over the now-bidirectional Houdini link, driven by
+ * @brief Closed-loop HIL test over the bidirectional Houdini link, driven by
  *        the sounder's real radio classes:
  *          1. BaseRadioSet (.21) replays the Gold beacon on TX ch1  [forward]
  *          2. ClientRadioSet (.22) syncs on that beacon on RX ch1
@@ -8,7 +8,9 @@
  *          4. BaseRadioSet (.21) receives on RX ch1 and find_beacon detects it
  *        i.e. the UE responds to the beacon and the BS hears it -- the loop is
  *        closed. Wiring: .21 DAC_A->.22 ADC_C (forward) and .22 DAC_A->.21 ADC_C
- *        (reverse), both ch1, both matched-NCO Zone 1.
+ *        (reverse), both ch1, both matched-NCO Zone 1. find_beacon runs with
+ *        its own defaults (first-crossing pick, power-ratio threshold), not
+ *        the configured detector Receiver::syncSearch runs.
  *
  * Build: CMake target houdini_loopback. Run (venv SoapySDR runtime):
  *   ./houdini_loopback --conf files/houdini-1u.json --iters 20
@@ -54,7 +56,7 @@ int main(int argc, char** argv) {
   }
 
   Config cfg(conf, "logs", false, false, false);
-  BaseRadioSet bs(&cfg, false);  // arms beacon replay + activates BS RX
+  BaseRadioSet bs(&cfg, false);  // arms the beacon replay; the BS RX starts at radioStart()
   if (bs.getRadioNotFound()) { std::fprintf(stderr, "BS not found\n"); return 1; }
   ClientRadioSet ue(&cfg);
   if (ue.getRadioNotFound()) { std::fprintf(stderr, "UE not found\n"); return 1; }
@@ -94,7 +96,7 @@ int main(int argc, char** argv) {
   // streams the pilot continuously (flags=0 = immediate) from a background
   // thread, so a pilot is always on the wire whenever the BS captures.
   // Start the BS RX only now (fresh), so it hasn't overflowed during the sync.
-  bs.radioStart();  // the framer starts the continuous BS RX (was activateHoudiniRx)
+  bs.radioStart();  // the framer starts the continuous BS RX
   const size_t bwin = static_cast<size_t>(2 * frame);
   std::vector<ci16> bbuf(bwin);
   std::printf("[rev] UE streaming pilot continuously; BS RX window %zu\n\n",

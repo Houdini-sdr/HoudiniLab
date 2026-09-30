@@ -2,6 +2,7 @@
 
 #ifndef __SIGNALHANDLER_H__
 #define __SIGNALHANDLER_H__
+#include <atomic>
 #include <stdexcept>
 using std::runtime_error;
 
@@ -12,7 +13,10 @@ class SignalException : public runtime_error {
 
 class SignalHandler {
  protected:
-  static bool mbGotExitSignal;
+  // Written by the SIGINT handler and read by the scheduler's loop on another
+  // thread: a lock-free atomic is safe in a handler and visible across threads
+  // (a plain bool is neither).
+  static std::atomic<bool> mbGotExitSignal;
 
  public:
   SignalHandler();

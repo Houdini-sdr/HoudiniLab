@@ -40,6 +40,7 @@ BeaconShape BeaconShape::fromDesc(const shapes::Desc& d, Platform platform) {
   b.replica_reps_ = d.replica_reps;
   b.guard_len_ = d.guard_len;
   b.papr_db_ = d.papr_db();
+  b.occupied_half_bw_hz_ = d.occupied_half_bw_hz;
   // The tail is a Houdini convention; the Iris/UHD framer never had one.
   b.tail_ = platform == Platform::kHoudini ? d.replica_tail() : 0;
   b.geometry_.core_len = static_cast<int>(d.core.size());

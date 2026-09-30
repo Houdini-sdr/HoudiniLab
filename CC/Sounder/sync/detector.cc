@@ -55,8 +55,8 @@ Detector::Detector(const BeaconShape& shape, const DetectorConfig& cfg)
       // Clamped to the window here so the accessor reports what the correlator
       // will actually apply: it clamps again, and an accessor that disagrees
       // with the effective value misleads the record it is written into.
-      // first_path_window_ is initialised above and holds the same expression;
-      // recomputing it here left two copies to keep in step (review round 5).
+      // Reads first_path_window_ rather than repeating its expression, which
+      // relies on the member order in detector.h (window before guard).
       first_path_guard_(std::max(0, std::min(cfg.first_path_guard, first_path_window_))),
       pfa_applies_(false),
       pfa_(cfg.pfa_per_window),

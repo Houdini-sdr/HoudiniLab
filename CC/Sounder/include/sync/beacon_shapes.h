@@ -1,22 +1,20 @@
 /**
  * @file sync/beacon_shapes.h
- * @brief The candidate beacon waveforms, defined ONCE.
- *
- * [user 2026-09-02] "instead of being 802.11 LTS / NR TRS and 802.11 'like',
- * what about going straight 802.11 and NR beacons (we can have it as a
- * parameter (config)), selectable between the 3 and see which works the best".
+ * @brief The candidate beacon waveforms, defined ONCE. `sync.beacon.type`
+ *        selects one; the shapes are the real 802.11 and NR preambles next to
+ *        the shipped legacy beacon, so a comparison measures the standards
+ *        rather than look-alikes.
  *
  * WHY A SHARED HEADER AND NOT FOUR COPIES. The offline geometry test, the
  * waveform dumper the bench probes read, and Config::genPilots all have to agree
  * on the sample-exact core, or the bench measures one beacon and the shipped
- * build transmits another. That is not hypothetical: AP-34(a) shipped a guard
- * variant to silicon whose index convention nobody had derived, and the cost was
- * a bench session. One definition, three consumers.
+ * build transmits another. AP-34(a) shipped a guard variant to silicon whose
+ * index convention nobody had derived, and the cost was a bench session. One
+ * definition, three consumers.
  *
  * EVERY SHAPE IS BUILT FROM SEQUENCES THIS REPO ALREADY GENERATES, except the
- * two NR fields, which are generated here from the 38.211 definitions rather
- * than approximated -- the user asked for a standard implementation and an
- * approximation is the thing that would make the comparison meaningless.
+ * NR fields, which are generated here from the 38.211 definitions rather than
+ * approximated: an approximation would make the comparison meaningless.
  *
  * Header-only, like sync_geometry.h and grid_tracker.h: no link dependency
  * beyond CommsLib itself, so a probe can pull it in without the sounder.
@@ -44,6 +42,7 @@ enum class Shape {
   kDot11,        ///< the actual 802.11a/g/n legacy preamble: STF + LTF.
   kNr,           ///< NR PSS (38.211 7.4.2.2) + CP + a CSI-RS tracking pair.
   kNrPss,        ///< the kNr core, matched-filtered on its PSS: NR's ARCHITECTURE.
+  kNrPssBl,      ///< kNrPss fitted inside a +-24 MHz channel (AP-79 mode V).
 };
 
 /// Everything a consumer needs: the waveform, what to correlate against, and
@@ -95,6 +94,10 @@ struct Desc {
   /// spacing is then rate / 128, not scs_hz); the caller should say so.
   Numerology numerology;
   bool numerology_held = true;
+  /// Half the band the core occupies, Hz; 0 means the whole output (every
+  /// shape but nr_pss_bl). Mode V refuses a beacon wider than its RX channel
+  /// filter's passband (AP-79).
+  double occupied_half_bw_hz = 0.0;
 
   /// Peak-to-average power ratio in dB. Not cosmetic: the transmit path scales
   /// the core to a fixed fraction of full scale by PEAK, so a higher PAPR
@@ -155,17 +158,13 @@ inline std::vector<int> gold38211(size_t len, uint32_t c_init) {
 /// Map `tones` frequency-domain values onto an `n`-point IFFT, DC nulled,
 /// centred, and return the n time samples normalised to unit mean power.
 ///
-/// THE DC SKIP MUST NOT COLLIDE, AND THE FIRST VERSION OF THIS DID. It centred
-/// the tones on DC and, when a tone landed on bin 0, "parked" it at k/2 + 1.
-/// For the NR tracking symbol that is 64 tones into a 64-point IFFT, and bin
-/// k/2+1 = 33 is ALREADY OCCUPIED by the tone from bin -31. The assignment
-/// silently overwrote it, so the symbol went out with one tone doubled and one
-/// missing. Transmit and correlator shared the same malformed symbol, so
-/// detection still worked and nothing failed -- it simply measured a beacon
-/// nobody designed, and the NR row's anomalies (4x the CFO scatter of the
-/// equal-length dot11 field, and 4.5 dB of unexplained SNR) were partly mine.
-/// Fixed by walking the non-DC bins in order instead: bins -floor/.../+ceil
-/// skipping zero, taking as many as there is room for.
+/// THE DC SKIP MUST NOT COLLIDE. The bins are walked in order from the most
+/// negative, skipping zero, taking as many tones as there is room for. Do not
+/// regress to centring on DC and "parking" the DC tone elsewhere: for the NR
+/// tracking symbol (64 tones into a 64-point IFFT) the parked bin is already
+/// occupied, one tone is silently overwritten, and because transmit and
+/// correlator share the malformed symbol nothing fails; the beacon measured is
+/// simply not the one designed.
 inline std::vector<cf> toneIfft(const std::vector<cf>& tones, size_t n) {
   std::vector<cf> f(n, cf(0.f, 0.f));
   const size_t k = std::min(tones.size(), n - 1);  // n-1 usable bins, DC nulled
@@ -201,18 +200,16 @@ inline void appendGuardedReps(std::vector<cf>& core, const std::vector<cf>& sym,
 
 /// Scale to unit mean power.
 ///
-/// THE SEQUENCES THIS REPO GENERATES ARE NOT MUTUALLY NORMALISED, and composing
-/// them naively is a trap I walked into. Measured: getSequence returns STS at
-/// rms 0.786 and GOLD at 0.600 -- 2.3 dB apart, which is why the shipped beacon
-/// is fine -- but LTS at 0.113 and LTE_ZADOFF_CHU at 0.088, which is 17 dB below
-/// the STS. A straight concatenation therefore transmits the 802.11 long
-/// training field 17 dB under its own short training field, and the first
-/// version of this header did exactly that. The detector then missed the dot11
-/// beacon at every level a real link runs at, and the honest-looking conclusion
-/// "802.11 is 20 dB less sensitive" would have been a property of MY
-/// concatenation, not of 802.11 -- which specifies the two fields at equal
-/// power. Normalise each field, then scale the core to the shipped beacon's
-/// peak so every candidate presents the DAC with the same constraint.
+/// THE SEQUENCES THIS REPO GENERATES ARE NOT MUTUALLY NORMALISED, so composing
+/// them naively is a trap. getSequence returns STS at rms 0.786 and GOLD at
+/// 0.600 (2.3 dB apart, which is why the shipped beacon is fine) but LTS at
+/// 0.113 and LTE_ZADOFF_CHU at 0.088, 17 dB below the STS. A straight
+/// concatenation transmits the 802.11 long training field 17 dB under its own
+/// short training field, which 802.11 specifies at equal power, and the
+/// detector then misses the dot11 beacon at every level a real link runs at: a
+/// property of the concatenation, not of 802.11. Normalise each field, then
+/// scale the core to the shipped beacon's peak so every candidate presents the
+/// DAC with the same constraint.
 inline void unitPower(std::vector<cf>& v) {
   double p = 0.0;
   for (const auto& x : v) p += std::norm(x);
@@ -231,50 +228,55 @@ inline void scaleToPeak(std::vector<cf>& v, double peak) {
   for (auto& x : v) x *= g;
 }
 
+/// AP-79: the band-limited NR shape's PSS spacing and the half bandwidth every
+/// field of it stays inside (the sub-6 RX lane's channel filter passes +-24 MHz).
+constexpr double kBlPssScsHz = 240e3;
+constexpr double kBlHalfBwHz = 23.5e6;
+
 /// The NR core: PSS, cyclic guard, two copies of a TRS symbol. Shared by kNr
 /// and kNrPss, which transmit the SAME burst and differ only in what the
 /// detector correlates against. Returns the PSS symbol length.
 inline size_t buildNr(Desc& d, const Numerology& num) {
-    // NR sends SSB and TRS as separate signals at different periodicities.
-    // Under this link's constraint -- the UE sees ONE periodic downlink burst
-    // and gets no pilots of its own -- the NR structure collapses to: an
-    // acquisition field that is a full-band non-repeating sequence, then a
-    // guarded repeated tracking symbol. Both fields are the standard's own
-    // sequences, not stand-ins.
-    std::vector<cf> pss_tones;
-    for (float v : nrPssMSeq(0)) pss_tones.push_back(cf(v, 0.f));
-    // 127 tones at the numerology's subcarrier spacing: 128 points at the
-    // shipped 122.88 MSPS / 960 kHz. A rate with no whole power-of-two size
-    // for that spacing builds the shipped 128 and records that it did not
-    // hold the numerology (the caller warns); refusing would abort every
-    // config that names an NR shape at another rate.
-    const auto held = num.ifftSizeIfExact(127);
-    const size_t nfft = held.value_or(128);
-    d.numerology_held = held.has_value();
-    auto pss = toneIfft(pss_tones, nfft);
-    unitPower(pss);
-    // TRS symbol: QPSK over a 38.211 Gold sequence, full band. c_init is
-    // arbitrary but must be FIXED, or TX and the correlator disagree.
-    // The TRS symbol is half the PSS symbol's length (64 at the shipped
-    // numerology), so the two scale together.
-    const size_t kTrsLen = nfft / 2;
-    const auto c = gold38211(2 * kTrsLen, 0x1u);
-    std::vector<cf> trs_tones(kTrsLen);
-    const float r = static_cast<float>(1.0 / std::sqrt(2.0));
-    for (size_t i = 0; i < kTrsLen; ++i)
-      trs_tones[i] = cf(r * (1.f - 2.f * c[2 * i]), r * (1.f - 2.f * c[2 * i + 1]));
-    auto trs = toneIfft(trs_tones, kTrsLen);
-    unitPower(trs);
-    d.core = pss;
-    // The PSS is one symbol, so it gives no repeat pair: no coarse stage.
-    d.coarse_reps = 0;
-    d.guard_len = 16;
-    d.fine_off = d.core.size() + d.guard_len;
-    d.fine_len = kTrsLen; d.fine_reps = 2;
-    appendGuardedReps(d.core, trs, d.guard_len, 2);
-    scaleToPeak(d.core, 1.0);
-    d.replica.assign(d.core.begin() + d.fine_off,
-                     d.core.begin() + d.fine_off + d.fine_len);
+  // NR sends SSB and TRS as separate signals at different periodicities.
+  // Under this link's constraint -- the UE sees ONE periodic downlink burst
+  // and gets no pilots of its own -- the NR structure collapses to: an
+  // acquisition field that is a full-band non-repeating sequence, then a
+  // guarded repeated tracking symbol. Both fields are the standard's own
+  // sequences, not stand-ins.
+  std::vector<cf> pss_tones;
+  for (float v : nrPssMSeq(0)) pss_tones.push_back(cf(v, 0.f));
+  // 127 tones at the numerology's subcarrier spacing: 128 points at the
+  // shipped 122.88 MSPS / 960 kHz. A rate with no whole power-of-two size
+  // for that spacing builds the shipped 128 and records that it did not
+  // hold the numerology (the caller warns); refusing would abort every
+  // config that names an NR shape at another rate.
+  const auto held = num.ifftSizeIfExact(127);
+  const size_t nfft = held.value_or(128);
+  d.numerology_held = held.has_value();
+  auto pss = toneIfft(pss_tones, nfft);
+  unitPower(pss);
+  // TRS symbol: QPSK over a 38.211 Gold sequence, full band. c_init is
+  // arbitrary but must be FIXED, or TX and the correlator disagree.
+  // The TRS symbol is half the PSS symbol's length (64 at the shipped
+  // numerology), so the two scale together.
+  const size_t kTrsLen = nfft / 2;
+  const auto c = gold38211(2 * kTrsLen, 0x1u);
+  std::vector<cf> trs_tones(kTrsLen);
+  const float r = static_cast<float>(1.0 / std::sqrt(2.0));
+  for (size_t i = 0; i < kTrsLen; ++i)
+    trs_tones[i] = cf(r * (1.f - 2.f * c[2 * i]), r * (1.f - 2.f * c[2 * i + 1]));
+  auto trs = toneIfft(trs_tones, kTrsLen);
+  unitPower(trs);
+  d.core = pss;
+  // The PSS is one symbol, so it gives no repeat pair: no coarse stage.
+  d.coarse_reps = 0;
+  d.guard_len = 16;
+  d.fine_off = d.core.size() + d.guard_len;
+  d.fine_len = kTrsLen; d.fine_reps = 2;
+  appendGuardedReps(d.core, trs, d.guard_len, 2);
+  scaleToPeak(d.core, 1.0);
+  d.replica.assign(d.core.begin() + d.fine_off,
+                   d.core.begin() + d.fine_off + d.fine_len);
   return nfft;  // the PSS symbol: 127 tones in an nfft-point IFFT
 }
 
@@ -288,7 +290,8 @@ inline Desc make(Shape s, const Numerology& num) {
   d.numerology = num;
   switch (s) {
     case Shape::kLegacy: {
-      // BIT-IDENTICAL to what Config::genPilots builds today. Deliberately NOT
+      // BIT-IDENTICAL to the beacon the sounder shipped before the shapes
+      // existed (beacon_geometry_test asserts it). Deliberately NOT
       // renormalised: this is the reference every measurement on this bench was
       // taken against, and a "tidier" scaling would silently invalidate them.
       d.name = "legacy";
@@ -322,8 +325,7 @@ inline Desc make(Shape s, const Numerology& num) {
       // getSequence(STS_SEQ,160) IS the standard's short training field (10
       // reps of the 16-sample symbol); getSequence(LTS_SEQ,160) is its long
       // training field, and the `% 64` wrap inside getSequence already makes
-      // its first 32 samples the LTS's own cyclic prefix -- that is GI2. Both
-      // have been in this repo the whole time and genBeacon never used them.
+      // its first 32 samples the LTS's own cyclic prefix -- that is GI2.
       d.name = "dot11";
       auto stf = seq(CommsLib::STS_SEQ, 160);
       auto ltf = seq(CommsLib::LTS_SEQ, 160);
@@ -346,6 +348,59 @@ inline Desc make(Shape s, const Numerology& num) {
     case Shape::kNr: {
       d.name = "nr";
       buildNr(d, num);
+      break;
+    }
+    case Shape::kNrPssBl: {
+      // AP-79 MODE V. Every other shape fills the whole 122.88 output: the
+      // gold and STS fields by construction, nr_pss's PSS at the 960 kHz
+      // default spacing and its TRS pair on every bin. The sub-6 channel is
+      // +-25 MHz and its RX lane is filtered to +-24 (the channel's 0 dBc
+      // mirror sits beyond 40.2 MHz), so this is nr_pss's architecture with
+      // every field inside that band: the 127-tone PSS at 240 kHz (a 512-point
+      // symbol at 122.88, +-15.2 MHz) behind NR's normal cyclic prefix (144 /
+      // 2048 of the symbol, 36 samples), then the guarded TRS pair on only the
+      // central tones that fit +-kBlHalfBwHz. The detector matches the PSS,
+      // the CFO estimator reads the TRS pair, as in nr_pss.
+      d.name = "nr_pss_bl";
+      Numerology pn = num;
+      pn.scs_hz = kBlPssScsHz;
+      const auto held = pn.ifftSizeIfExact(127);
+      const size_t nfft = held.value_or(512);
+      d.numerology_held = held.has_value();
+      std::vector<cf> pss_tones;
+      for (float v : nrPssMSeq(0)) pss_tones.push_back(cf(v, 0.f));
+      auto pss = toneIfft(pss_tones, nfft);
+      unitPower(pss);
+      const size_t cp = nfft * 144 / 2048;
+      const size_t trs_len = nfft / 2;
+      const double spacing = num.rate_hz / static_cast<double>(trs_len);
+      size_t n_trs = static_cast<size_t>(std::floor(2.0 * kBlHalfBwHz / spacing));
+      n_trs = std::min(n_trs - (n_trs % 2), trs_len - 2);
+      const auto c = gold38211(2 * n_trs, 0x1u);
+      std::vector<cf> trs_tones(n_trs);
+      const float r = static_cast<float>(1.0 / std::sqrt(2.0));
+      for (size_t i = 0; i < n_trs; ++i)
+        trs_tones[i] = cf(r * (1.f - 2.f * c[2 * i]), r * (1.f - 2.f * c[2 * i + 1]));
+      auto trs = toneIfft(trs_tones, trs_len);
+      unitPower(trs);
+      d.core.assign(pss.end() - static_cast<long>(cp), pss.end());
+      d.core.insert(d.core.end(), pss.begin(), pss.end());
+      d.coarse_reps = 0;
+      d.guard_len = 16;
+      d.fine_off = d.core.size() + d.guard_len;
+      d.fine_len = trs_len;
+      d.fine_reps = 2;
+      appendGuardedReps(d.core, trs, d.guard_len, 2);
+      scaleToPeak(d.core, 1.0);
+      d.replica.assign(d.core.begin() + static_cast<long>(cp),
+                       d.core.begin() + static_cast<long>(cp + nfft));
+      d.replica_off = cp;
+      d.replica_reps = 1;
+      // The outermost occupied bin of either field: the PSS's 127 tones sit
+      // on bins -64..63 skipping DC, the TRS's n_trs on -(n_trs/2)..n_trs/2.
+      d.occupied_half_bw_hz =
+          std::max(64.0 * num.rate_hz / static_cast<double>(nfft),
+                   static_cast<double>((n_trs + 1) / 2) * spacing);
       break;
     }
     case Shape::kNrPss: {
@@ -389,11 +444,12 @@ inline bool parse(const std::string& s, Shape* out) {
   if (s == "dot11" || s == "802.11") { *out = Shape::kDot11; return true; }
   if (s == "nr" || s == "5gnr") { *out = Shape::kNr; return true; }
   if (s == "nr_pss" || s == "5gnr_pss") { *out = Shape::kNrPss; return true; }
+  if (s == "nr_pss_bl") { *out = Shape::kNrPssBl; return true; }
   return false;
 }
 
 inline const char* kAllNames[] = {"legacy", "legacy_guard", "dot11", "nr",
-                                  "nr_pss"};
+                                  "nr_pss", "nr_pss_bl"};
 
 }  // namespace shapes
 }  // namespace sync

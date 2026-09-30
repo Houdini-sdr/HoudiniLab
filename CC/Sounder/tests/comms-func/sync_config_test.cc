@@ -3,9 +3,10 @@
  * @brief SyncConfig: defaults, JSON, ranges, unknown keys, environment
  *        overrides, provenance, cross-constraint notes.
  *
- * AP-56 asked for this: a knob that lands a finite nonsense value used to be
- * accepted silently. Every documented knob is loaded here at both bounds and
- * one step outside; the outside value must throw, the bounds must load.
+ * A knob must refuse a finite nonsense value rather than accept it silently
+ * (AP-56): every numeric knob is loaded here from JSON at both bounds and one
+ * step outside; the outside value must throw, the bounds must load. An
+ * environment override clamps or is ignored instead (section 6).
  */
 #include <cmath>
 #include <cstdio>
@@ -46,9 +47,8 @@ void clearEnv() {
 }
 
 // The walkthrough's knob table is generated from the schema and committed;
-// this diff is what keeps the two from drifting (commit 8253025 was the
-// drift it prevents). The path comes from CMake; without it the check is
-// skipped, loudly.
+// this diff is what keeps the two from drifting. The path comes from CMake;
+// without it the check is skipped, loudly.
 void checkWalkthroughTable(const char* path) {
   std::ifstream in(path);
   if (!in) {
@@ -209,7 +209,7 @@ int main(int argc, char** argv) {
     bool said0 = false;
     for (const auto& w : d0.warnings()) said0 |= (w.find("IGNORED") != std::string::npos);
     check(d0.resync.scatter_tol_us == 2.0 && !d0.allow_env_overrides && said0,
-          "env: refused and reported by DEFAULT (decided 2026-09-03)");
+          "env: refused and reported by DEFAULT");
     const auto d = SyncConfig::loadFromText(R"({"sync": {"allow_env_overrides": false}})");
     check(d.resync.scatter_tol_us == 2.0 && d.provenanceOf("resync.scatter_tol_us") == Source::kDefault,
           "env: refused when allow_env_overrides is false");
@@ -240,8 +240,8 @@ int main(int argc, char** argv) {
     const auto i = SyncConfig::loadFromText(kEnvOn);
     check(i.detector.pick == PickRule::kFirstPath, "env: an unknown enum name is ignored, not fatal");
     clearEnv();
-    // The three knobs whose old readers IGNORED an out-of-range value keep
-    // doing so; the formerly unbounded knobs clamp.
+    // Three knobs keep their pre-schema readers' behaviour and IGNORE an
+    // out-of-range value (EP::kIgnoreOutOfRange); the others clamp.
     setenv("HOUDINI_BEACON_FS", "0", 1);
     setenv("HOUDINI_FIRST_PATH_DB", "3", 1);
     setenv("HOUDINI_FIRST_PATH_WIN", "5000", 1);
@@ -258,7 +258,7 @@ int main(int argc, char** argv) {
               j.provenanceOf("detector.first_path_window") == Source::kDefault,
           "env: an ignored override leaves provenance at default");
     check(!throws(R"({"sync": {"_note.v2": "x"}})"), "a comment key with a dot is still a comment");
-    check(j.tracker.alpha == 1.0, "env: GRID_ALPHA=50 clamps to 1 (it used to pass through, AP-56)");
+    check(j.tracker.alpha == 1.0, "env: GRID_ALPHA=50 clamps to 1, not passed through (AP-56)");
     const std::string dj = j.describe();
     check(dj.find("tracker.alpha = 1  [env]") != std::string::npos, "describe shows [env] for an override");
     clearEnv();
@@ -282,7 +282,7 @@ int main(int argc, char** argv) {
     const auto pw = SyncConfig::loadFromText(R"({"sync": {"detector": {"pfa_per_window": 0.01}}})");
     bool reserved = false;
     for (const auto& w : pw.warnings()) reserved |= (w.find("RESERVED") != std::string::npos);
-    check(!reserved, "validate: pfa_per_window is no longer reserved (P3 applies it to the coherence form)");
+    check(!reserved, "validate: pfa_per_window is not reported as reserved (P3 applies it to the coherence form)");
     const auto fixed = SyncConfig::loadFromText(R"({"sync": {"tracker": {"alpha": 0, "beta": 0}}})");
     bool fixed_note = false;
     for (const auto& w : fixed.warnings()) fixed_note |= (w.find("fixed-period") != std::string::npos);
@@ -291,7 +291,7 @@ int main(int argc, char** argv) {
               m.find("`HOUDINI_SYNC_SNR_DB`") != std::string::npos,
           "schema table carries the key and the environment name it replaces");
   }
-  // 12. resolve(): the sentinels fill from the shape with provenance "derived";
+  // 8. resolve(): the sentinels fill from the shape with provenance "derived";
   //     an explicit value is left alone; the operation is idempotent.
   {
     auto c = SyncConfig::loadFromText("{}");
@@ -313,8 +313,8 @@ int main(int argc, char** argv) {
     check(c.describe().find("detector.first_path_window = 64  [derived]") != std::string::npos,
           "resolve: describe() prints the resolved value and its provenance");
   }
-  // 13. The legacy per-client threshold arrays feed the policy; corr_scale_init
-  //     defaults to corr_scale; the sync block wins over the legacy key.
+  // 9. The legacy per-client threshold arrays feed the policy; corr_scale_init
+  //    defaults to corr_scale; the sync block wins over the legacy key.
   {
     const auto a = SyncConfig::loadFromText(R"({"corr_scale": [25, 30]})");
     check(a.detector.bar.corr_scale == 25.0 && a.detector.bar.corr_scale_init == 25.0 &&
@@ -322,8 +322,27 @@ int main(int argc, char** argv) {
               a.provenanceOf("detector.corr_scale_init") == Source::kDerived &&
               a.detector.bar.relaxed(3) == 28.0,
           "legacy corr_scale: first client's value lands (json), init follows it (derived), relaxed() adds the retry");
+    {
+      houdini::sync::ThresholdPolicy b;
+      b.corr_scale = 5.0;
+      b.min_bar = 0.1;
+      check(b.relaxed(0) == 5.0 && b.relaxed(3) == 8.0 && b.relaxed(5) == 10.0 && b.relaxed(100) == 10.0,
+            "min_bar 0.1 stops the retry relaxation at corr_scale 10 (bar 0.1); unset, the ladder is unchanged");
+      // Fails under: relaxed() without the max against corr_scale (the first
+      // look would then run at bar 0.1, twice the configured 0.05).
+      b.corr_scale = 20.0;
+      check(b.relaxed(0) == 20.0 && b.relaxed(5) == 20.0,
+            "min_bar above the configured bar never raises it: corr_scale 20 stays 20 on every retry");
+    }
+    {
+      // Fails under: dropping validate()'s min_bar note.
+      const auto m = SyncConfig::loadFromText(R"({"sync": {"detector": {"corr_scale": 20, "min_bar": 0.1}}})");
+      bool noted = false;
+      for (const auto& w : m.warnings()) noted |= (w.find("relaxation is off") != std::string::npos);
+      check(noted, "validate: a min_bar above 1 / corr_scale is noted (the relaxation is off)");
+    }
     // The sounder's fallback for an ABSENT corr_scale is 1, and it is
-    // recorded as derived, not left at the library's 10 (round 4, HIGH 4).
+    // recorded as derived, not left at the library's 10.
     const auto none = SyncConfig::loadFromText("{}");
     check(none.detector.bar.corr_scale == 1.0 && none.detector.bar.corr_scale_init == 1.0 &&
               none.provenanceOf("detector.corr_scale") == Source::kDerived,
@@ -336,7 +355,7 @@ int main(int argc, char** argv) {
           "sync.detector.corr_scale wins over the legacy array; init still follows");
     check(SyncConfig::defaults().detector.bar.corr_scale == 10.0, "the library's own default corr_scale is 10");
   }
-  // 15. Platform defaults derive on Iris/UHD only, and the coherence bar
+  // 10. Platform defaults derive on Iris/UHD only, and the coherence bar
   //     formula is what 8.163 measured.
   {
     auto i = SyncConfig::loadFromText("{}");
@@ -431,7 +450,7 @@ int main(int argc, char** argv) {
     sc.resolve(rc);
     check(sc.warnings().size() == n1, "resolve: idempotent notes (a second call adds none)");
   }
-  // 14. The schema is static and const-correct: a spec is found by path, and a
+  // 11. The schema is static and const-correct: a spec is found by path, and a
   //     const object can be read through it.
   {
     const SyncConfig c = SyncConfig::defaults();

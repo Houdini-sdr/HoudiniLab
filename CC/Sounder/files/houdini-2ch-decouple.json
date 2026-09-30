@@ -1,0 +1,57 @@
+{
+ "_description": "Legacy: 500 MHz, 64 FFT, two links on two channels (original bench roles)",
+ "_comment": "Two-channel decoupled, SHARED pilot slot: BS(.21) rx=AB (ch0=ADC_D, ch1=ADC_C); UE(.22) tx=AB fires BOTH pilots in slot 2. Cables are spatially orthogonal (.22 DAC_B->.21 ADC_D=ch0, .22 DAC_A->.21 ADC_C=ch1) so the BS separates the two links in space -- no time-orthogonal slots needed; each RX antenna gets one clean pilot.",
+ "serial_file": "files/topology-houdini.json",
+ "radio_type": "houdini",
+ "remote_port": "55132",
+ "bs_hw_framer": true,
+ "ue_tdd_pilot": true,
+ "_ue_tdd_pilot_note": "UE streams its pilot with the tdd=1 TX stream arg: the driver's TxTickAnchor accepts beacon-referenced starts on the 3.125 us (384-tick) TDD grid (SH-248/SH-301). ue_tx_advance_ticks is QUANTIZED to that grid (values under 192 vanish; leave 0). Fine seating comes from the zero-padded burst; tx_advance=247 is the bench calibration (DEMO_VERIFICATION.md 4.48).",
+ "ue_tx_advance_ticks": 0,
+ "_bs_hw_framer_note": "true selects the BS native-Houdini TDD framer: one TDD symbol per sounder slot (4096 ticks), the beacon strobe on the B slot and the rx gate on every other slot; the pilot and data slots are cut from one continuous read (DEMO_VERIFICATION.md 4.12/4.16). samps_per_slot must stay <= 4096 (FPGA TX_RAM depth, else genPilots' size_t remain_size underflows): 48 x 80 + 128 + 128 = 4096.",
+ "frequency": 500000000.0,
+ "nco_frequency": 500000000.0,
+ "sample_rate": 122880000.0,
+ "channel": "B",
+ "frame_schedule": [
+  "BGPGGGGGGGGGGGGGGGGGGGGGGGGGGG"
+ ],
+ "max_frame": 2000,
+ "ofdm_symbol_per_slot": 48,
+ "fft_size": 64,
+ "cp_size": 16,
+ "ofdm_tx_zero_prefix": 128,
+ "ofdm_tx_zero_postfix": 128,
+ "beamsweep": false,
+ "ue_channel": "B",
+ "ue_rx_gain_a": [
+  65
+ ],
+ "ue_tx_gain_a": [
+  81
+ ],
+ "ue_rx_gain_b": [
+  65
+ ],
+ "ue_tx_gain_b": [
+  81
+ ],
+ "ue_frame_schedule": [
+  "GGPGGGGGGGGGGGGGGGGGGGGGGGGGGG"
+ ],
+ "tx_advance": [
+  247
+ ],
+ "corr_scale": [
+  100
+ ],
+ "_corr_scale_init_note": "Acquisition-only detection threshold; SMALLER is STRICTER (test: corr_scale * peak > trailing local energy). 10 puts the bar at 0.1, between the populations measured on the legacy link (no beacon 3.4e-07, beacon 0.31 to 4.2), where 100 let sidelobes cross first. Acquisition also requires the 30 dB in-window SNR floor (sync.confirm.snr_floor_db) and two grid-consistent confirms, which is what rejects the noise-artifact class (DEMO_VERIFICATION.md 4.25/4.32). Re-sync uses corr_scale and relaxes per retry, gated by the same floor.",
+ "corr_scale_init": [
+  10
+ ],
+ "ue_pilot_horizon": 96,
+ "tx_channel": "B",
+ "rx_channel": "AB",
+ "ue_tx_channel": "AB",
+ "ue_rx_channel": "B"
+}

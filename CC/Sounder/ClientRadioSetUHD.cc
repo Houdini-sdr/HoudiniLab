@@ -166,7 +166,7 @@ void ClientRadioSetUHD::init(ClientRadioContext* context) {
   }
   MLPD_TRACE("ClientRadioSet: Init complete\n");
   assert(thread_count->load() != 0);
-  thread_count->store(thread_count->load() - 1);
+  thread_count->fetch_sub(1);  // one atomic step (see BaseRadioSet::init)
   std::cout << "Client Init success" << std::endl;
 }
 

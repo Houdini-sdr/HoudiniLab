@@ -12,14 +12,11 @@
 #include "include/macros.h"
 #include "include/signalHandler.hpp"
 #include "include/utils.h"
+#include "include/houdini/core_map.h"
 
 namespace Sounder {
 // dequeue bulk size, used to reduce the overhead of dequeue in main thread
 const int Scheduler::KDequeueBulkSize = 5;
-
-#if (DEBUG_PRINT)
-const int kDsSim = 5;
-#endif
 
 Scheduler::Scheduler(Config* in_cfg, unsigned int core_start)
     : cfg_(in_cfg),
@@ -27,6 +24,19 @@ Scheduler::Scheduler(Config* in_cfg, unsigned int core_start)
       kSchedulerCore(kMainDispatchCore + 1),
       kRecvCore(kSchedulerCore + in_cfg->recorder_thread_num() +
                 in_cfg->reader_thread_num()) {
+  {
+    std::string err;
+    const houdini::CoreMap m = houdini::parseCoreMap(std::getenv("HOUDINI_CORE_MAP"), &err);
+    if (!err.empty()) throw std::invalid_argument("HOUDINI_CORE_MAP: " + err);
+    main_core_ = m.main >= 0 ? static_cast<unsigned>(m.main) : kMainDispatchCore;
+    recorder_core_ = m.recorder >= 0 ? static_cast<unsigned>(m.recorder) : kSchedulerCore;
+    bsrx_core_ = m.bsrx >= 0 ? static_cast<unsigned>(m.bsrx) : kRecvCore;
+    ue_core_ = m.ue >= 0 ? static_cast<unsigned>(m.ue) : kRecvCore + static_cast<unsigned>(in_cfg->bs_rx_thread_num());
+    if (std::getenv("HOUDINI_CORE_MAP") != nullptr) {
+      MLPD_WARN("core map from HOUDINI_CORE_MAP: main %u, recorder %u+i, BS rx %u+i, UE %u+i\n", main_core_,
+                recorder_core_, bsrx_core_, ue_core_);
+    }
+  }
   size_t bs_rx_thread_num = cfg_->bs_rx_thread_num();
   size_t cl_rx_thread_num = cfg_->cl_rx_thread_num();
   size_t total_rx_thread_num = bs_rx_thread_num + cl_rx_thread_num;
@@ -126,23 +136,29 @@ void Scheduler::do_it() {
       cfg_->bs_rx_thread_num() + cfg_->cl_rx_thread_num();
   size_t thread_antennas = 0;
   std::vector<pthread_t> recv_threads;
-
-  if (this->cfg_->core_alloc() == true) {
-    if (pin_to_core(kMainDispatchCore) != 0) {
-      std::string err_str =
-          std::string("Pinning main recorder thread to core ") +
-          std::to_string(kMainDispatchCore) + std::string(" failed");
-      throw std::runtime_error(err_str);
-    } else {
-      MLPD_INFO("Successfully pinned main scheduler thread to core %d",
-                kMainDispatchCore);
+  std::vector<pthread_t> client_threads;
+  // Every exit stops and joins the BS and UE threads before the receiver can
+  // go: a throw out of the dispatch loop otherwise unwinds into ~Scheduler,
+  // which unmakes the radios under live threads. The normal exit calls it
+  // explicitly, the destructor covers a throw; it runs once.
+  struct JoinOnExit {
+    Scheduler* s;
+    std::vector<pthread_t>& recv;
+    std::vector<pthread_t>& client;
+    bool done = false;
+    void operator()() {
+      if (done) return;
+      done = true;
+      s->cfg_->running(false);
+      s->receiver_->completeRecvThreads(recv);
+      s->receiver_->completeRecvThreads(client);
     }
-  }
+    ~JoinOnExit() { (*this)(); }
+  } join_threads{this, recv_threads, client_threads};
 
   if (this->cfg_->client_present() == true) {
-    auto client_threads = this->receiver_->startClientThreads(
-        this->rx_buffer_, this->cl_tx_buffer_,
-        kRecvCore + cfg_->bs_rx_thread_num());
+    client_threads = this->receiver_->startClientThreads(
+        this->rx_buffer_, this->cl_tx_buffer_, ue_core_);
   }
 
   // The Hdf5Reader feeds the file-based UL/DL data path. Houdini generates its
@@ -189,7 +205,7 @@ void Scheduler::do_it() {
     for (unsigned int i = 0u; i < recorder_threads; i++) {
       int thread_core = -1;
       if (this->cfg_->core_alloc() == true) {
-        thread_core = kSchedulerCore + i;
+        thread_core = static_cast<int>(recorder_core_ + i);
       }
 
       MLPD_INFO(
@@ -207,10 +223,22 @@ void Scheduler::do_it() {
       // create socket buffer and socket threads
       recv_threads = this->receiver_->startRecvThreads(
           this->rx_buffer_, cfg_->bs_rx_thread_num(), this->bs_tx_buffer_,
-          kRecvCore);
+          bsrx_core_);
+      this->receiver_->go();  // after the threads are held: a throw here joins them
     }
   } else
     this->receiver_->go();  // only beamsweeping
+
+  // The dispatch thread pins itself only now, after go() has started the
+  // radios: the host plugin creates its BS receive workers there, in this
+  // thread, and a thread inherits its creator's affinity. Pinned earlier, both
+  // workers landed on the dispatch core and saturated it (AP-81).
+  if (this->cfg_->core_alloc() == true) {
+    if (pin_to_core(static_cast<int>(main_core_)) != 0) {
+      throw std::runtime_error("Pinning main scheduler thread to core " + std::to_string(main_core_) + " failed");
+    }
+    MLPD_INFO("Successfully pinned main scheduler thread to core %u\n", main_core_);
+  }
 
   moodycamel::ConsumerToken ctok(this->message_queue_);
 
@@ -302,8 +330,9 @@ void Scheduler::do_it() {
       static_cast<int>(this->cfg_->running()),
       static_cast<int>(SignalHandler::gotExitSignal()),
       this->max_frame_number_);
-  this->cfg_->running(false);
-  this->receiver_->completeRecvThreads(recv_threads);
+  // The UE threads too: each leaves its loop on running() false, and one may
+  // still be finishing a device call.
+  join_threads();
   this->receiver_.reset();
 
   /* Force the recorders to process all of the data they have left and exit cleanly

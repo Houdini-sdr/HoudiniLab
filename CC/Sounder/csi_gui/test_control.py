@@ -1,0 +1,338 @@
+# Dashboard control (--control) against a stand-in sounder: the supervisor runs
+# on the main thread as in main(); commands arrive from another thread, and the
+# HTTP route is exercised end to end. Stdlib only; run from csi_gui/ (ctest does).
+import json, os, signal, sys, tempfile, threading, time, types, urllib.request, urllib.error
+sys.argv = ["x"]
+for k in ("HOUDINI_SOAPY_ROOT", "SOAPY_SDR_ROOT"):  # the runbook's A4 exports one; the venv's plugin is asserted
+    os.environ.pop(k, None)
+import importlib.util
+spec = importlib.util.spec_from_file_location("cs", "csi_server.py"); cs = importlib.util.module_from_spec(spec); spec.loader.exec_module(cs)
+fails = 0
+def check(ok, what):
+    global fails; print(("PASS " if ok else "FAIL ") + what, flush=True); fails += (not ok)
+
+sd = tempfile.mkdtemp(prefix="csi_ctl_")
+log = os.path.join(sd, "log")
+os.makedirs(os.path.join(sd, "build")); os.makedirs(os.path.join(sd, "csi_gui")); os.makedirs(os.path.join(sd, "files"))
+with open(os.path.join(sd, "build", "sounder"), "w") as f:  # records its config, then runs until killed
+    # plus a child that ignores SIGTERM: only a group SIGKILL ends it
+    f.write("#!/bin/sh\necho \"start $3\" >> %s\n"
+            "sh -c 'trap \"\" TERM; while :; do sleep 0.2; done' &\necho $! >> %s.kids\nexec sleep 60\n" % (log, log))
+os.chmod(os.path.join(sd, "build", "sounder"), 0o755)
+with open(os.path.join(sd, "csi_gui", "teardown_framer.py"), "w") as f:
+    f.write("open(%r, 'a').write('teardown\\n')\n" % log)
+# Stand-in setup check: logs its form, FAILs while the flag file exists, and
+# takes a second while the slow file exists.
+flag = os.path.join(sd, "fail_check"); slow = os.path.join(sd, "slow_check")
+with open(os.path.join(sd, "csi_gui", "check_setup.py"), "w") as f:
+    f.write("import json, os, sys\nq = '--quick' in sys.argv\n"
+            "open(%r, 'a').write('check %%s\\n' %% ('quick' if q else 'full'))\n"
+            "bad = os.path.exists(%r)\n"
+            "import time; os.path.exists(%r) and time.sleep(1.5)\n"
+            "print(json.dumps({'ok': not bad, 'quick': q, 'conf': sys.argv[2], 'results': "
+            "[{'level': 'FAIL' if bad else 'PASS', 'what': 'stand-in', 'detail': '', 'fix': ''}]}))\n" % (log, flag, slow))
+for n in ("houdini-a.json", "houdini-b.json", "other.json"):
+    open(os.path.join(sd, "files", n), "w").write('{"_description": "desc of %s"}' % n)
+# houdini-b carries a short _label (a demo config); houdini-a and other do not.
+open(os.path.join(sd, "files", "houdini-b.json"), "w").write('{"_label": "B short", "_description": "desc of houdini-b.json"}')
+args = types.SimpleNamespace(sounder_dir=sd, max_frame=1, csi_fps=0, venv=sd,
+                             conf="files/houdini-a.json", storepath=sd)
+# The operator's own --conf is offered even when it is not files/houdini*.json.
+check(cs.SounderSupervisor(types.SimpleNamespace(**dict(vars(args), conf="files/other.json")),
+                           "x").configs()[-1] == "files/other.json", "the --conf config is always in the list")
+# --configs labelled: only the labelled configs, and always the --conf one.
+lab = cs.SounderSupervisor(types.SimpleNamespace(**dict(vars(args), conf="files/other.json", configs="labelled")), "x")
+check(lab.configs() == ["files/houdini-b.json", "files/other.json"],
+      "--configs labelled offers the labelled configs and the --conf one, not the rest (mutation: the filter "
+      "dropped): %s" % lab.configs())
+check(lab.labels() == {"files/houdini-b.json": "B short", "files/other.json": ""},
+      "each offered config's _label is served, empty without one (mutation: the description as the label)")
+check(lab.request("start", "files/houdini-a.json") == "config not allowed: files/houdini-a.json",
+      "an unlabelled config cannot be started through the API under --configs labelled (mutation: the page's "
+      "list not the allow-list)")
+sup = cs.SounderSupervisor(args, "127.0.0.1:1")
+sup.SETTLE_AFTER_TEARDOWN_S = 0.2; sup.RETRY_DELAY_S = 0.2; sup.STOP_GRACE_S = 2.0
+# Fails under: LD_LIBRARY_PATH or the plugin's ABI directory dropped or changed.
+check(sup.env.get("SOAPY_SDR_PLUGIN_PATH") == os.path.join(sd, "lib", "SoapySDR", "modules0.8-3")
+      and sup.env.get("LD_LIBRARY_PATH") == os.path.join(sd, "lib") and sup.env.get("VIRTUAL_ENV") == sd,
+      "the sounder runs in the plugin environment")
+# Fails under: the supervisor building its own environment instead of calling
+# the setup check's plugin_env (the same values would pass the check above).
+# Both names are patched, so reaching the function as check_setup.plugin_env passes too.
+real_env = cs.plugin_env
+sentinel = lambda venv: {"PLUGIN_ENV_SENTINEL": venv}
+cs.plugin_env = sys.modules["check_setup"].plugin_env = sentinel
+try:
+    probe = cs.SounderSupervisor(args, "127.0.0.1:1")
+finally:
+    cs.plugin_env = sys.modules["check_setup"].plugin_env = real_env
+check(probe.env.get("PLUGIN_ENV_SENTINEL") == sd, "the supervisor takes its environment from the setup check's plugin_env")
+
+# --log-dir: each start's output lands in its own file as the sounder wrote it
+# (the report tools match its lines), after the command and the teardown.
+import glob
+ld = tempfile.mkdtemp(prefix="csi_log_")
+lsup = cs.SounderSupervisor(types.SimpleNamespace(**dict(vars(args), log_dir=ld)), "x")
+lsup.td_text = "cleared ch0\n"
+lsup.cmd = ["sh", "-c", "echo 'RX read check: 0 lost'; echo second"]
+lsup._start().wait()
+deadline = time.time() + 5
+while time.time() < deadline and not any(open(f).read().endswith("second\n") for f in glob.glob(os.path.join(ld, "sounder_*.log"))):
+    time.sleep(0.05)
+logs = glob.glob(os.path.join(ld, "sounder_*.log"))
+text = open(logs[0]).read() if len(logs) == 1 else ""
+check(text.startswith("# sh -c") and "# teardown: cleared ch0\n" in text and text.endswith("RX read check: 0 lost\nsecond\n"),
+      "with --log-dir a start's output is logged as written, after its command and teardown "
+      "(mutation: the pump not writing the log, or writing its [sounder] prefix)")
+nsup = cs.SounderSupervisor(args, "x"); nsup.cmd = ["true"]; nsup._start().wait()
+check(nsup.log_dir is None, "without --log-dir nothing is logged (mutation: a default directory)")
+import shutil; shutil.rmtree(ld, ignore_errors=True)
+
+# One session against a sounder that fails every start, in a checkout of its
+# own: the teardown stand-in records the arguments it was given, the sounder
+# stand-in records each launch and exits 1.
+rd = tempfile.mkdtemp(prefix="csi_retry_")
+rlog = os.path.join(rd, "log")
+for d in ("build", "csi_gui", "files"):
+    os.makedirs(os.path.join(rd, d))
+with open(os.path.join(rd, "build", "sounder"), "w") as f:
+    f.write("#!/bin/sh\necho launch >> %s\nexit 1\n" % rlog)
+os.chmod(os.path.join(rd, "build", "sounder"), 0o755)
+with open(os.path.join(rd, "csi_gui", "teardown_framer.py"), "w") as f:
+    f.write("import json, sys\nopen(%r, 'a').write('teardown ' + json.dumps(sys.argv[1:]) + '\\n')\n" % rlog)
+for n, topo in (("houdini-t.json", "files/topology-t.json"), ("houdini-u.json", "files/topology-u.json")):
+    json.dump({"serial_file": topo}, open(os.path.join(rd, "files", n), "w"))
+rsup = cs.SounderSupervisor(types.SimpleNamespace(**dict(vars(args), sounder_dir=rd, conf="files/houdini-t.json")), "x")
+rsup.SETTLE_AFTER_TEARDOWN_S = 0.05; rsup.RETRY_DELAY_S = 0.05
+check(rsup.run() is None and rsup.snapshot()["state"] == "gave up",
+      "a sounder that never starts ends the session as gave up (mutation: no gave-up state, the page shows the retry wait for good)")
+rlines = open(rlog).read().splitlines()
+# SH-442: a cold open that times out is retried; the dashboard's Start makes 4 attempts.
+check(rlines.count("launch") == 4 and rsup.snapshot()["attempt"] == 4,
+      "a failing start is launched 4 times, not once: %d launches (mutation: ATTEMPTS = 1, no retry)" % rlines.count("launch"))
+tds = [json.loads(l[len("teardown "):]) for l in rlines if l.startswith("teardown ")]
+# The teardown clears the radios of the topology the config names; the default
+# topology (teardown_framer.py's) has the demo's BS and UE the other way round.
+check(len(tds) == 4 and all(a == ["--topology", "files/topology-t.json"] for a in tds)
+      and [l.split()[0] for l in rlines] == ["teardown", "launch"] * 4,
+      "every attempt tears down first, against the config's own topology %s (mutation: drop --topology from the "
+      "teardown command)" % (tds[:1],))
+rsup.set_conf("files/houdini-u.json"); rsup._teardown()
+check(json.loads(open(rlog).read().splitlines()[-1][len("teardown "):]) == ["--topology", "files/topology-u.json"],
+      "a config switch tears down against the new config's topology (mutation: the teardown command built once, "
+      "at start-up)")
+demo = cs.SounderSupervisor(types.SimpleNamespace(**dict(vars(args), sounder_dir=os.path.abspath(".."),
+                                                         conf="files/houdini-dualband-xw-steer-slots.json")), "x")
+check(demo.td_cmd == ["python3", "csi_gui/teardown_framer.py", "--topology", "files/topology-houdini-dualband.json"],
+      "the demo config tears down its own mode-V topology (mutation: drop --topology, and the default "
+      "topology-houdini.json has the BS and UE swapped)")
+shutil.rmtree(rd, ignore_errors=True)
+
+# Stop sends SIGINT first, the sounder's own stop, so its destructors print the
+# end-of-run checks; SIGTERM skipped them (the default action).
+isup = cs.SounderSupervisor(args, "x"); isup.STOP_GRACE_S = 5.0
+ilog = os.path.join(sd, "int.log")
+isup.cmd = ["sh", "-c", "trap 'echo got-int >> %s; exit 0' INT; while :; do sleep 0.1; done" % ilog]
+isup.proc = isup._start(); time.sleep(0.5)
+t0 = time.time(); isup._kill(); took = time.time() - t0
+check(os.path.exists(ilog) and "got-int" in open(ilog).read() and took < 4.0,
+      "Stop reaches the sounder as SIGINT and a clean exit ends the wait early (%.1f s) (mutation: SIGTERM first, "
+      "which skips the sounder's end-of-run lines)" % took)
+
+# A sounder that does not exit on SIGINT is SIGKILLed after the grace: that is
+# what frees the radios when a clean stop hangs.
+ksup = cs.SounderSupervisor(args, "x"); ksup.STOP_GRACE_S = 1.0
+ksup.cmd = ["sh", "-c", "trap '' INT; while :; do sleep 0.1; done"]
+ksup.proc = ksup._start(); time.sleep(0.5)
+t0 = time.time(); ksup._kill(); took = time.time() - t0
+check(ksup.proc.poll() is not None and 0.9 <= took < 5.0,
+      "a sounder that ignores SIGINT is killed after the grace (%.1f s) (mutation: no deadline, wait for the exit forever)" % took)
+# The sounder starts with SIGINT at its default even when the dashboard runs
+# with SIGINT ignored (a background start from a script).
+dsup = cs.SounderSupervisor(args, "x"); dlog = os.path.join(sd, "sigign.txt")
+dsup.cmd = ["sh", "-c", "grep SigIgn /proc/self/status > %s" % dlog]
+old = signal.signal(signal.SIGINT, signal.SIG_IGN)
+try:
+    dsup._start().wait()
+finally:
+    signal.signal(signal.SIGINT, old)
+ign = int(open(dlog).read().split()[1], 16) if os.path.exists(dlog) else -1
+check(ign >= 0 and not (ign & (1 << (signal.SIGINT - 1))),
+      "the sounder does not inherit an ignored SIGINT (mutation: no SIG_DFL reset in the child)")
+
+# The gap before the main thread picks a Start up (a supervisor not yet serving):
+# a Check or a second Start then is refused, not queued behind it and dropped.
+idle = cs.SounderSupervisor(args, "127.0.0.1:1")
+check(idle.request("start") is None and idle.snapshot()["state"] == "queued"
+      and idle.request("check") and idle.request("start") and idle.cmds.qsize() == 1,
+      "a queued Start makes Check and Start busy until it is picked up")
+srv = cs.ThreadingHTTPServer(("127.0.0.1", 0), cs.Handler); srv.daemon_threads = True
+srv.control = sup
+threading.Thread(target=srv.serve_forever, daemon=True).start()
+url = "http://127.0.0.1:%d/control" % srv.server_address[1]
+def post(obj, headers=None, raw=None):
+    h = {"Content-Type": "application/json"}; h.update(headers or {})
+    req = urllib.request.Request(url, data=raw if raw is not None else json.dumps(obj).encode(),
+                                 method="POST", headers=h)
+    try:
+        with urllib.request.urlopen(req) as r: return r.status, json.load(r)
+    except urllib.error.HTTPError as e:
+        body = e.read()
+        return e.code, (json.loads(body) if body.startswith(b"{") else None)
+def get():
+    with urllib.request.urlopen(url) as r: return json.load(r)
+def get_code(headers):
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers=headers)) as r: return r.status
+    except urllib.error.HTTPError as e:
+        return e.code
+def wait_for(pred, t=5.0):
+    end = time.time() + t
+    while time.time() < end:
+        if pred(): return True
+        time.sleep(0.05)
+    return False
+def events(): return [l for l in open(log).read().splitlines() if not l.startswith("start")] if os.path.exists(log) else []
+def starts(): return [l.split()[1] for l in open(log).read().splitlines() if l.startswith("start")] if os.path.exists(log) else []
+def alive(pid):
+    try: os.kill(pid, 0); return True
+    except ProcessLookupError: return False
+
+seen = {}
+def driver():
+    try:
+        st = get()
+        check(st["enabled"] and st["state"] == "stopped", "not autostarted: stopped until asked")
+        check(st["configs"] == ["files/houdini-a.json", "files/houdini-b.json"], "only files/houdini*.json are offered")
+        check(st["desc"]["files/houdini-b.json"] == "desc of houdini-b.json", "each config's _description is served")
+        check(st["labels"] == {"files/houdini-a.json": "", "files/houdini-b.json": "B short"},
+              "each config's short _label is served for the list text (mutation: labels not served)")
+        # A failing quick check blocks Start and is shown; nothing launches.
+        open(flag, "w").close()
+        post({"cmd": "start"})
+        check(wait_for(lambda: get()["state"] == "check failed"), "a failing quick check blocks Start")
+        ck = get()["check"]
+        check(ck and ck["quick"] and not ck["ok"] and starts() == [] and "teardown" not in events(),
+              "the failed check is reported and neither teardown nor sounder ran")
+        post({"cmd": "check"})
+        check(wait_for(lambda: get()["state"] == "stopped" and not get()["check"]["quick"]),
+              "Check runs the full form")
+        os.remove(flag)
+        # Stop pressed while Start's quick check runs: nothing is torn down or started.
+        open(slow, "w").close(); open(log, "w").close()
+        post({"cmd": "start"})
+        check(wait_for(lambda: get()["state"] == "checking"), "Start: checking")
+        check(post({"cmd": "check"})[0] == 400, "Check while a check runs is refused, not queued")
+        post({"cmd": "stop"})
+        check(wait_for(lambda: get()["state"] == "stopped") and starts() == [] and "teardown" not in events(),
+              "Stop during the quick check: no teardown, no sounder")
+        os.remove(slow)
+        open(log, "w").close()
+        check(post({"cmd": "start", "conf": "files/other.json"})[0] == 400, "a config outside the list is refused")
+        check(post({"cmd": "start", "conf": "../../etc/passwd"})[0] == 400, "a path outside the sounder is refused")
+        check(post({"cmd": "reboot"})[0] == 400, "an unknown command is refused")
+        check(post({"cmd": "start"}, {"Content-Type": "text/plain"})[0] == 403,
+              "a non-JSON POST (what a cross-site no-cors fetch sends) is refused")
+        check(post({"cmd": "start"}, {"Origin": "http://evil.example"})[0] == 403, "a foreign Origin is refused")
+        port = srv.server_address[1]
+        rebound = {"Host": "evil.example:%d" % port, "Origin": "http://evil.example:%d" % port}
+        # Fails under: dropping the _host_is_address test from do_POST (DNS rebinding:
+        # the attacker's name resolves to 127.0.0.1, and Origin equals Host).
+        check(post({"cmd": "start"}, rebound)[0] == 403, "a rebound name (Host and Origin both evil.example) is refused")
+        # Fails under: dropping the _host_is_address test from _control_state.
+        check(get_code(rebound) == 403, "GET /control from a rebound name is refused")
+        # Fails under: a refusal body without its reason (the page then hides
+        # the controls with no word why).
+        try:
+            urllib.request.urlopen(urllib.request.Request(url, headers=rebound)); body = {}
+        except urllib.error.HTTPError as e:
+            body = json.loads(e.read().decode())
+        check(body.get("enabled") is False and "address" in body.get("error", ""),
+              "the refusal says why: %r" % body.get("error"))
+        # Fails under: _host_is_address refusing localhost or a bracketed IPv6 literal.
+        check(post({"cmd": "reboot"}, {"Host": "localhost:%d" % port})[0] == 400
+              and post({"cmd": "reboot"}, {"Host": "[::1]:%d" % port})[0] == 400,
+              "Host localhost and [::1] pass (the unknown command is then a 400, not a 403)")
+        check(post(None, raw=b"[1]")[0] == 400 and post(None, raw=b"{bad")[0] == 400,
+              "a body that is not a JSON object is a 400")
+        check(post(None, raw=b"{" + b" " * 5000 + b"}")[0] == 400, "an oversized body is a 400")
+        check(starts() == [], "nothing launched by refused requests")
+        check(post({"cmd": "start"})[0] == 202, "start is accepted")
+        check(wait_for(lambda: get()["state"] == "running"), "start: running")
+        pid1 = get()["pid"]; seen["pid1"] = pid1
+        check(post({"cmd": "start"})[0] == 400, "Start while running is refused")
+        sup.cmds.put(("start", None)); time.sleep(0.6)  # one queued before the state showed running
+        check(get()["pid"] == pid1 and alive(pid1), "a queued Start does not restart a live session")
+        check(starts() == ["files/houdini-a.json"] and events()[:2] == ["check quick", "teardown"],
+              "start ran a quick check, a teardown, then the current config")
+        check(post({"cmd": "check"})[0] == 400, "Check while running is refused")
+        with sup.state_lock:  # the retry wait inside a session
+            saved = sup.state["state"]; sup.state["state"] = "exited"
+        check(sup.request("check") and sup.request("start"), "Check and Start are refused in the retry wait, not dropped")
+        with sup.state_lock:
+            sup.state["state"] = saved
+        n_checks = events().count("check full")
+        sup.cmds.put(("check", None)); time.sleep(0.6)
+        check(get()["pid"] == pid1 and events().count("check full") == n_checks,
+              "a queued Check neither runs nor disturbs a live session")
+        post({"cmd": "restart", "conf": "files/houdini-b.json"})
+        check(wait_for(lambda: get()["state"] == "running" and get()["pid"] != pid1), "restart: a new sounder is running")
+        check(not alive(pid1), "restart killed the old sounder")
+        kid1 = int(open(log + ".kids").read().split()[0])
+        check(not alive(kid1), "restart killed the old sounder's SIGTERM-proof child (group SIGKILL)")
+        check(get()["conf"] == "files/houdini-b.json" and starts()[-1] == "files/houdini-b.json", "restart switched config")
+        check(open(log).read().count("teardown") == 2, "every start is preceded by a teardown")
+        pid2 = get()["pid"]
+        post({"cmd": "stop"})
+        check(wait_for(lambda: get()["state"] == "stopped"), "stop: stopped")
+        check(wait_for(lambda: not alive(pid2)), "stop killed the sounder")
+        time.sleep(0.5)
+        check(get()["state"] == "stopped" and len(starts()) == 2, "stop stays stopped (no retry)")
+        post({"cmd": "start"})
+        check(wait_for(lambda: get()["state"] == "running"), "start after stop works")
+        seen["pid3"] = get()["pid"]
+    finally:
+        sup.stop()
+
+threading.Thread(target=driver, daemon=True).start()
+sup.serve(autostart=False)  # main thread, as in main(); returns once sup.stop() is called
+check("pid3" in seen and wait_for(lambda: not alive(seen["pid3"])), "shutdown stop() ends serve() and kills the sounder")
+# Without --control the route does not exist.
+srv.control = None
+check(get() == {"enabled": False}, "no --control: GET reports disabled")
+check(post({"cmd": "start"})[0] == 404, "no --control: POST is 404")
+srv.shutdown()
+# --replay: a recording offered in the list; Start plays it into this dashboard's
+# UDP port with no setup check and no teardown; the recorder pauses; Stop ends it.
+rec = os.path.join(sd, "bench.rec"); open(rec, "wb").write(b"HCSIREC1")
+with open(os.path.join(sd, "csi_gui", "replay_feed.py"), "w") as f:
+    f.write("import sys, time\nopen(%r, 'a').write('replay %%s\\n' %% ' '.join(sys.argv[1:]))\ntime.sleep(60)\n" % log)
+rs = cs.SounderSupervisor(types.SimpleNamespace(**dict(vars(args), replay=[rec + "=Bench replay"])), "127.0.0.1:9999")
+rs.SETTLE_AFTER_TEARDOWN_S = 0.2; rs.RETRY_DELAY_S = 0.2; rs.STOP_GRACE_S = 2.0
+key = "replay:" + rec
+check(rs.configs()[-1] == key and rs.labels()[key] == "Bench replay" and rec in rs.descriptions()[key],
+      "a --replay entry is offered with its label (mutation: replays not listed)")
+check(rs.request("check", key) is not None, "Check on a replay is refused: it opens no radio")
+open(log, "w").close(); rseen = {}
+def rdriver():
+    try:
+        rs.request("start", key)
+        rseen["run"] = wait_for(lambda: rs.snapshot()["state"] == "running")
+        rseen["pid"] = rs.snapshot()["pid"]
+        rseen["log"] = wait_for(lambda: "replay " in open(log).read()) and open(log).read()
+        rseen["paused"] = cs._replaying[0]
+        rs.request("stop")
+        rseen["stopped"] = wait_for(lambda: rs.snapshot()["state"] == "stopped")
+    finally:
+        rs.stop()
+threading.Thread(target=rdriver, daemon=True).start()
+rs.serve(autostart=False)
+ev = rseen.get("log") or ""
+check(rseen.get("run") and "replay %s --host 127.0.0.1 --port 9999 --loop" % rec in ev,
+      "Start on a replay plays it in a loop into the dashboard's UDP port (mutation: the sounder launched): %r" % ev)
+check("teardown" not in ev and "check" not in ev,
+      "a replay runs no setup check and no teardown: it needs no radio (mutation: the radio steps kept)")
+check(rseen.get("paused") is True, "the recorder pauses while a replay plays (mutation: a replay recorded)")
+check(rseen.get("stopped") and rseen.get("pid") and wait_for(lambda: not alive(rseen["pid"])), "Stop ends the replay")
+import shutil; shutil.rmtree(sd, ignore_errors=True)  # no temp dir left per run
+print("%d failure(s)" % fails); sys.exit(1 if fails else 0)

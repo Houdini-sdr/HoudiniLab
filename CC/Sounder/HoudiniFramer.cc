@@ -1,8 +1,9 @@
 /** @file HoudiniFramer.cc
-  * @brief The Houdini base-station framer, moved out of BaseRadioSet.cc
-  *        (seam step S2). The mechanics and their measured reasons are the
-  *        ones recorded in DEMO_VERIFICATION.md 3.x and 4.x; nothing here
-  *        changed in the move.
+  * @brief The Houdini base-station framer: the native TDD schedule (the
+  *        beacon strobe and the rx slots), the continuous BS receive, and the
+  *        per-frame cut of each rx slot from it. The mechanics and their
+  *        measured reasons are recorded in DEMO_VERIFICATION.md sections 3, 4
+  *        and 9.
   *
   * RENEW OPEN SOURCE LICENSE: http://renew-wireless.org/license
 */
@@ -10,6 +11,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cerrno>
 #include <cmath>
 #include <complex>
@@ -19,59 +21,129 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <SoapySDR/Errors.hpp>
 
+#include "include/RadioHoudini.h"
 #include "include/logger.h"
 #include "include/macros.h"
 #include "include/rx_gap_sink.h"
 #include "include/utils.h"
+#include "houdini/replay_strobe.h"
+#include "houdini/bs_slots.h"
+#include "houdini/slot_align.h"
+#include "houdini/tx_rx_boundary.h"
 #include "sync/beacon_shape.h"
 
-void HoudiniFramer::buildBeacon(std::vector<int16_t>& iq) {
-  constexpr int kReplayDepth = 4096;  // Houdini TX replay RAM depth (samples)
+// AP-79: TX samples per tick (2 when the TX stream runs at twice the tick
+// rate and RadioHoudini::xmit interpolates), and the zero ticks placed ahead of
+// the beacon core in the replay image so the interpolator's lead-in is not
+// truncated (channel prefilter 17 + halfband 6 input samples back). The strobe offset is
+// pulled in by the same amount, so the core still plays at +384 and the UE's
+// beacon geometry (BeaconShape::expectedEndOffset) is unchanged.
+static int txPerTick(const Config* cfg) {
+  return (cfg->tx_rate() > 1.5 * cfg->rate()) ? 2 : 1;
+}
+static int beaconLeadTicks(const Config* cfg) {
+  // 24 with the shipped filters (a lead of 23 rounded up to the 4-tick grid),
+  // so the strobe offset is 360.
+  return txPerTick(cfg) == 2 ? static_cast<int>(houdini::boundary::beaconReplayLead()) : 0;
+}
+static int beaconTailTicks(const Config* cfg) {
+  return txPerTick(cfg) == 2
+             ? static_cast<int>(houdini::boundary::TxBurstInterpolator::prefilterTail())
+             : 0;
+}
 
-  // Rebuild the STS+gold core of config's beacon (indices [prefix, prefix+
+// The beacon channel's index in the opened TX channel list (bs_tx_channel):
+// beacon_channel(), clamped to the list.
+static size_t beaconTxIndex(const Config* cfg, const std::vector<size_t>& bs_chans) {
+  return bs_chans.empty() ? 0 : std::min(static_cast<size_t>(cfg->beacon_channel()), bs_chans.size() - 1);
+}
+
+// The PHYSICAL TX channel the beacon's replay strobe fires on: beacon_channel()
+// is the logical index within bs_channel, the strobe addresses the real DAC
+// (bs_channel "B" -> ch1). armTdd arms it there and stop() disarms it there.
+static size_t beaconTxChannel(const Config* cfg) {
+  const auto bs_chans = Utils::strToChannels(cfg->bs_tx_channel());
+  return bs_chans.empty() ? 0 : bs_chans.at(beaconTxIndex(cfg, bs_chans));
+}
+
+// Load the replay RAM with the beacon image `iq`. The beacon is single-antenna:
+// with per-channel TX streams (SH-235) its samples go at the beacon channel's
+// index and nullptr elsewhere, and xmit skips the null channels, so a
+// non-beacon TX stream is never filled. The load is the beacon: a refused or
+// short load (the plugin returns an error while the replay bank's level arm is
+// still set) throws, so the bring-up stops rather than arming over stale RAM
+// and playing a beacon that is not the one built (DEMO_VERIFICATION 4.24,
+// SH-348).
+static void loadBeaconRam(Radio* r, const std::vector<int16_t>& iq, const std::vector<size_t>& bs_chans,
+                          size_t beacon_idx) {
+  const size_t n_load = iq.size() / 2;
+  std::vector<const void*> buffs(bs_chans.empty() ? 1 : bs_chans.size(), nullptr);
+  buffs[beacon_idx] = iq.data();
+  long long t0 = 0;
+  const int loaded = r->xmit(buffs.data(), static_cast<int>(n_load), 0, t0);
+  if (loaded != static_cast<int>(n_load)) {
+    throw std::runtime_error(
+        "Houdini beacon replay RAM load refused: " +
+        std::string(loaded < 0 ? SoapySDR::errToStr(loaded) : "short load") +
+        " (" + std::to_string(loaded) + " of " + std::to_string(n_load) +
+        " samples)");
+  }
+}
+
+void HoudiniFramer::buildBeacon(std::vector<int16_t>& iq) {
+  // Houdini TX replay RAM depth: 4096 TX samples, so 4096 / (TX per tick)
+  // ticks of image built here (xmit doubles it at TX = 2 x rate).
+  const int kReplayDepth = 4096 / txPerTick(cfg_);
+  const int lead = beaconLeadTicks(cfg_);
+
+  // Rebuild the core of the config's beacon (indices [prefix, prefix+
   // beacon_size) skip the zero pre/postfix). Conjugate it: the matched-NCO R2C
   // mixer delivers the beacon conjugated and receiver.cc::syncSearch feeds the
-  // raw RX to find_beacon, so pre-conjugating the TX cancels it.
+  // raw RX to the detector, so pre-conjugating the TX cancels it.
   //
-  // NO host upsampling: the beacon replays at the APP rate (BaseRadioSet opens
-  // the beacon Radio's TX at cfg_->rate(), not the DAC max), so the RFDC's own
-  // interpolation carries it to the DAC. Placing the beacon_size (~496) core at
-  // the head of the 4096-deep RAM and leaving the rest SILENT makes an ISOLATED
-  // beacon that recurs once per FRAME (122880 samples, 1 ms): it fits inside the
-  // client's
-  // detect window AND keeps find_beacon's trailing-energy threshold low, so the
-  // SHARP native-rate 2-rep gold peak clears it at corr_scale=1. (The old x8
-  // upsample + DAC-max replay recurred every 512 samples -- dense -- and smeared
-  // the gold, forcing corr_scale~100.)
+  // Built at the tick rate, NOT the DAC max: the RFDC's own interpolation
+  // carries it to the DAC (after RadioHoudini::xmit's x2 when TX = 2 x rate).
+  // Placing the core at the head of the 4096-deep RAM (after the
+  // interpolator's lead, when there is one) and leaving the rest SILENT makes
+  // an ISOLATED beacon that recurs once per FRAME: it fits inside the client's
+  // detect window AND keeps the detector's trailing-energy threshold low, so
+  // the SHARP native-rate gold peak clears it at corr_scale=1. Do not upsample
+  // to the DAC max and replay there: that recurs every 512 samples (dense) and
+  // smears the gold, forcing corr_scale near 100.
   const auto& bc = cfg_->beacon_ci16();
   const int p = cfg_->prefix();
   const int n = cfg_->beacon_size();
   std::vector<std::complex<float>> loop(kReplayDepth, std::complex<float>(0, 0));
-  for (int k = 0; k < n && k < kReplayDepth; ++k) {
-    loop[k] = std::conj(std::complex<float>(
+  if (lead + n + beaconTailTicks(cfg_) > kReplayDepth) {
+    throw std::invalid_argument("Houdini beacon: core of " + std::to_string(n) +
+                                " ticks does not fit the replay RAM (" +
+                                std::to_string(kReplayDepth) + " ticks at this TX rate)");
+  }
+  for (int k = 0; k < n && lead + k < kReplayDepth; ++k) {
+    loop[lead + k] = std::conj(std::complex<float>(
         static_cast<float>(bc.at(p + k).real()),
         static_cast<float>(bc.at(p + k).imag())));
   }
   float peak = 1e-30f;
   for (const auto& v : loop) peak = std::max(peak, std::abs(v));
-  // TRANSMIT AMPLITUDE, AS A FRACTION OF FULL SCALE. 0.6 was the only value
-  // that had ever been used, hard-coded, and that made the received level the
-  // one axis this bench could not vary -- so a detector claim that depends on
-  // level (AP-34: the shipped threshold is 4th order in amplitude over 2nd, and
-  // therefore not scale invariant) could be measured offline and never on
-  // silicon. HOUDINI_BEACON_FS makes it a knob.
+  // TRANSMIT AMPLITUDE, AS A FRACTION OF FULL SCALE: sync.beacon.tx_full_scale
+  // (HOUDINI_BEACON_FS as a logged override while allow_env_overrides holds),
+  // range-checked by SyncConfig to (0.001, 1], default 0.6. It makes the
+  // received level an axis the bench can vary, so a detector claim that
+  // depends on level (AP-34: the power-ratio threshold is 4th order in
+  // amplitude over 2nd, and therefore not scale invariant) can be measured on
+  // silicon and not only offline.
   //
   // DIAGNOSTIC, NOT A LINK BUDGET. Lowering it weakens the beacon and nothing
   // else, which is the point: it is the cheapest available stand-in for path
-  // loss on a cabled bench. Clamped to (0, 1] because above 1.0 the samples
-  // would clip into a spectrally-splattered beacon that measures the clipping
-  // rather than the level (the conversion below clamps, it does not wrap).
-  // sync.beacon.tx_full_scale (HOUDINI_BEACON_FS as a logged override while
-  // allow_env_overrides holds), range-checked by SyncConfig to (0.001, 1].
+  // loss on a cabled bench. At most 1.0 because above it the samples would
+  // clip into a spectrally-splattered beacon that measures the clipping rather
+  // than the level (the conversion below clamps, it does not wrap).
   const float fs_frac = static_cast<float>(cfg_->sync().beacon.tx_full_scale);
   if (cfg_->sync().wasSet("beacon.tx_full_scale") &&
       std::fabs(static_cast<double>(fs_frac) - 0.6) > 1e-6) {
@@ -115,34 +187,14 @@ void HoudiniFramer::armReplayBeacon(void) {
   // Load the replay RAM + arm free-running on the beacon radio's TX. The TX
   // stream is bound to the BS channel (the wired DAC), so xmit targets it. RX
   // is NOT activated here: it would sit unread (overflowing) until the caller is
-  // ready to receive -- activateHoudiniRx() starts it on demand.
-  // Beacon is single-antenna: with per-channel TX streams (SH-235) pass it only
-  // on the beacon channel's index in the opened channel list, nullptr elsewhere.
+  // ready to receive -- start() starts it on demand.
   const auto bs_chans = Utils::strToChannels(cfg_->bs_tx_channel());  // beacon is TX
-  const size_t beacon_idx =
-      bs_chans.empty() ? 0
-                       : std::min(static_cast<size_t>(cfg_->beacon_channel()),
-                                  bs_chans.size() - 1);
-  std::vector<const void*> buffs(bs_chans.empty() ? 1 : bs_chans.size(),
-                                 nullptr);
-  buffs[beacon_idx] = iq.data();
-  long long t0 = 0;
+  const size_t beacon_idx = beaconTxIndex(cfg_, bs_chans);
   for (size_t c = 0; c < radios_.size(); ++c) {
     for (size_t i = 0; i < radios_.at(c).size(); ++i) {
       if (i != cfg_->beacon_radio()) continue;
       Radio* r = radios_.at(c).at(i).get();
-      // The load is the beacon: a refused or short load (the plugin returns an
-      // error while the replay bank's level arm is still set) must stop the
-      // bring-up here, not arm the loop over stale RAM and play a beacon that
-      // is not the one built above (DEMO_VERIFICATION 4.24, SH-348).
-      const int loaded = r->xmit(buffs.data(), static_cast<int>(n_load), 0, t0);
-      if (loaded != static_cast<int>(n_load)) {
-        throw std::runtime_error(
-            "Houdini beacon replay RAM load refused: " +
-            std::string(loaded < 0 ? SoapySDR::errToStr(loaded) : "short load") +
-            " (" + std::to_string(loaded) + " of " + std::to_string(n_load) +
-            " samples)");
-      }
+      loadBeaconRam(r, iq, bs_chans, beacon_idx);  // throws on a refused or short load
       r->activateXmit();  // arm free-running loop
       MLPD_INFO(
           "Houdini BS beacon armed: %zu-sample app-rate replay loop (isolated "
@@ -156,6 +208,27 @@ void HoudiniFramer::start(void) {
   // Start the BS RX streams on demand (the reverse link / UE pilots). Kept
   // separate from beacon arming so the RX stream is not left overflowing while
   // the caller is busy elsewhere (e.g. waiting for the UE to acquire).
+  if (cfg_->bs_hw_framer() && cfg_->bs_rx_slots()) {
+    // AP-87: activate once the schedule runs (the proven order; a capture
+    // started earlier is not on the slot grid the cut assumes).
+    for (size_t c = 0; c < radios_.size(); ++c)
+      for (size_t i = 0; i < radios_.at(c).size(); ++i) {
+        if (i != cfg_->beacon_radio()) continue;
+        auto* dev = radios_.at(c).at(i)->RawDev();
+        std::string st;
+        const auto t0 = std::chrono::steady_clock::now();
+        for (;;) {
+          st = dev->readSetting("TDD_STAT");
+          if (st.find("state=running") != std::string::npos) break;
+          if (std::chrono::steady_clock::now() - t0 > std::chrono::seconds(3)) {
+            MLPD_WARN("BS: the TDD schedule is not running 3 s after the arm (TDD_STAT '%s'); activating anyway\n",
+                      st.c_str());
+            break;
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+      }
+  }
   for (size_t c = 0; c < radios_.size(); ++c)
     for (size_t i = 0; i < radios_.at(c).size(); ++i)
       radios_.at(c).at(i)->activateRecv();
@@ -164,9 +237,9 @@ void HoudiniFramer::start(void) {
 // ---- Houdini native-TDD framer (bs_hw_framer + radio_type=houdini) ----------
 namespace {
 // 3.125 us anchor/strobe grid. NB the same driver constant appears as
-// houdini::sync::kHoudiniStrobeOffsetTicks (the one definition), a local kTddGridTicks in
-// clientTxPilots, and 3125 ns in ClientRadioSet::radioTx -- all four must
-// move together if the driver grid ever changes (Opus review LOW).
+// houdini::sync::kHoudiniStrobeOffsetTicks (the one definition, which this and
+// clientTxPilots's local kTddGridTicks alias) and as kTddGridNs in
+// RadioHoudini::txTimeNs: both must move together if the driver grid changes.
 constexpr long long kTddGridTicks = houdini::sync::kHoudiniStrobeOffsetTicks;
 constexpr long long kTddArmMargin = 36864000;  // ~300 ms of ticks
 }  // namespace
@@ -200,11 +273,10 @@ long long HoudiniFramer::armTddOnce(SoapySDR::Device* dev,
   long long epoch = 0;
   bool accepted = false;
   for (int attempt = 0; attempt < 4 && !accepted; ++attempt) {
-    // On the current stack a refused arm THROWS (SH-333) instead of returning
-    // accepted=0. A throwing WRITE must never be trusted via the readback:
-    // failures before the device stores its last-arm record leave a STALE
-    // string (possibly a previous run's accepted=1), so a throw always
-    // re-ladders and retries (Opus review finding 3).
+    // A refused arm THROWS (SH-333) rather than returning accepted=0. A
+    // throwing WRITE must never be trusted via the readback: failures before
+    // the device stores its last-arm record leave a STALE string (possibly a
+    // previous run's accepted=1), so a throw always re-ladders and retries.
     try {
       dev->writeSetting("TDD_ARM", arm);
     } catch (const std::exception& e) {
@@ -215,7 +287,7 @@ long long HoudiniFramer::armTddOnce(SoapySDR::Device* dev,
       // them, for exactly that reason). Retrying the arm without re-running
       // the setup could arm a framer with a cleared beacon: counters healthy,
       // "armed" logged, no RF -- the silent class the ladder exists to
-      // prevent (Opus review H1).
+      // prevent.
       if (resetup) resetup();
       continue;
     }
@@ -240,27 +312,36 @@ long long HoudiniFramer::armTddOnce(SoapySDR::Device* dev,
 void HoudiniFramer::armTdd(void) {
   // Slot-granular ring: one TDD symbol per sounder slot (symbol_ticks =
   // samps_per_slot, symbols_per_frame = slot_per_frame), '6' on the beacon
-  // slot, '2' on every other slot. Verified on silicon 2026-08-30
-  // (DEMO_VERIFICATION.md 4.12): the ring arms and the strobe plays exactly
-  // one burst per frame. Every non-beacon entry must keep the rx bit set:
-  // a gate close ABANDONS a running continuous capture (driver contract,
-  // D4 window-pump + overlength-abandon), and per-window host pumping costs
-  // ~100 ms RPC per window, unusable at 1 ms frames. True rx-only-in-P/U
-  // gating therefore needs a driver capability (hardware-chained windowed
-  // RX); until then the wire carries the whole frame and the guards are
-  // silent AIR, not absent DATA (DEMO_VERIFICATION.md section 3/4).
+  // slot, '2' on every other slot. Verified on silicon (DEMO_VERIFICATION.md
+  // 4.12): the ring arms and the strobe plays exactly one burst per frame.
+  // Without bs_rx_slots every non-beacon entry keeps
+  // the rx bit: up to fpga 1.33 a gate close ABANDONED a running continuous
+  // capture (driver contract, D4 window-pump + overlength-abandon), so the
+  // wire carries the whole frame and the guards are silent AIR, not absent
+  // DATA (DEMO_VERIFICATION.md section 3/4). With bs_rx_slots (AP-87) the
+  // pattern is the schedule's own: the device's slots mode (SH-347) delivers
+  // only the rx slots, and from fpga 1.34 the fabric gates packets by the rx
+  // bit (HS-237) instead of abandoning the capture.
   //
-  // The strobe plays ONE beacon copy per frame (loops=1, len = beacon core):
-  // the old loops=forever filled a 0.5 ms symbol with ~15 copies, which made
-  // the UE's frame anchor ambiguous by k x 4096 samples per restart.
+  // The strobe plays ONE beacon copy per frame (loops=1, len = beacon core).
+  // Do not use loops=forever: it fills the symbol with many copies a replay
+  // RAM apart, which makes the UE's frame anchor ambiguous by k x 4096 samples
+  // per restart.
   //
-  // NB (houdini_beacon_ab.py, .21->.22): the SAME beacon RAM scored by the
-  // client's gold correlation gives 44.5 dB via the framer strobe vs only 10.2 dB
-  // via a continuous activateXmit replay -- the strobe is SHARPER, not distorted
-  // (an earlier "strobe distorted ~11 dB" note was the continuous mode mislabeled).
+  // NB (houdini_beacon_ab.py): the SAME beacon RAM scored by the client's gold
+  // correlation gives 44.5 dB via the framer strobe vs only 10.2 dB via a
+  // continuous activateXmit replay -- the strobe is SHARPER, not distorted.
   // And a continuous replay can't coexist with the framer anyway: arming the framer
   // silences activateXmit (-33 dB) and any tx_gate schedule is arm-rejected without
   // a strobe. So the strobe is the only way to get beacon + rx_gate on one board.
+  // One BS radio in one cell: rx() serves radios_.at(0) from one cursor, cache
+  // and epoch, and only the beacon radio is armed below, so a second radio
+  // would be activated and silently misframed.
+  size_t n_radios = 0;
+  for (const auto& cell : radios_) n_radios += cell.size();
+  if (radios_.size() != 1 || n_radios != 1)
+    throw std::runtime_error("bs_hw_framer: the Houdini TDD framer drives exactly one BS radio in one cell; the topology gives " +
+                             std::to_string(n_radios) + " radio(s) in " + std::to_string(radios_.size()) + " cell(s)");
   htdd_symbol_ticks_ = static_cast<long long>(cfg_->samps_per_slot());
   htdd_tick_rate_ = cfg_->rate();
 
@@ -287,10 +368,10 @@ void HoudiniFramer::armTdd(void) {
       // TDD frame must EQUAL the sounder frame: the beacon fires once per TDD
       // frame, so a longer TDD frame makes the beacon period differ from the UE's
       // (sounder) frame and the pilot/data walk relative to the beacon -> noisy CSI.
-      // One symbol per sounder slot, beacon strobe on the schedule's B slot,
-      // rx bit on EVERY entry (see the function comment: a closed gate kills
-      // the continuous capture; the rx slots are still extracted from the
-      // continuous read in houdiniTddRx).
+      // One symbol per sounder slot, beacon strobe on the schedule's B slot;
+      // the rx bit on every other entry, or with bs_rx_slots on the rx slots
+      // only (the function comment says why). Either way rx() cuts the rx
+      // slots from one continuous read.
       const size_t spf_tdd = cfg_->slot_per_frame();
       const size_t b_pos = sched.find('B');
       const size_t beacon_slot = (b_pos == std::string::npos) ? 0 : b_pos;
@@ -305,40 +386,50 @@ void HoudiniFramer::armTdd(void) {
       std::string tdd(spf_tdd, '2');    // every slot rx-gates
       // NB the ring's last rx entry abuts the tx-ish '6' across the frame
       // wrap, so the driver logs the HS-184 warm-return warning twice per
-      // arm. ACCEPTED deliberately: a '0' guard would close the rx gate and
-      // abandon the continuous capture (see the function comment); the
-      // warning is about X-band T/R-switch timing, moot on this cabled
-      // bench. (The guarded probe ring in DEMO_VERIFICATION.md 4.12 avoided
-      // the warning; the shipped ring does not.)
+      // arm. ACCEPTED deliberately for this all-rx ring: up to fpga 1.33 a
+      // '0' guard closed the rx gate and abandoned the continuous capture
+      // (see the function comment; 1.34 packet-gates instead); the
+      // warning is about X-band T/R-switch timing, which this ring does not
+      // drive (the cabled build, or AP-86's static front-end source). (The
+      // guarded probe ring in DEMO_VERIFICATION.md 4.12 avoids the warning;
+      // this ring does not.)
       tdd.at(beacon_slot) = '6';        // + beacon strobe on the B slot
+      if (cfg_->bs_rx_slots()) {
+        // AP-87 (the over-the-air runs, DEMO_VERIFICATION 9.62-9.64): arm the
+        // pattern the schedule means (the beacon slot strobe only, the rx
+        // slots rx, guards closed) with the device's slots mode, which keeps
+        // the capture alive and cuts every packet outside the rx slots. The
+        // framer's read then carries the UE's P and U on their true offsets
+        // and zeros elsewhere: its own beacon and whatever is on the air in
+        // the guards never reach the search.
+        if (sched.size() != spf_tdd)
+          throw std::runtime_error("bs_rx_slots: the BS schedule has " + std::to_string(sched.size()) +
+                                   " slots and the frame " + std::to_string(spf_tdd));
+        tdd = houdini::bsslots::tddPattern(sched, true);
+        dev->writeSetting("TDD_RX_MODE", "slots");  // the framer is idle here (the ladder above)
+        std::string mode = dev->readSetting("TDD_RX_MODE");
+        mode.erase(mode.find_last_not_of(" \t\r\n") + 1);
+        if (mode != "slots")
+          throw std::runtime_error("bs_rx_slots: TDD_RX_MODE reads '" + mode +
+                                   "' (a device without SH-347 slots mode ignores the key)");
+      }
       htdd_frame_ticks_ = static_cast<long long>(spf_tdd) * htdd_symbol_ticks_;
 
       // PHYSICAL TX channel for the strobe (beacon_channel() is the logical index
       // within bs_channel; TDD_REPLAY_STROBE and the loaded RAM are on the real
-      // DAC, e.g. bs_channel "B" -> ch1 = the cabled DAC_A). Using the logical 0
-      // fired the strobe on ch0 (DAC_B, not cabled) so the beacon never reached
-      // the UE.
+      // DAC, e.g. bs_channel "B" -> ch1 = the cabled DAC_A). Do not pass the
+      // logical 0: that fires the strobe on ch0 (DAC_B, not cabled) and the
+      // beacon never reaches the UE.
       const auto bs_chans = Utils::strToChannels(cfg_->bs_tx_channel());  // beacon is TX
-      const size_t beacon_idx =
-          bs_chans.empty()
-              ? 0
-              : std::min(static_cast<size_t>(cfg_->beacon_channel()),
-                         bs_chans.size() - 1);
-      const size_t tx_ch = bs_chans.empty() ? 0 : bs_chans.at(beacon_idx);
-      // Beacon is single-antenna: with per-channel TX streams (SH-235) the load
-      // must land only on the beacon channel's stream. Pass its samples at the
-      // beacon channel's index in the opened channel list and nullptr elsewhere;
-      // xmit skips the null channels, so a non-beacon TX stream is never filled
-      // or (via the strobe below, which also targets tx_ch only) armed.
-      std::vector<const void*> buffs(bs_chans.empty() ? 1 : bs_chans.size(),
-                                     nullptr);
-      buffs[beacon_idx] = iq.data();
+      const size_t beacon_idx = beaconTxIndex(cfg_, bs_chans);
+      // The load lands only on the beacon channel's stream (loadBeaconRam),
+      // and the strobe below targets tx_ch only, so a non-beacon TX stream is
+      // never filled or armed.
+      const size_t tx_ch = beaconTxChannel(cfg_);
       // The load/schedule/strobe sequence, re-runnable: the arm retry loop
-      // re-invokes it after every teardown ladder (Opus review H1 -- a
-      // ladder invalidates this state, so a bare arm retry could arm a
-      // beaconless framer).
+      // re-invokes it after every teardown ladder (a ladder invalidates this
+      // state, so a bare arm retry could arm a beaconless framer).
       const auto setup_framer = [&]() {
-        long long t0 = 0;
         // Explicitly disarm any strobe left armed by a previous (e.g. killed)
         // run -- TDD_CMD abort alone doesn't release it, and the replay RAM
         // can't be filled while strobe mode is enabled ("Disarm first").
@@ -358,49 +449,64 @@ void HoudiniFramer::armTdd(void) {
         } catch (...) {
           MLPD_WARN("TDD_REPLAY_STROBE ch%zu:off before the load refused\n", tx_ch);
         }
-        // A refused or short load (the plugin refuses the fill while the
-        // replay bank's level arm is set) stops the sequence here: the arm
-        // retry loop runs the ladder, which clears that arm, and re-invokes
-        // this setup. Arming over stale RAM would play a beacon that is not
-        // the one built above (DEMO_VERIFICATION 4.24, SH-348).
-        const int loaded = r->xmit(buffs.data(), static_cast<int>(n_load), 0, t0);
-        if (loaded != static_cast<int>(n_load)) {
-          throw std::runtime_error(
-              "Houdini beacon replay RAM load refused: " +
-              std::string(loaded < 0 ? SoapySDR::errToStr(loaded)
-                                     : "short load") +
-              " (" + std::to_string(loaded) + " of " +
-              std::to_string(n_load) + " samples)");
-        }
+        // A refused or short load throws out of armTdd, from the first setup
+        // and from a retry's re-setup alike (armTddOnce does not catch it), so
+        // the bring-up fails rather than arming over stale RAM; the next arm
+        // starts with the full ladder, which clears the replay bank's level arm.
+        loadBeaconRam(r, iq, bs_chans, beacon_idx);
         dev->writeSetting("TDD_SCHED", tdd);
-      // ONE burst per frame (loops=1) spanning the usable symbol: the RAM is
-      // [beacon core 496][zeros], and len (2-sample units, driver contract)
-      // covers (symbol - offs) samples, so the slot's DAC input is the beacon
-      // followed by OUR zeros up to the window close, not engine-idle output.
-      // (D5 measured post-burst idle as silent on silicon, but explicit zeros
-      // remove the reliance.) Single-copy removes the k x 4096 anchor
-      // ambiguity the old loops=forever multi-copy fill created; the UE's
-      // acquisition just needs more detect windows to first see it
-      // (~1 in 12.9 windows carries the beacon now). Samples == ticks at the
-      // one supported rate (122.88 MSPS; the whole layer assumes it).
-      const size_t span_units =
-          static_cast<size_t>((htdd_symbol_ticks_ - kTddGridTicks) / 2);
-      const size_t len_units = std::max<size_t>(
-          (static_cast<size_t>(cfg_->beacon_size()) + 1) / 2,
-          std::min(n_load / 2, span_units));
+        // ONE burst per frame (loops=1) spanning the usable symbol: the RAM is
+        // [lead zeros][beacon core][zeros], and len (2-sample units, driver
+        // contract) covers (symbol - offs) samples, so the slot's DAC input is
+        // the beacon followed by OUR zeros up to the window close, not
+        // engine-idle output. (D5 measured post-burst idle as silent on
+        // silicon, but explicit zeros remove the reliance.) Samples == ticks
+        // at the one supported tick rate (122.88 MSPS; the whole layer
+        // assumes it).
+        // AP-79: offs and len in the driver's units at this TX rate, the core
+        // at +384, whole beats, inside the window (houdini/replay_strobe.h,
+        // tested in replay_strobe_test).
+        houdini::ReplayStrobeInputs si;
+        si.k_tx = txPerTick(cfg_);
+        si.symbol_ticks = htdd_symbol_ticks_;
+        si.n_load_ticks = n_load;
+        si.beacon_ticks = cfg_->beacon_size();
+        si.lead_ticks = beaconLeadTicks(cfg_);
+        si.tail_ticks = beaconTailTicks(cfg_);
+        si.grid_offs = kTddGridTicks;
+        const auto strobe = houdini::replayStrobe(si);
+        const long long offs = strobe.offs;
+        const size_t len_units = strobe.len_units;
         dev->writeSetting("TDD_REPLAY_STROBE",
                           "ch" + std::to_string(tx_ch) +
                               ":len=" + std::to_string(len_units) +
-                              ",loops=1,offs=" + std::to_string(kTddGridTicks));
+                              ",loops=1,offs=" + std::to_string(offs));
       };
       setup_framer();
       htdd_epoch_ = armTddOnce(dev, setup_framer, htdd_symbol_ticks_,
                                   static_cast<long long>(spf_tdd));
+      if (cfg_->bs_rx_slots()) {
+        // The device's own record of the rx slots it cuts to, against ours.
+        const std::string rs = dev->readSetting("TDD_RX_SLOTS");
+        std::string active, rxmap;
+        std::stringstream ss(rs);
+        std::string tok;
+        while (ss >> tok) {
+          if (tok.rfind("active=", 0) == 0) active = tok.substr(7);
+          if (tok.rfind("rx=", 0) == 0) rxmap = tok.substr(3);
+        }
+        const std::string want = houdini::bsslots::rxBits(tdd);
+        if (active != "1" || rxmap != want)
+          throw std::runtime_error("bs_rx_slots: TDD_RX_SLOTS reads '" + rs + "', wanted active=1 rx=" + want);
+        auto* hrs = dynamic_cast<RadioHoudini*>(r);
+        if (hrs == nullptr) throw std::runtime_error("bs_rx_slots: the BS radio is not a Houdini radio");
+        hrs->setRxSlotMap(htdd_epoch_, htdd_symbol_ticks_, htdd_frame_ticks_, want);
+        MLPD_INFO("BS: receives only its rx slots (AP-87): TDD_RX_SLOTS %s\n", rs.c_str());
+      }
       htdd_rx_cursor_ = 0;
-      htdd_last_win_tick_ = 0;
       MLPD_INFO(
           "Houdini BS TDD armed: sched=%s epoch=%lld frame=%lld ticks, "
-          "%zu pilot slot(s) %s beacon strobe %zu samp\n",
+          "%zu rx slot(s) %s beacon strobe %zu samp\n",
           tdd.c_str(), htdd_epoch_, htdd_frame_ticks_, htdd_rx_slots_.size(),
           htdd_rx_slots_.empty() ? "(none)" : "", n_load);
     }
@@ -410,12 +516,6 @@ void HoudiniFramer::armTdd(void) {
 int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
                                long long& frameTime) {
   if (htdd_rx_slots_.empty()) return 0;
-  // Bound the BS capture run: loopRecv (unlike the client loop) doesn't stop at
-  // max_frame, and an unbounded frame_id would grow the recorder's HDF5 dataset
-  // without limit (-> extend crash at close). Returning <0 makes loopRecv set
-  // running(false) and shut down cleanly.
-  const long long max_frame = static_cast<long long>(cfg_->max_frame());
-  if (max_frame > 0 && htdd_frame_counter_ >= max_frame) return -1;
   Radio* r = radios_.at(0).at(radio_id).get();
   const int n = static_cast<int>(cfg_->samps_per_slot());
   const size_t K = htdd_rx_slots_.size();  // rx slots/frame (pilot P + uplink U...)
@@ -424,9 +524,9 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
   // buffers and RadioHoudini::recv reads C lanes, so every read/cache/deliver here
   // must span all C -- a single-lane read hands the driver a null buffs[1] and its
   // null-lane guard rejects the whole read (-2 STREAM_ERROR). The pilot/timing is
-  // located on lane 0 and applied to all lanes (they are sample-aligned by the
-  // combined stream). C==1 reduces to the original single-channel path. The cache
-  // is laid out slot-major, lanes contiguous within a slot: [slot k][lane c].
+  // located on the lane with the cleanest pilot and applied to all lanes (they are
+  // sample-aligned by the combined stream); C == 1 is the single-lane case. The
+  // cache is laid out slot-major, lanes contiguous within a slot: [slot k][lane c].
   const size_t C = std::max<size_t>(1, cfg_->bs_rx_ch());
 
   // Non-first rx slot: serve it from the per-frame cache filled on cursor 0 (one
@@ -444,6 +544,21 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
     return n;
   }
 
+  // Bound the BS capture run at a frame boundary, after the last frame's cached
+  // slots went out: loopRecv (unlike the client loop) does not stop at
+  // max_frame, and an unbounded frame_id would grow the recorder's HDF5 dataset
+  // without limit. loopRecv treats a negative return as a recoverable RX error
+  // and keeps calling, so stop the run here and hand back no slot. The counter
+  // counts frames that carried a UE pilot, and the UE stops at the same
+  // max_frame, so a run whose BS skipped a frame ends quiet below it; the
+  // run's timer or Stop ends that one.
+  const long long max_frame = static_cast<long long>(cfg_->max_frame());
+  if (max_frame > 0 && htdd_frame_counter_ >= max_frame) {
+    MLPD_INFO("BS: max_frame %lld reached, stopping the run\n", max_frame);
+    cfg_->running(false);
+    return 0;
+  }
+
   // cursor 0: CONTINUOUS framer receive (the Iris model -- framer armed once, RX
   // activated once in radioStart, no per-window arm/teardown). Read a bit more than
   // one frame + the pilot->last-slot span so every rx slot is fully contained
@@ -458,12 +573,21 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
   for (size_t c = 0; c < C; ++c)
     cb[c] = htdd_cap_buf_.data() + c * static_cast<size_t>(fn) * 2;
   long long ft = 0;
+  // AP-79: this capture is continuous and only its P/U slots are used, so the
+  // channel filter runs on the extracted slots below, not on the whole read
+  // (filtering the whole read ran at about 1.3x real time at R1). The framer's
+  // own decisions below (the energy search, the presence gate, the P/U
+  // tagging, the LTS check, the pilot edge) therefore run on the RAW lane,
+  // which in mode V carries the channel's 0 dBc real-sampling mirror; the
+  // uplink decodes at every rung R1 to R3 on them (DEMO_VERIFICATION 9.3, 9.6).
+  auto* hr = dynamic_cast<RadioHoudini*>(r);
+  if (hr != nullptr) hr->setRecvFilter(false);
   const int cg = r->recv(cb.data(), fn, ft);
   // This one read backs every rx slot of the frame, so its padding applies to all of
   // them; latch it before any later recv on this radio overwrites the radio's copy.
   htdd_frame_pad_ = r->lastPadSamples();
   if (cg < fn) {
-    // Short read: the frame is not fully covered. align_slot() clamps a slot start
+    // Short read: the frame is not fully covered. The slot placement clamps a slot start
     // to cg, so any slot past the received data would be extracted from the tail
     // and look perfectly valid downstream. Fold the shortfall into the frame's
     // untrusted count so consumers refuse those slots instead of trusting them.
@@ -472,55 +596,175 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
     htdd_frame_pad_ += static_cast<size_t>(fn - cg);
   }
   if (cg < n) return (cg < 0) ? cg : 0;
-  const int16_t* s = htdd_cap_buf_.data();
-  std::vector<double> cse(static_cast<size_t>(cg) + 1, 0.0);
-  for (int i = 0; i < cg; ++i) {
-    const double re = s[2 * i], im = s[2 * i + 1];
-    cse[i + 1] = cse[i] + re * re + im * im;
+  // Every lane is searched the same way, and the lane whose pilot is cleanest
+  // places the cut for all of them: the lanes are sample-aligned (one combined
+  // stream). Lane 0 keeps the job unless another lane's pilot is clearly
+  // cleaner. Do not let lane 0 place the cut alone: over the air the weak
+  // sub-6 pilot then drags the wired X-band lane down with it.
+  const int lag = static_cast<int>(cfg_->cp_size() + cfg_->fft_size());
+  const int gap = static_cast<int>(htdd_rx_slots_.back() - htdd_pilot_slot_) * n;
+  // The pilot is identical repeated LTS symbols (high self-similarity at lag
+  // cp+fft); data is distinct symbols (low).
+  auto laneSelfsim = [&](const int16_t* ls, int off) -> double {
+    if (off < 0 || off + n > cg) return 0.0;
+    double sr = 0, si = 0, sp = 0;
+    for (int m = 0; m + lag < n; ++m) {
+      const double a = ls[2 * (off + m)], b = ls[2 * (off + m) + 1];
+      const double c = ls[2 * (off + m + lag)], d = ls[2 * (off + m + lag) + 1];
+      sr += a * c + b * d;
+      si += b * c - a * d;
+      sp += a * a + b * b;
+    }
+    return sp > 0 ? std::sqrt(sr * sr + si * si) / sp : 0.0;
+  };
+  // AP-87: the device delivers only the rx slots, so the read's guards are
+  // exact zeros (no noise floor) and a head cut is possible at the slot edge.
+  const bool slots_mode = cfg_->bs_rx_slots();
+  // The read's first-sample stamp in ticks (meaningful when ft > 0), and the
+  // span the frame's rx slots need from the pilot (first to last rx slot,
+  // plus a slot of margin).
+  const long long stamp_ticks = llround(static_cast<double>(ft) * htdd_tick_rate_ / 1e9);
+  const long long span_n = (static_cast<long long>(htdd_rx_slots_.back()) -
+                            static_cast<long long>(htdd_rx_slots_.front()) + 2) * n;
+  // Each lane's cumulative energy lives in a member buffer reused frame to
+  // frame: a fresh zero-filled vector per lane per frame costs about 24 MB of
+  // allocation and page faults every frame. Every entry is rewritten below,
+  // so no fill is needed.
+  if (htdd_lane_cse_.size() < C) htdd_lane_cse_.resize(C);
+  struct LaneSearch {
+    std::vector<double>* cse = nullptr;
+    int at = 0;
+    double best = 0.0, worst = -1.0;
+    int whole_at = 0;
+    double whole_best = 0.0;
+    long long sched_expect = -1;
+    int p_at = 0;
+    double ss = 0.0;
+    double pilot_rms = 0.0, floor_rms = 0.0;
+    bool present = false;
+  };
+  auto searchLane = [&](const int16_t* ls, size_t lane) -> LaneSearch {
+    LaneSearch L;
+    L.cse = &htdd_lane_cse_[lane];
+    std::vector<double>& cse = *L.cse;
+    cse.resize(static_cast<size_t>(cg) + 1);
+    cse[0] = 0.0;
+    // Accumulated as integers: every partial sum is an integer below 2^53 (a
+    // read under 4.19 M samples), so the double copy is exact and identical to
+    // a double accumulation, and the integer chain costs about a third less on
+    // the rig (2.5 -> 1.6 ms per lane per frame, measured).
+    int64_t acc = 0;
+    for (int i = 0; i < cg; ++i) {
+      const int64_t re = ls[2 * i], im = ls[2 * i + 1];
+      acc += re * re + im * im;
+      cse[i + 1] = static_cast<double>(acc);
+    }
+    for (int t = 0; t + n <= cg; t += 128) {
+      const double e = cse[t + n] - cse[t];
+      if (e > L.best) { L.best = e; L.at = t; }
+      if (L.worst < 0.0 || e < L.worst) L.worst = e;
+    }
+    // The UE burst is searched for only where the schedule puts the pilot
+    // (SH-347, the host half of "a TDD node receives only its RX slots"): the
+    // rx gate is open all frame without bs_rx_slots, so over the air the BS's own beacon slot and
+    // the guards carry whatever is on the air, and the whole-read search above
+    // takes the loudest of it (its own beacon through the adjacent antennas)
+    // for the UE, cutting every lane there (O1a/O1b, DEMO_VERIFICATION 9.62).
+    // The window is +-n/4 around
+    // the scheduled start: wired, the pilot sits 4 samples from it
+    // (pilot_grid_off); a slot away is the guard or the data slot. Without a
+    // read stamp, the whole-read search stands. The floor keeps the whole read.
+    L.whole_at = L.at;  // the whole read's loudest slot, kept for the
+    L.whole_best = L.best;  // presence-gate diagnostic below
+    if (ft > 0) {
+      // A pilot at the head of the read takes the next frame's copy when the
+      // read holds it (slot_align.h chooseExpect).
+      const long long expect = houdini::slotalign::chooseExpect(
+          houdini::slotalign::expectedPilotStart(stamp_ticks, htdd_epoch_,
+                                                 static_cast<long long>(htdd_pilot_slot_), n, htdd_frame_ticks_),
+          n, htdd_frame_ticks_, span_n, cg);
+      L.sched_expect = expect;
+      const auto near = houdini::slotalign::densestNear(cse, expect, n / 4, n, 128);
+      if (near.first >= 0) {
+        L.at = static_cast<int>(near.first);
+        L.best = near.second;
+      }
+    }
+    // The read spans a little over one frame, so when the pilot lands in the
+    // first few slots of the buffer a SECOND copy (next frame) is also fully
+    // contained near the tail -- and the densest-window search picks between
+    // two equal-energy copies by noise. The tail copy leaves no room for the
+    // frame's later rx slots: the data slot's start runs past cg and the
+    // placement clamp serves tail junk (noise, partial bursts, or the pilot
+    // itself) as the data slot, a garbage constellation on about 2% of frames.
+    // Re-map to the earlier copy, which always fits with its whole rx-slot
+    // span.
+    {
+      const int fr_t = static_cast<int>(htdd_frame_ticks_);
+      while (L.at + span_n > cg && L.at >= fr_t) L.at -= fr_t;
+    }
+    // The densest slot `at` is a UE slot -- pilot OR data. Identify it by the
+    // self-similarity, which keeps P/U tagged correctly so CSI comes from the
+    // pilot and equalization from the data.
+    L.p_at = L.at;
+    if (laneSelfsim(ls, L.at) < 0.5) {  // `at` is a data slot -> the pilot is `gap` earlier
+      if (laneSelfsim(ls, L.at - gap) >= houdini::slotalign::kLtsMinSelfsim) L.p_at = L.at - gap;
+      else if (laneSelfsim(ls, L.at + gap) >= houdini::slotalign::kLtsMinSelfsim) L.p_at = L.at + gap;
+    }
+    L.ss = laneSelfsim(ls, L.p_at);
+    L.pilot_rms = std::sqrt(L.best / n);
+    L.floor_rms = std::sqrt(std::max(L.worst, 0.0) / n);
+    L.present = houdini::slotalign::lanePresent(L.pilot_rms, L.floor_rms, L.ss, slots_mode);
+    return L;
+  };
+  // Each lane is gated on its own, and the cut goes to the cleanest lane among
+  // those with a UE burst (slot_align.h laneTakesCut): gating on the chosen
+  // lane alone would let a weak lane skip a frame the other lane carried.
+  const int16_t* s0 = htdd_cap_buf_.data();
+  LaneSearch ref = searchLane(s0, 0);
+  size_t ref_lane = 0;
+  for (size_t c = 1; c < C; ++c) {
+    LaneSearch L = searchLane(s0 + c * static_cast<size_t>(fn) * 2, c);
+    if (houdini::slotalign::laneTakesCut(L.present, L.ss, ref.present, ref.ss)) {
+      ref = std::move(L);
+      ref_lane = c;
+    }
   }
-  double best = 0.0;
-  double worst = -1.0;
-  int at = 0;
-  for (int t = 0; t + n <= cg; t += 128) {
-    const double e = cse[t + n] - cse[t];
-    if (e > best) { best = e; at = t; }
-    if (worst < 0.0 || e < worst) worst = e;
+  if (ft > 0) {
+    static std::atomic<bool> said{false};
+    if (!said.exchange(true)) {
+      MLPD_INFO("BS: the UE burst is searched only within +-%d samples of the scheduled pilot slot (SH-347 host half); "
+                "each lane is gated on its own and the cleanest lane with a UE burst places the cut\n",
+                n / 4);
+    }
   }
-  // The read spans ~1.17 frames, so when the pilot lands in the first few
-  // slots of the buffer a SECOND copy (next frame) is also fully contained
-  // near the tail -- and the densest-window search picks between two
-  // equal-energy copies by noise. The tail copy leaves no room for the
-  // frame's later rx slots: u_start ran past cg and align_slot's clamp
-  // served tail junk (noise, partial bursts, or the pilot itself) as the
-  // data slot -- the ~2% garbage-constellation class (measured: frame 5220
-  // p_start=139160 pu_spacing_err=-8088 with the pilot burst in the "U"
-  // dump). Re-map to the earlier copy, which always fits with its whole
-  // rx-slot span.
-  {
-    const int fr_t = static_cast<int>(htdd_frame_ticks_);
-    const int span_n = (static_cast<int>(htdd_rx_slots_.back()) -
-                        static_cast<int>(htdd_rx_slots_.front()) + 2) * n;
-    while (at + span_n > cg && at >= fr_t) at -= fr_t;
-  }
-  const double pilot_rms = std::sqrt(best / n);
-  // Noise floor from the QUIETEST slot-length window of the same read (27 of
-  // 30 slots are guard, so it measures the true floor, ~6 rms on this bench).
-  // The old gate compared against 4x the WHOLE-read mean, but that mean
-  // includes the pilot+data burst energy itself, which put the threshold
-  // right on top of a healthy pilot (measured: rms 1392 vs 4x355 = 1420) --
-  // the gate flapped on ~half of all healthy frames, and the quiet path's
-  // delivery painted the 1-2 s garbage blips on the dashboard
-  // [user 2026-08-30]. Densest-vs-quietest separates by ~47 dB instead.
-  const double floor_rms = std::sqrt(std::max(worst, 0.0) / n);
+  const int16_t* s = s0 + ref_lane * static_cast<size_t>(fn) * 2;
+  const std::vector<double>& cse = *ref.cse;
+  const int at = ref.at;
+  const int whole_at = ref.whole_at;
+  const double whole_best = ref.whole_best;
+  const long long sched_expect = ref.sched_expect;
+  const double pilot_rms = ref.pilot_rms;
+  // Noise floor from the QUIETEST slot-length window of the same read: with
+  // every slot open most of the read is guard, so it measures the true floor
+  // (about 6 rms wired). In slots mode the guards are the device's cut, exact
+  // zeros, the floor reads 0, and the LTS check stands in (lanePresent).
+  // Do not gate against a multiple of the WHOLE-read mean: that mean includes
+  // the pilot+data burst energy itself, which puts the threshold right on top
+  // of a healthy pilot (measured: rms 1392 vs 4x355 = 1420), so the gate flaps
+  // on about half of all healthy frames. Densest-vs-quietest separates by
+  // about 47 dB instead.
+  const double floor_rms = ref.floor_rms;
   // Presence gate: skip frames where no UE signal is on-air (don't advance the
   // frame counter -> the first real frame lands at recorder frame 0). A LOSS
-  // of pilots mid-run is reported loudly [user 2026-08-30]: the UE pausing
-  // its schedule (e.g. the AP-18 resync escalation hunting for a lost beacon)
-  // shows up here as a quiet streak, and the BS should say so rather than
-  // skip silently.
-  if (pilot_rms < 120.0 || pilot_rms < 4.0 * floor_rms) {
+  // of pilots mid-run is reported loudly: the UE pausing its schedule (e.g.
+  // the AP-18 resync escalation hunting for a lost beacon) shows up here as a
+  // quiet streak, and the BS should say so rather than skip silently.
+  // With every lane failing, the reference is still lane 0, so the quiet
+  // path's numbers are lane 0's.
+  if (!ref.present) {
     ++htdd_quiet_streak_;
-    constexpr size_t kQuietWarnFrames = 200;  // ~0.2 s at 1 kHz frames
+    constexpr size_t kQuietWarnFrames = 200;  // about 4 s at the BS's ~50 frames/s
     if (htdd_frame_counter_ > 0 &&
         (htdd_quiet_streak_ == kQuietWarnFrames ||
          (htdd_quiet_streak_ > kQuietWarnFrames &&
@@ -532,19 +776,33 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
           htdd_quiet_streak_, htdd_frame_counter_);
     }
     // Deliver NOTHING: loopRecv's rx_ret==0 path releases the reserved
-    // buffers and continues cleanly (receiver.cc, the no-slot branch), so a
-    // quiet frame no longer has to ship a noise buffer tagged as the pilot
-    // slot -- which both painted garbage (pre-gate-fix) and emitted
-    // duplicate (frame,slot) packets for the whole length of a UE pause
-    // (Opus review M7). htdd_frame_counter_ intentionally does not advance:
-    // the first REAL frame still lands at recorder frame 0.
+    // buffers and continues cleanly (receiver.cc, the no-slot branch). Do not
+    // ship a noise buffer tagged as the pilot slot instead: it paints garbage
+    // and emits duplicate (frame,slot) packets for the whole length of a UE
+    // pause. htdd_frame_counter_ intentionally does not advance: the first
+    // REAL frame still lands at recorder frame 0.
     static std::atomic<unsigned> quiet_single_count{0};
     const unsigned qc = quiet_single_count.fetch_add(1) + 1;
     if ((qc & (qc - 1)) == 0) {  // 1,2,4,8,... then quiet
+      // Where the read's loudest slot was, against the schedule: a UE burst
+      // more than n/4 off its scheduled slot (an anchoring error) is skipped
+      // here every frame, and this names where it went.
+      char where[96] = "no read stamp";
+      if (sched_expect >= 0) {
+        const long long fr = htdd_frame_ticks_;
+        long long off = ((static_cast<long long>(whole_at) - sched_expect) % fr + fr) % fr;
+        if (off > fr / 2) off -= fr;
+        std::snprintf(where, sizeof where, "at %+lld samples from the scheduled pilot", off);
+      }
+      // In slots mode the gate is the LTS check itself, so a burst above the
+      // bar whose pilot fails it lands here: interference or a corrupted
+      // pilot, not a UE that stopped transmitting.
+      const bool lts_fail = slots_mode && pilot_rms >= houdini::slotalign::kBurstMinRms;
       MLPD_WARN(
-          "BS: no UE burst in frame read (rms %.0f vs floor %.0f, occurrence "
-          "%u) -- frame skipped\n",
-          pilot_rms, floor_rms, qc);
+          "BS: %s in frame read (rms %.0f vs floor %.0f, pilot selfsim %.2f, occurrence "
+          "%u; the read's loudest slot rms %.0f, %s) -- frame skipped\n",
+          lts_fail ? "a burst whose pilot failed the LTS check (interference or a corrupted pilot)" : "no UE burst",
+          pilot_rms, floor_rms, ref.ss, qc, std::sqrt(whole_best / n), where);
     }
     return 0;
   }
@@ -554,42 +812,15 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
     htdd_quiet_warned_ = false;
   }
   htdd_quiet_streak_ = 0;
-  // The densest slot `at` is a UE slot -- pilot OR data. Identify it: the pilot is
-  // identical repeated LTS symbols (high self-similarity at lag cp+fft); data is
-  // distinct symbols (low). This keeps P/U tagged correctly so CSI comes from the
-  // pilot and equalization from the data.
-  auto selfsim = [&](int off) -> double {
-    const int lag = static_cast<int>(cfg_->cp_size() + cfg_->fft_size());
-    if (off < 0 || off + n > cg) return 0.0;
-    double sr = 0, si = 0, sp = 0;
-    for (int m = 0; m + lag < n; ++m) {
-      const double a = s[2 * (off + m)], b = s[2 * (off + m) + 1];
-      const double c = s[2 * (off + m + lag)], d = s[2 * (off + m + lag) + 1];
-      sr += a * c + b * d;
-      si += b * c - a * d;
-      sp += a * a + b * b;
-    }
-    return sp > 0 ? std::sqrt(sr * sr + si * si) / sp : 0.0;
-  };
-  const int gap =
-      static_cast<int>(htdd_rx_slots_.back() - htdd_pilot_slot_) * n;
-  int p_at = at;
-  if (selfsim(at) < 0.5) {  // `at` is a data slot -> the pilot is `gap` earlier
-    if (selfsim(at - gap) >= 0.4) p_at = at - gap;
-    else if (selfsim(at + gap) >= 0.4) p_at = at + gap;
-  }
-  // The chosen candidate must actually look like repeated LTS symbols. When
-  // the pilot is damaged and every candidate fails, the old code kept its
-  // best guess and delivered the DATA slot (or worse) as the pilot -- a
-  // poison H rendered as a whole-panel garbage blip [user 2026-08-30]. Keep
-  // the caller's P/U lockstep but mark the frame fully padded so view mode
-  // refuses it, and count occurrences for the mechanism hunt.
-  const double pilot_ss = selfsim(p_at);
-  if (pilot_ss < 0.4) {
+  // The reference lane's pilot, found and identified in searchLane above.
+  auto selfsim = [&](int off) -> double { return laneSelfsim(s, off); };
+  const int p_at = ref.p_at;
+  const double pilot_ss = ref.ss;
+  if (pilot_ss < houdini::slotalign::kLtsMinSelfsim) {
     htdd_frame_pad_ += static_cast<size_t>(n);
     // Recording mode ignores rx_pad (only the view refuses on it), so also
     // push the extent into the gap sink: the HDF5's /Data/Gaps then records
-    // that this frame's slots are untrusted (Opus review M8).
+    // that this frame's slots are untrusted.
     Sounder::RxGapSink::instance().push(
         {r->rxSamplePos() - cg + p_at, static_cast<int64_t>(n),
          Sounder::kGapUntrustedPilot});
@@ -602,60 +833,68 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
           pilot_ss, bc);
     }
   }
-  // Centroid-align a slot's energy near `guess` -> transmitted [prefix][energy]
-  // [postfix] layout (energy edge at ~prefix). Window ~1.25 slots so it can't
-  // reach into an adjacent slot and drag the centroid.
-  auto align_slot = [&](long long guess) -> long long {
-    long long w0 = guess - n / 8;
-    if (w0 < 0) w0 = 0;
-    long long w1 = w0 + 5 * n / 4;
-    if (w1 > cg) w1 = cg;
-    double peak = 0.0;
-    for (long long i = w0 + 64; i + 64 <= w1; ++i) {
-      const double m = cse[i + 64] - cse[i - 64];
-      if (m > peak) peak = m;
+  // Place the pilot once, by its leading edge (AP-79, houdini/slot_align.h):
+  // the UE sends the pilot and its data slots as one burst at exact whole-slot
+  // offsets, so every other slot sits a whole number of slots from it. Do not
+  // centroid-align each slot on its own: with P and U adjacent each window
+  // takes in its neighbour's energy, and U came out 264-317 samples early
+  // (DEMO_VERIFICATION 9.3).
+  std::vector<long long> rel_slots;
+  for (size_t k = 0; k < K; ++k)
+    rel_slots.push_back(static_cast<long long>(htdd_rx_slots_.at(k)) -
+                        static_cast<long long>(htdd_pilot_slot_));
+  const long long p_start =
+      houdini::slotalign::burstPilotStart(cse, p_at, static_cast<long long>(n), cfg_->prefix());
+  // AP-87: the device cuts at the slot edge, so a UE burst more than its prefix
+  // early loses its head there and the FFT window runs late by the excess;
+  // the placed start then pins at -prefix, and nothing else would say so.
+  // tx_advance is calibrated with bs_rx_slots off (the whole burst visible).
+  if (slots_mode && ft > 0) {
+    const long long off = houdini::slotalign::pilotGridOff(stamp_ticks, p_start, htdd_epoch_,
+                                                           static_cast<long long>(htdd_pilot_slot_), n,
+                                                           htdd_frame_ticks_);
+    if (houdini::slotalign::headAtSlotEdge(off, cfg_->prefix())) {
+      static std::atomic<unsigned> edge_count{0};
+      const unsigned ec = edge_count.fetch_add(1) + 1;
+      if ((ec & (ec - 1)) == 0) {
+        MLPD_WARN("BS: the UE burst starts at the pilot slot's edge (pilot_grid_off %lld, prefix %d, occurrence %u): "
+                  "the slot cut takes its head if it is any earlier; recalibrate tx_advance with bs_rx_slots off\n",
+                  off, static_cast<int>(cfg_->prefix()), ec);
+      }
     }
-    const double thr = 0.15 * peak;
-    long long cnt = 0;
-    double isum = 0.0;
-    for (long long i = w0 + 64; i + 64 <= w1; ++i)
-      if (cse[i + 64] - cse[i - 64] > thr) { ++cnt; isum += static_cast<double>(i); }
-    long long st = (cnt > 0 ? std::llround(isum / cnt) : (guess + n / 2)) - n / 2;
-    if (st < 0) st = 0;
-    if (st + n > cg) st = cg - n;
-    return st;
-  };
-  const long long p_start = align_slot(p_at);  // aligned pilot slot start
-  // Fill the per-frame cache. Centroid-align EACH rx slot to its OWN energy near
-  // its expected offset from the pilot -- the UE snaps each slot's tx time to the
-  // 384-tick TDD grid independently, so the pilot->data spacing isn't exactly an
-  // integer number of slots; extracting the data at pilot+gap would leave it
-  // ~260 samples off. Aligning each slot lands every slot at [prefix..] so the
-  // recorded data lines up with the pilot for offline equalization.
+  }
   htdd_slot_cache_.resize(K * C * static_cast<size_t>(n) * 2);
-  long long u_start = -1;  // aligned start of the uplink-data slot, if present
+  // Slots whose placed start fell outside the capture and were clamped into
+  // it: they hold the wrong samples. (Every other slot is exactly p_start plus
+  // its whole-slot offset by construction, so this is what is left to check.)
+  size_t clamped = 0;
+  long long u_start = -1;  // placed start of the uplink-data slot, if present (the landing-map dump)
   for (size_t k = 0; k < K; ++k) {
-    const long long guess = p_start +
-        (static_cast<long long>(htdd_rx_slots_.at(k)) -
-         static_cast<long long>(htdd_pilot_slot_)) * n;
-    const long long st = align_slot(guess);
+    const long long guess = p_start + rel_slots.at(k) * n;
+    const long long st = std::max(0LL, std::min(guess, static_cast<long long>(cg) - static_cast<long long>(n)));
+    clamped += (st != guess) ? 1 : 0;
     if (htdd_rx_slots_.at(k) != htdd_pilot_slot_) u_start = st;
-    // The centroid start is derived from lane 0 but applies to every lane (the
-    // combined stream is sample-aligned), so extract slot k from each lane's own
-    // capture block at the same offset.
+    // The slot's start is derived from the reference lane but applies to every
+    // lane (the combined stream is sample-aligned), so extract slot k from each
+    // lane's own capture block at the same offset.
     for (size_t c = 0; c < C; ++c) {
       const int16_t* sc = htdd_cap_buf_.data() + c * static_cast<size_t>(fn) * 2;
-      std::memcpy(
-          htdd_slot_cache_.data() + (k * C + c) * static_cast<size_t>(n) * 2,
-          sc + st * 2, static_cast<size_t>(n) * 4);
+      int16_t* dst = htdd_slot_cache_.data() + (k * C + c) * static_cast<size_t>(n) * 2;
+      if (hr != nullptr && hr->rxLaneFiltered(c)) {
+        // The slot through the channel filter, with the capture around it as
+        // context: exactly what filtering the whole capture would give here.
+        hr->filterRxSlice(sc, static_cast<size_t>(cg), static_cast<size_t>(st), static_cast<size_t>(n), dst);
+      } else {
+        std::memcpy(dst, sc + st * 2, static_cast<size_t>(n) * 4);
+      }
     }
   }
   if (getenv("HOUDINI_BS_RX_DEBUG") != nullptr) {
-    // Throttle is its OWN knob. HOUDINI_BS_RX_DEBUG=1 has meant "on" in the
-    // runbook, the walkthrough, ap15_correlate.py and run_pad_campaign.sh
-    // since it was added, and redefining it as a period would turn every one
-    // of those into a 1 kHz flood and invalidate ledger 4.60's measured line
-    // rate. So: DEBUG stays on/off, EVERY sets the period.
+    // Throttle is its OWN knob. HOUDINI_BS_RX_DEBUG=1 means "on" in the
+    // runbook, the walkthrough, the configs' notes, ap15_correlate.py and
+    // run_pad_campaign.sh; redefining it as a period would turn every one of
+    // those into a 1 kHz flood and invalidate DEMO_VERIFICATION 4.60's measured
+    // line rate. So: DEBUG stays on/off, EVERY sets the period.
     //
     // AP-51 needs every frame for a while: `pilot_grid_off` is one of the two
     // observables in the two-way transfer, and a slope fit over 1-in-20 at a
@@ -674,37 +913,27 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
       // number decomposes as prefix + round-trip latency - tx_advance +
       // grid/snap residuals; it must be CONSTANT within a run, and it is the
       // direct input for deriving tx_advance (DEMO_VERIFICATION.md 4.29).
-      const long long stamp_ticks =
-          llround(static_cast<double>(ft) * htdd_tick_rate_ / 1e9);
-      const long long fr = htdd_frame_ticks_;
-      long long grid_off =
-          ((stamp_ticks + p_start - htdd_epoch_) % fr + fr) % fr;
-      long long rel_pilot = grid_off -
-          static_cast<long long>(htdd_pilot_slot_) * n;
-      if (rel_pilot > fr / 2) rel_pilot -= fr;
-      if (rel_pilot < -fr / 2) rel_pilot += fr;
-      long long pu_err = -99999;
-      if (u_start >= 0) {
-        const long long slots_gap =
-            static_cast<long long>(htdd_rx_slots_.back()) -
-            static_cast<long long>(htdd_pilot_slot_);
-        pu_err = (u_start - p_start) - slots_gap * n;
-      }
+      const long long rel_pilot = houdini::slotalign::pilotGridOff(
+          stamp_ticks, p_start, htdd_epoch_, static_cast<long long>(htdd_pilot_slot_), n, htdd_frame_ticks_);
       // stamp_ticks is carried explicitly: `pilot_grid_off` is an offset and
       // AP-51 needs its SLOPE against time, which the frame counter cannot
       // give (it counts PROCESSED frames, and the BS drops none only when it
       // keeps up). Both numbers on one line so an offline fit needs no join.
+      // With two lanes the offset is the reference lane's (`ref_lane`): the
+      // lanes are sample-aligned, but their paths differ by under a sample, so
+      // a fit across lanes filters on ref_lane.
       MLPD_INFO("HOUDINI_BS_RX: frame=%lld stamp_ticks=%lld cg=%d "
                 "pilot-rms=%.0f selfsim=%.2f p_start=%lld rx_slots=%zu "
-                "pilot_grid_off=%lld pu_spacing_err=%lld\n",
+                "pilot_grid_off=%lld clamped=%zu ref_lane=%zu\n",
                 htdd_frame_counter_, stamp_ticks, cg, pilot_rms, selfsim(at),
-                p_start, K, rel_pilot, pu_err);
+                p_start, K, rel_pilot, clamped, ref_lane);
     }
   }
-  // Landing-map instrument (phase 5-7 walk): dump the raw continuous read plus
-  // the grid metadata so the offline analyzer can place every burst on the
-  // ABSOLUTE slot grid. Ground truth for zero prefix/postfix sizing -- the CSI
-  // dump stores centroid-ALIGNED slots and cannot serve here.
+  // Landing-map instrument (landing_map.py, DEMO_VERIFICATION 4.44): dump the
+  // raw continuous read plus the grid metadata so the offline analyzer can
+  // place every burst on the ABSOLUTE slot grid. Ground truth for zero
+  // prefix/postfix sizing -- the CSI dump stores the placed slots and cannot
+  // serve here.
   const char* lm_dir = getenv("HOUDINI_BS_DUMP_FRAME");
   if (lm_dir != nullptr) {
     static std::atomic<int> lm_dumped{0};
@@ -716,7 +945,7 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
       snprintf(pb, sizeof(pb), "%s/bsframe_%02d.bin", lm_dir, dk);
       FILE* fb = fopen(pb, "wb");
       if (fb != nullptr) {
-        fwrite(s, sizeof(int16_t), static_cast<size_t>(cg) * 2, fb);
+        fwrite(s0, sizeof(int16_t), static_cast<size_t>(cg) * 2, fb);  // lane 0, raw; p_start is ref_lane's
         fclose(fb);
       }
       snprintf(pb, sizeof(pb), "%s/bsframe_%02d.txt", lm_dir, dk);
@@ -725,12 +954,12 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
         fprintf(fg,
                 "ft_ns %lld\ncg %d\nepoch %lld\ntick_rate %.1f\n"
                 "frame_ticks %lld\npilot_slot %lld\nn %d\np_start %lld\n"
-                "u_start %lld\npad %lld\nframe %lld\nrx_slots",
+                "u_start %lld\npad %lld\nframe %lld\nref_lane %zu\nrx_slots",
                 ft, cg, static_cast<long long>(htdd_epoch_), htdd_tick_rate_,
                 static_cast<long long>(htdd_frame_ticks_),
                 static_cast<long long>(htdd_pilot_slot_), n, p_start, u_start,
                 static_cast<long long>(htdd_frame_pad_),
-                static_cast<long long>(htdd_frame_counter_));
+                static_cast<long long>(htdd_frame_counter_), ref_lane);
         for (size_t rk = 0; rk < K; ++rk)
           fprintf(fg, " %lld", static_cast<long long>(htdd_rx_slots_.at(rk)));
         fprintf(fg, "\n");
@@ -753,10 +982,10 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
 
 
 void HoudiniFramer::arm() {
-  // bs_hw_framer=true -> native TDD framer (beacon replay strobe + rx_gate on
-  // the pilot slots; loopRecv's HW-framer true-path receives only those
-  // slots, tagged). bs_hw_framer=false -> free-running replay beacon + the
-  // software-framer read-every-slot path.
+  // bs_hw_framer=true -> native TDD framer (beacon replay strobe + the rx
+  // slots cut from one continuous read per frame; loopRecv's HW-framer path
+  // receives only those slots, tagged). bs_hw_framer=false -> free-running
+  // replay beacon + the software-framer read-every-slot path.
   if (cfg_->bs_hw_framer()) {
     armTdd();
     MLPD_INFO("BaseRadioSet done (Houdini native TDD framer)!\n");
@@ -767,17 +996,34 @@ void HoudiniFramer::arm() {
 }
 
 void HoudiniFramer::stop() {
-  // Native TDD teardown so the next run can re-arm. Full ladder, not abort
+  // Native TDD teardown so the next run can re-arm. The beacon's replay strobe
+  // is disarmed first: TDD_CMD abort does not release it, and left armed the
+  // plugin disarms it at close and logs a leak. Then the full ladder, not abort
   // alone: abort latches gates_held on a running framer and skips TX_CLEAR
-  // (3.2 + 4.24 in DEMO_VERIFICATION.md).
+  // (3.2 + 4.24 in DEMO_VERIFICATION.md). The plugin's own idle path keeps
+  // the same order (strobe off, abort, TX_CLEAR, gate release).
+  const size_t tx_ch = beaconTxChannel(cfg_);
   for (size_t c = 0; c < radios_.size(); c++)
-    for (size_t i = 0; i < radios_.at(c).size(); i++)
-      if (radios_.at(c).at(i) != nullptr) {
+    for (size_t i = 0; i < radios_.at(c).size(); i++) {
+      SoapySDR::Device* dev = radios_.at(c).at(i) != nullptr ? radios_.at(c).at(i)->RawDev() : nullptr;
+      if (dev != nullptr) {
         try {
-          tddLadder(radios_.at(c).at(i)->RawDev(), cfg_->diag_skip_tx_clear());
+          dev->writeSetting("TDD_REPLAY_STROBE", "ch" + std::to_string(tx_ch) + ":off");
+        } catch (const std::exception& e) {
+          MLPD_WARN("BS: disarming the beacon strobe on radio %zu ch%zu failed (%s)\n", i, tx_ch, e.what());
         } catch (...) {
+          MLPD_WARN("BS: disarming the beacon strobe on radio %zu ch%zu failed\n", i, tx_ch);
+        }
+        try {
+          tddLadder(dev, cfg_->diag_skip_tx_clear());
+        } catch (const std::exception& e) {
+          MLPD_WARN("BS: the TDD teardown of radio %zu failed (%s); the next run's arm may find the gates held\n",
+                    i, e.what());
+        } catch (...) {
+          MLPD_WARN("BS: the TDD teardown of radio %zu failed; the next run's arm may find the gates held\n", i);
         }
       }
+    }
 }
 
 int HoudiniFramer::txBeacon(size_t radio_id, size_t cell_id, const void* const* buffs,

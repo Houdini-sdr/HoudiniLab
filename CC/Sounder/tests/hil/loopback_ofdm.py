@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 loopback_ofdm.py -- self-contained OFDM closure test over one board's DAC_B -> ADC_D
-loopback cable (default .22).  Reproduces the whole sounder-style signal chain in one
+loopback cable (--board names the board).  Reproduces the whole sounder-style signal chain in one
 script: build an app-rate frame in replay RAM, loop it, receive it, and run a full
 receiver (GOLD beacon sync -> fine CFO from the two identical pilots -> LTS channel
 estimate -> zero-forcing equalize -> QPSK constellation + EVM).
@@ -12,11 +12,11 @@ Frame (app rate 122.88, in replay RAM, looped):
 A --selftest mode runs the SAME receiver on a simulated channel (numpy only, no radio)
 to prove the receiver itself is correct before trusting any hardware verdict.
 
-Run on the DGX (after: source ~/houdini_test/bin/activate ; export the lib/plugin paths):
-    python3 loopback_ofdm.py                 # hardware, app-rate replay (strong beacon)
-    python3 loopback_ofdm.py --rate max      # 8x-upsampled DAC-rate replay
-    python3 loopback_ofdm.py --selftest      # offline receiver self-test (no radio)
-    python3 loopback_ofdm.py --board 168.6.244.21   # (bare .21 RX may yield 0 samples)
+Run on the rig host (after: source ~/houdini_test/bin/activate ; export the lib/plugin paths):
+    python3 loopback_ofdm.py --board <address>             # hardware, app-rate replay (strong beacon)
+    python3 loopback_ofdm.py --board <address> --rate max  # 8x-upsampled DAC-rate replay
+    python3 loopback_ofdm.py --selftest                    # offline receiver self-test (no radio)
+(<address>: the board with the DAC_B -> ADC_D cable; a board whose RX is bare may yield 0 samples)
 
 Interpreting the result:
   * clean chain  -> tight QPSK: low data-aided EVM, channel adjacent-phase autocorr high,
@@ -25,7 +25,9 @@ Interpreting the result:
                     (per-subcarrier RANDOM), deep |H| comb.  The beacon still syncs
                     (wideband) while the narrowband OFDM subcarriers are scrambled -- the
                     RFDC/RF-path issue that blocks OFDM equalization even single-board.
-Free the boards first (pkill -9 -f build/sounder).  DAC_B=TX ch0, ADC_D=RX ch0 on .22.
+Free the boards first: stop any sounder holding them with kill -INT <pid> (the setup check
+names the pid; never pkill -f, whose pattern matches the caller's own shell).  DAC_B=TX ch0,
+ADC_D=RX ch0 on the loopback board.
 """
 import argparse
 import os
@@ -291,7 +293,7 @@ def run_selftest(html=None):
     print("\nSELFTEST %s (ideal %.2f%% < 1%%, multipath %.1f%% < 40%%)" %
           ("PASS" if ok else "FAIL", r1["evm"] if r1 else 99, r2["evm"] if r2 else 99))
     if html and r2:
-        write_html(html, r2, "SELFTEST — simulated mild-multipath channel (receiver reference)")
+        write_html(html, r2, "SELFTEST: simulated mild-multipath channel (receiver reference)")
     return 0 if ok else 1
 
 
@@ -345,7 +347,7 @@ def run_hardware(a):
     # at -f, verified via analyze_rx_interleave); conjugate to un-mirror the subcarriers.
     x = np.conj(hs.iq_from_cs16(buf)).astype(np.complex128)
     if len(x) < (1 << 17):
-        print("captured only %d samples -- bare RX on this board may not egress (try .22)" % len(x))
+        print("captured only %d samples -- bare RX on this board may not egress (try the loopback board)" % len(x))
         return 1
     r = receive(x, beacon, tx_syms, ndata, period)
     if r is not None:
@@ -361,9 +363,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--selftest", action="store_true", help="offline receiver validation (no radio)")
-    ap.add_argument("--board", default="168.6.244.22", help="board IP (has the DAC_B->ADC_D cable)")
+    ap.add_argument("--board", help="board address (the one with the DAC_B->ADC_D cable); required for a hardware run")
     ap.add_argument("--tx-ch", type=int, default=0, help="DAC_B = TX ch0")
-    ap.add_argument("--rx-ch", type=int, default=0, help="ADC_D = RX ch0 on .22")
+    ap.add_argument("--rx-ch", type=int, default=0, help="ADC_D = RX ch0 on the loopback board")
     ap.add_argument("--nco", type=float, default=500.0, help="TX=RX NCO in MHz (Zone 1)")
     ap.add_argument("--rate", default="app", choices=["app", "max"],
                     help="app: 122.88 replay (strong beacon); max: 8x-upsampled DAC-rate replay")
@@ -376,6 +378,8 @@ def main():
                     help="write a self-contained HTML visualization (channel + constellation); "
                          "optional path, default /tmp/loopback_ofdm.html")
     a = ap.parse_args()
+    if not a.selftest and not a.board:
+        ap.error("--board <address> is required for a hardware run (the board with the loopback cable)")
     return run_selftest(a.html) if a.selftest else run_hardware(a)
 
 

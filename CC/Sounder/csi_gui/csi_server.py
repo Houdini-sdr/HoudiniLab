@@ -22,6 +22,10 @@ Usage (on the DGX, then browse via SSH port-forward ``-L 8080:localhost:8080``):
     # B) backend only receives (you run `sounder --view` yourself):
     python3 csi_server.py
 
+    # C) Start / Stop / Restart and a config choice on the page (localhost only;
+    #    add --launch to also start at once):
+    python3 csi_server.py --control --conf files/houdini-dualband.json
+
 Wire formats (little-endian), one datagram per (frame, antenna) per kind:
 
   CSI2  [magic][frame][ant][num_sc][rate f32][reps]  then num_sc * (H_re f32, H_im f32)
@@ -53,6 +57,11 @@ Wire formats (little-endian), one datagram per (frame, antenna) per kind:
         resid-slope figure the panel also prints is the tracking RESIDUAL and is
         not a third opinion on the same quantity. `cfo_beacon` is NaN on any
         record with no detection behind it, and the field is then dropped.
+  CIR1  [magic][frame][ant][ntaps][pre][peak][N][tap_ns f32] then ntaps * dB f32:
+        the impulse response of the same H (an inverse FFT per SENT CSI frame),
+        `ntaps` taps from `pre` before the strongest, dB re that tap.
+  MET1  [magic][ant][channel][fft][occupied tones][fc f64][scs f64][occupied bw f64]:
+        the channel's constants from the config the sounder loaded, ~1/s.
   ADC2  [magic][frame][ant][cols][samps][rate f32][peak][clipped][slot][any_peak]
         [any_clipped]  then cols * (I_min, I_max, Q_min, Q_max) as int16.  A min/max
         envelope of the whole slot rather than decimated samples, so a brief clip
@@ -61,12 +70,22 @@ Wire formats (little-endian), one datagram per (frame, antenna) per kind:
         them makes every update a different signal; peak/clipped describe that slot,
         any_peak/any_clipped cover every slot since the previous send.  ADC1 is the
         same without the last three fields and is still accepted.
+  SPC1  [magic][frame][ant][nbins][nfft][rate f32][rbw_hz f32]  then nbins * dBFS f32:
+        the PILOT slot's spectrum (include/houdini/spectrum.h), a Welch average of
+        nfft-point Hann segments, DC-centred from -rate/2; bin i is centred at
+        (i r + (r - 1) / 2 - nfft / 2) * rate / nfft with r = nfft / nbins. Each bin
+        is the power in its rbw_hz = rate / nbins band, in dB re the int16 rail: a
+        full-scale complex tone reads 0 dBFS. In the recorder's (conjugated) sense,
+        as the CSI. A few per second per antenna (HOUDINI_CSI_SPC_FPS, default 4).
 """
 import argparse
 import collections
 import json
+import glob
+import ipaddress
 import math
 import os
+import queue
 import signal
 import socket
 import struct
@@ -76,11 +95,21 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from check_setup import plugin_env  # noqa: E402  one plugin environment, not two
+import csi_record  # noqa: E402  the record format replay_feed.py plays back
+
 MAGIC_CSI = 0x43534931   # "CSI1" -- pilot channel estimate (legacy, no quality)
 MAGIC_CSI2 = 0x43534932  # "CSI2" -- as CSI1 plus per-subcarrier raw phase
 MAGIC_CNS = 0x434E5331   # "CNS1" -- equalized uplink-data constellation
 MAGIC_ADC = 0x41444331   # "ADC1" -- raw-ADC envelope, any slot (legacy)
 MAGIC_ADC2 = 0x41444332  # "ADC2" -- pilot-slot envelope + an all-slot clip ledger
+MAGIC_CIR = 0x43495231   # "CIR1" -- impulse response window, dB re the peak tap
+MAGIC_MET = 0x4D455431   # "MET1" -- the channel's constants (centre, bandwidth)
+MAGIC_SPC = 0x53504331   # "SPC1" -- the pilot slot's spectrum, dBFS per bin
+SPC_HDR = struct.Struct("<IIIIIff")    # magic, frame, ant, nbins, nfft, rate, rbw_hz
+CIR_HDR = struct.Struct("<IIIIIIIf")   # magic, frame, ant, ntaps, pre, peak, N, tap_ns
+MET_HDR = struct.Struct("<IIIIIddd")   # magic, ant, channel, fft, occ tones, fc, scs, occ bw
 MAGIC_SYN = 0x53594E31   # "SYN1" -- UE beacon sync state, resid and CFO
 CSI_HDR = struct.Struct("<IIIIf")   # magic, frame, ant, num_sc, rate
 CSI2_HDR = struct.Struct("<IIIIfI")  # ... plus reps (pilot symbols averaged)
@@ -93,7 +122,7 @@ SYN_HDR = struct.Struct("<IIIIiffiIfIf")  # ... + samps_per_frame, carrier_hz, s
 _lock = threading.Lock()
 _latest = {}   # ant_id -> {"csi": {...}, "cns": {...}}
 _seq = 0       # bumps on every new datagram so the SSE loop knows there's fresh data
-_stats = {"pkts": 0, "t0": time.time()}
+_stats = {"pkts": 0}
 # Sync/CFO history is a TIME SERIES, not a latest-value, so it lives beside the
 # per-antenna state rather than in it. maxlen caps memory on a long run; the page
 # shows a shorter window than this.
@@ -104,6 +133,7 @@ _sync = {}     # tid -> deque of records
 _sync_t = {}   # tid -> monotonic time of that tid's last SYN1
 _sync_bad = [0]     # datagrams rejected as non-finite
 _bad_payload = [0]  # SSE snapshots dropped because a float would not serialise
+_bad_dgram = [0]    # datagrams whose parse raised (short header, corrupt field)
 SYNC_REPUSH_CEIL_MS = 120000  # past this a quiet tid stops driving re-pushes
 # tid arrives as a uint32 off the wire, so the map is unbounded by construction.
 # Entries are NOT pruned on age -- the record is what lets the page show
@@ -115,8 +145,8 @@ MAX_SYNC_TIDS = 8
 def _parse_csi(payload, with_quality):
     """CSI1 or CSI2 -> one antenna's channel estimate.
 
-    Both layouts are accepted so a dashboard running ahead of an un-rebuilt sounder
-    still draws everything except the raw-phase panel, rather than drawing nothing.
+    Both layouts are accepted. CSI2's trailing raw-phase block is length-checked
+    and not carried: no panel draws it.
     """
     if with_quality:
         magic, frame, ant, nsc, rate, reps = CSI2_HDR.unpack_from(payload, 0)
@@ -129,11 +159,12 @@ def _parse_csi(payload, with_quality):
     if len(payload) < need:
         return None
     vals = struct.unpack_from("<%df" % (2 * nsc), payload, off)
-    # CSI2's trailing float block carries the RAW per-subcarrier phase
-    # (radians): arg(H) before the display de-ramp and the per-run anchor.
-    rawph_in = (struct.unpack_from("<%df" % nsc, payload, off + 8 * nsc)
-                if with_quality else None)
-    mag_db, phase, mags, rawph = [], [], [], []
+    # A non-finite value would poison the snapshot: every SSE event fails to
+    # serialise (allow_nan=False) until a finite record replaces it, which a
+    # stray antenna id never does. A sum is finite only when every term is.
+    if not (math.isfinite(rate) and math.isfinite(sum(vals))):
+        return None
+    mag_db, phase, mags = [], [], []
     for k in range(nsc):
         re, im = vals[2 * k], vals[2 * k + 1]
         m = math.hypot(re, im)
@@ -141,20 +172,19 @@ def _parse_csi(payload, with_quality):
         if m < 1e-9:               # unused subcarrier (guard band / DC null)
             mag_db.append(None)
             phase.append(None)
-            rawph.append(None)     # a gap, not a zero: nothing was measured here
         else:
             mag_db.append(20.0 * math.log10(m))
             phase.append(math.atan2(im, re))
-            rawph.append(rawph_in[k] if rawph_in else None)
     peak = max((m for m in mags if m > 0), default=0.0)
     return int(ant), {"frame": int(frame), "sc": int(nsc), "rate": float(rate),
                       "mag_db": mag_db, "phase": phase,
-                      "raw_ph": (rawph if with_quality else None),
                       "peak_db": (20.0 * math.log10(peak) if peak > 0 else 0.0)}
 
 
 def _parse_adc(payload, v2):
-    """ADC1/ADC2 -> one antenna's raw-sample min/max envelope plus clip counts.
+    """ADC1/ADC2 -> one antenna's peak and clip counts. The datagram's min/max
+    envelope is length-checked and not carried: the card draws only the peak
+    and the clipping badge.
 
     ADC2 draws the PILOT slot only and carries a separate ledger covering every slot
     seen since the previous send. A frame's slots differ in level by orders of
@@ -169,16 +199,61 @@ def _parse_adc(payload, v2):
         magic, frame, ant, cols, samps, rate, peak, clipped = ADC_HDR.unpack_from(payload, 0)
         off = ADC_HDR.size
         slot, any_peak, any_clipped = -1, peak, clipped
-    if len(payload) < off + 8 * cols:
+    if len(payload) < off + 8 * cols or not math.isfinite(rate):
         return None
-    e = struct.unpack_from("<%dh" % (4 * cols), payload, off)
     return int(ant), {"frame": int(frame), "cols": int(cols), "samps": int(samps),
                       "rate": float(rate), "peak": int(peak), "clipped": int(clipped),
                       "slot": int(slot), "any_peak": int(any_peak),
                       "any_clipped": int(any_clipped),
-                      "i_min": e[0::4], "i_max": e[1::4],
-                      "q_min": e[2::4], "q_max": e[3::4],
                       "full_scale": 32767}
+
+
+def _slice_err2(x, lvl):
+    """Squared distance of one unit-power coordinate to the nearest of the
+    alphabet's per-axis levels (odd integers / norm): O(1), not a search."""
+    k = min(lvl - 1, max(0, int(round((x + lvl - 1) / 2.0))))
+    return (x - (2 * k - (lvl - 1))) ** 2
+
+
+def _mer_err(pts, mod):
+    """Mean decision-directed error power of unit-power points against the
+    square-QAM alphabet, and the point count; None for too few points."""
+    if len(pts) < 8 or mod not in (2, 4, 6):
+        return None
+    lvl = int(round(math.sqrt(2 ** mod)))
+    nrm = math.sqrt(sum(((-(lvl - 1) + 2 * i) ** 2) * 2 for i in range(lvl)) / lvl)
+    err = 0.0
+    for x, y in pts:
+        err += (_slice_err2(x * nrm, lvl) + _slice_err2(y * nrm, lvl)) / (nrm * nrm)
+    return err / len(pts), len(pts)
+
+
+def _evm_mer(e):
+    """A mean error power of unit-power points as (EVM rms %, MER dB). MER in
+    the TR 101 290 sense (hard decisions, not an SNR): it includes the
+    equalizer's H error, carrier-offset leakage and phase noise, over the
+    sounder's point sample. Unbiased above ~15 dB, reads high below (a
+    decision error lands on the wrong point). Floored at an error power of
+    1e-10, so a perfect constellation reads 100 dB."""
+    e = max(e, 1e-10)
+    return 100.0 * math.sqrt(e), -10.0 * math.log10(e)
+
+
+# The dashboard's MER is averaged over about a second of records per antenna,
+# as ERROR POWER (then converted), the way 3GPP and 802.11 average EVM, rather
+# than a per-frame number that jumps with every refresh.
+MER_WINDOW_S = 1.0
+_mer_hist = {}
+
+
+def _mer_avg(ant, e, n, now):
+    h = _mer_hist.setdefault(ant, collections.deque())
+    h.append((now, e * n, n))
+    while h and now - h[0][0] > MER_WINDOW_S:
+        h.popleft()
+    tot_e = sum(x[1] for x in h)
+    tot_n = sum(x[2] for x in h)
+    return (tot_e / tot_n if tot_n else e), tot_n
 
 
 def _parse_cns(payload):
@@ -187,8 +262,90 @@ def _parse_cns(payload):
     if len(payload) < off + 8 * npt:
         return None
     vals = struct.unpack_from("<%df" % (2 * npt), payload, off)
+    if not math.isfinite(sum(vals)):  # as _parse_csi: a non-finite point poisons the snapshot
+        return None
     pts = [[vals[2 * i], vals[2 * i + 1]] for i in range(npt)]
-    return int(ant), {"frame": int(frame), "mod": int(mod), "pts": pts}
+    rec = {"frame": int(frame), "mod": int(mod), "pts": pts}
+    r = _mer_err(pts, int(mod))
+    if r is not None:
+        e, n = _mer_avg(int(ant), r[0], r[1], time.monotonic())
+        evm, mer = _evm_mer(e)
+        rec["evm_pct"] = round(evm, 2)
+        rec["mer_db"] = round(mer, 1)
+        rec["mer_pts"] = int(n)
+    return int(ant), rec
+
+
+def _delay_stats(db, tap_ns):
+    """The power delay profile's standard figures (ITU-R P.1407 section 2; TR
+    38.901 section 7.5): RMS delay spread, mean excess delay and maximum excess
+    delay, the excess delays measured from the FIRST tap above the threshold
+    (the first arrival, which need not be the strongest tap). The
+    threshold is 20 dB below the peak or 6 dB above the noise floor (the
+    median of the window's outer quarter), whichever is higher, and is
+    reported. A single path is NOT 0 ns: the Hann-windowed CIR's mainlobe
+    (about 2/B wide at -6 dB, 4/B null to null) gives a lone path, at the -20 dB
+    threshold, an RMS spread of about 0.5/B, a mean excess of about 1.5/B and a
+    max excess of about 3/B (from the mainlobe's first tap above the
+    threshold), so values near those are unresolved, not multipath. A noise
+    floor that lifts the threshold narrows them."""
+    q = max(1, len(db) // 8)
+    tail = sorted(db[:q] + db[-q:])
+    floor = tail[len(tail) // 2] if tail else -60.0
+    thr = max(-20.0, floor + 6.0)
+    w = [10 ** (v / 10.0) if v >= thr else 0.0 for v in db]
+    tot = sum(w)
+    if tot <= 0.0:
+        return {"rms_ns": 0.0, "mean_ns": 0.0, "max_ns": 0.0, "thr_db": round(thr, 1)}
+    mu = sum(i * wi for i, wi in enumerate(w)) / tot
+    var = sum(wi * (i - mu) ** 2 for i, wi in enumerate(w)) / tot
+    above = [i for i, wi in enumerate(w) if wi > 0.0]
+    return {"rms_ns": round(math.sqrt(var) * tap_ns, 1),
+            "mean_ns": round((mu - above[0]) * tap_ns, 1),
+            "max_ns": round((above[-1] - above[0]) * tap_ns, 1),
+            "thr_db": round(thr, 1)}
+
+
+def _parse_cir(payload):
+    if len(payload) < CIR_HDR.size:
+        return None
+    _m, frame, ant, ntaps, pre, peak, n, tap_ns = CIR_HDR.unpack_from(payload, 0)
+    if len(payload) < CIR_HDR.size + 4 * ntaps or not math.isfinite(tap_ns):
+        return None
+    db = list(struct.unpack_from("<%df" % ntaps, payload, CIR_HDR.size))
+    if not all(math.isfinite(v) for v in db):
+        return None
+    rec = {"frame": int(frame), "db": [round(v, 2) for v in db],
+           "pre": int(pre), "peak": int(peak), "n": int(n), "tap_ns": float(tap_ns)}
+    rec.update(_delay_stats(db, float(tap_ns)))
+    return int(ant), rec
+
+
+def _parse_met(payload):
+    if len(payload) != MET_HDR.size:
+        return None
+    _m, ant, ch, fft, occ, fc, scs, bw = MET_HDR.unpack_from(payload, 0)
+    if not (math.isfinite(fc) and math.isfinite(scs) and math.isfinite(bw)):
+        return None
+    return int(ant), {"ch": "ABCD"[ch] if ch < 4 else str(ch), "fc_mhz": fc / 1e6,
+                      "scs_khz": scs / 1e3, "bw_mhz": bw / 1e6, "fft": int(fft),
+                      "occ": int(occ)}
+
+
+def _parse_spc(payload):
+    """SPC1 -> one antenna's pilot spectrum; None for a short or malformed one."""
+    if len(payload) < SPC_HDR.size:
+        return None
+    _m, frame, ant, nbins, nfft, rate, rbw = SPC_HDR.unpack_from(payload, 0)
+    if (nbins == 0 or nfft < nbins or nfft % nbins or len(payload) != SPC_HDR.size + 4 * nbins
+            or not (math.isfinite(rate) and rate > 0 and math.isfinite(rbw))):
+        return None
+    db = struct.unpack_from("<%df" % nbins, payload, SPC_HDR.size)
+    if not all(math.isfinite(v) for v in db):
+        return None
+    return int(ant), {"frame": int(frame), "nbins": int(nbins), "nfft": int(nfft),
+                      "rate": float(rate), "rbw_hz": float(rbw),
+                      "db": [round(v, 1) for v in db]}
 
 
 def _parse_syn(payload):
@@ -225,7 +382,34 @@ def _parse_syn(payload):
     return rec
 
 
-def _udp_loop(bind_host, bind_port):
+def _parse(magic, data):
+    """(parsed, kind) for one datagram: parsed is (ant, rec), a SYN1 record for
+    kind "syn", or None for an unknown magic or a malformed datagram."""
+    if magic == MAGIC_CSI:
+        return _parse_csi(data, False), "csi"
+    if magic == MAGIC_CSI2:
+        return _parse_csi(data, True), "csi"
+    if magic == MAGIC_CNS:
+        return _parse_cns(data), "cns"
+    if magic == MAGIC_ADC:
+        return _parse_adc(data, False), "adc"
+    if magic == MAGIC_ADC2:
+        return _parse_adc(data, True), "adc"
+    if magic == MAGIC_CIR:
+        return _parse_cir(data), "cir"
+    if magic == MAGIC_MET:
+        return _parse_met(data), "met"
+    if magic == MAGIC_SPC:
+        return _parse_spc(data), "spc"
+    if magic == MAGIC_SYN:
+        return _parse_syn(data), "syn"
+    return None, None
+
+
+_replaying = [False]  # set by the supervisor while a --replay entry plays into this dashboard
+
+
+def _udp_loop(bind_host, bind_port, recorder=None):
     global _seq
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -237,22 +421,25 @@ def _udp_loop(bind_host, bind_port):
             data, _ = sock.recvfrom(65535)
         except OSError:
             break
+        if recorder is not None and not _replaying[0]:  # every datagram as received, never a replay
+            recorder.write(time.monotonic(), data)
         if len(data) < 4:
             continue
         magic = struct.unpack_from("<I", data, 0)[0]
-        parsed, kind = (None, None)
-        if magic == MAGIC_CSI:
-            parsed, kind = _parse_csi(data, False), "csi"
-        elif magic == MAGIC_CSI2:
-            parsed, kind = _parse_csi(data, True), "csi"
-        elif magic == MAGIC_CNS:
-            parsed, kind = _parse_cns(data), "cns"
-        elif magic == MAGIC_ADC:
-            parsed, kind = _parse_adc(data, False), "adc"
-        elif magic == MAGIC_ADC2:
-            parsed, kind = _parse_adc(data, True), "adc"
-        elif magic == MAGIC_SYN:
-            rec = _parse_syn(data)
+        try:
+            parsed, kind = _parse(magic, data)
+        except Exception as e:  # noqa: BLE001 -- one bad datagram must not end the receive loop
+            # A short or corrupt datagram raised out of a parser (struct.error
+            # on a header, a bad field); the port is open to the network. The
+            # thread dying left every card stale for good, which reads as a
+            # dead link.
+            _bad_dgram[0] += 1
+            if _bad_dgram[0] == 1 or _bad_dgram[0] % 1000 == 0:
+                print("[csi] a %d-byte datagram (magic 0x%08x) failed to parse: %r; "
+                      "%d so far" % (len(data), magic, e, _bad_dgram[0]), flush=True)
+            continue
+        if kind == "syn":
+            rec = parsed
             if rec is not None:
                 with _lock:
                     t = rec["tid"]
@@ -302,6 +489,52 @@ def _snapshot():
 
 
 # ---- HTTP / SSE ------------------------------------------------------------
+BODY_REUSE_S = 0.25
+_body_lock = threading.Lock()
+_body = [None, 0.0, None]  # seq, when built (monotonic), the encoded SSE event
+
+
+def _shared_event(seq, snap, sync, now):
+    """The SSE event for this seq, serialised once for every open page. Each
+    page serialising the whole snapshot itself (about 20 ms for two lanes) at
+    30 Hz, all under one GIL, starved the UDP receiver: three pages dropped a
+    fifth of the datagrams. An event is reused while it is under BODY_REUSE_S
+    old, so a stale re-push (seq unchanged) still carries ages that move. None:
+    a value that would not serialise (allow_nan=False turns a poisoned value
+    into an exception here rather than invalid JSON on the wire)."""
+    with _body_lock:
+        if _body[0] == seq and now - _body[1] < BODY_REUSE_S:
+            return _body[2]
+        try:
+            ev = ("data: %s\n\n" % json.dumps({"ant": snap, "sync": sync},
+                                                 allow_nan=False)).encode("utf-8")
+        except ValueError:
+            _bad_payload[0] += 1
+            ev = None
+        _body[:] = [seq, now, ev]
+        return ev
+
+
+def _host_is_address(host):
+    """A Host header that names this server by address or as localhost (any
+    port). DNS rebinding points an attacker's NAME at 127.0.0.1: the browser
+    then sends that name as Host, and an Origin equal to it, so the Origin
+    check alone lets the page in. A name other than localhost is refused;
+    an IP literal cannot be rebound."""
+    h = host.strip().lower()
+    if h.startswith("["):
+        name = h[1:h.find("]")] if "]" in h else ""
+    else:
+        name = h.split(":", 1)[0]
+    if name == "localhost":
+        return True
+    try:
+        ipaddress.ip_address(name)
+        return True
+    except ValueError:
+        return False
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -311,10 +544,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/" or self.path.startswith("/index"):
             body = (PAGE.replace("__STALE_MS__", str(self.server.stale_ms))
-                        .replace("__MAG_TOP__", str(self.server.mag_top))
+                        .replace("__MAG_TOP__", str(self.server.mag_top()))
                         .replace("__MAG_SPAN__", str(self.server.mag_span))
-                        .replace("__GUARD_PRE__", str(self.server.guard_pre))
-                        .replace("__GUARD_POST__", str(self.server.guard_post))
                         .encode("utf-8"))
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -325,8 +556,74 @@ class Handler(BaseHTTPRequestHandler):
             self._static(self.path[len("/vendor/"):].split("?", 1)[0])
         elif self.path.startswith("/stream"):
             self._sse()
+        elif self.path.startswith("/control"):
+            self._control_state()
         else:
             self.send_error(404)
+
+    def _json(self, code, obj):
+        body = json.dumps(obj).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _control_state(self):
+        sup = getattr(self.server, "control", None)
+        if sup is None:
+            self._json(200, {"enabled": False})
+            return
+        if not _host_is_address(self.headers.get("Host", "")):
+            # Said on the page and once in the log, so a refused operator is
+            # not left with controls that silently vanish.
+            why = "controls answer only by address: open the dashboard at localhost or its IP"
+            if not getattr(self.server, "host_refusal_logged", False):
+                self.server.host_refusal_logged = True
+                print("[csi] /control refused for Host %r: %s" % (self.headers.get("Host", ""), why), flush=True)
+            self._json(403, {"enabled": False, "error": why})
+            return
+        st = sup.snapshot()
+        st.update({"enabled": True, "configs": sup.configs(), "desc": sup.descriptions(), "labels": sup.labels()})
+        self._json(200, st)
+
+    def do_POST(self):
+        """Dashboard control: {"cmd": "start"|"stop"|"restart", "conf": "files/..."}.
+        Only with --control (which binds the dashboard to localhost), and only
+        for configs under the sounder's files/houdini*.json."""
+        sup = getattr(self.server, "control", None)
+        if not self.path.startswith("/control") or sup is None:
+            self.send_error(404)
+            return
+        # A page on any other site can POST to localhost too. Requiring JSON
+        # forces the browser's CORS preflight, which this server never answers,
+        # a foreign Origin is refused outright, and so is a Host that is a name
+        # (DNS rebinding, _host_is_address).
+        origin = self.headers.get("Origin")
+        host = self.headers.get("Host", "")
+        if (self.headers.get("Content-Type", "").split(";")[0].strip() != "application/json"
+                or (origin is not None and origin.split("://", 1)[-1] != host)
+                or not _host_is_address(host)):
+            self._json(403, {"error": "forbidden"})
+            return
+        try:
+            n = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            n = -1
+        if not 0 <= n <= 4096:
+            self.close_connection = True
+            self._json(400, {"error": "bad request"})
+            return
+        try:
+            req = json.loads(self.rfile.read(n) or b"{}")
+        except ValueError:
+            req = None
+        if not isinstance(req, dict):
+            self._json(400, {"error": "bad request"})
+            return
+        err = sup.request(str(req.get("cmd", "")), req.get("conf"))
+        self._json(400 if err else 202, {"error": err} if err else {"queued": req.get("cmd")})
 
     def _static(self, name):
         """Serve one vendored asset out of ``csi_gui/vendor``.
@@ -376,8 +673,8 @@ class Handler(BaseHTTPRequestHandler):
                 now = time.monotonic()
                 stale = any(r.get("age_ms", 0) >= stale_ms for r in snap.values())
                 # The sync stream must count too: it is quiet by nature between
-                # resync bursts, and after the staleness fix its age is the only
-                # thing that can move the chip off a stale state. Without this
+                # resync bursts, and its age is the only thing that can move the
+                # chip off a stale state. Without this
                 # the push stops when SYN1 stops and the age freezes on screen.
                 # Bounded above as well as below: past SYNC_REPUSH_CEIL_MS the
                 # page has long since shown NOT SYNCED, and a tid that never
@@ -386,26 +683,19 @@ class Handler(BaseHTTPRequestHandler):
                 stale = stale or any(
                     stale_ms <= (v.get("age_ms") or 0) < SYNC_REPUSH_CEIL_MS
                     for v in sync.values())
-                body = None
+                ev = None
                 if (snap or sync) and (seq != last_seq or
                              (stale and now - last_stale_push >= 0.5)):
-                    # allow_nan=False turns a poisoned value into an exception
-                    # here rather than invalid JSON on the wire. Serialise
-                    # BEFORE booking the snapshot as delivered, and fall through
-                    # to the keepalive on failure -- an early `continue` here
-                    # skipped the throttle at the bottom of the loop and spun
-                    # the thread at 100% CPU against the UDP receiver.
-                    try:
-                        body = json.dumps({"ant": snap, "sync": sync},
-                                          allow_nan=False)
-                    except ValueError:
-                        _bad_payload[0] += 1
-                        body = None
-                if body is not None:
+                    # Serialise BEFORE booking the snapshot as delivered, and
+                    # fall through to the keepalive on failure: an early
+                    # `continue` here skipped the throttle at the bottom of the
+                    # loop and spun the thread at 100% CPU against the UDP
+                    # receiver.
+                    ev = _shared_event(seq, snap, sync, now)
+                if ev is not None:
                     last_seq = seq
                     last_stale_push = now
-                    msg = "data: %s\n\n" % body
-                    self.wfile.write(msg.encode("utf-8"))
+                    self.wfile.write(ev)
                     self.wfile.flush()
                 else:
                     # keep-alive comment so proxies/clients don't time out
@@ -417,18 +707,38 @@ class Handler(BaseHTTPRequestHandler):
 
 
 # ---- sounder launcher ------------------------------------------------------
-def _topology_of(sounder_dir, conf):
-    """The topology file a config names, or None if it cannot be determined.
-
-    Falling back to None is fine: teardown_framer.py then uses its own default,
-    which is the same file every shipped config points at.
-    """
+def _load_conf(sounder_dir, conf):
+    """A config as the sounder reads it (relative to its checkout), or None."""
     try:
         path = conf if os.path.isabs(conf) else os.path.join(sounder_dir, conf)
         with open(path, encoding="utf-8") as f:
-            return json.load(f).get("serial_file") or None
+            cj = json.load(f)
+        return cj if isinstance(cj, dict) else None
     except (OSError, ValueError):
         return None
+
+
+MAG_TOP_DEFAULT = 90.0
+
+
+def _mag_top(sounder_dir, conf, explicit):
+    """The |H| axis top: --mag-top when given, else the config's
+    dashboard_mag_top (a finite number), else MAG_TOP_DEFAULT."""
+    if explicit is not None:
+        return explicit
+    v = (_load_conf(sounder_dir, conf) or {}).get("dashboard_mag_top")
+    if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v):
+        return float(v)
+    return MAG_TOP_DEFAULT
+
+
+def _topology_of(sounder_dir, conf):
+    """The topology file a config names, or None if it cannot be determined.
+
+    With None the teardown runs without --topology and refuses, naming the fix;
+    under --control the quick check has already failed such a config.
+    """
+    return (_load_conf(sounder_dir, conf) or {}).get("serial_file") or None
 
 
 _PR_SET_PDEATHSIG = 1  # linux/prctl.h
@@ -455,13 +765,35 @@ def _die_with_parent():
     except (OSError, AttributeError):
         os.write(2, b"[csi] PR_SET_PDEATHSIG unavailable on this platform\n")
     os.setsid()  # its own session: the clean-shutdown path signals the group
+    # A dashboard started in the background by a script inherits SIGINT as
+    # ignored and would pass that on: the sounder installs its own handler a
+    # few ms after exec, and a Stop before that would be lost.
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
 
 
-def _pump(stream, prefix):
-    """Copy a child's output to ours, one prefix per line (was a sed)."""
-    for line in iter(stream.readline, b""):
-        sys.stdout.write(prefix + line.decode("utf-8", errors="replace"))
-        sys.stdout.flush()
+def _pump(stream, prefix, log=None):
+    """Copy a child's output to ours, one prefix per line, and to
+    `log` as written (the report tools read the sounder's own lines); closes
+    `log` at the child's end of output."""
+    try:
+        for line in iter(stream.readline, b""):
+            text = line.decode("utf-8", errors="replace")
+            sys.stdout.write(prefix + text)
+            sys.stdout.flush()
+            if log is not None:
+                try:
+                    log.write(text)
+                    log.flush()
+                except (OSError, ValueError) as e:  # a full disk must not stop the pump
+                    print("[csi] session log stopped: %s" % e, flush=True)
+                    try:
+                        log.close()
+                    except (OSError, ValueError):
+                        pass
+                    log = None
+    finally:
+        if log is not None:
+            log.close()
 
 
 class SounderSupervisor:
@@ -476,32 +808,205 @@ class SounderSupervisor:
     ATTEMPTS = 4
     SETTLE_AFTER_TEARDOWN_S = 8.0  # the boards' server needs this to release
     RETRY_DELAY_S = 5.0
-    STOP_GRACE_S = 4.0
+    STOP_GRACE_S = 10.0  # a clean stop takes about 1 s (9.69-9.71's logs)
 
     def __init__(self, args, udp_dest):
+        self.args = args
         self.sd = args.sounder_dir
-        self.env = os.environ.copy()
+        # The plugin's environment (the setup check's), plus what `source
+        # venv/bin/activate` would set.
+        venv = args.venv
+        self.env = plugin_env(venv)
+        self.env["VIRTUAL_ENV"] = venv
+        self.env["PATH"] = os.path.join(venv, "bin") + os.pathsep + self.env.get("PATH", "")
         self.env["HOUDINI_CSI_UDP"] = udp_dest
         self.env["HOUDINI_MAX_FRAME"] = str(args.max_frame)
         if args.csi_fps:
             self.env["HOUDINI_CSI_FPS"] = str(args.csi_fps)
-        # What `source venv/bin/activate` would set, plus the plugin path.
-        venv = args.venv
-        self.env["VIRTUAL_ENV"] = venv
-        self.env["PATH"] = os.path.join(venv, "bin") + os.pathsep + self.env.get("PATH", "")
-        self.env["LD_LIBRARY_PATH"] = os.path.join(venv, "lib")
-        self.env["SOAPY_SDR_PLUGIN_PATH"] = os.path.join(venv, "lib", "SoapySDR", "modules0.8-3")
-        # Tear down against the radios THIS run will use: the config names its
-        # own topology file, so a config pointed at a different bench tears down
-        # that bench rather than whatever the default topology happens to list.
-        topo = _topology_of(self.sd, args.conf)
+        self.log_dir = getattr(args, "log_dir", None)
+        # --configs labelled: the page offers only the configs carrying a short `_label`
+        # (the demo's handful), not every files/houdini*.json.
+        self.labelled_only = getattr(args, "configs", "all") == "labelled"
+        # --replay FILE[=LABEL]: a recording offered in the list; Start plays it in a loop
+        # into this dashboard's own UDP port, with no radio (no setup check, no teardown).
+        self.udp_dest = udp_dest
+        self.replays = {}
+        for spec in getattr(args, "replay", None) or []:
+            path, _, label = spec.partition("=")
+            path = os.path.abspath(os.path.expanduser(path))
+            self.replays["replay:" + path] = (path, label or "Replay, " + os.path.basename(path))
+        self.td_text = ""  # the last teardown's output, the head of the next start's log
+        self.proc = None
+        self.stopping = False
+        # Dashboard control (--control): the HTTP threads only QUEUE commands;
+        # the main thread, which forks the sounder (PR_SET_PDEATHSIG is tied to
+        # the forking thread), executes them. `state` is what the page shows.
+        self.cmds = queue.Queue()
+        self.state_lock = threading.Lock()
+        self.state = {"state": "stopped", "pid": None, "rc": None, "attempt": 0, "conf": None,
+                      "check": None}
+        self.set_conf(args.conf)
+        self.launch_conf = args.conf  # the operator's --conf is always a valid choice
+
+    def set_conf(self, conf):
+        """The command lines for one config. Tear down against the radios THIS
+        run will use: the config names its own topology file, so a config
+        pointed at a different bench tears down that bench rather than whatever
+        the default topology happens to list. A replay entry has no teardown."""
+        if conf in self.replays:
+            host, port = self.udp_dest.rsplit(":", 1)
+            self.td_cmd = None
+            self.td_text = ""  # no teardown ahead of a replay's log
+            self.cmd = ["python3", "csi_gui/replay_feed.py", self.replays[conf][0], "--host", host,
+                        "--port", port, "--loop"]
+            self.conf = conf
+            self._set(conf=conf)
+            return
+        topo = _topology_of(self.sd, conf)
         self.td_cmd = ["python3", "csi_gui/teardown_framer.py"]
         if topo:
             self.td_cmd += ["--topology", topo]
-        self.cmd = ["./build/sounder", "--view", "--conf_file", args.conf,
-                    "--storepath", args.storepath]
-        self.proc = None
-        self.stopping = False
+        self.cmd = ["./build/sounder", "--view", "--conf_file", conf,
+                    "--storepath", self.args.storepath]
+        self.conf = conf
+        self._set(conf=conf)
+
+    def _set(self, **kw):
+        with self.state_lock:
+            self.state.update(kw)
+
+    def snapshot(self):
+        with self.state_lock:
+            return dict(self.state)
+
+    def _note(self, conf, key):
+        """A config's note (`_label`, `_description`), "" when absent or unreadable."""
+        try:
+            with open(os.path.join(self.sd, conf), encoding="utf-8") as f:
+                return str(json.load(f).get(key, "") or "")
+        except (OSError, ValueError):
+            return ""
+
+    def configs(self):
+        """The configs the page may choose: the sounder's own files/houdini*.json (with
+        --configs labelled, only those carrying a `_label`), and always the --conf one."""
+        found = {os.path.relpath(p, self.sd) for p in glob.glob(os.path.join(self.sd, "files", "houdini*.json"))}
+        if self.labelled_only:
+            found = {c for c in found if self._note(c, "_label")}
+        return sorted(found | {self.launch_conf}) + list(self.replays)
+
+    def descriptions(self):
+        """Each offered config's one-line `_description`: the list entry's tooltip."""
+        return {c: ("Plays %s in a loop, no radio needed" % self.replays[c][0]) if c in self.replays
+                else self._note(c, "_description") for c in self.configs()}
+
+    def labels(self):
+        """Each offered config's short `_label`: the list entry's text ("" shows the file name)."""
+        return {c: self.replays[c][1] if c in self.replays else self._note(c, "_label") for c in self.configs()}
+
+    def request(self, cmd, conf=None):
+        """From any thread: queue start / stop / restart / check. Returns an error or None."""
+        if cmd not in ("start", "stop", "restart", "check"):
+            return "unknown command"
+        if conf is not None and conf not in self.configs():
+            return "config not allowed: %s" % conf
+        if cmd == "check" and (conf if conf is not None else self.conf) in self.replays:
+            return "a replay opens no radio: nothing to check"
+        # "exited" is the retry wait inside a session: a Start or Check queued then
+        # would be dropped by _pending, so refuse it here instead.
+        # "queued": a Start or Restart the main thread has not picked up yet. Set
+        # under the lock BEFORE the put, so the main thread's own state (which
+        # takes the same lock) always lands after it and never under it; and only
+        # from an idle state, so a Restart does not hide a live one.
+        with self.state_lock:
+            state = self.state["state"]
+            live = state in ("queued", "stopping", "checking", "tearing down", "starting",
+                             "running", "exited")
+            if cmd == "start" and live:
+                return "busy (%s): use Restart or Stop" % state
+            if cmd == "check" and live:
+                return "stop the sounder first: the full check opens the radios"
+            if cmd in ("start", "restart") and not live:
+                self.state["state"] = "queued"
+            self.cmds.put((cmd, conf))
+        return None
+
+    def _kill(self):
+        """SIGINT the running sounder's group, then SIGKILL what is left.
+
+        SIGINT is the sounder's own stop (its only handler, signalHandler.cpp):
+        the loop ends and the radios close through their destructors, which
+        print the end-of-run checks (RX read check, AP-87 slot check,
+        RX_HOST_STATUS) and write the end-of-run state records. SIGTERM took
+        the default action and skipped all of it, so a dashboard session's log
+        never had those lines. SIGKILL after the grace releases the boards the
+        same way SIGTERM did (the kernel closes the sockets)."""
+        proc = self.proc
+        if proc is None or proc.poll() is not None:
+            return
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGINT)
+        except ProcessLookupError:
+            return
+        pgid = proc.pid  # the sounder leads its own session (setsid in _die_with_parent)
+        deadline = time.time() + self.STOP_GRACE_S
+        while proc.poll() is None and time.time() < deadline:
+            time.sleep(0.1)
+        # The whole group, even when the leader went on SIGINT: a child left
+        # behind would still hold the radios when the next start runs.
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            print("[csi] sounder pid %d did not exit after SIGKILL" % proc.pid, flush=True)
+
+    def _pending(self):
+        """The next command for a live session. A Start or Check is dropped: one
+        queued before the state showed the session (a double click) must not
+        restart it, and the full check must not open radios a sounder holds."""
+        while True:
+            try:
+                c = self.cmds.get_nowait()
+            except queue.Empty:
+                return None
+            if c[0] not in ("start", "check"):
+                return c
+
+    def _check(self, quick):
+        """Run csi_gui/check_setup.py for the current config; keep its report for
+        the page. Returns False when it found a FAIL (or could not run)."""
+        self._set(state="checking")
+        cmd = ["python3", "csi_gui/check_setup.py", "--conf", self.conf, "--json"]
+        if quick:
+            cmd.append("--quick")
+        try:
+            out = subprocess.run(cmd, cwd=self.sd, env=self.env, timeout=180,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            rep = json.loads(out.stdout)
+        except (OSError, subprocess.TimeoutExpired, ValueError) as e:
+            rep = {"ok": False, "quick": quick, "conf": self.conf, "results": [
+                {"level": "FAIL", "what": "check", "detail": "check_setup.py did not run (%s)" % e,
+                 "fix": "Run it by hand: python3 csi_gui/check_setup.py --conf %s" % self.conf}]}
+        rep["when"] = time.strftime("%H:%M:%S")
+        rep["id"] = time.time()  # identity for the page; `when` can repeat within a second
+        self._set(check=rep)
+        for r in rep["results"]:
+            if r["level"] in ("FAIL", "WARN"):
+                print("[check] %s %s: %s" % (r["level"], r["what"], r["detail"]), flush=True)
+        return rep["ok"]
+
+    def _wait(self, seconds):
+        """Sleep, but return a queued command as soon as one arrives."""
+        deadline = time.time() + seconds
+        while time.time() < deadline and not self.stopping:
+            c = self._pending()
+            if c is not None:
+                return c
+            time.sleep(0.1)
+        return None
 
     def _teardown(self):
         try:
@@ -512,55 +1017,119 @@ class SounderSupervisor:
             text = (exc.stdout or b"").decode("utf-8", errors="replace") + "timed out\n"
         for line in text.splitlines():
             print("[teardown] " + line, flush=True)
+        self.td_text = text
+
+    def _open_log(self):
+        """With --log-dir, one file per sounder start: the command, the
+        teardown before it, then the sounder's own output. None without it or
+        when the file cannot be made (said once; the run goes on)."""
+        if not self.log_dir:
+            return None
+        path = os.path.join(self.log_dir, "sounder_%s.log" % time.strftime("%Y%m%d-%H%M%S", time.gmtime()))
+        try:
+            os.makedirs(self.log_dir, exist_ok=True)
+            f = open(path, "a", encoding="utf-8")
+            f.write("# %s (in %s)\n" % (" ".join(self.cmd), self.sd))
+            f.writelines("# teardown: %s\n" % l for l in self.td_text.splitlines())
+            f.flush()
+        except OSError as e:
+            print("[csi] NOT logging this start: %s" % e, flush=True)
+            return None
+        print("[csi] logging this start to %s" % path, flush=True)
+        return f
 
     def _start(self):
-        print("[csi] launching sounder --view in %s" % self.sd, flush=True)
-        proc = subprocess.Popen(self.cmd, cwd=self.sd, env=self.env,
-                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                preexec_fn=_die_with_parent)
-        threading.Thread(target=_pump, args=(proc.stdout, "[sounder] "),
+        replay = self.conf in self.replays
+        _replaying[0] = replay
+        print("[csi] launching %s in %s" % ("the replay of " + self.replays[self.conf][0] if replay
+                                            else "sounder --view", self.sd), flush=True)
+        log = self._open_log()
+        try:
+            proc = subprocess.Popen(self.cmd, cwd=self.sd, env=self.env,
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    preexec_fn=_die_with_parent)
+        except BaseException:
+            if log is not None:
+                log.close()
+            raise
+        threading.Thread(target=_pump, args=(proc.stdout, "[replay] " if replay else "[sounder] ", log),
                          daemon=True).start()
         return proc
 
     def run(self):
-        """Supervise until the sounder gives up or stop() is called. Main thread only."""
+        """One session: teardown, start, retry a failed start, until the sounder
+        gives up, stop() is called, or a dashboard command arrives (returned, for
+        serve() to act on). Main thread only."""
         for attempt in range(1, self.ATTEMPTS + 1):
             if self.stopping:
-                return
-            self._teardown()
-            time.sleep(self.SETTLE_AFTER_TEARDOWN_S)
-            if self.stopping:
-                return
+                return None
+            if self.td_cmd is not None:  # a replay opens no radio: nothing to tear down
+                self._set(state="tearing down", attempt=attempt, pid=None, rc=None)
+                self._teardown()
+                c = self._wait(self.SETTLE_AFTER_TEARDOWN_S)
+                if c is not None or self.stopping:
+                    return c
+            self._set(state="starting")
             self.proc = self._start()
+            self._set(state="running", pid=self.proc.pid)
             print("[csi] sounder pid %d, attempt %d of %d"
                   % (self.proc.pid, attempt, self.ATTEMPTS), flush=True)
             while self.proc.poll() is None and not self.stopping:
-                time.sleep(0.5)
+                c = self._pending()
+                if c is not None:
+                    return c
+                time.sleep(0.2)
             if self.stopping:
-                return
+                return None
+            self._set(state="exited", rc=self.proc.returncode, pid=None)
             print("[sounder] exited rc=%s, retrying..." % self.proc.returncode, flush=True)
-            time.sleep(self.RETRY_DELAY_S)
+            c = self._wait(self.RETRY_DELAY_S)
+            if c is not None:
+                return c
+        self._set(state="gave up")
         print("[csi] sounder gave up after %d attempts; dashboard stays up"
               % self.ATTEMPTS, flush=True)
+        return None
+
+    def serve(self, autostart):
+        """Main thread: optionally run a session now, then act on dashboard
+        commands for the life of the process. A command that arrives during a
+        session interrupts it (stop, or a restart with its config)."""
+        c = ("start", None) if autostart else None
+        while not self.stopping:
+            if c is None:
+                try:
+                    c = self.cmds.get(timeout=0.5)
+                except queue.Empty:
+                    continue
+            cmd, conf = c
+            c = None
+            self._set(state="stopping")
+            self._kill()
+            self._set(pid=None)
+            if cmd == "stop":
+                self._set(state="stopped")
+            if conf:
+                self.set_conf(conf)
+            if cmd == "check":
+                self._check(quick=False)
+                self._set(state="stopped")
+            elif cmd in ("start", "restart"):
+                # The quick check first (no radio opened): a missing build, plugin
+                # or server is named on the page instead of as a sounder exit code.
+                if self.conf not in self.replays and not self._check(quick=True):
+                    self._set(state="check failed")
+                    continue
+                c = self._pending()  # a Stop or Restart pressed during the check
+                if c is not None:
+                    continue
+                print("[csi] dashboard %s: %s" % (cmd, self.conf), flush=True)
+                c = self.run()
 
     def stop(self):
-        """SIGTERM the sounder's group, then SIGKILL what is left. Safe to repeat."""
+        """SIGINT the sounder's group, then SIGKILL what is left. Safe to repeat."""
         self.stopping = True
-        proc = self.proc
-        if proc is None or proc.poll() is not None:
-            return
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-        except ProcessLookupError:
-            return
-        deadline = time.time() + self.STOP_GRACE_S
-        while proc.poll() is None and time.time() < deadline:
-            time.sleep(0.1)
-        if proc.poll() is None:
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+        self._kill()
 
 
 def main():
@@ -568,11 +1137,18 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--udp-host", default="0.0.0.0", help="CSI UDP bind host")
     ap.add_argument("--udp-port", type=int, default=9999, help="CSI UDP bind port")
-    ap.add_argument("--http-host", default="0.0.0.0", help="web server bind host")
+    ap.add_argument("--record", default=os.environ.get("HOUDINI_CSI_RECORD") or None,
+                    help="append every datagram to this file for replay_feed.py, the "
+                         "canned-data fallback (default: $HOUDINI_CSI_RECORD, else off)")
+    ap.add_argument("--record-max-mb", type=float, default=2048.0,
+                    help="stop recording at this size (default: %(default)s)")
+    ap.add_argument("--http-host", default=None,
+                    help="web server bind host (default 0.0.0.0; 127.0.0.1 with --control)")
     ap.add_argument("--http-port", type=int, default=8080, help="web server port")
     ap.add_argument("--fps", type=float, default=30.0, help="dashboard push rate")
-    ap.add_argument("--mag-top", type=float, default=90.0,
-                    help="top of the FIXED |H| axis in dB (default: %(default)s)")
+    ap.add_argument("--mag-top", type=float, default=None,
+                    help="top of the FIXED |H| axis in dB (default: the config's "
+                         "dashboard_mag_top, else %.0f)" % MAG_TOP_DEFAULT)
     ap.add_argument("--mag-span", type=float, default=40.0,
                     help="height of the FIXED |H| axis in dB (default: %(default)s). "
                          "Both panels are fixed frame to frame; widen the span if "
@@ -583,32 +1159,65 @@ def main():
                          "card will read as stale (default: %(default)s)")
     ap.add_argument("--launch", action="store_true",
                     help="also launch the sounder in viewing mode on this host")
-    ap.add_argument("--sounder-dir", default=os.path.expanduser("~/repos/HoudiniLab/CC/Sounder"))
-    ap.add_argument("--venv", default=os.path.expanduser("~/houdini_test"),
-                    help="virtualenv prefix holding SoapySDR and the Houdini "
-                         "plugin, used when --launch runs the sounder")
+    ap.add_argument("--control", action="store_true",
+                    help="Start / Stop / Restart and a config choice on the page (runs "
+                         "the sounder on this host like --launch, but only when asked "
+                         "unless --launch is also given). Binds the web server to "
+                         "127.0.0.1 unless --http-host is given: use the SSH port-forward")
+    ap.add_argument("--sounder-dir", default=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                    help="the sounder checkout to run (default: the one this file is in)")
+    ap.add_argument("--replay", action="append", default=[], metavar="FILE[=LABEL]",
+                    help="with --control, offer this recording in the page's list (repeatable); Start "
+                         "plays it in a loop into this dashboard, with no radio, no setup check and "
+                         "no teardown, and a --record recording pauses while it plays")
+    ap.add_argument("--configs", choices=("all", "labelled"), default="all",
+                    help="with --control, the configs the page offers: every files/houdini*.json "
+                         "(all), or only those carrying a short `_label`, the demo's (labelled); "
+                         "the --conf config is always offered")
+    ap.add_argument("--venv", default=os.environ.get("VIRTUAL_ENV") or os.path.expanduser("~/houdini_test"),
+                    help="virtualenv prefix holding SoapySDR (and the Houdini plugin, "
+                         "unless HOUDINI_SOAPY_ROOT names a release prefix), used when "
+                         "--launch or --control runs the sounder (default: the activated "
+                         "venv, else %(default)s)")
     ap.add_argument("--conf", default="files/houdini-1u.json")
     ap.add_argument("--storepath", default="/tmp/houdini_hdf5")
     ap.add_argument("--max-frame", type=int, default=2_000_000_000,
                     help="HOUDINI_MAX_FRAME for continuous viewing")
     ap.add_argument("--csi-fps", type=float, default=0.0,
                     help="HOUDINI_CSI_FPS per-antenna stream rate (0 = sounder default 30)")
+    ap.add_argument("--log-dir", default=None,
+                    help="with --launch/--control, write each sounder start's output to "
+                         "<dir>/sounder_<UTC>.log for the report tools (default: off)")
     ap.add_argument("--dest-host", default="127.0.0.1",
                     help="host the sounder streams CSI to (when --launch)")
     args = ap.parse_args()
     # Validate BEFORE anything launches: a SystemExit after the supervisor starts
-    # orphaned the sounder group holding the radios (second review 2.5).
-    if not (math.isfinite(args.mag_top) and math.isfinite(args.mag_span)
+    # orphans the sounder group holding the radios.
+    if not ((args.mag_top is None or math.isfinite(args.mag_top)) and math.isfinite(args.mag_span)
             and args.mag_span > 0):
         raise SystemExit("--mag-top/--mag-span must be finite (span > 0)")
+    if not (math.isfinite(args.fps) and args.fps > 0):
+        raise SystemExit("--fps must be a positive number")  # every SSE handler sleeps 1/fps
 
-    t = threading.Thread(target=_udp_loop, args=(args.udp_host, args.udp_port),
+    recorder = None
+    if args.record:
+        recorder = csi_record.Recorder(args.record, int(args.record_max_mb * 1e6),
+                                       log=lambda m: print(m, flush=True))
+        if recorder.f is None:
+            recorder = None  # it said why
+        else:
+            print("[csi] recording every datagram to %s" % args.record, flush=True)
+    t = threading.Thread(target=_udp_loop, args=(args.udp_host, args.udp_port, recorder),
                          daemon=True)
     t.start()
 
     sup = None
-    if args.launch:
+    if args.launch or args.control:
         sup = SounderSupervisor(args, "%s:%d" % (args.dest_host, args.udp_port))
+    if args.http_host is None:
+        # Buttons that start a radio transmitting are not for the whole lab
+        # network: with --control, localhost, reached through the SSH port-forward.
+        args.http_host = "127.0.0.1" if args.control else "0.0.0.0"
 
     def _stats_loop():
         while True:
@@ -624,6 +1233,8 @@ def main():
                 extra += ", SYN1 dropped=%d" % _sync_bad[0]
             if _bad_payload[0]:
                 extra += ", payloads dropped=%d" % _bad_payload[0]
+            if _bad_dgram[0]:
+                extra += ", unparsable datagrams=%d" % _bad_dgram[0]
             print("[csi] %d datagrams, antennas=%s%s" % (n, ants, extra),
                   flush=True)
     threading.Thread(target=_stats_loop, daemon=True).start()
@@ -631,21 +1242,13 @@ def main():
     srv = ThreadingHTTPServer((args.http_host, args.http_port), Handler)
     srv.fps = args.fps
     srv.stale_ms = args.stale_ms
-    srv.mag_top = args.mag_top
+    # The |H| level depends on the config (its FFT size, above all), so the config
+    # may carry the axis top; an explicit --mag-top wins. Resolved per page load
+    # so a config switch under --control takes effect on the next reload.
+    srv.mag_top = lambda: _mag_top(args.sounder_dir, sup.conf if sup else args.conf, args.mag_top)
     srv.mag_span = args.mag_span
-    # Nominal guard seats for the ADC panel's dashed markers, read from the
-    # config when one is given (Opus review M16: 128 was hardcoded but eight
-    # shipped configs use 160); harmless default otherwise.
-    srv.guard_pre, srv.guard_post = 128, 128
-    if getattr(args, "conf", None):
-        try:
-            with open(args.conf) as cf:
-                cj = json.load(cf)
-            srv.guard_pre = int(cj.get("ofdm_tx_zero_prefix", 128))
-            srv.guard_post = int(cj.get("ofdm_tx_zero_postfix", 128))
-        except Exception as exc:  # noqa: BLE001 -- markers are cosmetic
-            print("[csi] conf parse for guard markers failed: %s" % exc)
     srv.daemon_threads = True
+    srv.control = sup if args.control else None
     # Serve in a daemon thread so the main thread can wait for Ctrl+C. (Calling
     # srv.shutdown() from a signal handler on the serve_forever thread deadlocks.)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -654,22 +1257,33 @@ def main():
           % (url, args.http_port, args.http_port), flush=True)
 
     def _cleanup():
-        if sup is not None:  # SIGTERM then SIGKILL the sounder's process group
+        if sup is not None:  # SIGINT then SIGKILL the sounder's process group
             sup.stop()
 
     def _sigterm(*_):
-        print("\n[csi] shutting down (SIGTERM)", flush=True)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        print("\n[csi] shutting down (SIGTERM): stopping the sounder, up to %.0f s"
+              % SounderSupervisor.STOP_GRACE_S, flush=True)
         _cleanup()
         os._exit(0)
     signal.signal(signal.SIGTERM, _sigterm)
+    # SIGINT stops the dashboard even when a script started it in the background
+    # (which leaves SIGINT ignored, and Python then never raises KeyboardInterrupt).
+    signal.signal(signal.SIGINT, signal.default_int_handler)
 
     try:
-        if sup is not None:
+        if sup is not None and args.control:
+            sup.serve(autostart=args.launch)  # main thread: PR_SET_PDEATHSIG
+        elif sup is not None:
             sup.run()  # main thread: PR_SET_PDEATHSIG is tied to the forking thread
         while True:
             time.sleep(0.5)
     except KeyboardInterrupt:
-        print("\n[csi] shutting down (Ctrl+C)", flush=True)
+        # A second Ctrl+C during the sounder's grace must not cut its clean stop
+        # short (a traceback, then the launcher's death SIGTERMs the sounder).
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        print("\n[csi] shutting down (Ctrl+C): stopping the sounder, up to %.0f s"
+              % SounderSupervisor.STOP_GRACE_S, flush=True)
         _cleanup()
         os._exit(0)  # hard exit: avoids any serve_forever/shutdown deadlock
 
@@ -679,7 +1293,7 @@ PAGE = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Houdini live CSI</title>
+<title>Houdini LIVE: Magic in the airwaves</title>
 <link rel="stylesheet" href="/vendor/tabler.min.css">
 <style>
 /* Local layer: only what Tabler has no class for. Every colour here is a Tabler
@@ -687,32 +1301,31 @@ PAGE = r"""<!doctype html>
    to keep in step. Same reason the canvases read their colours from these vars. */
 .csi-cards{display:grid;gap:1rem;padding:1rem;align-items:start;
   grid-template-columns:repeat(auto-fit,minmax(520px,1fr))}
-/* No fixed card width. The old 620px card gave 586px of content while the views
-   needed 588, so every panel was clipped by 2px: sizing a card by arithmetic that
-   has to be redone whenever a panel changes is the bug, not the number. The
-   canvases now stretch to whatever the grid gives them. */
+/* No fixed card width: the canvases stretch to whatever the grid gives them, so a
+   panel change never needs the card's width redone by arithmetic. */
 .csi-card{min-width:0}
-/* Both views need 588px of content and the card gives 606, but a future size change
-   should degrade to a scrollbar rather than silently clip a panel off the edge. */
-.csi-plots{min-width:0}
 /* A stale card dims its plots but NOT its header, so the badge that explains the
    dimming does not dim along with the thing it is explaining. */
 .csi-card.stale .csi-plots{opacity:.4}
-.csi-plots{display:grid;grid-template-columns:1fr 1fr;gap:.75rem 1rem}
+/* A collapsed card keeps its header (title, badges, the sync chip) and hides the
+   rest. A class, not the hidden attribute: Tabler's d-* utilities override that. */
+.csi-card.csi-collapsed .csi-collapsible{display:none}
+/* Tabler's .d-flex{display:flex!important} comes after its [hidden] rule and so
+   beat it: a view-only dashboard showed the control bar. An ID rule wins. */
+#ctl[hidden]{display:none!important}
+.csi-fold svg{transition:transform .15s}
+.csi-card.csi-collapsed .csi-fold svg{transform:rotate(-90deg)}
+.csi-plots{display:grid;grid-template-columns:1fr 1fr;gap:.75rem 1rem;min-width:0}
 .csi-phase-stack{display:flex;flex-direction:column;gap:.35rem}
-.csi-h-half canvas{height:74px}
-/* (retired) The quality strip sat in the SAME grid cell as the magnitude panel, directly
-   under it, so the two share one subcarrier axis exactly. A strip in its own
-   full-width row would be a different pixels-per-subcarrier scale, and a null would
-   appear at two different x positions in two panels that describe the same tone. */
+.csi-h-half canvas{height:110px}
 .csi-adc .csi-plot{grid-column:1 / -1}
 .csi-head{grid-column:1 / -1;margin-top:.5rem}
-.csi-head-lbl{font-size:.7rem;color:var(--tblr-secondary);margin-bottom:.15rem}
+.csi-head-lbl{font-size:.85rem;color:var(--tblr-secondary);margin-bottom:.15rem}
 .csi-head-pct{font-variant-numeric:tabular-nums}
-.csi-plot-title{font-size:.7rem;color:var(--tblr-secondary);margin-bottom:.15rem;
+.csi-plot-title{font-size:.85rem;color:var(--tblr-secondary);margin-bottom:.15rem;
   display:flex;align-items:center;gap:.35rem}
-.csi-stage{display:flex}
-.csi-y-axis{position:relative;width:36px;flex:0 0 36px;font-size:.65rem;
+.csi-stage{display:flex;min-width:0}
+.csi-y-axis{position:relative;width:46px;flex:0 0 46px;font-size:.8rem;
   color:var(--tblr-secondary);font-variant-numeric:tabular-nums}
 .csi-y-axis span{position:absolute;right:5px;transform:translateY(-50%);white-space:nowrap}
 /* The top and bottom labels sit ON the canvas edge, so centring them there would
@@ -722,16 +1335,17 @@ PAGE = r"""<!doctype html>
 .csi-y-axis span:last-child{transform:translateY(-100%)}
 .csi-plot canvas{display:block;width:100%;background:var(--tblr-bg-surface-tertiary);
   border:1px solid var(--tblr-border-color);border-radius:4px}
-/* Heights live here, widths come from the grid. Bigger than the first pass: at
-   120px a 64-subcarrier trace had under 2px per subcarrier. */
+/* Heights live here, widths come from the grid (at 120px a 64-subcarrier trace
+   had under 2px per subcarrier). */
 .csi-h-line canvas{height:190px}
 .csi-h-wf   canvas{height:190px}
 .csi-h-cons canvas{height:250px}
+.csi-h-cir  canvas{height:150px}
+.csi-quality{font-size:.95rem;line-height:1.5;align-self:center}
 .csi-h-adc  canvas{height:220px}
-.csi-stage{min-width:0}
 .csi-plot{min-width:0}
-.csi-x-axis{display:flex;justify-content:space-between;margin-left:36px;margin-top:.1rem;
-  font-size:.65rem;color:var(--tblr-secondary);font-variant-numeric:tabular-nums}
+.csi-x-axis{display:flex;justify-content:space-between;margin-left:46px;margin-top:.1rem;
+  font-size:.8rem;color:var(--tblr-secondary);font-variant-numeric:tabular-nums}
 .tnum{font-variant-numeric:tabular-nums}
 </style>
 </head>
@@ -743,37 +1357,70 @@ PAGE = r"""<!doctype html>
            fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
            stroke-linejoin="round" class="icon"><path stroke="none" d="M0 0h24v24H0z" fill="none"/>
         <path d="M6 18l0 -3"/><path d="M10 18l0 -6"/><path d="M14 18l0 -9"/><path d="M18 18l0 -12"/></svg>
-      <span>Houdini live CSI</span>
+      <span>Houdini LIVE: Magic in the airwaves</span>
     </span>
     <div class="ms-auto d-flex align-items-center gap-3">
+      <div class="d-flex align-items-center gap-2" id="ctl" hidden>
+        <select class="form-select form-select-sm" id="ctl-conf" style="width:auto"
+                title="Config for Start / Restart"></select>
+        <button class="btn btn-sm btn-outline-secondary" data-cmd="check"
+                title="Check this host and both radios before starting">Check</button>
+        <button class="btn btn-sm btn-success" data-cmd="start">Start</button>
+        <button class="btn btn-sm btn-warning" data-cmd="restart">Restart</button>
+        <button class="btn btn-sm btn-danger" data-cmd="stop">Stop</button>
+        <span class="text-secondary tnum" id="ctl-state"></span>
+      </div>
       <span class="text-secondary tnum" id="meta">connecting&hellip;</span>
       <button class="btn btn-icon btn-ghost-secondary" id="theme"
               title="Toggle light / dark" aria-label="Toggle light / dark"></button>
     </div>
   </div>
 </header>
+<div id="check" class="px-3 pt-3" hidden></div>
 <div id="sync"></div>
 <div class="csi-cards" id="ants"></div>
 <script>
 // Canvas sizes are MEASURED from the layout every time it changes, not declared
 // here: the panels stretch with the card, so a hard-coded width could only ever be
 // wrong. Heights come from the .csi-h-* classes. See fitCard().
-// Full scale for the sample container: the 14-bit ADC is MSB-aligned in int16, so
-// the rail really is 32768 and not the converter's 8191 (device/README.md:239,
-// Full scale of the int16 sample CONTAINER (the absolute converter mapping
-// is unmeasured, DEMO_VERIFICATION.md 2.19). The PARSER is the single
-// page-side source: it stamps `full_scale` on every record and drawAdc
-// reads the record. The ADC2 wire does not carry it, so a sounder-side
-// change still means editing the parser constant (second review 2.6).
+// Full scale of the int16 sample CONTAINER: the 14-bit ADC is MSB-aligned in
+// int16, so the rail is 32767 and not the converter's 8191 (the absolute
+// converter mapping is unmeasured, DEMO_VERIFICATION.md 2.19). The server's
+// parser stamps `full_scale` on every ADC record and drawAdc reads it; the ADC2
+// wire does not carry it, so a sounder-side change means editing the parser.
 const ADC_FS=32767;
-const GUARD_PRE=__GUARD_PRE__, GUARD_POST=__GUARD_POST__;
 const STALE_MS=__STALE_MS__;         // no update for this long -> dim + badge
 // Both top panels are FIXED frame to frame. An axis that re-ranges per frame makes
-// a static channel look alive and hides real drift, so nothing here auto-scales.
-// (raynet-compiler's LinePlot deliberately does re-range: that is right for a
-// reviewed capture and wrong for a live one. Do not copy it here.)
-const MAG_TOP=__MAG_TOP__, MAG_BOT=__MAG_TOP__-__MAG_SPAN__;
+// a static channel look alive and hides real drift, so nothing here auto-scales
+// per frame. (raynet-compiler's LinePlot deliberately does re-range: that is right
+// for a reviewed capture and wrong for a live one. Do not copy it here.)
+// The |H| axis is per card and STEPPED [user: not auto-scale, but a few updates]:
+// the bands can sit 20 dB apart (the X-band through the XUD1A), so one config
+// top leaves a card off scale. Each card starts at the config's top and moves in
+// MAG_STEP dB steps, at most once per MAG_RERANGE_MS, and only when its trace
+// has left the axis or sat in its bottom quarter for that whole period
+// (nextMagTop). A steady trace never moves it.
+const MAG_TOP=__MAG_TOP__, MAG_SPAN=__MAG_SPAN__, MAG_BOT=MAG_TOP-MAG_SPAN;
+const MAG_STEP=10, MAG_RERANGE_MS=3000;
+// The axis top for a trace whose high level over the last period is `hi` (the
+// highest per-frame 95th percentile of |H|, dB): unchanged while hi sits in the
+// axis's top three quarters, else the next step at least 3 dB above hi.
+function nextMagTop(top, span, hi){
+  if(!isFinite(hi)) return top;
+  if(hi<=top && hi>=top-0.75*span) return top;
+  return Math.ceil((hi+3)/MAG_STEP)*MAG_STEP;
+}
 const CONS_R=1.7;                     // constellation half-width, in unit-power units
+// The Spectrum tab's fixed axis, dBFS per bin. From the V1 run's dumps at
+// 240 kHz bins: occupied band -57 (sub-6) and -61 (X-IF), the sub-6 Fs/2 spur
+// -75, the X-IF refclk image -80, floors -125 (sub-6, int16 quantisation past
+// the channel filter) and -107 (X-IF). The top is a full-scale tone.
+const SPC_TOP=0, SPC_BOT=-140, SPC_STEP=20;
+function spcLabels(){
+  const out=[];
+  for(let v=SPC_TOP;v>=SPC_BOT;v-=SPC_STEP) out.push(String(v));
+  return out;
+}
 const cards={};                       // ant_id -> {mag,phase,wf,wfimg,cons,...}
 
 // ---- theme ---------------------------------------------------------------
@@ -797,7 +1444,7 @@ function readTheme(){
   const s=getComputedStyle(document.documentElement), v=n=>s.getPropertyValue(n).trim();
   C={grid:v('--tblr-border-color'), bg:v('--tblr-bg-surface-tertiary'),
      mag:v('--tblr-azure'), phase:v('--tblr-green'), warn:v('--tblr-red'),
-     rawph:v('--tblr-yellow'),
+     mer:v('--tblr-purple'),
      pts:'rgba('+v('--tblr-azure-rgb')+',0.55)'};
 }
 let themeChanged=false;
@@ -871,6 +1518,13 @@ function magLabels(){
   for(let i=0;i<=4;i++) out.push(formatAxisValue(MAG_TOP-(MAG_TOP-MAG_BOT)*i/4));
   return out;
 }
+// Relabel a card's |H| axis after nextMagTop moved it.
+function setMagAxis(card){
+  if(!card.magYax) return;
+  card.magYax.querySelectorAll('span').forEach((s,i)=>{
+    s.textContent=formatAxisValue(card.magTop-MAG_SPAN*i/4);
+  });
+}
 function makeCard(ant){
   const wrap=document.createElement('div');
   wrap.className='card csi-card';
@@ -879,59 +1533,81 @@ function makeCard(ant){
 
   wrap.innerHTML=
     '<div class="card-header py-2">'
-     +'<h3 class="card-title">RX antenna '+ant+'</h3>'
+     +'<h3 class="card-title">RX antenna '+ant+'</h3>'  // named by band once its metadata arrives (setCardTitle)
      +'<div class="card-actions d-flex gap-1">'
        +'<span class="badge bg-orange-lt text-orange csi-stale" hidden></span>'
+       +foldButton()
      +'</div>'
     +'</div>'
-    +'<div class="card-body p-3">'
+    +'<div class="card-body p-3 csi-collapsible">'
      +'<ul class="nav nav-underline mb-3 csi-tabs">'
        +'<li class="nav-item"><a href="#" class="nav-link active" data-view="channel">Channel</a></li>'
-       +'<li class="nav-item"><a href="#" class="nav-link" data-view="adc">ADC</a></li>'
+       +'<li class="nav-item"><a href="#" class="nav-link" data-view="adc">Spectrum</a></li>'
      +'</ul>'
      +'<div class="csi-plots csi-view" data-view="channel">'
-      +frame('|H| (dB) vs subcarrier','csi-h-line',magLabels(),['','',''],off)
-      // Raw above corrected [user]: raw = arg(H) exactly as measured (window
-      // back-off ramp + per-run offset); corrected = de-ramped and run-anchored.
+      +frame('|H| (dB rel.) vs subcarrier','csi-h-line',magLabels(),['','',''],off)
+      // MER over the last minute above the phase shape [user]. Raw arg(H) is not
+      // drawn: it carries the FFT window's half-CP advance (56 turns across the
+      // sub-6 band, 114 across the X-band) and shows nothing readable; MER over
+      // time shows steering, fades and interference as they happen.
       +'<div class="csi-phase-stack">'
-      +frame('phase (raw, rad)','csi-h-half',['1.0π','0.0π','-1.0π'],['','',''])
-      +frame('phase (corrected, rad)','csi-h-half',['1.0π','0.0π','-1.0π'],['','',''])
+      +frame('MER (dB), last '+MER_HIST_S+' s','csi-h-half',
+             [MER_TOP,MER_TOP*3/4,MER_TOP/2,MER_TOP/4,0].map(String),['-'+MER_HIST_S+' s','-'+(MER_HIST_S/2)+' s','now'],
+             '<span class="text-secondary tnum csi-mer-now"></span>')
+      +frame('phase shape, delay and common phase removed (deg)','csi-h-half',
+             ['+'+PH_SPAN_DEG+'°','0°','-'+PH_SPAN_DEG+'°'],['','',''],
+             '<span class="text-secondary tnum csi-ph-delay"></span>'
+             +'<span class="badge bg-red-lt text-red csi-ph-off" hidden>off scale</span>')
       +'</div>'
       +frame('waterfall |H| (time down)','csi-h-wf',['older','','now'],['','',''])
       +frame('constellation (equalized U)','csi-h-cons',
              [formatAxisValue(CONS_R),'0.00',formatAxisValue(-CONS_R)],
              [formatAxisValue(-CONS_R),'I','+'+formatAxisValue(CONS_R)])
+      // AP-79: the impulse response of the same H (sounder CIR1, one inverse
+      // FFT per sent frame) on a FIXED 0..-60 dB axis, and the channel's numbers.
+      +frame('CIR |h|² (dB re peak) vs delay','csi-h-cir',
+             ['0','-15','-30','-45','-60'],['','peak',''])
+      +'<div class="csi-quality tnum"></div>'
      +'</div>'
      +'<div class="csi-plots csi-adc csi-view" data-view="adc" hidden>'
-      +frame('raw ADC min/max envelope, whole slot','csi-h-adc',
-             ['','','','',''],['0','sample','end'],clip)
-      // The trace is FITTED to the slot, so the absolute question it cannot answer
-      // ("how much converter range am I using") gets its own fixed-scale widget.
+      // The pilot slot's spectrum (SPC1). It shows where the power is, not how
+      // close the samples come to the rail, so the converter range (ADC2) keeps
+      // its own fixed-scale widget and the clipping badge.
+      +frame('pilot spectrum','csi-h-adc',spcLabels(),['','',''],
+             '<span class="badge bg-red-lt text-red csi-spc-off" hidden>off scale</span>'+clip)
       +'<div class="csi-head">'
         +'<div class="d-flex justify-content-between csi-head-lbl">'
           +'<span>converter range used</span><span class="csi-head-pct"></span></div>'
         +'<div class="progress progress-sm"><div class="progress-bar csi-head-bar"'
         +' style="width:0%"></div></div></div>'
      +'</div>'
-     +'<div class="text-secondary tnum mt-3 csi-status" style="font-size:.75rem"></div>'
-     +'<div class="text-secondary tnum mt-1 csi-adc-status" style="font-size:.75rem"></div>'
+     +'<div class="text-secondary tnum mt-3 csi-status" style="font-size:.85rem"></div>'
+     +'<div class="text-secondary tnum mt-1 csi-adc-status" style="font-size:.85rem"></div>'
     +'</div>';
   document.getElementById('ants').appendChild(wrap);
   const cvs=[...wrap.querySelectorAll('.csi-view canvas')];
-  cards[ant]={magCv:cvs[0],rawPhaseCv:cvs[1],phaseCv:cvs[2],wfCv:cvs[3],
-              consCv:cvs[4],adcCv:cvs[5],dim:null,wfimg:null,
+  cards[ant]={magTop:MAG_TOP,magHi:-Infinity,magT:0,magYax:wrap.querySelector('.csi-h-line .csi-y-axis'),
+              magCv:cvs[0],merCv:cvs[1],phaseCv:cvs[2],wfCv:cvs[3],
+              consCv:cvs[4],cirCv:cvs[5],spcCv:cvs[6],dim:null,wfimg:null,
+              quality:wrap.querySelector('.csi-quality'),
+              ant:ant, titleEl:wrap.querySelector('.card-title'),
+              phOff:wrap.querySelector('.csi-ph-off'),phDelay:wrap.querySelector('.csi-ph-delay'),
+              phAcc:null,phLast:null,phT:0,
+              merHist:[],merT:0,merNow:wrap.querySelector('.csi-mer-now'),
+              cirX:wrap.querySelectorAll('.csi-h-cir .csi-x-axis span'),
               status:wrap.querySelector('.csi-status'),
               adcStatus:wrap.querySelector('.csi-adc-status'),
               el:wrap,badge:wrap.querySelector('.csi-stale'),
               off:wrap.querySelector('.csi-off'),
               clip:wrap.querySelector('.csi-clip'),
-              adcTitle:wrap.querySelector('.csi-adc .csi-plot-title span'),
-              adcY:wrap.querySelectorAll('.csi-adc .csi-y-axis span'),
+              spcTitle:wrap.querySelector('.csi-adc .csi-plot-title span'),
+              spcOff:wrap.querySelector('.csi-spc-off'),
+              spcX:wrap.querySelectorAll('.csi-adc .csi-x-axis span'),
               headPct:wrap.querySelector('.csi-head-pct'),
               headBar:wrap.querySelector('.csi-head-bar'),
               xax:wrap.querySelectorAll('.csi-view[data-view=channel] .csi-x-axis'),
-              lastCsi:-1,lastCns:-1,lastAdc:-1,
-              csiRec:null,cnsRec:null,adcRec:null,frame:0};
+              lastCsi:-1,lastCns:-1,lastAdc:-1,lastCir:-1,lastSpc:-1,
+              csiRec:null,cnsRec:null,adcRec:null,cirRec:null,spcRec:null,metRec:null};
   // Tabs are per card so you can watch one antenna's ADC while another shows its
   // channel, which is how you find the one converter that is actually clipping.
   // Measure once the card is in the document, and again whenever the grid reflows.
@@ -947,12 +1623,44 @@ function makeCard(ant){
         v=>{v.hidden=(v.dataset.view!==want);});
       // A canvas in a hidden div measures 0, so anything drawn while the tab was
       // closed went nowhere. Re-fit and repaint the moment it becomes visible.
-      const card=cards[ant];
-      fitCard(card);
-      if(card.csiRec) drawCsi(card,card.csiRec,false);
-      if(card.cnsRec) drawCons(card,card.cnsRec);
-      if(card.adcRec) drawAdc(card,card.adcRec);
+      repaintCard(cards[ant]);
     });
+  });
+  // Expanding repaints for the same reason; while collapsed nothing is drawn.
+  setupFold(wrap,'ant:'+ant,()=>repaintCard(cards[ant]));
+}
+function repaintCard(card){
+  fitCard(card);
+  if(card.csiRec) drawCsi(card,card.csiRec,false);
+  if(card.cnsRec) drawCons(card,card.cnsRec);
+  if(card.adcRec) drawAdc(card,card.adcRec);
+  if(card.spcRec) drawSpc(card,card.spcRec);
+  if(card.cirRec) drawCir(card,card.cirRec);
+  drawMer(card);
+}
+
+// Collapsible cards [user]: a chevron in the header folds the card to its header.
+// Remembered per browser, per card; a browser that refuses storage just starts open.
+const FOLD_KEY='csi-fold:';
+const CHEVRON='<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none"'
+  +' stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon m-0">'
+  +'<path stroke="none" d="M0 0h24v24H0z" fill="none"/><path d="M6 9l6 6l6 -6"/></svg>';
+function foldButton(){
+  return '<button class="btn btn-sm btn-icon btn-ghost-secondary csi-fold" title="Collapse / expand"'
+    +' aria-label="Collapse or expand this card" aria-expanded="true">'+CHEVRON+'</button>';
+}
+function isFolded(el){ return el.classList.contains('csi-collapsed'); }
+function setupFold(wrap,key,onOpen){
+  const btn=wrap.querySelector('.csi-fold');
+  const apply=c=>{ wrap.classList.toggle('csi-collapsed',c); btn.setAttribute('aria-expanded',String(!c)); };
+  let folded=false;
+  try{ folded=localStorage.getItem(FOLD_KEY+key)==='1'; }catch(e){}
+  apply(folded);
+  btn.addEventListener('click',()=>{
+    const c=!isFolded(wrap);
+    apply(c);
+    try{ localStorage.setItem(FOLD_KEY+key,c?'1':'0'); }catch(e){}
+    if(!c && onOpen) onOpen();
   });
 }
 
@@ -978,14 +1686,15 @@ function fitCanvas(cv, useDpr){
 function fitCard(card, force){
   const d={};
   d.mag  = fitCanvas(card.magCv,  true);
-  d.rawph= fitCanvas(card.rawPhaseCv,true);
+  d.merh = fitCanvas(card.merCv,  true);
   d.phase= fitCanvas(card.phaseCv,true);
   d.cons = fitCanvas(card.consCv, true);
-  d.adc  = fitCanvas(card.adcCv,  true);
+  d.cir  = fitCanvas(card.cirCv,  true);
+  d.spc  = fitCanvas(card.spcCv,  true);
   d.wf   = fitCanvas(card.wfCv,   false);
   card.dim=d;
-  card.mag=d.mag.ctx; card.rawph=d.rawph.ctx; card.phase=d.phase.ctx;
-  card.cons=d.cons.ctx; card.adc=d.adc.ctx; card.wf=d.wf.ctx;
+  card.mag=d.mag.ctx; card.merc=d.merh.ctx; card.phase=d.phase.ctx;
+  card.cons=d.cons.ctx; card.cir=d.cir.ctx; card.spc=d.spc.ctx; card.wf=d.wf.ctx;
   // Only when the waterfall's device size ACTUALLY changed: its history lives in
   // the bitmap and cannot be resampled honestly, so a real resize has to restart
   // it -- but a no-op refit must not. The card's height changes whenever the
@@ -997,7 +1706,7 @@ function fitCard(card, force){
   }
 }
 
-// Grid only: the labels are HTML now. Horizontal quarters plus the DC centre line.
+// Grid only: the labels are HTML gutters (yAxis). Horizontal quarters plus the DC centre line.
 function grid(ctx,w,h){
   ctx.clearRect(0,0,w,h);
   ctx.strokeStyle=C.grid; ctx.lineWidth=1;
@@ -1019,41 +1728,166 @@ function line(ctx,vals,ymin,ymax,color,w,h){
   ctx.stroke();
 }
 
+// Phase-shape panel [user: "too zoomed out and update too fast"]. It redraws
+// every PH_DRAW_MS, not every frame, and shows the channel's phase SHAPE: from
+// each frame the sounder's de-ramped phase loses its measured delay (a
+// least-squares line, seeded by the mean phase step between adjacent tones so
+// wrapping cannot fool it) and its common phase, and what is left is averaged
+// over the frames since the last draw (as unit phasors) and drawn on a fixed
+// +-PH_SPAN_DEG axis. Removing only the window back-off (the sounder's de-ramp)
+// leaves a tilt that the frame timing moves by about a sample from one frame to
+// the next, plus the two free-running carriers' phase; both swamp the shape,
+// which on a cable is the filters' ripple. The removed delay is printed beside
+// the title instead.
+//
+// MER history [user]: the dashboard's own 1 s pooled MER (the quality line's
+// figure), sampled every MER_STEP_MS into a MER_HIST_S window on a FIXED
+// 0..MER_TOP dB axis; a gap in the line is a stretch with no constellation.
+const MER_HIST_S=60, MER_STEP_MS=500, MER_TOP=40;
+function sampleMer(card,cn){
+  if(!cn || cn.mer_db===undefined) return false;
+  const now=Date.now();
+  if(now-card.merT<MER_STEP_MS) return false;
+  card.merT=now;
+  card.merHist.push({t:now,v:cn.mer_db});
+  while(card.merHist.length && now-card.merHist[0].t>MER_HIST_S*1000) card.merHist.shift();
+  return true;
+}
+function drawMer(card){
+  if(!card.dim || !card.merc) return;
+  const d=card.dim.merh, n=Math.round(MER_HIST_S*1000/MER_STEP_MS)+1, now=Date.now();
+  grid(card.merc,d.w,d.h);
+  const vals=new Array(n).fill(null);
+  for(const p of card.merHist){
+    const k=n-1-Math.round((now-p.t)/MER_STEP_MS);
+    if(k>=0 && k<n) vals[k]=Math.max(0,Math.min(MER_TOP,p.v));
+  }
+  line(card.merc,vals,0,MER_TOP,C.mer,d.w,d.h);
+  const last=card.merHist.length ? card.merHist[card.merHist.length-1] : null;
+  card.merNow.textContent=(last && now-last.t<2000) ? ('now '+last.v.toFixed(1)+' dB') : '';
+}
+const PH_DRAW_MS=500, PH_SPAN_DEG=10;  // measured: the shape is about +-1 deg typical, 5-9 deg at the 99th percentile; +-5 pinned the tails [user]
+function phaseShape(ph){
+  const n=ph.length;
+  let sr=0, si=0;
+  for(let k=0;k+1<n;k++){
+    const a=ph[k], b=ph[k+1];
+    if(a===null||b===null) continue;
+    sr+=Math.cos(b-a); si+=Math.sin(b-a);
+  }
+  const slope=Math.atan2(si,sr);  // rad per tone
+  let cr=0, ci=0;
+  for(let k=0;k<n;k++){
+    if(ph[k]===null) continue;
+    cr+=Math.cos(ph[k]-slope*k); ci+=Math.sin(ph[k]-slope*k);
+  }
+  const cp=Math.atan2(ci,cr);
+  // The mean step behaves like an end-to-end slope, so a ripple with a net tilt
+  // biases it; a least-squares line through the now small residual (no wrapping
+  // left) makes it the standard fit.
+  const r=new Array(n);
+  let m=0, sk=0, skk=0, sr2=0, skr=0;
+  for(let k=0;k<n;k++){
+    if(ph[k]===null){ r[k]=null; continue; }
+    const d=ph[k]-slope*k-cp;
+    r[k]=Math.atan2(Math.sin(d),Math.cos(d));
+    m++; sk+=k; skk+=k*k; sr2+=r[k]; skr+=k*r[k];
+  }
+  const den=m*skk-sk*sk, b=den ? (m*skr-sk*sr2)/den : 0, a=m ? (sr2-b*sk)/m : 0;
+  const re=new Array(n), im=new Array(n);
+  for(let k=0;k<n;k++){
+    if(r[k]===null){ re[k]=null; im[k]=null; continue; }
+    const v=r[k]-a-b*k;
+    re[k]=Math.cos(v); im[k]=Math.sin(v);
+  }
+  return {slope:slope+b, re:re, im:im};
+}
+function drawPhase(card,c,advance){
+  if(advance!==false){
+    const sh=phaseShape(c.phase), n=sh.re.length;
+    let a=card.phAcc;
+    if(!a || a.re.length!==n)
+      a=card.phAcc={re:new Float64Array(n), im:new Float64Array(n), cnt:new Uint32Array(n), frames:0, slope:0};
+    for(let k=0;k<n;k++){
+      if(sh.re[k]===null) continue;
+      a.re[k]+=sh.re[k]; a.im[k]+=sh.im[k]; a.cnt[k]++;
+    }
+    a.frames++; a.slope+=sh.slope;
+  }
+  // A repaint (advance false: a resize, a tab switch, an expand) redraws the last
+  // published mean and leaves the running one alone, or every resize would publish
+  // a one-frame mean.
+  const now=Date.now();
+  if(advance!==false && now-card.phT<PH_DRAW_MS) return;
+  const a=card.phAcc;
+  if(advance!==false && a && a.frames){
+    card.phT=now;
+    const vals=new Array(a.re.length);
+    for(let k=0;k<vals.length;k++)
+      vals[k]=a.cnt[k] ? Math.atan2(a.im[k],a.re[k])*180/Math.PI : null;
+    card.phLast={vals:vals, slope:a.slope/a.frames, frames:a.frames};
+    card.phAcc=null;
+  }
+  const dp=card.dim.phase;
+  grid(card.phase,dp.w,dp.h);
+  const L=card.phLast;
+  if(!L) return;
+  // Clamp so a shape outside the axis is pinned to the edge, and say so.
+  let off=false;
+  const shown=L.vals.map(v=>{
+    if(v===null) return null;
+    if(Math.abs(v)>PH_SPAN_DEG){ off=true; return Math.sign(v)*PH_SPAN_DEG; }
+    return v;
+  });
+  line(card.phase,shown,-PH_SPAN_DEG,PH_SPAN_DEG,C.phase,dp.w,dp.h);
+  card.phOff.hidden=!off;
+  // delay = -slope / (2 pi scs); the tones are one subcarrier apart.
+  const scs=card.metRec && card.metRec.scs_khz ? card.metRec.scs_khz*1e3 : 0;
+  card.phDelay.textContent=scs
+    ? ('delay removed '+(-L.slope/(2*Math.PI*scs)*1e9).toFixed(1)+' ns, '+L.frames+'-frame mean')
+    : (L.frames+'-frame mean');
+}
+
 // The subcarrier axis is only known once a frame has arrived, so the three x-axis
 // gutters that share it are filled in on the first one and left alone after.
 function setScAxis(card,nsc){
   if(card.nsc===nsc) return;
   card.nsc=nsc;
   const lab=['-'+(nsc>>1),'DC','+'+(nsc>>1)];
-  // Gutters in document order: mag, raw phase, corrected phase, waterfall.
-  // The constellation (index 4) keeps its own I/Q labels (Opus review M14:
-  // adding the phase stack shifted these indices and the waterfall lost its
-  // labels).
-  for(let i=0;i<4;i++){
+  // Gutters in document order: mag, MER history, phase shape, waterfall. The
+  // MER history (index 1) keeps its time labels and the constellation (index 4)
+  // its I/Q labels. A panel added to the channel view shifts these indices:
+  // recount them, or a gutter loses its labels.
+  for(const i of [0,2,3]){
     const sp=card.xax[i].querySelectorAll('span');
     for(let j=0;j<3;j++) sp[j].textContent=lab[j];
   }
 }
 
 function drawCsi(card,c,advance){
-  card.frame=c.frame; card.csiRec=c;
+  card.csiRec=c;
   setScAxis(card,c.sc);
-  // Magnitude: FIXED axis, never re-ranged. Set with --mag-top / --mag-span.
-  const top=MAG_TOP, bot=MAG_BOT;
-  const dm=card.dim.mag, dp=card.dim.phase, dw=card.dim.wf;
+  // Magnitude: this card's STEPPED axis (nextMagTop), fixed between steps; it
+  // starts at --mag-top and keeps --mag-span. A repaint never moves it.
+  const fin=c.mag_db.filter(v=>v!==null);
+  if(fin.length&&advance!==false){
+    const srt=fin.slice().sort((a,b)=>a-b);
+    card.magHi=Math.max(card.magHi,srt[Math.min(srt.length-1,Math.floor(0.95*srt.length))]);
+    const now=performance.now();
+    if(now-card.magT>=MAG_RERANGE_MS){
+      const nt=nextMagTop(card.magTop,MAG_SPAN,card.magHi);
+      if(nt!==card.magTop){ card.magTop=nt; setMagAxis(card); }
+      card.magHi=-Infinity; card.magT=now;
+    }
+  }
+  const top=card.magTop, bot=card.magTop-MAG_SPAN;
+  const dm=card.dim.mag, dw=card.dim.wf;
   grid(card.mag,dm.w,dm.h);
   line(card.mag,c.mag_db,bot,top,C.mag,dm.w,dm.h);
-  // A fixed axis can hide the trace entirely if the level moves off scale, so say
-  // so rather than showing an innocent-looking empty panel.
-  const fin=c.mag_db.filter(v=>v!==null);
+  // Between steps the trace can still leave the axis, so say so rather than
+  // showing an innocent-looking empty panel.
   card.off.hidden=!(fin.length&&(Math.max(...fin)>top||Math.min(...fin)<bot));
-  // Both phase panels: fixed -pi..+pi. Raw = as measured; corrected =
-  // de-ramped + run-anchored (the sounder does both transforms).
-  const dr=card.dim.rawph;
-  grid(card.rawph,dr.w,dr.h);
-  if(c.raw_ph) line(card.rawph,c.raw_ph,-Math.PI,Math.PI,C.rawph,dr.w,dr.h);
-  grid(card.phase,dp.w,dp.h);
-  line(card.phase,c.phase,-Math.PI,Math.PI,C.phase,dp.w,dp.h);
+  drawPhase(card,c,advance);
   // waterfall: scroll up 1px, draw new bottom row coloured by magnitude
   if(advance!==false){
     card.wf.drawImage(card.wf.canvas,0,-1);
@@ -1070,47 +1904,12 @@ function drawCsi(card,c,advance){
      +(c.rate/1e6).toFixed(2)+' MS/s · peak '+formatScaled(c.peak_db,'db');
 }
 
+// The converter's range (ADC2): the pilot's peak on a fixed full-scale bar and
+// the clipping badge, which covers every slot. The canvas is the spectrum's.
 function drawAdc(card,a){
   card.adcRec=a;
-  const ctx=card.adc, d=card.dim.adc, AW=d.w, AH=d.h;
   const FS=a.full_scale||ADC_FS;
-  ctx.clearRect(0,0,AW,AH);
-  // Power envelope in dBFS on a FIXED 0..-80 axis [user 2026-08-30: the raw
-  // I/Q min/max bands read as a noise block -- "pretty messy"]. One line, the
-  // burst structure visible: where energy starts and ends against the nominal
-  // guard seats (dashed), which is the live landing view. Clip catching is
-  // unchanged: the amplitude per column is still the max over EVERY sample it
-  // covers, so one clipped sample pins its column at 0 dBFS.
-  const n=a.cols, DB_BOT=-80;
-  const amp=new Array(n);
-  for(let k=0;k<n;k++)
-    amp[k]=Math.max(Math.abs(a.i_min[k]),Math.abs(a.i_max[k]),
-                    Math.abs(a.q_min[k]),Math.abs(a.q_max[k]));
-  ctx.strokeStyle=C.grid; ctx.lineWidth=1;
-  for(let i=0;i<=4;i++){const y=(AH*i/4)|0;
-    ctx.beginPath();ctx.moveTo(0,y+.5);ctx.lineTo(AW,y+.5);ctx.stroke();}
-  // Nominal guard seats: signal should occupy [128, samps-128) of the slot.
-  if(a.samps>GUARD_PRE+GUARD_POST){
-    ctx.strokeStyle=C.warn; ctx.setLineDash([3,3]);
-    for(const fx of [GUARD_PRE/a.samps, (a.samps-GUARD_POST)/a.samps]){
-      const x=(AW*fx)|0;
-      ctx.beginPath();ctx.moveTo(x+.5,0);ctx.lineTo(x+.5,AH);ctx.stroke();
-    }
-    ctx.setLineDash([]);
-  }
-  ctx.strokeStyle=C.mag; ctx.lineWidth=1.5; ctx.beginPath();
-  let started=false;
-  for(let k=0;k<n;k++){
-    const db=20*Math.log10(Math.max(amp[k],1)/FS);
-    const y=Math.min(AH-1,(db/DB_BOT)*AH);
-    const x=AW*k/(n-1);
-    if(!started){ctx.moveTo(x,y);started=true;}else ctx.lineTo(x,y);
-  }
-  ctx.stroke();
-  for(let i=0;i<=4;i++)
-    if(card.adcY[i]) card.adcY[i].textContent=(DB_BOT*i/4).toFixed(0);
   const pct=100*a.peak/FS;
-  card.adcTitle.textContent='pilot power envelope (dBFS), slot '+(a.slot>=0?a.slot:'?')+', nominal guards dashed';
   // The fixed-scale half of the panel. Under-driving is the failure we actually have,
   // so it gets a colour of its own rather than sharing "fine" with a healthy level.
   card.headBar.style.width=Math.max(0.5,Math.min(100,pct)).toFixed(2)+'%';
@@ -1128,6 +1927,49 @@ function drawAdc(card,a){
     +(anyClip?anyClip+' sample(s) clipped':'no clipping');
 }
 
+// The pilot slot's spectrum (SPC1) on a FIXED dBFS axis: each bin is the power
+// in its rbw_hz band, so a full-scale complex tone reads 0 dBFS; x in MHz from
+// the NCO with a 10 MHz grid, and the occupied band's edges (MET1) dashed. A
+// value above the top pins to it and lights the badge; below the bottom it
+// rests on the bottom edge (a filtered channel's int16 quantisation floor sits
+// near -125 dBFS a 240 kHz bin, the silence floor at -200).
+function drawSpc(card,s){
+  card.spcRec=s;
+  const ctx=card.spc, d=card.dim.spc, W=d.w, H=d.h, n=s.db.length, m=card.metRec;
+  const half=s.rate/2e6, r=s.nfft/s.nbins, df=s.rate/s.nfft/1e6;
+  const xOf=f=>W*(f+half)/(2*half);   // f in MHz from the NCO
+  const yOf=v=>H*(SPC_TOP-v)/(SPC_TOP-SPC_BOT);
+  ctx.clearRect(0,0,W,H);
+  ctx.strokeStyle=C.grid; ctx.lineWidth=1; ctx.beginPath();
+  for(let v=SPC_TOP;v>=SPC_BOT;v-=SPC_STEP){ const y=Math.round(yOf(v))+.5; ctx.moveTo(0,y); ctx.lineTo(W,y); }
+  for(let f=-10*Math.floor(half/10);f<=half;f+=10){ const x=Math.round(xOf(f))+.5; ctx.moveTo(x,0); ctx.lineTo(x,H); }
+  ctx.stroke();
+  if(m && m.bw_mhz>0){
+    ctx.strokeStyle=C.phase; ctx.setLineDash([4,3]); ctx.beginPath();
+    for(const f of [-m.bw_mhz/2, m.bw_mhz/2]){ const x=Math.round(xOf(f))+.5; ctx.moveTo(x,0); ctx.lineTo(x,H); }
+    ctx.stroke(); ctx.setLineDash([]);
+  }
+  let over=false;
+  ctx.strokeStyle=C.mag; ctx.lineWidth=1.5; ctx.beginPath();
+  for(let i=0;i<n;i++){
+    const v=s.db[i];
+    if(v>SPC_TOP) over=true;
+    const x=xOf((i*r+(r-1)/2-s.nfft/2)*df), y=yOf(Math.max(SPC_BOT,Math.min(SPC_TOP,v)));
+    if(i) ctx.lineTo(x,y); else ctx.moveTo(x,y);
+  }
+  ctx.stroke();
+  card.spcOff.hidden=!over;
+  const key=s.rate+'/'+s.rbw_hz+'/'+(m?m.fc_mhz+'/'+m.bw_mhz:'');
+  if(card.spcKey!==key){
+    card.spcKey=key;
+    card.spcX[0].textContent='-'+half.toFixed(2)+' MHz';
+    card.spcX[1].textContent=m?'NCO '+m.fc_mhz.toFixed(3)+' MHz':'NCO';
+    card.spcX[2].textContent='+'+half.toFixed(2)+' MHz';
+    card.spcTitle.textContent='pilot spectrum, dBFS per '+(s.rbw_hz/1e3).toFixed(0)
+      +' kHz bin (a full-scale complex tone reads 0), 10 MHz grid'+(m?', occupied band dashed':'');
+  }
+}
+
 // ideal alphabet (unit average power), mod = bits/symbol (2=QPSK,4=16QAM,6=64QAM)
 function idealPts(mod){
   const L=Math.round(Math.sqrt(Math.pow(2,mod)));  // levels per dimension
@@ -1136,6 +1978,70 @@ function idealPts(mod){
   const nrm=Math.sqrt(p/(L*L)), out=[];
   for(const a of lv)for(const b of lv) out.push([a/nrm,b/nrm]);
   return out;
+}
+// CIR: Hann-windowed |h|^2 on a fixed 0..-60 dB axis, the strongest tap in the
+// middle (the centre line and the "peak" label), the x axis in ns from it.
+// A clean cable reads as ONE mainlobe about 2/B wide (Hann), not a single tap.
+function drawCir(card,r){
+  card.cirRec=r;
+  const d=card.dim.cir;
+  grid(card.cir,d.w,d.h);
+  line(card.cir,r.db,-60,0,C.mag,d.w,d.h);
+  const key=r.pre+'/'+r.db.length+'/'+r.tap_ns;
+  if(card.cirKey!==key){
+    card.cirKey=key;
+    card.cirX[0].textContent='-'+(r.pre*r.tap_ns).toFixed(0)+' ns';
+    card.cirX[2].textContent='+'+((r.db.length-1-r.pre)*r.tap_ns).toFixed(0)+' ns';
+  }
+  drawQuality(card);
+}
+// The channel's constants (MET1, from the config the sounder loaded) and its
+// quality, labelled as a wireless engineer reads them (a standards check):
+// the NCO is the converter's IF (the X lane is up-converted later), the
+// bandwidth is the TRANSMISSION bandwidth (N_RB x 12 x SCS when the tones
+// make whole resource blocks), MER is decision-directed (TR 101 290), averaged
+// over ~1 s as error power, over the tones the recorder equalises (|H| at least
+// 0.4 x the median, 8 dB under it: recorder_worker.cc skips deeper fades, so
+// over a faded channel the MER describes the stronger tones and says so), and
+// the delay figures carry their threshold and
+// the resolution (about 2/B, the Hann mainlobe).
+// The card is named by its BAND [user: 'RX antenna 0/1' above and 'ch A/C' in
+// the quality line read as four different things]. The band follows from the
+// lane's own NCO (sub-6 below 3 GHz; the X-band lane runs at its IF), with the
+// sounder's channel letter and the dashboard's antenna index kept as a muted
+// note, so the mapping stays visible without leading.
+function setCardTitle(card){
+  const m=card.metRec;
+  if(!m || !card.titleEl) return;
+  const band=m.fc_mhz<3000 ? ('Sub-6 · '+m.fc_mhz.toFixed(0)+' MHz') : ('X-band · IF '+m.fc_mhz.toFixed(0)+' MHz');
+  card.titleEl.innerHTML=band+' <span class="text-secondary small">(RX ch '+m.ch+', antenna '+card.ant+')</span>';
+}
+function drawQuality(card){
+  const m=card.metRec, q=[];
+  if(m){
+    // Resource blocks only at an NR numerology (38.211 4.2: 15 x 2^mu kHz).
+    const nr=[15,30,60,120,240].some(v=>Math.abs(m.scs_khz-v)<1e-6);
+    const rb=(nr && m.occ%12===0)?(m.occ/12)+' RB × 12 × ':m.occ+' tones × ';
+    q.push('IF/NCO '+m.fc_mhz.toFixed(3)+' MHz · transmission BW '
+           +m.bw_mhz.toFixed(2)+' MHz ('+rb+(+m.scs_khz.toFixed(3))+' kHz, fft '+m.fft+')');
+  }
+  const cn=card.cnsRec;
+  if(cn && cn.mer_db!==undefined && Date.now()-(card.cnsT||0)<2000)
+    q.push('MER '+cn.mer_db.toFixed(1)+' dB · EVM '+cn.evm_pct.toFixed(2)+' % (decision-directed, 1 s avg, '
+           +cn.mer_pts+' pts, tones within 8 dB of the median |H|)');
+  const c=card.cirRec;
+  if(c){
+    let t='RMS delay spread '+c.rms_ns.toFixed(1)+' ns · mean excess '+c.mean_ns.toFixed(1)
+         +' ns · max excess '+c.max_ns.toFixed(1)+' ns (thr '+c.thr_db.toFixed(0)+' dB re peak';
+    // Hann mainlobe ~2/B at -6 dB; at the -20 dB threshold a lone path reads
+    // rms ~0.5/B, mean ~1.5/B, max ~3/B (test_metrics pins both).
+    if(m && m.bw_mhz>0) t+=', resolution ≈ '+(2e3/m.bw_mhz).toFixed(0)+' ns; at -20 dB a single path reads rms '
+                           +(0.5e3/m.bw_mhz).toFixed(0)+', mean '+(1.5e3/m.bw_mhz).toFixed(0)
+                           +', max '+(3e3/m.bw_mhz).toFixed(0)+' ns';
+    q.push(t+')');
+  }
+  card.quality.textContent=q.join('\n');
+  card.quality.style.whiteSpace='pre-line';
 }
 function drawCons(card,cn){
   card.cnsRec=cn;
@@ -1176,10 +2082,14 @@ function redrawAll(){
   }
   for(const a in cards){
     const card=cards[a];
+    if(isFolded(card.el)) continue;    // repainted when it is expanded
     fitCard(card, themeChanged);       // clears the waterfall only when it must
     if(card.csiRec) drawCsi(card,card.csiRec,false);
     if(card.cnsRec) drawCons(card,card.cnsRec);
     if(card.adcRec) drawAdc(card,card.adcRec);
+    if(card.spcRec) drawSpc(card,card.spcRec);
+    if(card.cirRec) drawCir(card,card.cirRec);
+    drawMer(card);
   }
 }
 
@@ -1196,12 +2106,11 @@ let pktCount=0,t0=Date.now();
 // ---- beacon sync / CFO panel (AP-32) --------------------------------------
 // One card per client tid, matching how every other stream here is keyed.
 const SYNC_SHOW=120, SYNC_QUIET_FLOOR_MS=2500, SYNC_DEAD_MS=60000;
-// THE QUIET THRESHOLD MUST TRACK THE RESYNC CADENCE, NOT A CONSTANT. 2500 ms was
-// chosen when the client resynced every 260 ms, so it meant "about ten missed
-// opportunities". The cadence default became 2604 ms on 2026-09-02, which put
-// every NORMAL detection past a fixed 2500 and would have dimmed the card and
-// shown "quiet 2.6s" permanently -- destroying the one badge whose whole job is
-// to distinguish held data from live data.
+// THE QUIET THRESHOLD MUST TRACK THE RESYNC CADENCE, NOT A CONSTANT. 2500 ms
+// meant "about ten missed opportunities" at a 260 ms cadence; at the 2604 ms
+// default every NORMAL detection lands past a fixed 2500, which would dim the
+// card and show "quiet 2.6s" permanently -- destroying the one badge whose whole
+// job is to distinguish held data from live data.
 //
 // SYN1 does not carry the cadence, so the page measures it: the median interval
 // between arriving records for this tid, over the last few. Self-calibrating, no
@@ -1225,13 +2134,17 @@ function makeSyncCard(tid){
   wrap.innerHTML='<div class="card-body">'
     +'<div class="d-flex align-items-center justify-content-between mb-2">'
       +'<h3 class="card-title mb-0">beacon sync'+(tid!=='0'?(' [UE '+tid+']'):'')+'</h3>'
-      +'<span class="badge bg-secondary-lt sync-chip">--</span></div>'
+      +'<div class="d-flex align-items-center gap-1">'
+        +'<span class="badge bg-secondary-lt sync-chip">--</span>'+foldButton()+'</div></div>'
+    +'<div class="csi-collapsible">'
     +frame('resid vs the anchored grid (samples)','csi-h-line',
            ['','','0','',''],['older','frame','now'])
-    +'<div class="text-secondary tnum mt-2 sync-read" style="font-size:.75rem"></div>'
-    +'</div>';
+    +'<div class="text-secondary tnum mt-2 sync-read" style="font-size:.85rem"></div>'
+    +'</div></div>';
   document.getElementById('sync').appendChild(wrap);
-  syncCards[tid]={cv:wrap.querySelector('canvas'),
+  // The chip stays live while folded; the plot is redrawn on expand.
+  setupFold(wrap,'sync:'+tid,()=>{ if(syncCards[tid].rec) drawSyncCard(tid,syncCards[tid].rec); });
+  syncCards[tid]={el:wrap,cv:wrap.querySelector('canvas'),
                   chip:wrap.querySelector('.sync-chip'),
                   read:wrap.querySelector('.sync-read'),
                   plot:wrap.querySelector('.csi-plot'),
@@ -1296,6 +2209,7 @@ function drawSyncCard(tid, sync){
   card.chip.textContent=label;
   card.chip.className='badge '+cls;
   if(card.plot) card.plot.style.opacity=(age>=quietMs)?'0.4':'1';
+  if(isFolded(card.el)) return;
 
   const d=fitCanvas(card.cv,true), ctx=d.ctx;
   ctx.clearRect(0,0,d.w,d.h);
@@ -1392,8 +2306,13 @@ function drawSyncCard(tid, sync){
         +(Math.abs(bm)<CFO_NOISE_HZ?', inside the ~2 kHz phase-noise floor':'')
         +')';
   }
-  card.read.textContent=
-    'clock '+kppm.toFixed(3)+' ppm (tracked)  |  residual '
+  // The beacon's detection SNR at the UE: the median over the latest
+  // detections, the number to watch while aiming antennas (the demo's detector
+  // floor is 25 dB).
+  const snrs=hist.slice(-40).map(h=>h.snr).filter(v=>Number.isFinite(v)).sort((a,b)=>a-b);
+  const snrStr=snrs.length?('beacon SNR '+snrs[snrs.length>>1].toFixed(1)+' dB (median of '+snrs.length+')  |  '):'';
+  card.read.textContent=snrStr
+    +'clock '+kppm.toFixed(3)+' ppm (tracked)  |  residual '
     +tppm.toFixed(4)+' ppm (resid slope)  |  '+bstr
     +'  |  '+n+' locked over '+span+' frames'+note;
 }
@@ -1418,14 +2337,34 @@ function onData(obj){
     const rec=ant[a], card=cards[a];
     // A stale re-push carries the SAME record, so gate redraw and the rate meter
     // on the frame number. Otherwise a stalled link would read as busy.
+    // A folded card keeps the newest records (drawn on expand) and draws nothing.
+    const open=!isFolded(card.el);
     if(rec.csi && rec.csi.frame!==card.lastCsi){
-      drawCsi(card,rec.csi,true); card.lastCsi=rec.csi.frame; pktCount++;
+      if(open) drawCsi(card,rec.csi,true); else card.csiRec=rec.csi;
+      card.lastCsi=rec.csi.frame; pktCount++;
     }
     if(rec.cns && rec.cns.frame!==card.lastCns){
-      drawCons(card,rec.cns); card.lastCns=rec.cns.frame;
+      card.lastCns=rec.cns.frame; card.cnsT=Date.now();  // before drawQuality, which reads its age
+      if(open){ drawCons(card,rec.cns); drawQuality(card); } else card.cnsRec=rec.cns;
+      if(sampleMer(card,rec.cns) && open) drawMer(card);
+    }
+    if(rec.met){
+      // Retitle on a change too: a --control switch to another config moves the
+      // lane's centre (or channel) under the same antenna index.
+      const was=card.metRec; card.metRec=rec.met;
+      if(!was || was.ch!==rec.met.ch || was.fc_mhz!==rec.met.fc_mhz){ setCardTitle(card); if(open) drawQuality(card); }
+    }
+    if(rec.cir && rec.cir.frame!==card.lastCir){
+      if(open) drawCir(card,rec.cir); else card.cirRec=rec.cir;
+      card.lastCir=rec.cir.frame;
     }
     if(rec.adc && rec.adc.frame!==card.lastAdc){
-      drawAdc(card,rec.adc); card.lastAdc=rec.adc.frame;
+      if(open) drawAdc(card,rec.adc); else card.adcRec=rec.adc;
+      card.lastAdc=rec.adc.frame;
+    }
+    if(rec.spc && rec.spc.frame!==card.lastSpc){
+      if(open) drawSpc(card,rec.spc); else card.spcRec=rec.spc;
+      card.lastSpc=rec.spc.frame;
     }
     // The sounder stops sending for an antenna whose slots carried RX gaps, so
     // the panels hold their last good estimate. Say that on screen: a frozen
@@ -1447,12 +2386,96 @@ function onData(obj){
 
 function connect(){
   const es=new EventSource('/stream');
-  es.onmessage=e=>{ try{onData(JSON.parse(e.data));}catch(err){} };
+  // A failing update must not stop the stream, but it is said (the first few,
+  // in the browser console) rather than swallowed.
+  let updErrs=0;
+  es.onmessage=e=>{ try{onData(JSON.parse(e.data));}catch(err){ if(updErrs++<5) console.error('dashboard update failed:',err); } };
   es.onerror=()=>{ document.getElementById('meta').innerHTML=
      '<span class="text-red">disconnected, retrying&hellip;</span>'; };
 }
+// ---- sounder control (only when the server runs with --control) ----------
+// Polled, not on the SSE stream: the controls must work while no sounder runs.
+let ctlConfs='', ctlMsg=null;
+async function pollCtl(){
+  try{
+    const st=await (await fetch('/control',{cache:'no-store'})).json();
+    const box=document.getElementById('ctl');
+    if(!st.enabled){
+      box.hidden=!st.error;  // no --control: no box; refused: say why
+      if(st.error){
+        box.querySelectorAll('button,select').forEach(e=>{ e.disabled=true; });
+        document.getElementById('ctl-state').textContent=st.error;
+      }
+      return;
+    }
+    box.hidden=false;
+    box.querySelectorAll('button,select').forEach(e=>{ e.disabled=false; });
+    const sel=document.getElementById('ctl-conf');
+    const key=st.configs.join('|');
+    if(key!==ctlConfs){
+      ctlConfs=key; sel.innerHTML='';
+      for(const c of st.configs){
+        const o=document.createElement('option'); o.value=c;
+        const d=st.desc[c]||'', name=c.replace(/^files\//,'').replace(/\.json$/,'');
+        o.textContent=(st.labels&&st.labels[c])||name; o.title=d?d+' ('+c+')':c; sel.appendChild(o);
+      }
+      sel.value=st.conf;
+    }
+    drawCheck(st.check);
+    let t=st.state;
+    if(st.state==='running') t+=' (pid '+st.pid+')';
+    else if(st.state==='exited') t+=' rc '+st.rc;
+    if(st.attempt>1 && st.state!=='stopped' && st.state!=='queued') t+=', attempt '+st.attempt;
+    // A refused command is shown for a few seconds in place of the state line;
+    // the next poll would otherwise overwrite it before it could be read.
+    document.getElementById('ctl-state').textContent=(ctlMsg && Date.now()<ctlMsg.until)?ctlMsg.text
+      :t+' · '+String(st.conf).replace(/^files\//,'');
+  }catch(err){}
+}
+// The last setup check, as a list with the fix under each problem. Shown after
+// a Check, and after a Start the quick check refused; the close button hides it
+// until the next check.
+let checkShown=null, checkClosed=null;
+function esc(x){ return String(x).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function drawCheck(ck){
+  const box=document.getElementById('check');
+  // A quick check that passed cleanly (every normal Start) needs no panel; one
+  // with a WARN (a stale build, say) is shown.
+  const clean=ck && ck.ok && !ck.results.some(r=>r.level==='WARN');
+  if(!ck || ck.id===checkClosed || (ck.quick && clean)){ box.hidden=true; return; }
+  box.hidden=false;
+  if(ck.id===checkShown) return;
+  checkShown=ck.id;
+  const col={PASS:'green',WARN:'orange',FAIL:'red',INFO:'secondary'};
+  let rows='';
+  for(const r of ck.results){
+    rows+='<tr><td><span class="badge bg-'+col[r.level]+'-lt text-'+col[r.level]+'">'+esc(r.level)+'</span></td>'
+      +'<td class="text-nowrap">'+esc(r.what)+'</td><td>'+esc(r.detail)
+      +(r.fix?'<div class="text-secondary small">'+esc(r.fix)+'</div>':'')+'</td></tr>';
+  }
+  box.innerHTML='<div class="card"><div class="card-header py-2"><h3 class="card-title">'
+    +(!ck.ok?'Setup check: NOT READY, fix each FAIL':clean?'Setup check passed':'Setup check passed, with warnings')
+    +' <span class="text-secondary small">('+(ck.quick?'quick, radios not opened':'full')+', '+esc(ck.conf)+', '+esc(ck.when)+')</span></h3>'
+    +'<div class="card-actions"><button class="btn btn-sm btn-ghost-secondary" id="check-close">Close</button></div></div>'
+    +'<div class="table-responsive"><table class="table table-sm table-vcenter card-table mb-0">'+rows+'</table></div></div>';
+  document.getElementById('check-close').addEventListener('click',()=>{ checkClosed=ck.id; box.hidden=true; });
+}
+async function sendCtl(cmd){
+  const conf=document.getElementById('ctl-conf').value||null;
+  try{
+    const r=await fetch('/control',{method:'POST',headers:{'Content-Type':'application/json'},
+                                    body:JSON.stringify({cmd:cmd,conf:(cmd==='stop'?null:conf)})});
+    const j=await r.json();
+    if(j.error) ctlMsg={text:j.error, until:Date.now()+5000};
+  }catch(err){ ctlMsg={text:'control request failed', until:Date.now()+5000}; }
+  pollCtl();
+}
+for(const b of document.querySelectorAll('#ctl [data-cmd]'))
+  b.addEventListener('click',()=>sendCtl(b.dataset.cmd));
 initTheme();
 connect();
+pollCtl();
+setInterval(pollCtl,1000);
 </script>
 </body></html>
 """

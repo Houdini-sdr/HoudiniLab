@@ -1,21 +1,23 @@
 /**
  * @file beacon_tx_gold.cc
- * @brief TX the Sounder's REAL beacon (STS + the actual CommsLib GOLD_IFFT
- *        sequence that receiver.cc::syncSearch correlates against) continuously
- *        from a Houdini board, so a Houdini UE running the unmodified
- *        receiver.cc client-sync path can acquire it.
+ * @brief TX the Sounder's legacy beacon (STS + the CommsLib GOLD_IFFT sequence
+ *        the UE's Receiver::syncSearch correlates against) continuously from a
+ *        Houdini board, so a Houdini UE running the receiver.cc client-sync
+ *        path with the legacy beacon (sync.beacon.type legacy, the default)
+ *        can acquire it.
  *
- * Unlike beacon_hil/client_sync_cuda (which used a stand-in QPSK match), this
+ * Unlike beacon_hil/client_sync_cuda (which use a stand-in QPSK match), this
  * builds the beacon from CommsLib::getSequence(GOLD_IFFT)/getSequence(STS_SEQ)
- * exactly as Config::genPilots() does, so config_->gold_cf32() on the UE side
- * matches. The beacon is band-limited x8-upsampled (DAC replay runs at ~983.04
- * MSPS, the UE samples at the config rate) and, by default, CONJUGATED: the
- * matched-NCO real->complex mixer delivers the beacon conjugated and syncSearch
- * feeds the raw RX straight to find_beacon, so pre-conjugating the TX cancels it.
+ * in the legacy layout Config::genPilots() transmits, so config_->gold_cf32()
+ * on the UE side matches. The beacon is band-limited x8-upsampled (DAC replay
+ * runs at ~983.04 MSPS, the UE samples at the config rate) and, by default,
+ * CONJUGATED: the matched-NCO real->complex mixer delivers the beacon
+ * conjugated and syncSearch feeds the raw RX straight to the detector, so
+ * pre-conjugating the TX cancels it.
  *
- * Build: added as a CMake target (links comms-lib + utils + muFFT + SoapySDR).
- * Run (venv SoapySDR runtime):
- *   ./beacon_tx_gold --tx-ip 168.6.244.21 --tx-ch 1 --nco-mhz 500
+ * Build: CMake target beacon_tx_gold (links comms-lib + utils + muFFT + SoapySDR).
+ * Run (venv SoapySDR runtime; the default --tx-ip is the bench BS):
+ *   ./beacon_tx_gold --tx-ip <BS_IP> --tx-ch 1 --nco-mhz 500
  */
 #include <SoapySDR/Device.hpp>
 #include <SoapySDR/Formats.hpp>

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Synthetic CSI/constellation/ADC feed, so the dashboard can be seen with no radios.
 
-Sends the same three datagram kinds `sounder --view` sends, at the same rates, to a
+Sends the datagram kinds `sounder --view` sends, at the same rates, to a
 running ``csi_server.py``. Use it to look at the dashboard, to check a change to the
 page, or to reproduce a display bug without booting the rig:
 
@@ -16,9 +16,8 @@ Do not read it as expected hardware behaviour.
 
 Failure modes worth reproducing on purpose:
 
-    python3 fake_feed.py --clip           # ADC hard against the rail, clipping badge
-                                          #   reports "not measurable" instead of 1.0
-    python3 fake_feed.py --legacy         # emit CSI1, as an un-rebuilt sounder would
+    python3 fake_feed.py --clip           # ADC hard against the rail: the clipping badge
+    python3 fake_feed.py --legacy         # emit CSI1 and ADC1, as an older sounder would
     python3 fake_feed.py --antennas 4     # more cards
     python3 fake_feed.py --stall-after 60 # stop sending, to watch the stale badges
 """
@@ -34,6 +33,9 @@ MAGIC_CSI2 = 0x43534932
 MAGIC_CNS = 0x434E5331
 MAGIC_ADC = 0x41444331
 MAGIC_ADC2 = 0x41444332
+MAGIC_CIR = 0x43495231
+MAGIC_MET = 0x4D455431
+MAGIC_SPC = 0x53504331
 ADC_FS = 32767
 ADC_COLS = 250
 
@@ -65,11 +67,10 @@ def send_csi(sock, dest, frame, ant, h, rate, reps, noise, legacy):
     head = struct.pack("<IIIIfI", MAGIC_CSI2, frame, ant, nsc, rate, 1)
     body = b"".join(struct.pack("<ff", z.real, z.imag) for z in h)
     # The CSI2 trailing block is the RAW phase (radians): arg(H) before the
-    # sounder's display de-ramp and per-run anchor. Emulate the instrumental
-    # ramp the real sounder carries there (8 samples of CP back-off -> pi/4
-    # per subcarrier, wrapped), so the "phase (raw)" panel exercises its
-    # sawtooth rendering honestly instead of drawing coherence values on a
-    # phase axis (Opus review H9).
+    # sounder's display de-ramp and per-run anchor, with the instrumental ramp
+    # the real sounder carries there (8 samples of CP back-off -> pi/4 per
+    # subcarrier, wrapped). The dashboard length-checks the block and does not
+    # draw it; it is sent so the datagram is the sounder's size.
     del reps, noise
     raw = []
     for k, z in enumerate(h):
@@ -126,6 +127,46 @@ def send_adc(sock, dest, frame, ant, samps, rate, clip, legacy=False):
     sock.sendto(head + body, dest)
 
 
+def send_cir(sock, dest, frame, ant, rate):
+    """CIR1: a direct path and an echo 8 dB down 6 taps later, over a -50 dB floor,
+    the strongest tap centred in the window as the sounder sends it."""
+    pre, ntaps = 64, 128
+    db = [-50.0 + random.gauss(0, 2) for _ in range(ntaps)]
+    db[pre] = 0.0
+    db[pre + 6] = -8.0 + random.gauss(0, 0.3)
+    head = struct.pack("<IIIIIIIf", MAGIC_CIR, frame, ant, ntaps, pre, 40, 4096, 1e9 / rate)
+    sock.sendto(head + struct.pack("<%df" % ntaps, *db), dest)
+
+
+def send_met(sock, dest, ant):
+    """MET1: antenna 0 the sub-6 lane, antenna 1 the X-IF, as the R3 config."""
+    ch, fc = (0, 2425e6) if ant % 2 == 0 else (2, 4380e6)
+    sock.sendto(struct.pack("<IIIIIddd", MAGIC_MET, ant, ch, 4096, 1596, fc, 30e3, 1596 * 30e3), dest)
+
+
+def send_spc(sock, dest, frame, ant):
+    """SPC1, the pilot spectrum at the R3 numerology (122.88 Msps, 2048-point
+    segments, 512 bins of 240 kHz), shaped loosely on the rig's levels: the
+    occupied band, its skirts, the channel filter, and one tone (antenna 0 an
+    Fs/2-like spur at +32.6 MHz, antenna 1 an image at -43.68 MHz)."""
+    nbins, nfft, rate = 512, 2048, 122.88e6
+    r = nfft // nbins
+    band, floor_in, floor_out = (-57.0, -110.0, -125.0) if ant % 2 == 0 else (-61.0, -104.0, -107.0)
+    tone_mhz, tone_db = (32.6, -75.0) if ant % 2 == 0 else (-43.68, -80.0)
+    db = []
+    for i in range(nbins):
+        f = (i * r + (r - 1) / 2.0 - nfft / 2) * rate / nfft / 1e6
+        a = abs(f)
+        v = band + 0.8 * math.sin(f / 3.0) if a < 23.94 else max(floor_in, band - 12.0 - 6.0 * (a - 23.94))
+        if a > 33.0:
+            v = max(floor_out, floor_in - 4.0 * (a - 33.0))
+        if abs(f - tone_mhz) < rate / nbins / 2e6:
+            v = tone_db
+        db.append(v + random.gauss(0, 0.4))
+    sock.sendto(struct.pack("<IIIIIff", MAGIC_SPC, frame, ant, nbins, nfft, rate, rate / nbins)
+                + struct.pack("<%df" % nbins, *db), dest)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -137,17 +178,16 @@ def main():
     ap.add_argument("--fps", type=float, default=30.0, help="frames per second")
     ap.add_argument("--frames", type=int, default=0, help="0 = run until interrupted")
     ap.add_argument("--reps", type=int, default=6,
-                    help="pilot symbols averaged per slot; below 2 the quality panel "
-                         "reports that it cannot measure")
+                    help="ignored: the retired quality panel's input, kept so old command lines run")
     ap.add_argument("--noise", type=float, default=0.05,
-                    help="per-symbol noise, drives the repeat coherence down")
+                    help="ignored: the retired quality panel's input, kept so old command lines run")
     ap.add_argument("--evm", type=float, default=0.08, help="constellation cloud size")
     ap.add_argument("--mod", type=int, default=2, help="bits/symbol: 2 QPSK, 4 16QAM")
     ap.add_argument("--samps", type=int, default=4096, help="samples per slot")
     ap.add_argument("--clip", action="store_true",
                     help="drive the ADC into the rail, to see the clipping badge")
     ap.add_argument("--legacy", action="store_true",
-                    help="send CSI1, as a sounder built before the quality panel does")
+                    help="send CSI1 and ADC1, as an older sounder does")
     ap.add_argument("--stall-after", type=int, default=0, metavar="N",
                     help="stop sending after N frames, to watch the stale badges")
     args = ap.parse_args()
@@ -172,6 +212,12 @@ def main():
                 send_cns(sock, dest, frame, ant, args.mod, args.evm)
                 send_adc(sock, dest, frame, ant, args.samps, args.rate, args.clip,
                          args.legacy)
+                if not args.legacy:
+                    send_cir(sock, dest, frame, ant, args.rate)
+                    if frame % max(1, int(args.fps)) == 0:
+                        send_met(sock, dest, ant)
+                    if frame % max(1, int(args.fps / 4)) == 0:  # the sounder's 4 Hz
+                        send_spc(sock, dest, frame, ant)
             frame += 1
             time.sleep(1.0 / args.fps)
     except KeyboardInterrupt:
