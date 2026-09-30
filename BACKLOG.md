@@ -14,9 +14,10 @@ written into another lane's tracker.
 > **TEST BASELINE [user]: fpga v1.30 or newer, only.** The v1.20 TDD baseline is RETIRED.
 > Rows below that record results against fpga v1.20 / device+host v0.2.0 (notably AP-3's max-rate
 > 99.998 % and AP-5's V5 tone leg) were validated on a SUPERSEDED stack and are NOT re-confirmed on
-> v1.30+. Re-run before citing them as current. Live stack, both nodes agreeing: fpga 1.30
-> `c88e0b5f`, device 0.2.2 `71bcbc6b`, host 0.2.2 `c20d7975`, proto 1.0. `sounder` now prints the
-> per-node stack at bring-up and warns `VERSION SKEW:` when participating nodes disagree.
+> v1.30+. Re-run before citing them as current. Read the live stack with
+> `CC/Sounder/csi_gui/check_setup.py`, never from this file: the last validated stack is the newest
+> `CC/Sounder/DEMO_VERIFICATION.md` section 9 row. `sounder` prints the per-node stack at bring-up
+> and warns `VERSION SKEW:` when participating nodes disagree.
 
 > **Table convention, and the drift in it.** Rows up to AP-24 fill
 > the Status cell. From AP-25 on the status is carried instead as bold lead text
