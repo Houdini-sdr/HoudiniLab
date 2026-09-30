@@ -141,8 +141,8 @@ The XUD1A is the reworked board (RF 9.5 GHz, LO 13.88 GHz). It needs:
   `demo_run.sh`, `run_rung.sh` and `fstage_run.sh` runs, AND for the dashboard's
   Check and Start; without it no radio opens. The setup check's stack line shows
   which one loaded (`host_build`, equal to `device_build`; a mismatch is a
-  WARN). Going back one release (0.3.0: `~/houdini_beta` with each node's saved
-  0.3.0 module) is a deploy: the software lane's, on the user's go.
+  WARN). Going back a release is a deploy of that release's host prefix and
+  device modules: the software lane's, on the user's go.
 - **Cores.** `HOUDINI_CORE_MAP` places the sounder's threads by role and the
   main thread pins itself only after the radios start, so the plugin's BS
   receive workers run on the housekeeping cores 0-9 (AP-81, 9.44). The launch
