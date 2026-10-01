@@ -410,8 +410,7 @@ void HoudiniFramer::armTdd(void) {
         std::string mode = dev->readSetting("TDD_RX_MODE");
         mode.erase(mode.find_last_not_of(" \t\r\n") + 1);
         if (mode != "slots")
-          throw std::runtime_error("bs_rx_slots: TDD_RX_MODE reads '" + mode +
-                                   "' (a device without SH-347 slots mode ignores the key)");
+          throw std::runtime_error("bs_rx_slots: TDD_RX_MODE reads '" + mode + "' after writing slots");
       }
       htdd_frame_ticks_ = static_cast<long long>(spf_tdd) * htdd_symbol_ticks_;
 

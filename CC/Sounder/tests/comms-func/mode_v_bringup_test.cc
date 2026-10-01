@@ -54,7 +54,8 @@ class FakeDevice : public SoapySDR::Device {
   bool wrong_cal = false;        ///< every ADC block reads cal=mode2
   std::string preflight = "ok known DAC0.0:FIFO_OVR(HS-207)";
   // AP-86: the X-band front end, as the software lane's 329e23d plugin behaves.
-  bool extpin_ignored = false;       ///< the keys no-op (standing trap 1): STAT never shows static
+  bool extpin_not_adopted = false;   ///< the board never adopts the static: STAT never shows it
+  bool extpin_unknown = false;       ///< a plugin without the front-end keys: their writes throw
   int drive_allow_off = -1;          ///< this TX channel reads drive_allow_chK=0 (guarded, no pa_ready)
   bool extpin_lost_on_setup = false; ///< setupStream resets CTRL/SRC
   bool seq_busy_stuck = false;       ///< the source walk never settles (seq_busy=1)
@@ -79,6 +80,7 @@ class FakeDevice : public SoapySDR::Device {
     return it == gain_.end() ? (dir == SOAPY_SDR_TX ? -6.13 : 0.0) : it->second;
   }
   void writeSetting(const std::string& key, const std::string& value) override {
+    if (extpin_unknown && key.rfind("TDD_EXTPIN_", 0) == 0) throw std::runtime_error(key + ": unknown setting");
     calls.push_back(value.empty() ? key : key + "=" + value);
     set_[key] = value;
     if (key == "FORCE_IDLE") set_.erase("TDD_EXTPIN_SRC"), set_.erase("TDD_EXTPIN_CTRL");  // the plugin resets both
@@ -131,7 +133,7 @@ class FakeDevice : public SoapySDR::Device {
     }
     if (key == "TDD_EXTPIN_STAT") {
       // The fields the software lane named, mixed separators on purpose.
-      const bool st = !extpin_ignored && val("TDD_EXTPIN_SRC").rfind("src=static", 0) == 0 &&
+      const bool st = !extpin_not_adopted && val("TDD_EXTPIN_SRC").rfind("src=static", 0) == 0 &&
                       val("TDD_EXTPIN_CTRL").find("ilock=1") != std::string::npos;
       const std::string src = val("TDD_EXTPIN_SRC");
       const std::string applied = !st ? "idle" : (src.find("state=tx") != std::string::npos ? "tx" : "rx");
@@ -142,8 +144,12 @@ class FakeDevice : public SoapySDR::Device {
     }
     if (key == "RFDC_PREFLIGHT") return preflight + "\ndetail";
     if (key == "RFDC_INTR_FIRE_COUNT") return "14032361";
+    if (key == "RFDC_SNAPSHOT") return "blocks:\nADC0.0:en=1 fs=4915.200MHz";
+    // Any other key reads back what was written; a key the driver does not
+    // know throws, as the plugin does.
     const auto it = set_.find(key);
-    return it == set_.end() ? std::string("ok") : it->second;
+    if (it == set_.end()) throw std::runtime_error(key + ": unknown setting");
+    return it->second;
   }
   SoapySDR::Kwargs getChannelInfo(const int dir, const size_t ch) const override {
     SoapySDR::Kwargs kw;
@@ -436,13 +442,24 @@ int main() {
   }
   {
     FakeDevice f;
-    f.extpin_ignored = true;
+    f.extpin_not_adopted = true;
     auto p = uePlan();
     p.xband_fe_state = "tx";
     bool threw = false;
     try { houdini::modev::bringUp(f, p); } catch (const std::runtime_error&) { threw = true; }
     check(threw && idx(f.calls, "rate TX ") < 0,
-          "AP-86: keys the plugin ignores (STAT never static) throw before any converter write [mutation: the STAT poll removed]");
+          "AP-86: a static the board never adopts (STAT never static) throws before any converter write [mutation: the STAT poll removed]");
+  }
+  {
+    FakeDevice f;
+    f.extpin_unknown = true;
+    auto p = uePlan();
+    p.xband_fe_state = "tx";
+    std::string why;
+    try { houdini::modev::bringUp(f, p); } catch (const std::runtime_error& e) { why = e.what(); }
+    check(why.find("TDD_EXTPIN_CTRL: unknown setting") != std::string::npos && idx(f.calls, "rate TX ") < 0,
+          "AP-86: a plugin without the front-end keys stops the bring-up at the write, before any converter write "
+          "[mutation: the write's error caught and the bring-up continued]");
   }
   {
     FakeDevice f;
