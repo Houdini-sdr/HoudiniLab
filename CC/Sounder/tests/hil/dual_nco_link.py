@@ -74,7 +74,9 @@ def capture(txd, rxd, a, dac_nco, adc_nco, native, dtype):
             txd.setFrequency(SOAPY_SDR_TX, a.tx_ch, dac_nco)
             cs16 = np.ascontiguousarray(iq_a, dtype=np.int16).view(np.int32)
             txd.writeStream(tx, [cs16], cs16.size, 0, 0)
-            txd.activateStream(tx)
+            if txd.activateStream(tx) != 0:
+                raise RuntimeError("activateStream(TX replay) refused (DS-19: a load must be a whole "
+                                   "number of 16-sample beats)")
         rxd.setSampleRate(SOAPY_SDR_RX, a.rx_ch, a.rate_mhz * 1e6)
         rxd.setFrequency(SOAPY_SDR_RX, a.rx_ch, adc_nco)
         fs = float(rxd.getSampleRate(SOAPY_SDR_RX, a.rx_ch))

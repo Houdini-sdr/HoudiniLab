@@ -73,7 +73,9 @@ def capture_once(txd, rxd, args, mix, nco_hz):
                 txd.writeSetting("RFDC_TX_COARSE_MIX", "fs4")
             cs16 = np.ascontiguousarray(iq_a, dtype=np.int16).view(np.int32)
             txd.writeStream(tx, [cs16], cs16.size, 0, 0)
-            txd.activateStream(tx)
+            if txd.activateStream(tx) != 0:
+                raise RuntimeError("activateStream(TX replay) refused (DS-19: a load must be a whole "
+                                   "number of 16-sample beats)")
         rxd.setSampleRate(SOAPY_SDR_RX, args.rx_ch, args.rate_mhz * 1e6)
         if mix == "nco":
             rxd.setFrequency(SOAPY_SDR_RX, args.rx_ch, nco_hz)

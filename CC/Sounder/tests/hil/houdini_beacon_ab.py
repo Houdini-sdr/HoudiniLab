@@ -143,7 +143,9 @@ def main():
     try:
         # ---- A: continuous replay ----
         tsd.writeStream(txs, [cs16], n_load, 0, 0)
-        tsd.activateStream(txs)
+        if tsd.activateStream(txs) != 0:
+            raise RuntimeError("activateStream(TX replay) refused (DS-19: a load must be a whole "
+                               "number of 16-sample beats)")
         time.sleep(0.2)
         iqA = capture()
         snrA, _ = gold_snr(iqA, a.center_mhz, rx_rate, gold)

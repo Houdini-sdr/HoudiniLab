@@ -142,7 +142,9 @@ def main():
             txd.setFrequency(SOAPY_SDR_TX, a.tx_ch, a.dac_nco * 1e6)
             cs16 = np.ascontiguousarray(iq_i16, dtype=np.int16).view(np.int32)
             txd.writeStream(tx, [cs16], cs16.size, 0, 0)
-            txd.activateStream(tx)
+            if txd.activateStream(tx) != 0:
+                raise RuntimeError("activateStream(TX replay) refused (DS-19: a load must be a whole "
+                                   "number of 16-sample beats)")
 
         rxd.setSampleRate(SOAPY_SDR_RX, a.rx_ch, a.rx_rate * 1e6)
         rxd.setFrequency(SOAPY_SDR_RX, a.rx_ch, a.adc_nco * 1e6)

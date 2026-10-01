@@ -139,7 +139,11 @@ int main(int argc, char** argv) {
     int txflags = 0;
     txd->writeStream(txs, buffs, n_load, txflags, tns, 1000000);  // load RAM
   }
-  txd->activateStream(txs);
+  // The driver refuses a load that is not a whole number of 16-sample beats (DS-19).
+  if (const int rc = txd->activateStream(txs); rc != 0) {
+    std::fprintf(stderr, "activateStream(TX replay, %zu samples) refused: %s\n", n_load, SoapySDR::errToStr(rc));
+    return 1;
+  }
   std::printf("BS TX %s ch%d beacon %zu samp @ NCO %.0f MHz\n", tx_ip.c_str(),
               tx_ch, n_load, nco / 1e6);
 

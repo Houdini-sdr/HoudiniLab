@@ -102,7 +102,9 @@ def main():
     results = []
     try:
         tsd.writeStream(txs, [cs16], a.n_load, 0, 0)   # load replay RAM
-        tsd.activateStream(txs)                        # CONTINUOUS replay
+        if tsd.activateStream(txs) != 0:  # CONTINUOUS replay
+            raise RuntimeError("activateStream(TX replay) refused (DS-19: a load must be a whole "
+                               "number of 16-sample beats)")
         time.sleep(0.2)
         for sched in [s.strip() for s in a.scheds.split(",") if s.strip()]:
             if sched != "none":

@@ -8,6 +8,8 @@
 */
 #include "include/RadioSoapy.h"
 
+#include <SoapySDR/Errors.hpp>
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -17,6 +19,7 @@
 #include <cstring>
 #include <iostream>
 #include <sstream>
+#include <stdexcept>
 #include <vector>
 
 #include "SoapySDR/Errors.hpp"
@@ -549,11 +552,12 @@ int RadioSoapy::xmit(const void* const* buffs, int samples, int flags,
 void RadioSoapy::activateXmit(void) {
   // for USRP device start tx stream UHD_INIT_TIME_SEC sec in the future
   for (auto* txs : tx_streams_) {
-    if (!isUhd()) {
-      dev_->activateStream(txs);
-    } else {
-      dev_->activateStream(txs, SOAPY_SDR_HAS_TIME, UHD_INIT_TIME_SEC * 1e9, 0);
-    }
+    const int rc = !isUhd() ? dev_->activateStream(txs)
+                            : dev_->activateStream(txs, SOAPY_SDR_HAS_TIME, UHD_INIT_TIME_SEC * 1e9, 0);
+    // A refused activation transmits nothing; the Houdini driver refuses, for
+    // one, a replay load that is not a whole number of 16-sample beats (DS-19).
+    if (rc != 0)
+      throw std::runtime_error(params_.label + ": activateStream(TX) refused: " + SoapySDR::errToStr(rc));
   }
 }
 

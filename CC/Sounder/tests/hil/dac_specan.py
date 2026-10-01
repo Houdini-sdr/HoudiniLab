@@ -139,7 +139,9 @@ def main():
         sdr.setFrequency(SOAPY_SDR_TX, a.tx_ch, nco)
         cs16 = np.ascontiguousarray(i16, dtype=np.int16).view(np.int32)
         sdr.writeStream(tx, [cs16], a.n_load, 0, 0)
-        sdr.activateStream(tx)
+        if sdr.activateStream(tx) != 0:
+            raise RuntimeError("activateStream(TX replay) refused (DS-19: a load must be a whole "
+                               "number of 16-sample beats)")
         got = float(sdr.getFrequency(SOAPY_SDR_TX, a.tx_ch))
         # sanity on the loaded waveform: a real tone has ~0 DC and finite std
         iqc = i16[0::2].astype(float) + 1j * i16[1::2]

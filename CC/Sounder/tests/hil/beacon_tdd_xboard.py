@@ -111,7 +111,9 @@ def main():
         cs16 = np.ascontiguousarray(i16, dtype=np.int16).view(np.int32)
         tsd.writeStream(tx, [cs16], a.n_load, 0, 0)
         if a.continuous:
-            tsd.activateStream(tx)                     # continuous replay, no TDD
+            if tsd.activateStream(tx) != 0:  # continuous replay, no TDD
+                raise RuntimeError("activateStream(TX replay) refused (DS-19: a load must be a whole "
+                                   "number of 16-sample beats)")
             print("  CONTINUOUS replay (activateStream) -- TDD strobe bypassed")
         else:
             pattern = ["0"] * a.spf

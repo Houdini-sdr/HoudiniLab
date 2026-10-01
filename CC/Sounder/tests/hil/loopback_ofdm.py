@@ -333,7 +333,10 @@ def run_hardware(a):
           (a.rate, ndata, float(txd.getSampleRate(SOAPY_SDR_TX, a.tx_ch)) / 1e6,
            a.tx_ch, a.rx_ch, a.nco))
     tx = txd.setupStream(SOAPY_SDR_TX, "CS16", [a.tx_ch], {"tx_mode": "replay"})
-    txd.writeStream(tx, [cs16], len(ram), 0, 0); txd.activateStream(tx)
+    txd.writeStream(tx, [cs16], len(ram), 0, 0)
+    if txd.activateStream(tx) != 0:
+        raise RuntimeError("activateStream(TX replay) refused (DS-19: a load must be a whole "
+                           "number of 16-sample beats)")
     try:
         rxd.setSampleRate(SOAPY_SDR_RX, a.rx_ch, RATE)
         rxd.setFrequency(SOAPY_SDR_RX, a.rx_ch, a.nco * 1e6)
