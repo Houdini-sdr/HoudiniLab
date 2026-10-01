@@ -54,7 +54,7 @@ int main() {
     bs.remote_port = cfg.remote_port();
     bs.tx_channels = Utils::strToChannels(cfg.bs_tx_channel());
     bs.rx_channels = Utils::strToChannels(cfg.bs_rx_channel());
-    bs.packet_samples = houdini::rxpkt::bsPacket(cfg.samps_per_slot(), cfg.bs_hw_framer());
+    bs.packet_samples = houdini::rxpkt::bsPacket(cfg.samps_per_slot(), cfg.bs_hw_framer(), cfg.rate());
     bs.tx_mode = "replay";
     // ...and as ClientRadioSet::init describes the UE.
     RadioParams ue = bs;

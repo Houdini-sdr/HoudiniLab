@@ -531,11 +531,12 @@ Config::Config(const std::string& jsonfile, const std::string& directory,
   if (bs_rx_slots_ && !bs_hw_framer_) {
     throw std::invalid_argument("bs_rx_slots needs bs_hw_framer (the native TDD framer arms the pattern)");
   }
-  if (is_houdini() && bs_hw_framer_ && houdini::rxpkt::framerPacket(samps_per_slot_) == 0) {
+  if (is_houdini() && bs_hw_framer_ && houdini::rxpkt::framerPacket(samps_per_slot_, rate_) == 0) {
     throw std::invalid_argument("the BS's TDD framer needs packets that tile the slot (the device refuses a TDD RX "
                                 "packet that does not divide the slot or spans under " +
-                                std::to_string(houdini::rxpkt::kMinFramerPacket) + " ticks, SH-488); a " +
-                                std::to_string(samps_per_slot_) + "-sample slot has no such packet");
+                                std::to_string(houdini::rxpkt::kMinFramerTicks) + " ticks, SH-488); a " +
+                                std::to_string(samps_per_slot_) + "-sample slot at " + std::to_string(rate_ / 1e6) +
+                                " MSPS has no such packet");
   }
   // The Houdini TDD framer cuts ONE pilot slot per frame: it keeps the
   // schedule's 'P' as the pilot and centres the burst search on it, so a
