@@ -60,8 +60,8 @@ class IClientRadioSet {
   /// on sets that cannot, which keep their random-phase windows.
   virtual void placeNextRx(size_t /*radio_id*/, std::function<long long(long long)> /*start_for_head*/) {}
   /// A device setting on one client radio: the clock-steering actuator
-  /// (AP-79, CLOCK_ADJ). Empty / false on sets that have none, or when the
-  /// device refuses; never throws.
+  /// (AP-79, CLOCK_ADJ). Empty / false on sets that have none; a read the
+  /// device refuses throws its error, a refused write returns false.
   virtual std::string readRadioSetting(size_t /*radio_id*/, const std::string& /*key*/) { return ""; }
   virtual bool writeRadioSetting(size_t /*radio_id*/, const std::string& /*key*/, const std::string& /*value*/) {
     return false;

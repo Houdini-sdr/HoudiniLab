@@ -348,12 +348,9 @@ void ClientRadioSet::setRxFilter(size_t radio_id, bool on) {
 
 std::string ClientRadioSet::readRadioSetting(size_t radio_id, const std::string& key) {
   if (radio_id >= radios.size() || radios.at(radio_id) == nullptr) return "";
-  try {
-    return radios.at(radio_id)->RawDev()->readSetting(key);
-  } catch (const std::exception& e) {
-    MLPD_WARN("UE %zu: readSetting(%s) failed: %s\n", radio_id, key.c_str(), e.what());
-    return "";
-  }
+  // A refused read throws to the caller, so its reason reaches the line that
+  // acts on it (the clock steering's OFF line names it).
+  return radios.at(radio_id)->RawDev()->readSetting(key);
 }
 
 bool ClientRadioSet::writeRadioSetting(size_t radio_id, const std::string& key, const std::string& value) {
