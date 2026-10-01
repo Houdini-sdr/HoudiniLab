@@ -115,9 +115,10 @@ The XUD1A is the reworked board (RF 9.5 GHz, LO 13.88 GHz). It needs:
   runs. Superseded run
   directories are filed under `~/app_archive` (its `INDEX.md` maps them).
 - **Shipping a build.** From the lane's checkout, `tools/ship_to_rig.sh
-  <user>@<rig-host> <rig worktree> [<branch>]` does all of it and fails closed
-  (it refuses while a sounder runs or the host is busy, and `CHECK_STRING=<text>`
-  makes it require the new binary to carry a string only the new code logs). By
+  [options] <user>@<rig-host> <rig worktree> [<branch>]` does all of it and fails
+  closed (it refuses while a sounder or a hardware-in-the-loop suite runs, or
+  the host is busy; `--check-string <text>` makes it require the new binary to
+  carry a string only the new code logs; the options are at its head). By
   hand: bundle, copy, and fetch INSIDE the target worktree (`FETCH_HEAD` is per
   worktree), then relink muFFT, which a checkout restores as an empty directory:
 
