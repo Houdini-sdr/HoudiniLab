@@ -20,6 +20,9 @@ GOOD = [
     "(0 samples lost in rx slots, 0 the schedule's gaps), 0 out of order, 0 time jumps",
     "57:000200 INFOR: BS 192.168.10.22 link health: [BS 192.168.10.22] 60.0 s: irq 12/s, preflight ok: clean"
     " | app: rx_err +0, rx_short +0, rx_pad +0, tx_short +0, tx_sat +0",
+    "29:011822 INFOR: clientSyncBeacon [0]: idx 190198 snr 46.9 dB",
+    "42:198592 INFOR: CNS score 0.995 rot -0.0 deg at frame 553 (512 datagrams, 0 low); P->U 500.0 us, so +180.0 deg "
+    "per kHz of uncorrected CFO",
 ]
 def levels(L):
     return [lv for lv, _ in rs.verdict(L)]
@@ -27,6 +30,20 @@ def swap(L, old, new):
     return [l.replace(old, new) for l in L]
 
 check("FAIL" not in levels(GOOD) and "WARN" not in levels(GOOD), "a clean slots-mode run passes with no warnings: %s" % rs.verdict(GOOD))
+# AP-112, DEMO_VERIFICATION 9.83: clean read checks and counters on a link that
+# carried nothing. Each signal on its own, then both gone.
+nolock = [l for l in GOOD if "clientSyncBeacon" not in l]
+check(any(lv == "FAIL" and "never detected the beacon" in t for lv, t in rs.verdict(nolock)),
+      "a UE that never detected the beacon fails (mutation: the beacon rule removed)")
+nocns = [l for l in GOOD if "datagrams" not in l]
+check(any(lv == "FAIL" and "no constellation record" in t for lv, t in rs.verdict(nocns)),
+      "a run whose BS scored no constellation fails (mutation: the constellation rule removed)")
+zero = swap(GOOD, "(512 datagrams, 0 low)", "(0 datagrams, 0 low)")
+check(any(lv == "FAIL" and "no constellation record" in t for lv, t in rs.verdict(zero)),
+      "a CNS summary of zero datagrams is no data (mutation: any summary line taken as data)")
+idle = [l for l in GOOD if "clientSyncBeacon" not in l and "datagrams" not in l]
+check(sum(lv == "FAIL" for lv in levels(idle)) == 2,
+      "the 9.83 shape, clean checks and no data, fails on both counts (mutation: PASS on clean counters alone)")
 check("FAIL" in levels(swap(GOOD, "(0 samples lost in rx slots, 128820113280", "(1920 samples lost in rx slots, 128820113280")),
       "samples lost in the rx slots fail (mutation: the lost count not read)")
 check("FAIL" in levels([l.replace("0 time jumps", "2 time jumps") if "UE 192" in l else l for l in GOOD]),

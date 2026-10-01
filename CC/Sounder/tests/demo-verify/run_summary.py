@@ -8,15 +8,17 @@ largest *.log, the sounder's; a dashboard session log (csi_server.py
 --log-dir) is given as the file. The summary prints the stack, the X-band
 front end, slots mode, errors, the end-of-run checks, warning counts, UE
 acquisition, the BS framer (with --bs_rx_debug) and the carrier. The
-verdict, last, is FAIL on an error, on a nonzero end-of-run count, or on a
+verdict, last, is FAIL on an error, on a nonzero end-of-run count, on a
 missing end-of-run line (they are printed as the radios close, so a run that
-did not close cleanly has none); link-health alarms, lost pilots, untrusted
-windows and late releases are warnings to read. Exits 1 on FAIL.
+did not close cleanly has none), or when no data flowed (the UE never detected
+the beacon, or the BS produced no constellation); link-health alarms, lost
+pilots, untrusted windows and late releases are warnings to read. Exits 1 on
+FAIL.
 """
 import glob, os, re, statistics as st, sys
 from collections import Counter
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from sounder_log import ANSI, alarm_kinds  # noqa: E402,F401  alarm_kinds: rung_report and the test read it here too
+from sounder_log import ANSI, alarm_kinds, cns_total  # noqa: E402,F401  alarm_kinds: rung_report and the test read it here too
 
 # "Radios Not Found. Will attempt a retry" is the in-process retry of a slow or
 # refused open (8.127, 8.131): a warning when the run then closes cleanly; one
@@ -51,6 +53,17 @@ def verdict(L):
     for l in L:
         if re.search(ERRORS, l):
             out.append(("FAIL", "error: " + l.strip()[:200]))
+    # Data flowed (AP-112): every other check below reads clean on an idle
+    # link, so a run that carried nothing passed them (DEMO_VERIFICATION 9.83,
+    # the nodes cabled in loopback). The UE locks on the beacon first, and the
+    # BS's CSI view then scores constellations from its uplink.
+    if not any("clientSyncBeacon" in l or "syncSearch: detection" in l for l in L):
+        out.append(("FAIL", "UE: never detected the beacon (no syncSearch detection or clientSyncBeacon line): "
+                            "no data flowed"))
+    cns = cns_total(L)
+    if not cns or cns[0] == 0:
+        out.append(("FAIL", "BS: no constellation record (no CNS summary with datagrams): no UE uplink reached the "
+                            "CSI view"))
     slots = any("receives only its rx slots" in l for l in L)
     # Up to fpga 1.33 the host plugin drops the non-rx symbols itself, so
     # tdd_drop counts them by design (9.69: 51.7 M a channel); from 1.34 the

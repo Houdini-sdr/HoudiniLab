@@ -197,6 +197,7 @@ def check_examples(rep, ex):
 
 
 PROC = "/proc"  # the process table read below; --proc-root points the test at its own
+HWINFO_ATTEMPTS = 3  # tries of a radio's hardware-info read that timed out
 
 
 def running_sounders():
@@ -389,17 +390,32 @@ def check_versions(rep, sd, nodes, port, env, root=None):
     infos = {}
     for ip in nodes:
         # A child process with a timeout: a radio that accepts the connection but
-        # never answers must not hang the check.
-        try:
-            out = subprocess.run([sys.executable, os.path.abspath(__file__), "--hwinfo", ip, str(port)],
-                                 cwd=sd, env=env, timeout=60, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            if out.returncode != 0:
-                raise RuntimeError((out.stderr.decode("utf-8", "replace").strip().splitlines() or ["?"])[-1])
-            infos[ip] = json.loads(out.stdout)
-        except (subprocess.TimeoutExpired, RuntimeError, ValueError) as e:
-            rep.add("FAIL", "stack %s" % ip, "could not read the radio's hardware info (%s)" % str(e)[:160],
-                    "Run this check with the venv's python. If the radio is held by another "
-                    "run, stop that run first.")
+        # never answers must not hang the check. A node's first opens after its
+        # boot can take 3.3 s against the 3 s open timeout (DEMO_VERIFICATION
+        # 9.83), so a timeout is tried again, as the dashboard's radio opens are.
+        for attempt in range(1, HWINFO_ATTEMPTS + 1):
+            err = None
+            try:
+                out = subprocess.run([sys.executable, os.path.abspath(__file__), "--hwinfo", ip, str(port)],
+                                     cwd=sd, env=env, timeout=60, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                if out.returncode != 0:
+                    raise RuntimeError((out.stderr.decode("utf-8", "replace").strip().splitlines() or ["?"])[-1])
+                infos[ip] = json.loads(out.stdout)
+            except (subprocess.TimeoutExpired, RuntimeError, ValueError) as e:
+                err = str(e)
+            if err is None or "TIMEOUT" not in err:
+                break
+        if err is None:
+            continue
+        if "TIMEOUT" in err:
+            fix = ("The radio did not answer within the open timeout in %d tries. A node's first opens after its "
+                   "boot can be that slow: run this check again. If it persists, its SoapySDRServer is stuck "
+                   "(restart it with the rig booked)." % HWINFO_ATTEMPTS)
+        elif "No module named" in err:
+            fix = "Run this check with the venv's python (--venv, and its bin/python3)."
+        else:
+            fix = "If the radio is held by another run, stop that run first."
+        rep.add("FAIL", "stack %s" % ip, "could not read the radio's hardware info (%s)" % err[:160], fix)
     if not infos:
         return
     for ip, info in infos.items():

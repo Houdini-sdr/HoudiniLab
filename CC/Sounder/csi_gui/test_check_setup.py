@@ -47,6 +47,12 @@ open(os.path.join(fake, "SoapySDR.py"), "w").write(
     "                (os.environ.get('SOAPY_SDR_ROOT') and os.environ.get('SOAPY_SDR_PLUGIN_PATH') == '')), 'no plugin path'\n"
     "        assert int(a.get('timeout', '0')) >= 1000000, 'no timeout: the plugin default is 300 ms'\n"
     "        self.ip = a['remote'].split('//')[1].split(':')[0]\n"
+    "        slow = os.path.join(%r, 'slow_' + self.ip)\n"
+    "        if os.path.exists(slow):\n"
+    "            n = int(open(slow).read())\n"
+    "            if n > 0:\n"
+    "                open(slow, 'w').write(str(n - 1))\n"
+    "                raise RuntimeError('SoapyRPCUnpacker::recv() TIMEOUT')\n"
     "    def getHardwareInfo(self): return json.load(open(%r))[self.ip]\n"
     "    def readSetting(self, k):\n"
     "        if k == 'CLOCK_ADJ': return json.load(open(%r))[self.ip]\n"
@@ -63,7 +69,7 @@ open(os.path.join(fake, "SoapySDR.py"), "w").write(
     "        except AttributeError: Device.unmake(self)\n"
     "        setattr(self, '__closed__', True)\n"
     "    def __del__(self): self.close()\n"
-    % (info_file, os.path.join(root, "clock.json"), egress_file, os.path.join(root, "unmade")))
+    % (root, info_file, os.path.join(root, "clock.json"), egress_file, os.path.join(root, "unmade")))
 HEALTHY = "drop=p0:0,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marked=p0:0,p1:0,p2:0,p3:0"
 json.dump({"127.0.0.1": HEALTHY, "127.0.0.2": HEALTHY}, open(egress_file, "w"))
 clock_file = os.path.join(root, "clock.json")
@@ -197,6 +203,19 @@ check(rc == 1 and lv.get("stack match") == "PASS" and lv.get("lockstep 127.0.0.1
       "a host release that is not the radio's device release FAILs each node (mutation: the lockstep check "
       "removed, the nodes agreeing passes): %s" % lv)
 json.dump({"127.0.0.1": same, "127.0.0.2": same}, open(info_file, "w"))
+# A slow first open (DEMO_VERIFICATION 9.83: 3.34 s against the 3 s timeout):
+# one timeout is tried again and passes; one that persists names the slow
+# open, not the venv.
+slow = os.path.join(root, "slow_127.0.0.2")
+open(slow, "w").write("1"); rc, rep, lv = run()
+check(rc == 0 and lv.get("stack match") == "PASS",
+      "one timed-out hardware-info read is tried again and the check passes (mutation: no retry): %s" % lv)
+open(slow, "w").write("9"); rc, rep, lv = run()
+fix = [r["fix"] for r in rep["results"] if r["what"] == "stack 127.0.0.2"]
+check(rc == 1 and lv.get("stack 127.0.0.2") == "FAIL" and fix and "run this check again" in fix[0]
+      and "venv" not in fix[0],
+      "a timeout that persists FAILs with the slow-open advice, not the venv's (mutation: the old advice): %s" % fix)
+os.remove(slow)
 # The device's single marked=N form (older builds printed it per port).
 json.dump({"127.0.0.1": "drop=p0:0,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marked=1",
            "127.0.0.2": "drop=p0:0,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marked=255"}, open(egress_file, "w"))
