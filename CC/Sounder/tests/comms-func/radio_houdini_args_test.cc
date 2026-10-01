@@ -85,9 +85,8 @@ int main() {
           "no tiled packet: no HOUDINI_MTU, the device's default (mutation: the packet_samples > 0 guard dropped, "
           "asking for a 58-byte MTU)");
 
-    // RX: the BS opens A and C as one combined stream (the driver assigns the
-    // ports and rejects local_port there); the UE opens A alone on the FPGA's
-    // fixed port for channel 0, 10001.
+    // RX: the BS opens A and C as one combined stream, the UE opens A alone;
+    // neither names a port, the driver binds each channel's fixed one (SH-425).
     check(bs.rx_channels == std::vector<size_t>{0, 2} && ue.rx_channels == std::vector<size_t>{0},
           "the demo config opens BS RX A and C, UE RX A (mutation: rx_channel ignored, the BS on its common channel A)");
     const auto brx = RadioHoudini::rxStreamArgs(bs);
@@ -96,14 +95,16 @@ int main() {
               ": break-at-gap and MTS, no local_port on the combined stream (mutation: local_port set for a combined "
               "stream, or rx_gap_break left to the driver's default)");
     const auto urx = RadioHoudini::rxStreamArgs(ue);
-    check(urx == SoapySDR::Kwargs{{"local_port", "10001"}, {"rx_gap_break", "1"}, {"mts", "true"}},
-          "UE rxStreamArgs " + show(urx) + ": channel A binds 10001 (mutation: a fixed port, or 10000 + channel)");
+    check(urx == SoapySDR::Kwargs{{"rx_gap_break", "1"}, {"mts", "true"}},
+          "UE rxStreamArgs " + show(urx) +
+              ": break-at-gap and MTS, no local_port on a single-channel stream either (mutation: local_port set "
+              "for a single channel)");
     RadioParams c_only = ue;
     c_only.rx_channels = {2};
     c_only.mts = false;
-    check(RadioHoudini::rxStreamArgs(c_only) == SoapySDR::Kwargs{{"local_port", "10003"}, {"rx_gap_break", "1"}},
-          "channel C alone binds 10003, and no MTS asked when it is off (mutation: the port not following the "
-          "channel, or mts written regardless)");
+    check(RadioHoudini::rxStreamArgs(c_only) == SoapySDR::Kwargs{{"rx_gap_break", "1"}},
+          "channel C alone, and no MTS asked when it is off (mutation: mts written regardless, or local_port set for "
+          "a single channel)");
 
     // TX: the BS plays its beacon from the replay RAM; the UE streams on the TDD
     // tick anchor (ue_tdd_pilot is on in the demo config).

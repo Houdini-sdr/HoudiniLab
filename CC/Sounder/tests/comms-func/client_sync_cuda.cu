@@ -146,8 +146,7 @@ int main(int argc, char** argv) {
   // --- UE: RX sync loop on rx_ip ch rx_ch ---
   rxd->setSampleRate(SOAPY_SDR_RX, rx_ch, rx_rate);
   rxd->setFrequency(SOAPY_SDR_RX, rx_ch, nco);
-  auto* rxs = rxd->setupStream(SOAPY_SDR_RX, "CS16", {static_cast<size_t>(rx_ch)},
-                               {{"local_port", std::to_string(10001 + rx_ch)}});
+  auto* rxs = rxd->setupStream(SOAPY_SDR_RX, "CS16", {static_cast<size_t>(rx_ch)});
   rxd->activateStream(rxs);
   std::printf("UE RX %s ch%d frame %zu, %d frames -- syncing with find_beacon_cuda\n\n",
               rx_ip.c_str(), rx_ch, frame, iters);
