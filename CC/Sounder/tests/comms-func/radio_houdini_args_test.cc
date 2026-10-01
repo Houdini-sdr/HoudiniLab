@@ -54,7 +54,7 @@ int main() {
     bs.remote_port = cfg.remote_port();
     bs.tx_channels = Utils::strToChannels(cfg.bs_tx_channel());
     bs.rx_channels = Utils::strToChannels(cfg.bs_rx_channel());
-    bs.packet_samples = houdini::rxpkt::tiledPacketOrDefault(cfg.samps_per_slot());
+    bs.packet_samples = houdini::rxpkt::bsPacket(cfg.samps_per_slot(), cfg.bs_hw_framer());
     bs.tx_mode = "replay";
     // ...and as ClientRadioSet::init describes the UE.
     RadioParams ue = bs;
@@ -68,7 +68,7 @@ int main() {
     // Packets that tile the 61440-tick slot: 1920 samples, 32 per RX slot, and
     // HOUDINI_MTU 1920 x 4 + 58 = 7738 (the config's _status names 7738).
     check(cfg.samps_per_slot() == 61440 && bs.packet_samples == 1920,
-          "the demo slot is 61440 samples and its tiled packet 1920 (mutation: tiledPacketOrDefault falling back to 0)");
+          "the demo slot is 61440 samples and its tiled packet 1920 (mutation: bsPacket falling back to 0)");
     const auto da = RadioHoudini::deviceArgs(bs);
     const SoapySDR::Kwargs want_da = {{"driver", "houdinisdr"},
                                       {"remote", "tcp://192.0.2.1:55132"},

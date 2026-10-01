@@ -22,6 +22,9 @@ constexpr size_t kBeatSamples = 16;        ///< 8 words x 2 sc16 samples
 constexpr size_t kOverheadBytes = 58;      ///< Eth 14 + IP 20 + UDP 8 + framer 16
 constexpr size_t kBytesPerSample = 4;      ///< sc16
 constexpr size_t kDefaultMtu = 8192;
+/// The shortest packet the device takes on a TDD RX stream: 128 ticks
+/// (SH-488), 128 samples at the 122.88 MHz tick rate the framer assumes.
+constexpr size_t kMinFramerPacket = 128;
 
 /// The largest packet (samples) that is a whole number of beats, divides the
 /// slot exactly and fits the default MTU; 0 when none does.
@@ -49,6 +52,21 @@ inline size_t deviceSamples(size_t mtu) {
 inline size_t tiledPacketOrDefault(size_t slot_samples) {
   const size_t s = samplesForSlot(slot_samples);
   return (s * 4 >= deviceSamples(kDefaultMtu) * 3) ? s : 0;
+}
+
+/// The packet while the BS's TDD framer is armed. The device refuses a TDD RX
+/// packet that does not divide the slot or spans under 128 ticks (SH-488), so
+/// this is the dividing packet whatever its size; 0 when none of at least
+/// kMinFramerPacket exists (the config refuses that slot).
+inline size_t framerPacket(size_t slot_samples) {
+  const size_t s = samplesForSlot(slot_samples);
+  return s >= kMinFramerPacket ? s : 0;
+}
+
+/// The BS's packet: framerPacket while its framer is armed, otherwise
+/// tiledPacketOrDefault (no TDD RX, so the default is allowed).
+inline size_t bsPacket(size_t slot_samples, bool framer_armed) {
+  return framer_armed ? framerPacket(slot_samples) : tiledPacketOrDefault(slot_samples);
 }
 
 }  // namespace rxpkt

@@ -25,6 +25,14 @@ int main() {
         "a power-of-two slot gets 1024, since 2048 exceeds the MTU (mutation: the MTU cap dropped); no divisor gives 0 (mutation: no divisibility check)");
   check(rp::tiledPacketOrDefault(61440) == 1920 && rp::tiledPacketOrDefault(4096) == 0,
         "a small tiling packet (4096 -> 1024) keeps the default instead of doubling the packet rate (mutation: no 3/4 floor)");
+  // SH-488: under the TDD framer the device refuses any packet that does not
+  // divide the slot or spans under 128 ticks, so the BS takes the divisor.
+  check(rp::framerPacket(4096) == 1024 && rp::framerPacket(61440) == 1920,
+        "under the framer a 4096 slot takes 1024, the demo slot 1920 (mutation: the 3/4 floor applied under the framer)");
+  check(rp::samplesForSlot(2096) == 16 && rp::framerPacket(2096) == 0 && rp::framerPacket(61441) == 0,
+        "a slot whose only divisor is 16 samples, or none, has no framer packet (mutation: no 128-tick floor)");
+  check(rp::bsPacket(4096, true) == 1024 && rp::bsPacket(4096, false) == 0 && rp::bsPacket(61440, false) == 1920,
+        "the BS takes the framer packet only while its framer is armed (mutation: the framer flag ignored)");
   if (failures) std::printf("FAILED: %d failure(s)\n", failures);
   return failures ? 1 : 0;
 }
