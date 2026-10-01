@@ -71,7 +71,7 @@ def clock_adj(dac, cal=408):
     return "holdover=1 man_dac=%d rb_dac=%d pll1_locked=1 ref=calibrated cal_dac=%d offset=%d" % (dac, dac, cal, dac - cal)
 json.dump({"127.0.0.1": clock_adj(404, 404), "127.0.0.2": clock_adj(408)}, open(clock_file, "w"))
 same = {k: "v1" for k in ("fpga_version", "fpga_commit", "fpga_board", "device_version",
-                          "device_build", "host_version", "host_build", "proto_version")}
+                          "device_build", "host_version", "host_build")}
 json.dump({"127.0.0.1": same, "127.0.0.2": same}, open(info_file, "w"))
 
 env = dict(os.environ, HOUDINI_EXAMPLES=ex, PYTHONPATH=fake)
@@ -191,6 +191,14 @@ check(rc == 0 and lv.get("stack match") == "PASS" and lv.get("plugin build 127.0
       and lv.get("plugin build 127.0.0.2") == "WARN",
       "a host plugin that is not the radios' device build is a WARN per node, not a failure (mutation: builds not "
       "compared): %s" % lv)
+# Both nodes' host plugins a different release than their device modules: the
+# nodes agree (stack match), and each one FAILs the driver's release lockstep.
+json.dump({"127.0.0.1": dict(same, host_version="v2"), "127.0.0.2": dict(same, host_version="v2")}, open(info_file, "w"))
+rc, rep, lv = run()
+check(rc == 1 and lv.get("stack match") == "PASS" and lv.get("lockstep 127.0.0.1") == "FAIL"
+      and lv.get("lockstep 127.0.0.2") == "FAIL",
+      "a host release that is not the radio's device release FAILs each node (mutation: the lockstep check "
+      "removed, the nodes agreeing passes): %s" % lv)
 json.dump({"127.0.0.1": same, "127.0.0.2": same}, open(info_file, "w"))
 # The device's single marked=N form (older builds printed it per port).
 json.dump({"127.0.0.1": "drop=p0:0,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marked=1",

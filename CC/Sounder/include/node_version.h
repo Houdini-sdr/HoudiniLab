@@ -2,11 +2,12 @@
   * @brief Cross-node version skew check for a multi-node run.
   *
   * Every participating radio reports its whole stack through
-  * getHardwareInfo(): gateware (fpga_*), device firmware (device_*), host
-  * plugin (host_*) and the wire protocol (proto_version). A run with two nodes
-  * on different builds can fail in ways that look like RF or timing problems,
-  * so the versions are collected at bring-up, printed once, and any difference
-  * is WARNed about before the run starts.
+  * getHardwareInfo(): gateware (fpga_*), device firmware (device_*) and host
+  * plugin (host_*). A run with two nodes on different builds can fail in ways
+  * that look like RF or timing problems, so the versions are collected at
+  * bring-up, printed once, and any difference is WARNed about before the run
+  * starts, as is a node whose host and device releases differ (the driver's
+  * lockstep).
   *
   * Process-wide registry rather than a parameter threaded through the radio
   * sets: the BS and the UE are built by different classes (and there are UHD
@@ -29,6 +30,17 @@
 
 namespace Sounder {
 
+/// The driver's release lockstep: a node's host plugin and its device module
+/// carry one release version, exactly (host_version == device_version). "" when
+/// they agree, or when either key is absent (nothing to judge); otherwise the
+/// mismatch, worded for the log.
+inline std::string lockstepMismatch(const SoapySDR::Kwargs& info) {
+  const auto h = info.find("host_version"), d = info.find("device_version");
+  if (h == info.end() || d == info.end() || h->second == d->second) return "";
+  return "the host plugin is release " + h->second + " and the radio's device module " + d->second +
+         "; a run needs one release on both";
+}
+
 class NodeVersions {
  public:
   static NodeVersions& instance(void) {
@@ -43,8 +55,9 @@ class NodeVersions {
     nodes_.emplace_back(who, info);
   }
 
-  /// Print each node's stack and warn on any disagreement. Returns the number
-  /// of keys that differ. Safe to call with 0 or 1 node (nothing to compare).
+  /// Print each node's stack and warn on any disagreement: a node whose host
+  /// and device releases differ, and a key the nodes differ in. Returns the
+  /// number of such findings. Safe to call with 0 or 1 node.
   size_t checkAndWarn(void) {
     std::lock_guard<std::mutex> lock(mtx_);
     if (nodes_.empty()) return 0;
@@ -53,9 +66,10 @@ class NodeVersions {
     // that SHOULD differ per node (serial, label, ip_address, data_iface,
     // hostname), so a normal two-node bench is quiet.
     static const std::vector<std::string> kMustMatch = {
-        "fpga_version",   "fpga_commit",  "fpga_board", "device_version",
-        "device_build",   "host_version", "host_build", "proto_version"};
+        "fpga_version", "fpga_commit", "fpga_board", "device_version",
+        "device_build", "host_version", "host_build"};
 
+    size_t lockstep = 0;
     for (const auto& n : nodes_) {
       std::string line;
       for (const auto& k : kMustMatch) {
@@ -63,8 +77,13 @@ class NodeVersions {
         if (it != n.second.end()) line += " " + k + "=" + it->second;
       }
       MLPD_INFO("Node stack %s:%s\n", n.first.c_str(), line.c_str());
+      const std::string m = lockstepMismatch(n.second);
+      if (!m.empty()) {
+        ++lockstep;
+        MLPD_WARN("LOCKSTEP %s: %s\n", n.first.c_str(), m.c_str());
+      }
     }
-    if (nodes_.size() < 2) return 0;
+    if (nodes_.size() < 2) return lockstep;
 
     size_t differing = 0;
     for (const auto& k : kMustMatch) {
@@ -93,7 +112,7 @@ class NodeVersions {
       MLPD_INFO("Node versions: all %zu node(s) agree on the full stack.\n",
                 nodes_.size());
     }
-    return differing;
+    return lockstep + differing;
   }
 
  private:

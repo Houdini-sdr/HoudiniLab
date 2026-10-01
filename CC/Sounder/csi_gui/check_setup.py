@@ -49,7 +49,7 @@ from teardown_framer import _EXAMPLES, roles_from_topology  # noqa: E402  one re
 # The keys every node in one run must agree on: the sounder's own list
 # (include/node_version.h, kMustMatch), so the two cannot disagree about a bench.
 MUST_MATCH = ("fpga_version", "fpga_commit", "fpga_board", "device_version",
-              "device_build", "host_version", "host_build", "proto_version")
+              "device_build", "host_version", "host_build")
 
 
 class Report:
@@ -402,6 +402,13 @@ def check_versions(rep, sd, nodes, port, env):
         return
     for ip, info in infos.items():
         rep.add("INFO", "stack %s" % ip, " ".join("%s=%s" % (k, info.get(k, "<absent>")) for k in MUST_MATCH))
+        # The driver's release lockstep: one release on the host plugin and the
+        # radio's device module (node_version.h lockstepMismatch, the sounder's twin).
+        hv, dv = info.get("host_version"), info.get("device_version")
+        if hv and dv and hv != dv:
+            rep.add("FAIL", "lockstep %s" % ip, "the host plugin is release %s and the radio's device module %s"
+                    % (hv, dv), "Run with the host prefix of the radio's release, or deploy the plugin's release "
+                    "to the radio (ask whoever maintains the boards).")
         check_egress(rep, ip, info.get("egress_status"))
         check_clock(rep, ip, port, info.get("_clock_adj", ""))
     if len(infos) < 2:
