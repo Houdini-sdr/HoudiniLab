@@ -44,8 +44,7 @@ import SoapySDR  # noqa: E402
 from SoapySDR import (SOAPY_SDR_RX, SOAPY_SDR_TX, SOAPY_SDR_HAS_TIME,  # noqa: E402
                       SOAPY_SDR_END_BURST)
 import houdini_setup as hs  # noqa: E402
-from houdini_setup import (run_burst, rx_stream_args, rx_framing,  # noqa: E402
-                           iq_from_cs16)
+from houdini_setup import run_burst, rx_framing, iq_from_cs16  # noqa: E402
 from beacon_tdd import (build_beacon, _arm, _cmd, _teardown, _ns_of_tick,  # noqa: E402
                         _hw_tick, _next_window_tick, GRID_TICKS, SYM, ARM_MARGIN)
 
@@ -127,7 +126,7 @@ def main():
           f"{label}  RF {a.nco+a.center_mhz:.1f} MHz")
 
     bs_tx = bsd.setupStream(SOAPY_SDR_TX, native, [a.tx_ch], {"tx_mode": "replay"})
-    bs_rx = bsd.setupStream(SOAPY_SDR_RX, native, [a.rx_ch], rx_stream_args(a.rx_ch))
+    bs_rx = bsd.setupStream(SOAPY_SDR_RX, native, [a.rx_ch], {})
     ue_tx = ued.setupStream(SOAPY_SDR_TX, ue["native_fmt"], [a.tx_ch], {"tx_mode": "replay"})
     per_packet = rx_framing(bsd, verbose=False)["frame_words"] * (8 // bps)
     cap = max(per_packet, (int(SYM * spt) // 8 // per_packet) * per_packet)  # ~62us window

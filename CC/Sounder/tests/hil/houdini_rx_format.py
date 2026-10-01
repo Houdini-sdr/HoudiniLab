@@ -30,7 +30,6 @@ if _EX not in sys.path:
 import SoapySDR  # noqa: E402
 from SoapySDR import SOAPY_SDR_RX, SOAPY_SDR_TX  # noqa: E402
 import houdini_setup as hs  # noqa: E402
-from houdini_setup import rx_stream_args  # noqa: E402
 from beacon_tdd import _arm, _teardown, GRID_TICKS, SYM, ARM_MARGIN  # noqa: E402
 
 TX_IP, RX_IP, TXC, RXC, NCO = "168.6.244.21", "168.6.244.22", 1, 1, 500.0
@@ -57,7 +56,7 @@ def score(iq, gold, tag):
 
 
 def read_stream(sdr, ch, fmt, dtype, nsamp, drain=True):
-    rx = sdr.setupStream(SOAPY_SDR_RX, fmt, [ch], rx_stream_args(ch))
+    rx = sdr.setupStream(SOAPY_SDR_RX, fmt, [ch], {})
     sdr.activateStream(rx)
     if drain:
         # aggressive FIFO drain (recvHoudini does this: readStream timeout~0 until empty)

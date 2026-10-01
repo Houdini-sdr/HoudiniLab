@@ -41,8 +41,7 @@ import SoapySDR  # noqa: E402
 from SoapySDR import (SOAPY_SDR_RX, SOAPY_SDR_TX, SOAPY_SDR_HAS_TIME,  # noqa: E402
                       SOAPY_SDR_END_BURST)
 import houdini_setup as hs  # noqa: E402
-from houdini_setup import (run_burst, rx_stream_args, rx_framing,  # noqa: E402
-                           tx_lfm_chirp)
+from houdini_setup import run_burst, rx_framing, tx_lfm_chirp  # noqa: E402
 from beacon_tdd import (build_beacon, _arm, _teardown, _ns_of_tick,  # noqa: E402
                         _hw_tick, _next_window_tick, GRID_TICKS, SYM, ARM_MARGIN)
 
@@ -67,7 +66,7 @@ def bs_rx_worker(bsd, ch, native, dtype, mode, tick_rate, epoch, frame, pilot_sy
     """Run .21 RX in `mode` until stop is set."""
     if mode == "none":
         return
-    rx = bsd.setupStream(SOAPY_SDR_RX, native, [ch], rx_stream_args(ch))
+    rx = bsd.setupStream(SOAPY_SDR_RX, native, [ch], {})
     per_packet = rx_framing(bsd, verbose=False)["frame_words"] * (8 // (4 if dtype == np.int16 else 2))
     win = 4096
     try:
