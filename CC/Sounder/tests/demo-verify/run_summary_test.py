@@ -70,13 +70,13 @@ rnf = ["57:1 WARNG: Radios Not Found. Will attempt a retry"] + GOOD
 check("FAIL" not in levels(rnf) and any("retried" in t for lv, t in rs.verdict(rnf) if lv == "WARN"),
       "a radio open that was retried and recovered is a warning, not a failure (mutation: Radios Not Found as an error)")
 K = rs.alarm_kinds([
-    "57:2 WARNG: BS x link health: [BS x] 5.0 s: irq 1/s, preflight ok: egress.stall_seen=1 (sticky: a stall happened;"
-    " stall_evt no longer proves a new one); config blocks: a -> b | app: rx_err +0, rx_short +0, rx_pad +0, tx_short +0, tx_sat +0",
+    "57:2 WARNG: BS x link health: [BS x] 5.0 s: irq 1/s, preflight ok: egress.drop_p0 +3; host.rxq_ovfl_ch2 +7"
+    " | app: rx_err +0, rx_short +0, rx_pad +0, tx_short +0, tx_sat +0",
     "57:3 WARNG: BS x link health: [BS x] 5.0 s: irq 1/s, preflight ok: egress.drop_p0=255 (saturated: further drops"
-    " cannot be counted) | app: rx_err +0, rx_short +0, rx_pad +0, tx_short +0, tx_sat +0"])
-check(dict(K) == {"egress.stall_seen sticky": 1, "config blocks drift": 1, "egress.drop_p0 saturated": 1},
-      "blind and drift items get their kinds in link_health.h's own forms (mutation: the old 'drift ...' and "
-      "'blind ...' patterns, which match nothing): %s" % dict(K))
+    " cannot be counted); config blocks: a -> b | app: rx_err +0, rx_short +0, rx_pad +0, tx_short +0, tx_sat +0"])
+check(dict(K) == {"egress.drop_p0 +N": 1, "host.rxq_ovfl_ch2 +N": 1},
+      "an egress rise and a per-stream host rise get their kinds, and the retired blind and drift forms none "
+      "(mutation: the old 'saturated' or 'config' pattern kept): %s" % dict(K))
 lr2 = GOOD + ["57:%d INFOR: UE 192.168.10.21 TX_HOST_STATUS: late_refusals_ch0=%d late_refusals_ch1=0 release_late_ch0=0" % (i, i)
                for i in range(3)] + ["57:9 WARNG: Write rejected: HAS_TIME stamp 123 behind by 50 ms"]
 w = [t for lv, t in rs.verdict(lr2) if lv == "WARN"]

@@ -391,7 +391,8 @@ endif()
 add_executable(link_health_test tests/comms-func/link_health_test.cc)
 target_include_directories(link_health_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 add_test(NAME link_health COMMAND link_health_test
-         ${CMAKE_CURRENT_SOURCE_DIR}/tests/comms-func/fixtures/link_health/mode_v_streaming_21.txt)
+         ${CMAKE_CURRENT_SOURCE_DIR}/tests/comms-func/fixtures/link_health/mode_v_streaming_21.txt
+         ${CMAKE_CURRENT_SOURCE_DIR}/tests/comms-func/fixtures/link_health/demo_stack_fi1.txt)
 
 # AP-79: the replay strobe offs/len in the driver's units.
 add_executable(replay_strobe_test tests/comms-func/replay_strobe_test.cc)

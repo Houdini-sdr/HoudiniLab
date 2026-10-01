@@ -439,10 +439,9 @@ void RadioHoudini::healthLoop(double period_s) {
     }
     houdini::health::LinkHealth h([this](const std::string& k) { return dev_->readSetting(k); }, label);
     std::string at_start;
-    for (const auto& f : h.baselineFailures()) at_start += (at_start.empty() ? "" : "; ") + f;
-    MLPD_INFO("%s link health: baseline taken; preflight FAILs standing at start: %s\n", label.c_str(),
-              at_start.empty() ? "none" : at_start.c_str());
-    std::set<std::string> reported;  // blind/drift alarms already warned about
+    for (const auto& f : h.startFailures()) at_start += (at_start.empty() ? "" : "; ") + f;
+    MLPD_INFO("%s link health: baseline taken; preflight FAILs standing at start (they alarm on the first check): %s\n",
+              label.c_str(), at_start.empty() ? "none" : at_start.c_str());
     unsigned long long p_err = app_rx_err_, p_short = app_rx_short_, p_pad = app_rx_pad_,
                        p_txs = app_tx_short_, p_sat = app_tx_sat_;
     for (unsigned n = 1; wait(period_s); ++n) {
@@ -454,20 +453,9 @@ void RadioHoudini::healthLoop(double period_s) {
                     c_err - p_err, c_short - p_short, c_pad - p_pad, c_txs - p_txs, c_sat - p_sat);
       const bool app_bad = c_err != p_err || c_pad != p_pad || c_txs != p_txs || c_sat != p_sat;
       p_err = c_err; p_short = c_short; p_pad = c_pad; p_txs = c_txs; p_sat = c_sat;
-      // Unattended, a condition that cannot clear within a session (a sticky
-      // or saturated egress counter, a drifted config section) would WARN
-      // every period and bury the new alarms: warn when one first appears or
-      // changes; the periodic line still carries it. Counter rises and new
-      // preflight items are new by construction and always warn.
-      bool fresh = !rep.increases.empty() || !rep.new_failures.empty();
-      std::set<std::string> standing;
-      for (const auto* v : {&rep.blind, &rep.drift})
-        for (const auto& s : *v) {
-          standing.insert(s);
-          if (reported.count(s) == 0) fresh = true;
-        }
-      reported = standing;
-      if (fresh || app_bad) {
+      // Every alarm is new by construction (a rise, or a preflight item's
+      // first appearance), so each one warns; a clean check logs every 12th time.
+      if (!rep.alarms().empty() || app_bad) {
         MLPD_WARN("%s link health: %s%s\n", label.c_str(), rep.line().c_str(), app);
       } else if (n % 12 == 0) {
         MLPD_INFO("%s link health: %s%s\n", label.c_str(), rep.line().c_str(), app);
