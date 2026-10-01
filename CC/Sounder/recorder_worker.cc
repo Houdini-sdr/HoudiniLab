@@ -10,6 +10,7 @@
 
 #include <cerrno>
 #include "include/recorder_worker.h"
+#include "include/run_options.h"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -89,13 +90,13 @@ static bool writeCnsDump(const char* path, int N, int cp, int es, int nsym, cons
   return true;
 }
 
-// Parse HOUDINI_CSI_UDP ("host:port"), open a connected UDP socket, precompute the
+// Parse --csi_udp ("host:port"), open a connected UDP socket, precompute the
 // DC-centred frequency-domain pilot reference per RX lane and the transforms, and
-// set the per-antenna send throttles. Enables view mode when the env is present.
+// set the per-antenna send throttles. Enables view mode when the option is set.
 void RecorderWorker::initCsi(void) {
-  const char* dst = std::getenv("HOUDINI_CSI_UDP");
-  if (dst == nullptr) return;
-  std::string s(dst);
+  const Sounder::RunOptions& opt = Sounder::runOptions();
+  if (opt.csi_udp.empty()) return;
+  const std::string& s = opt.csi_udp;
   const auto colon = s.find(':');
   const std::string host = (colon == std::string::npos) ? "127.0.0.1"
                                                         : s.substr(0, colon);
@@ -132,14 +133,12 @@ void RecorderWorker::initCsi(void) {
   // not an explicit DFT).
   fft_ = std::make_unique<houdini::DcCenteredFft>(N);
   cir_ = std::make_unique<houdini::CirFromH>(N);
-  double fps = 30.0;
-  if (const char* f = std::getenv("HOUDINI_CSI_FPS")) fps = std::max(0.5, atof(f));
+  const double fps = std::max(0.5, opt.csi_fps);
   csi_throttle_ns_ = 1e9 / fps;
   // The Spectrum tab: 2048-point segments over the whole pilot slot, 512 bins
   // (240 kHz at 122.88 Msps), on its own throttle, default 4 Hz per antenna;
-  // HOUDINI_CSI_SPC_FPS=0 turns it off.
-  double spc_fps = 4.0;
-  if (const char* f = std::getenv("HOUDINI_CSI_SPC_FPS")) spc_fps = atof(f);
+  // --csi_spc_fps=0 turns it off.
+  const double spc_fps = opt.csi_spc_fps;
   if (spc_fps > 0.0 && static_cast<int>(cfg_->samps_per_slot()) >= 2048) {
     spc_ = std::make_unique<houdini::WelchSpectrum>(2048, 512);
     spc_throttle_ns_ = 1e9 / spc_fps;
@@ -153,7 +152,7 @@ void RecorderWorker::initCsi(void) {
   // a circular shift (pure phase, recoverable), but one placed even 1 sample LATE
   // pulls the next symbol into the FFT (ISI, unrecoverable). The nominal prefix
   // sits right at that edge, where beacon re-lock jitter tips a run into ISI;
-  // backing off CP/2 centres the window in the guard. HOUDINI_CSI_SYM_START
+  // backing off CP/2 centres the window in the guard. --csi_sym_start
   // overrides (an int, or "auto" for the energy-edge detector).
   // May be NEGATIVE, legitimately: the body is read from es + cp, so a zero
   // prefix shorter than CP/2 (the 5G-like R3: prefix 32, CP 288 -> -112, body
@@ -161,18 +160,17 @@ void RecorderWorker::initCsi(void) {
   // sentinel, which would switch such a numerology to the energy-edge detector.
   csi_sym_start_ = static_cast<int>(cfg_->prefix()) -
                    static_cast<int>(cfg_->cp_size()) / 2;
-  if (const char* sym_env = std::getenv("HOUDINI_CSI_SYM_START")) {
-    csi_sym_auto_ = std::string(sym_env) == "auto";
-    if (!csi_sym_auto_) csi_sym_start_ = std::atoi(sym_env);
+  if (!opt.csi_sym_start.empty()) {
+    csi_sym_auto_ = opt.csi_sym_start == "auto";
+    if (!csi_sym_auto_) csi_sym_start_ = std::atoi(opt.csi_sym_start.c_str());
   }
   // Per-frame pilot-vs-data timing re-align (Houdini framer jitter). Default on for Houdini.
-  csi_timing_fix_ = fixes.csi_timing;
-  if (std::getenv("HOUDINI_CSI_NO_TIMING_FIX")) csi_timing_fix_ = false;
-  // Per-symbol pilot common-phase (AP-38). Default on for Houdini; the env is
-  // the A/B lever, since the whole point is that it should be invisible when
-  // the carrier offset is small and decisive when it is not.
-  csi_phase_fix_ = fixes.csi_phase;
-  if (std::getenv("HOUDINI_CSI_NO_PHASE_FIX")) csi_phase_fix_ = false;
+  csi_timing_fix_ = fixes.csi_timing && opt.csi_timing_fix;
+  // Per-symbol pilot common-phase (AP-38). Default on for Houdini;
+  // --csi_phase_fix=false is the A/B lever, since the whole point is that it
+  // should be invisible when the carrier offset is small and decisive when it
+  // is not.
+  csi_phase_fix_ = fixes.csi_phase && opt.csi_phase_fix;
   view_mode_ = true;
   MLPD_INFO("CSI view mode: streaming to %s:%d (%d subcarriers, ~%.0f fps/ant, rx_conj=%d, "
             "sym_start=%s, timing_fix=%d, phase_fix=%d)\n", host.c_str(), port, N, fps, rx_conj_ ? 1 : 0,
@@ -613,8 +611,8 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
   // One-shot raw dump for offline analysis (writeCnsDump has the format). H is
   // this frame's pilot estimate before the timing fix; the U slot is as
   // equalized, so after the pre-FFT rotation when bs_cfo_pre_fft is on.
-  if (std::getenv("HOUDINI_CSI_DUMP") != nullptr) {
-    // HOUDINI_CSI_DUMP=<n> skips the first n constellation frames (0 or 1, a plain
+  if (Sounder::runOptions().csi_dump >= 0) {
+    // --csi_dump=<n> skips the first n constellation frames (0 or 1, a plain
     // "on", skip 30, about a second at the shipped throttle): a dump of the first
     // frame catches the link before it settles, and every run then looks alike.
     // One shot PER ANTENNA: antenna 0 writes cns_dump.bin, antenna k
@@ -623,7 +621,7 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
     static std::atomic<int> seen[kMaxDumpAnt] = {};
     static std::atomic<bool> dumped[kMaxDumpAnt] = {};
     const size_t da = pkt->ant_id;
-    int skip = std::atoi(std::getenv("HOUDINI_CSI_DUMP"));
+    int skip = Sounder::runOptions().csi_dump;
     if (skip <= 1) skip = 30;
     bool exp = false;
     const std::string dump_name =
@@ -768,7 +766,7 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
         Hc[k] *= std::complex<float>(static_cast<float>(std::cos(ang)),
                                      static_cast<float>(std::sin(ang)));
       }
-    if (std::getenv("HOUDINI_CSI_R_DEBUG") != nullptr) {
+    if (Sounder::runOptions().csi_r_debug) {
       static std::atomic<int> rc{0};
       if ((rc.fetch_add(1) % 30) == 0) {
         MLPD_INFO("CSI timing-fix: r=%.3f (blind score %.3g)\n", best_r, best_score);
@@ -936,9 +934,10 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
             "periodic summary line)\n",
             score, pkt->frame_id, fix_r, lo, tot);
       }
-      // Autopsy dump of the first few low scorers, HOUDINI_CSI_DUMP format;
+      // Autopsy dump of the first few low scorers, --csi_dump format;
       // r (x 1000) rides in the filename.
-      const char* lowdir = std::getenv("HOUDINI_CNS_DUMP_LOW");
+      const char* lowdir = Sounder::runOptions().cns_dump_low.empty() ? nullptr
+                                                                     : Sounder::runOptions().cns_dump_low.c_str();
       if (lowdir != nullptr && lo <= 6) {
         char pb[512];
         snprintf(pb, sizeof(pb), "%s/cns_low_%02u_a%u_f%u_r%+05d.bin", lowdir,

@@ -5,7 +5,7 @@
 # enter it, so it passes in an operator's shell mid-run. Stdlib only; run from
 # csi_gui/ (ctest does).
 import json, os, shutil, socket, subprocess, sys, tempfile, threading, time
-for k in ("HOUDINI_SOAPY_ROOT", "SOAPY_SDR_ROOT"):  # the runbook's A4 exports one
+for k in ("SOAPY_SDR_ROOT",):  # the loader's own; the check sets it from --soapy-root
     os.environ.pop(k, None)
 fails = 0
 def check(ok, what):
@@ -74,7 +74,7 @@ same = {k: "v1" for k in ("fpga_version", "fpga_commit", "fpga_board", "device_v
                           "device_build", "host_version", "host_build")}
 json.dump({"127.0.0.1": same, "127.0.0.2": same}, open(info_file, "w"))
 
-env = dict(os.environ, HOUDINI_EXAMPLES=ex, PYTHONPATH=fake)
+env = dict(os.environ, PYTHONPATH=fake)
 for k in ("SOAPY_SDR_PLUGIN_PATH", "LD_LIBRARY_PATH", "VIRTUAL_ENV"):  # the checker must set them itself
     env.pop(k, None)
 open(os.path.join(sd, "files", "topo-other.json"), "w").write(
@@ -90,7 +90,8 @@ def fake_sounder(pid, argv, cwd):
     return d
 def run(*extra, conf="files/houdini-x.json"):
     out = subprocess.run([sys.executable, os.path.abspath("check_setup.py"), "--sounder-dir", sd,
-                          "--venv", venv, "--conf", conf, "--json", "--proc-root", fproc] + list(extra),
+                          "--venv", venv, "--examples", ex, "--conf", conf, "--json", "--proc-root", fproc]
+                         + list(extra),
                          env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
     rep = json.loads(out.stdout)
     return out.returncode, rep, {r["what"]: r["level"] for r in rep["results"]}
@@ -155,32 +156,28 @@ rc, rep, lv = run()
 det = [r["detail"] for r in rep["results"] if r["what"] == "egress 127.0.0.2"]
 check(rc == 0 and lv["egress 127.0.0.2"] == "WARN" and det and "drop p0" in det[0] and lv["egress 127.0.0.1"] == "PASS",
       "saturated egress drop counters are a WARN naming the port (mutation: only the stall bit read)")
-# The plugin from HOUDINI_SOAPY_ROOT's prefix: the venv without a Houdini module
+# The plugin from the --soapy-root prefix: the venv without a Houdini module
 # (the demo rig's, since the release prefixes carry it) and the prefix with one.
 vmod = os.path.join(venv, "lib", "SoapySDR", "modules0.8-3", "libHoudiniSDRSupport.so")
 rel = os.path.join(root, "rel"); os.makedirs(os.path.join(rel, "lib", "SoapySDR", "modules0.8-3"))
 open(os.path.join(rel, "lib", "SoapySDR", "modules0.8-3", "libHoudiniSDRSupport.so"), "w").close()
 os.rename(vmod, vmod + ".off")
-env_saved = env; env = dict(env_saved, HOUDINI_SOAPY_ROOT=rel)
-rc, rep, lv = run("--quick")
-check(lv.get("plugin") == "PASS", "the plugin is found in HOUDINI_SOAPY_ROOT's prefix when the venv has none "
+rc, rep, lv = run("--quick", "--soapy-root", rel)
+check(lv.get("plugin") == "PASS", "the plugin is found in the --soapy-root prefix when the venv has none "
       "(mutation: only the venv's module dir searched)")
-env = env_saved
 rc, rep, lv = run("--quick")
 det = [r["fix"] for r in rep["results"] if r["what"] == "plugin"]
-check(rc == 1 and lv.get("plugin") == "FAIL" and det and "HOUDINI_SOAPY_ROOT" in det[0],
-      "no module in the venv and no HOUDINI_SOAPY_ROOT fails, naming the variable (mutation: the old advice)")
-# The full check under HOUDINI_SOAPY_ROOT with the venv's module still absent
+check(rc == 1 and lv.get("plugin") == "FAIL" and det and "--soapy-root" in det[0],
+      "no module in the venv and no --soapy-root fails, naming the option (mutation: the old advice)")
+# The full check under --soapy-root with the venv's module still absent
 # (the rig's layout): the radios are read through that prefix, and a steered
 # node's release line carries it.
 json.dump({"127.0.0.1": clock_adj(404, 404), "127.0.0.2": clock_adj(411)}, open(clock_file, "w"))
-env_saved = env; env = dict(env_saved, HOUDINI_SOAPY_ROOT=rel)
-rc, rep, lv = run()
-env = env_saved
+rc, rep, lv = run("--soapy-root", rel)
 os.rename(vmod + ".off", vmod)
 fix = [r["fix"] for r in rep["results"] if r["what"] == "clock 127.0.0.2"]
 check(lv.get("stack match") == "PASS" and fix and fix[0].startswith("Release it before the run: SOAPY_SDR_ROOT=%s SOAPY_SDR_PLUGIN_PATH= python3" % rel),
-      "under HOUDINI_SOAPY_ROOT the full check reads the radios and the printed release carries the prefix "
+      "under --soapy-root the full check reads the radios and the printed release carries the prefix "
       "(mutation: a bare python3 line, which finds no Houdini module on the rig): %s" % (fix[:1],))
 json.dump({"127.0.0.1": clock_adj(404, 404), "127.0.0.2": clock_adj(408)}, open(clock_file, "w"))
 # A host plugin that is not the radios' device build: a WARN per node.
@@ -248,8 +245,8 @@ os.rename(exe, exe + ".x"); rc, rep, lv = run("--quick"); check(rc == 1 and lv["
 open(util, "w").write("#!/bin/sh\necho 'Available factories... remote'\n")
 rc, rep, lv = run("--quick"); check(rc == 1 and lv["plugin"] == "FAIL", "SoapySDR not loading the Houdini module fails 'plugin'")
 open(util, "w").write("#!/bin/sh\necho 'Available factories... houdinisdr, remote'\n")
-env["HOUDINI_EXAMPLES"] = root; rc, rep, lv = run("--quick")
-check(rc == 0 and lv["teardown"] == "WARN", "missing host examples is a WARN"); env["HOUDINI_EXAMPLES"] = ex
+rc, rep, lv = run("--quick", "--examples", root)
+check(rc == 0 and lv["teardown"] == "WARN", "missing host examples is a WARN (mutation: --examples ignored)")
 # A sounder run from the sounder directory with a --conf_file, as the real one is.
 held = fake_sounder(4242, ["./build/sounder", "--conf_file", "files/houdini-x.json"], sd)
 rc, rep, lv = run("--quick"); check(rc == 1 and lv["radios free"] == "FAIL", "a sounder on the same radios fails 'radios free'")
@@ -277,42 +274,19 @@ shutil.rmtree(unknown)
 srv.shutdown(socket.SHUT_RDWR); srv.close()
 rc, rep, lv = run(); check(rc == 1 and lv["server 127.0.0.1"] == "FAIL" and "stack match" not in lv,
                           "a server that does not answer fails, and the stack read is skipped")
-# plugin_env, the environment the dashboard's Start runs the sounder in, follows
-# HOUDINI_SOAPY_ROOT exactly as run_rung.sh does.
+# plugin_env, the environment the dashboard's Start runs the sounder in, takes
+# the --soapy-root prefix exactly as run_rung.sh does.
 import check_setup
-saved = os.environ.pop("HOUDINI_SOAPY_ROOT", None)
 orig_root = os.environ.get("SOAPY_SDR_ROOT")
 e0 = check_setup.plugin_env("/v")
-os.environ["HOUDINI_SOAPY_ROOT"] = "/slots"
-e1 = check_setup.plugin_env("/v")
-os.environ.pop("HOUDINI_SOAPY_ROOT")
-if saved is not None:
-    os.environ["HOUDINI_SOAPY_ROOT"] = saved
+e1 = check_setup.plugin_env("/v", "/slots")
 check(e0["SOAPY_SDR_PLUGIN_PATH"] == "/v/lib/SoapySDR/modules0.8-3" and e0.get("SOAPY_SDR_ROOT") == orig_root,
-      "without HOUDINI_SOAPY_ROOT the venv's plugin loads (mutation: the root applied always)")
+      "without a root the venv's plugin loads (mutation: the root applied always)")
 check(e1.get("SOAPY_SDR_ROOT") == "/slots" and e1.get("SOAPY_SDR_PLUGIN_PATH") == "",
-      "with HOUDINI_SOAPY_ROOT that prefix loads, not the venv's (mutation: the variable ignored, so the dashboard "
-      "runs a slots config on the default plugin; or the venv's module path left set, which SoapySDR searches too)")
-# The operator's own environment rides along: the runbook's launch knobs (the
-# core map, the TX worker pinning) reach the sounder only through this dict.
-knobs = {"HOUDINI_CORE_MAP": "main=3", "HOUDINI_TX_CPU_AFFINITY": "4,5"}
-saved_knobs = {k: os.environ.get(k) for k in knobs}
-os.environ.update(knobs)
-os.environ.pop("HOUDINI_SOAPY_ROOT", None)  # e2 is the case without it, whatever the shell exported
-e2 = check_setup.plugin_env("/v")
-os.environ["HOUDINI_SOAPY_ROOT"] = "/slots"
-e3 = check_setup.plugin_env("/v")
-os.environ.pop("HOUDINI_SOAPY_ROOT")
-if saved is not None:
-    os.environ["HOUDINI_SOAPY_ROOT"] = saved
-for k, v in saved_knobs.items():
-    if v is None:
-        os.environ.pop(k, None)
-    else:
-        os.environ[k] = v
-check(all(e.get(k) == v for e in (e2, e3) for k, v in knobs.items()) and e2.get("PATH") == os.environ.get("PATH"),
-      "the operator's HOUDINI_CORE_MAP, HOUDINI_TX_CPU_AFFINITY and PATH reach the sounder, with and without "
-      "HOUDINI_SOAPY_ROOT (mutation: build the environment from scratch instead of from os.environ, even one that keeps PATH and PYTHONPATH)")
+      "with a root that prefix loads, not the venv's (mutation: the root ignored, so the dashboard runs a slots "
+      "config on the default plugin; or the venv's module path left set, which SoapySDR searches too)")
+check(e1.get("PATH") == os.environ.get("PATH"),
+      "the operator's PATH rides along (mutation: the environment built from scratch)")
 # The teardown's radios, by hand: --node, else --topology, else the topology
 # the config names, else a refusal (a default topology names one bench only).
 import teardown_framer as tf

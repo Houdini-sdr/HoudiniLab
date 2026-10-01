@@ -7,6 +7,7 @@
 ---------------------------------------------------------------------
 */
 #include "include/scheduler.h"
+#include "include/run_options.h"
 
 #include "include/logger.h"
 #include "include/macros.h"
@@ -26,14 +27,15 @@ Scheduler::Scheduler(Config* in_cfg, unsigned int core_start)
                 in_cfg->reader_thread_num()) {
   {
     std::string err;
-    const houdini::CoreMap m = houdini::parseCoreMap(std::getenv("HOUDINI_CORE_MAP"), &err);
-    if (!err.empty()) throw std::invalid_argument("HOUDINI_CORE_MAP: " + err);
+    const std::string& cm = Sounder::runOptions().core_map;
+    const houdini::CoreMap m = houdini::parseCoreMap(cm.empty() ? nullptr : cm.c_str(), &err);
+    if (!err.empty()) throw std::invalid_argument("--core_map: " + err);
     main_core_ = m.main >= 0 ? static_cast<unsigned>(m.main) : kMainDispatchCore;
     recorder_core_ = m.recorder >= 0 ? static_cast<unsigned>(m.recorder) : kSchedulerCore;
     bsrx_core_ = m.bsrx >= 0 ? static_cast<unsigned>(m.bsrx) : kRecvCore;
     ue_core_ = m.ue >= 0 ? static_cast<unsigned>(m.ue) : kRecvCore + static_cast<unsigned>(in_cfg->bs_rx_thread_num());
-    if (std::getenv("HOUDINI_CORE_MAP") != nullptr) {
-      MLPD_WARN("core map from HOUDINI_CORE_MAP: main %u, recorder %u+i, BS rx %u+i, UE %u+i\n", main_core_,
+    if (!cm.empty()) {
+      MLPD_WARN("core map from --core_map: main %u, recorder %u+i, BS rx %u+i, UE %u+i\n", main_core_,
                 recorder_core_, bsrx_core_, ue_core_);
     }
   }

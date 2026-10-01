@@ -53,7 +53,6 @@ $SEARCH
 EOF
 [ -n "$FOUND" ] || { echo "no Houdini host plugin where SoapySDR will search (${HOUDINI_SOAPY_ROOT:-$SOAPY_SDR_PLUGIN_PATH}): export HOUDINI_SOAPY_ROOT=<the release's host-plugin prefix>" >&2; exit 1; }
 # Run until the wall clock says stop, never until max_frame.
-export HOUDINI_MAX_FRAME="${HOUDINI_MAX_FRAME:-2000000000}"
 
 mkdir -p "$OUT"
 TOPO=$(python3 -c "import json,sys
@@ -123,7 +122,7 @@ for ((k = 0; k < ROUNDS; ++k)); do
       # only signal handler), so streams close the way they do in the demo and
       # the end-of-run checks print; a hard kill 15 s later is the backstop.
       # rc 124 (timed out) is therefore the SUCCESS code here.
-      timeout -s INT -k 15 "$RUN_S" ./build/sounder --view --conf_file "${conf_of[$s]}" > "$f" 2>&1
+      timeout -s INT -k 15 "$RUN_S" ./build/sounder --view --max_frame=2000000000 --conf_file "${conf_of[$s]}" > "$f" 2>&1
       rc=$?
       if [ "$rc" -eq 124 ] || grep -q "lock CONFIRMED" "$f"; then started=1; break; fi
       echo "  attempt $attempt rc=$rc (no lock, run ended early), retrying" | tee -a "$log"

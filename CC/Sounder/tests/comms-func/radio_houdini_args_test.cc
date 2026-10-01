@@ -22,6 +22,7 @@
 #include <stdexcept>
 #include <string>
 
+#include "include/run_options.h"
 #include "include/RadioHoudini.h"
 #include "include/config.h"
 #include "include/houdini/rx_packet.h"
@@ -42,7 +43,6 @@ std::string show(const SoapySDR::Kwargs& k) {
 
 int main() {
   const char* kConf = "files/houdini-dualband-xw-steer-slots.json";
-  unsetenv("HOUDINI_TX_STREAM_ARGS");  // an operator's export must not leak into the known answers
   try {
     Config cfg(kConf, "/tmp", false, false, false);
 
@@ -114,22 +114,22 @@ int main() {
     const auto utx = RadioHoudini::txStreamArgs(ue);
     check(ue.tdd && utx == SoapySDR::Kwargs{{"tx_mode", "stream"}, {"tdd", "1"}, {"mts", "true"}},
           "UE txStreamArgs " + show(utx) + " (mutation: the TDD anchor not asked for)");
-    setenv("HOUDINI_TX_STREAM_ARGS", "tx_target_frac=0.75", 1);
+    Sounder::runOptions().tx_stream_args = "tx_target_frac=0.75";
     const auto utx2 = RadioHoudini::txStreamArgs(ue);
     const auto btx2 = RadioHoudini::txStreamArgs(bs);
     check(utx2.count("tx_target_frac") == 1 && utx2.at("tx_target_frac") == "0.75" && utx2.at("tdd") == "1" &&
               btx2.count("tx_target_frac") == 0,
-          "HOUDINI_TX_STREAM_ARGS reaches the UE's stream and not the BS's replay (mutation: the passthrough "
+          "--tx_stream_args reaches the UE's stream and not the BS's replay (mutation: the passthrough "
           "dropped, or applied to the replay stream too)");
-    setenv("HOUDINI_TX_STREAM_ARGS", "tdd=0", 1);
+    Sounder::runOptions().tx_stream_args = "tdd=0";
     bool refused = false;
     try {
       RadioHoudini::txStreamArgs(ue);
     } catch (const std::invalid_argument&) {
       refused = true;
     }
-    unsetenv("HOUDINI_TX_STREAM_ARGS");
-    check(refused, "HOUDINI_TX_STREAM_ARGS overriding a key the sounder sets (tdd) is refused (mutation: the parse "
+    Sounder::runOptions().tx_stream_args.clear();
+    check(refused, "--tx_stream_args overriding a key the sounder sets (tdd) is refused (mutation: the parse "
                    "error ignored)");
 
     // The mode-V plan's inputs: the common NCO on the sub-6 channels and the

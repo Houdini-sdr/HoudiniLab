@@ -8,6 +8,7 @@
   * ----------------------------------------------------------
   */
 #include "include/ClientRadioSet.h"
+#include "include/run_options.h"
 
 #include <pthread.h>
 
@@ -36,23 +37,13 @@ static void initAGC(SoapySDR::Device* dev, Config* cfg);
 
 // Deliberate UE carrier detune for CFO-estimator validation (AP-33/AP-34).
 // Both boards share a 10 MHz reference, so there is no natural CFO to measure
-// against; HOUDINI_UE_RX_FREQ_OFFSET_HZ imposes a KNOWN one on the UE receive
+// against; --ue_rx_freq_offset_hz imposes a KNOWN one on the UE receive
 // path only -- pure carrier offset, no sample-timing drift, so the beacon
 // estimator can be checked for sign and scale against a truth it cannot infer.
-// HOUDINI_UE_TX_FREQ_OFFSET_HZ detunes the UE transmit path instead, which is
-// what the BS then sees. Both default to 0 = nominal.
-static double envFreqOffsetHz(const char* name) {
-  const char* v = std::getenv(name);
-  return (v != nullptr) ? std::strtod(v, nullptr) : 0.0;
-}
-static double ueRxFreqOffsetHz(void) {
-  static const double v = envFreqOffsetHz("HOUDINI_UE_RX_FREQ_OFFSET_HZ");
-  return v;
-}
-static double ueTxFreqOffsetHz(void) {
-  static const double v = envFreqOffsetHz("HOUDINI_UE_TX_FREQ_OFFSET_HZ");
-  return v;
-}
+// --ue_tx_freq_offset_hz detunes the UE transmit path instead, which is what
+// the BS then sees. Both default to 0 = nominal.
+static double ueRxFreqOffsetHz(void) { return Sounder::runOptions().ue_rx_freq_offset_hz; }
+static double ueTxFreqOffsetHz(void) { return Sounder::runOptions().ue_tx_freq_offset_hz; }
 
 ClientRadioSet::ClientRadioSet(Config* cfg) : _cfg(cfg) {
   size_t num_radios = _cfg->num_cl_sdrs();
@@ -403,8 +394,7 @@ int ClientRadioSet::radioTx(size_t radio_id, const void* const* buffs,
     long long frameTimeNs = radios.at(radio_id)->txTimeNs(
         frameTime, _cfg->rate(), _cfg->ue_tdd_pilot(), _cfg->ue_tx_advance_ticks());
     const int r = radios.at(radio_id)->xmit(buffs, numSamps, flags, frameTimeNs);
-    static const bool kTxDebug = std::getenv("HOUDINI_UE_TX_DEBUG") != nullptr;  // read once
-    if (kTxDebug) {
+    if (Sounder::runOptions().ue_tx_debug) {
       static std::atomic<int> c{0};
       if ((c.fetch_add(1) % 20) == 0) {
         try {

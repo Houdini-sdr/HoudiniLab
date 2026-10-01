@@ -25,6 +25,7 @@
 #include <thread>
 #include <vector>
 
+#include "include/run_options.h"
 #include "comms-lib.h"
 
 namespace {
@@ -40,14 +41,8 @@ unsigned ResolveThreads(unsigned requested) {
   if (requested > 0) return requested;
   const unsigned set = g_corr_threads.load(std::memory_order_relaxed);
   if (set > 0) return set;
-  static const unsigned from_env = [] {
-    if (const char* e = std::getenv("SOUNDER_CORR_THREADS")) {
-      const int v = std::atoi(e);
-      if (v > 0) return static_cast<unsigned>(v);
-    }
-    return 1u;
-  }();
-  return from_env;
+  const int opt = Sounder::runOptions().corr_threads;  // --corr_threads
+  return opt > 0 ? static_cast<unsigned>(opt) : 1u;
 }
 
 // Persistent fork-join pool: worker threads are created once and reused, so
@@ -430,8 +425,7 @@ CommsLib::BeaconResult CommsLib::find_beacon_ex(
       valid_peaks.push(static_cast<int>(i));
     }
   }
-  static const bool kDebug = std::getenv("FIND_BEACON_DEBUG") != nullptr;  // read once
-  if (kDebug) {
+  if (Sounder::runOptions().find_beacon_debug) {
     double best_ratio = 0.0;
     size_t best_i = 0, best_pm_i = 0;
     float best_pm = 0.0f;

@@ -7,6 +7,7 @@
 #include "houdini/bs_slots.h"
 #include "houdini/rx_packet.h"
 #include "include/RadioHoudini.h"
+#include "include/run_options.h"
 
 #include <algorithm>
 #include <atomic>
@@ -78,15 +79,16 @@ SoapySDR::Kwargs RadioHoudini::txStreamArgs(const RadioParams& p) {
   // window grid (SH-248/SH-301) instead of whole milliseconds.
   if (p.tdd) tx["tdd"] = "1";
   if (p.mts) tx["mts"] = "true";
-  // HOUDINI_TX_STREAM_ARGS: the host plugin's own TX knobs on the live
-  // streams, passed through without a rebuild (houdini/stream_args.h).
+  // --tx_stream_args: the host plugin's own TX knobs on the live streams,
+  // passed through without a rebuild (houdini/stream_args.h).
   if (p.tx_mode == "stream") {
     std::string err;
-    const auto extra = houdini::extraStreamArgs(std::getenv("HOUDINI_TX_STREAM_ARGS"), &err);
-    if (!err.empty()) throw std::invalid_argument("HOUDINI_TX_STREAM_ARGS: " + err);
+    const std::string& extra_s = Sounder::runOptions().tx_stream_args;
+    const auto extra = houdini::extraStreamArgs(extra_s.empty() ? nullptr : extra_s.c_str(), &err);
+    if (!err.empty()) throw std::invalid_argument("--tx_stream_args: " + err);
     for (const auto& kv : extra) {
       tx[kv.first] = kv.second;
-      MLPD_WARN("%s: TX stream arg %s=%s from HOUDINI_TX_STREAM_ARGS\n", p.label.c_str(), kv.first.c_str(),
+      MLPD_WARN("%s: TX stream arg %s=%s from --tx_stream_args\n", p.label.c_str(), kv.first.c_str(),
                 kv.second.c_str());
     }
   }
@@ -108,7 +110,7 @@ namespace {
 // node does not answer (writeStateRecord).
 const char* const kEndOfRunStage = "end";
 
-// A per-node record file under HOUDINI_DUMP_DIR (Utils::dumpPath), named
+// A per-node record file under --dump_dir (Utils::dumpPath), named
 // <kind>_<label>_<stamp>.txt with the label made file-safe; f is empty when it
 // cannot be opened, and closes itself on every exit.
 struct RecordFile {
@@ -396,13 +398,13 @@ RadioHoudini::~RadioHoudini() {
 
 void RadioHoudini::maybeStartHealth() {
   // AP-79: the software lane's link-health checks (houdini/link_health.h) on
-  // THIS radio's own device handle, once streaming. HOUDINI_LINK_HEALTH_S
-  // sets the period (default 5 s in mode V, off otherwise; 0 turns it off).
+  // THIS radio's own device handle, once streaming. --link_health_s sets
+  // the period (default 5 s in mode V, off otherwise; 0 turns it off).
   if (health_started_.exchange(true)) return;
   // On by default in mode V only; the one-rate path adds no control-plane
   // reads unless asked.
   double period = mode_v_ != nullptr ? 5.0 : 0.0;
-  if (const char* e = std::getenv("HOUDINI_LINK_HEALTH_S")) period = std::atof(e);
+  if (Sounder::runOptions().link_health_s >= 0.0) period = Sounder::runOptions().link_health_s;
   if (!(period > 0.0)) return;
   health_thread_ = std::thread([this, period] { healthLoop(period); });
 }
@@ -460,10 +462,10 @@ void RadioHoudini::healthLoop(double period_s) {
       } else if (n % 12 == 0) {
         MLPD_INFO("%s link health: %s%s\n", label.c_str(), rep.line().c_str(), app);
       }
-      // SH-427 diagnostic (HOUDINI_TX_HOST_STATUS): the host pacer's per-channel
+      // SH-427 diagnostic (--tx_host_status): the host pacer's per-channel
       // state and the bank counters, every period, stamped. Its own try: a plugin
       // without the key throws, and that must not stop the health thread.
-      if (std::getenv("HOUDINI_TX_HOST_STATUS") != nullptr) {
+      if (Sounder::runOptions().tx_host_status) {
         try {
           MLPD_INFO("%s TX_HOST_STATUS: %s\n", label.c_str(), dev_->readSetting("TX_HOST_STATUS").c_str());
           MLPD_INFO("%s TX_BANK_STATUS: %s\n", label.c_str(), dev_->readSetting("TX_BANK_STATUS").c_str());
@@ -548,16 +550,14 @@ int RadioHoudini::recv(void* const* buffs, int samples, long long& frameTime) {
     jb[c] = junk.data() + c * drain_samps * kBytesPerSamp;
   int jf = 0;
   long long jt = 0;
-  // HOUDINI_RX_PROFILE splits a radioRx call's cost into the drain and the
+  // --rx_profile splits a radioRx call's cost into the drain and the
   // read (the RX PROFILE line), every N calls. Its OWN knob, not
-  // HOUDINI_LOOP_PROFILE: that one counts loop ITERATIONS while this counts
+  // --loop_profile: that one counts loop ITERATIONS while this counts
   // radioRx CALLS, and coalescing changes the ratio between them (about 30:1
   // uncoalesced, 2:1 coalesced), so one shared setting would silently report
   // two different scales.
-  static const size_t rx_profile_every = [] {
-    const char* e = getenv("HOUDINI_RX_PROFILE");
-    return e != nullptr ? static_cast<size_t>(atol(e)) : 0;
-  }();
+  const size_t rx_profile_every =
+      Sounder::runOptions().rx_profile > 0 ? static_cast<size_t>(Sounder::runOptions().rx_profile) : 0;
   static thread_local double p_drain = 0, p_read = 0;
   static thread_local size_t p_calls = 0, p_chunks = 0, p_drained = 0;
   // Gated, not unconditional: this is the RX hot path (~30 calls per frame) and
@@ -778,8 +778,7 @@ int RadioHoudini::recv(void* const* buffs, int samples, long long& frameTime) {
   last_pad_samples_ = padded;
   if (padded > 0) app_rx_pad_.fetch_add(1, std::memory_order_relaxed);
   if (got > 0) maybeStartHealth();
-  if ((getenv("HOUDINI_CL_RX_DEBUG") != nullptr ||
-       getenv("HOUDINI_DUMP_WIN") != nullptr) &&
+  if ((Sounder::runOptions().cl_rx_debug || Sounder::runOptions().dump_win) &&
       got > 0 && buffs[0] != nullptr) {
     const int16_t* p = static_cast<const int16_t*>(buffs[0]);
     double s = 0;
@@ -789,7 +788,7 @@ int RadioHoudini::recv(void* const* buffs, int samples, long long& frameTime) {
       amax = std::max(amax, std::abs((int)p[k]));
     }
     const double rms = std::sqrt(s / (got * 2));
-    if (getenv("HOUDINI_CL_RX_DEBUG") != nullptr) {
+    if (Sounder::runOptions().cl_rx_debug) {
       static std::atomic<int> cnt{0};
       if ((cnt.fetch_add(1) % 40) == 0) {
         MLPD_INFO("Houdini client RX dbg: got=%d rms=%.2f absmax=%d\n", got,
@@ -797,14 +796,14 @@ int RadioHoudini::recv(void* const* buffs, int samples, long long& frameTime) {
       }
     }
     // Dump the first strong (beacon-present) window for offline correlation.
-    if (getenv("HOUDINI_DUMP_WIN") != nullptr && rms > 100.0) {
+    if (Sounder::runOptions().dump_win && rms > 100.0) {
       static std::atomic<bool> done{false};
       bool expected = false;
       if (done.compare_exchange_strong(expected, true)) {
         const std::string path = Utils::dumpPath("cl_win.bin");
         FILE* f = std::fopen(path.c_str(), "wb");
         if (f == nullptr) {
-          MLPD_WARN("HOUDINI_DUMP_WIN: cannot open %s (%s)\n", path.c_str(), std::strerror(errno));
+          MLPD_WARN("--dump_win: cannot open %s (%s)\n", path.c_str(), std::strerror(errno));
         }
         if (f) {
           std::fwrite(p, sizeof(int16_t), static_cast<size_t>(got) * 2, f);

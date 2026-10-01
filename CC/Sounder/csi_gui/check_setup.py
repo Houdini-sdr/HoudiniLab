@@ -44,7 +44,7 @@ import sys
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SOUNDER = os.path.dirname(_HERE)
 sys.path.insert(0, _HERE)
-from teardown_framer import _EXAMPLES, roles_from_topology  # noqa: E402  one reader, not two
+from teardown_framer import DEFAULT_EXAMPLES, roles_from_topology  # noqa: E402  one reader, not two
 
 # The keys every node in one run must agree on: the sounder's own list
 # (include/node_version.h, kMustMatch), so the two cannot disagree about a bench.
@@ -63,7 +63,7 @@ class Report:
         return any(r["level"] == "FAIL" for r in self.lines)
 
 
-def check_config(rep, sd, conf):
+def check_config(rep, sd, conf, topology=None):
     """Returns (config dict, [base station ips], [client ips]) or (None, [], [])."""
     path = conf if os.path.isabs(conf) else os.path.join(sd, conf)
     try:
@@ -77,7 +77,7 @@ def check_config(rep, sd, conf):
         rep.add("FAIL", "config", "%s is not valid JSON: %s" % (conf, e),
                 "Fix the JSON syntax at the line and column shown.")
         return None, [], []
-    topo = cfg.get("serial_file")
+    topo = topology or cfg.get("serial_file")
     if not topo:
         rep.add("FAIL", "config", "%s names no topology (serial_file)" % conf,
                 "Add \"serial_file\": \"files/topology-<name>.json\" to the config.")
@@ -137,39 +137,39 @@ def plugin_dir(venv):
     return os.path.join(venv, "lib", "SoapySDR", "modules0.8-3")
 
 
-def plugin_env(venv):
+def plugin_env(venv, root=None):
     """The environment that loads the Houdini plugin; csi_server.py runs the sounder in it.
 
-    HOUDINI_SOAPY_ROOT selects the release's host-plugin prefix (built with the
-    radios' device build; the venv then carries no Houdini module), exactly as
-    tests/demo-verify/run_rung.sh does, so the dashboard's Check and Start run
-    the stack a scripted run validated.
+    `root` (--soapy-root) is the release's host-plugin prefix (built with the
+    radios' device build; the venv then carries no Houdini module): SoapySDR
+    then searches only that prefix (SOAPY_SDR_ROOT, the loader's own variable,
+    with its plugin path emptied), exactly as tests/demo-verify/run_rung.sh
+    does, so the dashboard's Check and Start run the stack a scripted run
+    validated.
     """
     env = dict(os.environ, LD_LIBRARY_PATH=os.path.join(venv, "lib"), SOAPY_SDR_PLUGIN_PATH=plugin_dir(venv))
-    root = os.environ.get("HOUDINI_SOAPY_ROOT")
     if root:
         env.update(SOAPY_SDR_ROOT=root, SOAPY_SDR_PLUGIN_PATH="")
     return env
 
 
-def check_plugin(rep, venv):
-    # The Houdini module comes from HOUDINI_SOAPY_ROOT's prefix when it is set
+def check_plugin(rep, venv, root=None):
+    # The Houdini module comes from the --soapy-root prefix when one is given
     # (plugin_env loads it from there), else from the venv's own module dir.
-    root = os.environ.get("HOUDINI_SOAPY_ROOT")
     moddir = plugin_dir(root or venv)
     if not os.path.isdir(venv):
         rep.add("FAIL", "plugin", "venv %s not found" % venv,
                 "Pass the SoapySDR venv as --venv (walkthrough section 2.4); the Houdini plugin's own prefix goes "
-                "in HOUDINI_SOAPY_ROOT, not here.")
+                "in --soapy-root, not here.")
         return
     mods = [m for m in glob.glob(os.path.join(moddir, "*.so")) if "houdini" in os.path.basename(m).lower()]
     if not mods:
-        rep.add("FAIL", "plugin", "no Houdini module in %s%s" % (moddir, " (HOUDINI_SOAPY_ROOT)" if root else ""),
-                "Export HOUDINI_SOAPY_ROOT=<the release's host-plugin prefix> (on the demo rig ~/houdini_0.3.1, "
+        rep.add("FAIL", "plugin", "no Houdini module in %s%s" % (moddir, " (--soapy-root)" if root else ""),
+                "Pass --soapy-root <the release's host-plugin prefix> (on the demo rig ~/houdini_0.3.1, "
                 "the build the radios run) before the check and the dashboard (walkthrough section 2.4).")
         return
     util = os.path.join(venv, "bin", "SoapySDRUtil")
-    env = plugin_env(venv)
+    env = plugin_env(venv, root)
     try:
         out = subprocess.run([util, "--info"], env=env, timeout=30, stdout=subprocess.PIPE,
                              stderr=subprocess.STDOUT).stdout.decode("utf-8", "replace")
@@ -186,13 +186,13 @@ def check_plugin(rep, venv):
     rep.add("PASS", "plugin", "%s loads (%s)" % (os.path.basename(mods[0]), fac[0].split("...")[-1].strip()))
 
 
-def check_examples(rep):
-    ex = _EXAMPLES  # where the teardown will look
+def check_examples(rep, ex):
+    # `ex`: where the teardown will look (--examples)
     if os.path.isfile(os.path.join(ex, "houdini_setup.py")):
         rep.add("PASS", "teardown", "houdini_setup found in %s" % ex)
     else:
         rep.add("WARN", "teardown", "houdini_setup.py not in %s" % ex,
-                "The framer teardown before each start needs it: export HOUDINI_EXAMPLES="
+                "The framer teardown before each start needs it: pass --examples "
                 "<path-to-SoapyHoudiniSDR>/host/examples (walkthrough section 2.4).")
 
 
@@ -227,8 +227,11 @@ def radios_of(pid):
                 conf = argv[i + 1]
             elif a.startswith("--conf_file="):
                 conf = a.split("=", 1)[1]
-        with open(os.path.join(cwd, conf), encoding="utf-8") as f:
-            topo = json.load(f)["serial_file"]
+        topo = next((argv[i + 1] for i, a in enumerate(argv[:-1]) if a == "--topology"), None) or \
+            next((a.split("=", 1)[1] for a in argv if a.startswith("--topology=")), None)
+        if not topo:  # the sounder's --topology overrides its config's serial_file
+            with open(os.path.join(cwd, conf), encoding="utf-8") as f:
+                topo = json.load(f)["serial_file"]
         with open(os.path.join(cwd, topo), encoding="utf-8") as f:
             bs, ue = roles_from_topology(json.load(f))
         return set(bs + ue)
@@ -348,17 +351,16 @@ def check_egress(rep, ip, raw):
             rep.add("PASS", "egress %s" % ip, "no data-path stall recorded")
 
 
-def release_cmd(ip, port):
+def release_cmd(ip, port, root=None):
     """The shell line that releases a node's clock into its calibrated hold, in
-    the plugin environment this check ran with (HOUDINI_SOAPY_ROOT's prefix)."""
-    root = os.environ.get("HOUDINI_SOAPY_ROOT")
+    the plugin environment this check ran with (the --soapy-root prefix)."""
     pre = "SOAPY_SDR_ROOT=%s SOAPY_SDR_PLUGIN_PATH= " % shlex.quote(root) if root else ""
     return (pre + "python3 -c \"import SoapySDR as S; d = S.Device({'driver': 'houdinisdr', 'remote': "
             "'tcp://%s:%s', 'remote:driver': 'houdinisdr-device', 'remote:type': 'houdinisdr', 'timeout': "
             "'3000000'}); d.writeSetting('CLOCK_ADJ', 'release'); d.close()\"" % (ip, port))
 
 
-def check_clock(rep, ip, port, st):
+def check_clock(rep, ip, port, st, root=None):
     """A radio's CLOCK_ADJ state. A node left steered (a steering run that did
     not release, or a steering script) runs every later run off its
     calibration point, and a run with steering off never reads it."""
@@ -370,20 +372,20 @@ def check_clock(rep, ip, port, st):
         # Calibrated but out of its hold: PLL1 is tracking, so the tick is not at
         # the calibrated frequency (the device warns at make() too).
         rep.add("WARN", "clock %s" % ip, "ref=calibrated but the hold is not in force (CLOCK_ADJ %s)" % st,
-                "Release it back into the calibrated hold before the run: " + release_cmd(ip, port))
+                "Release it back into the calibrated hold before the run: " + release_cmd(ip, port, root))
     elif not off.lstrip("-").isdigit():
         rep.add("INFO", "clock %s" % ip, "ref=%s: not held at a calibration code, no steering offset"
                 % f.get("ref", "?"))
     elif int(off) != 0:
         rep.add("WARN", "clock %s" % ip, "left steered %+d counts from its calibration code (CLOCK_ADJ %s)"
                 % (int(off), st),
-                "Release it before the run: " + release_cmd(ip, port))
+                "Release it before the run: " + release_cmd(ip, port, root))
     else:
         rep.add("INFO", "clock %s" % ip, "ref=%s, at its calibration code %s (offset 0)"
                 % (f.get("ref", "?"), f.get("cal_dac", "?")))
 
 
-def check_versions(rep, sd, nodes, port, env):
+def check_versions(rep, sd, nodes, port, env, root=None):
     infos = {}
     for ip in nodes:
         # A child process with a timeout: a radio that accepts the connection but
@@ -410,7 +412,7 @@ def check_versions(rep, sd, nodes, port, env):
                     % (hv, dv), "Run with the host prefix of the radio's release, or deploy the plugin's release "
                     "to the radio (ask whoever maintains the boards).")
         check_egress(rep, ip, info.get("egress_status"))
-        check_clock(rep, ip, port, info.get("_clock_adj", ""))
+        check_clock(rep, ip, port, info.get("_clock_adj", ""), root)
     if len(infos) < 2:
         return
     diff = [k for k in MUST_MATCH if len({i.get(k, "<absent>") for i in infos.values()}) > 1]
@@ -420,13 +422,13 @@ def check_versions(rep, sd, nodes, port, env):
     else:
         rep.add("PASS", "stack match", "both nodes on the same gateware, firmware, plugin and protocol")
     # A release pairs the host plugin with the radios' device build (lockstep);
-    # a mismatch is a stale or wrong HOUDINI_SOAPY_ROOT.
+    # a mismatch is a stale or wrong --soapy-root.
     for ip, info in sorted(infos.items()):
         hb, db = info.get("host_build"), info.get("device_build")
         if hb and db and hb != db:
             rep.add("WARN", "plugin build %s" % ip, "the host plugin (host_build %s) is not this radio's device "
                     "build (%s)" % (hb, db),
-                    "Point HOUDINI_SOAPY_ROOT at the prefix built with the radios' release (on the demo rig "
+                    "Pass --soapy-root with the prefix built with the radios' release (on the demo rig "
                     "~/houdini_0.3.1).")
 
 
@@ -436,8 +438,15 @@ def main():
                     help="the config you will run, relative to the sounder directory")
     ap.add_argument("--sounder-dir", default=_SOUNDER)
     ap.add_argument("--venv", default=os.environ.get("VIRTUAL_ENV") or os.path.expanduser("~/houdini_test"),
-                    help="the SoapySDR venv (default: $VIRTUAL_ENV, else %(default)s); the Houdini plugin comes "
-                         "from HOUDINI_SOAPY_ROOT's prefix when that is set")
+                    help="the SoapySDR venv (default: the active one, else %(default)s); the Houdini plugin comes "
+                         "from --soapy-root's prefix when one is given")
+    ap.add_argument("--soapy-root", default=None, metavar="DIR",
+                    help="the release's host-plugin prefix (the venv carries no Houdini module)")
+    ap.add_argument("--examples", default=DEFAULT_EXAMPLES, metavar="DIR",
+                    help="the SoapyHoudiniSDR host examples the framer teardown imports (default %(default)s)")
+    ap.add_argument("--topology", default=None, metavar="FILE",
+                    help="the topology file the run will use, overriding the config's serial_file "
+                         "(the sounder's --topology)")
     ap.add_argument("--quick", action="store_true", help="skip check 7 (does not open the radios)")
     ap.add_argument("--json", action="store_true", help="print the report as JSON (for the dashboard)")
     ap.add_argument("--hwinfo", nargs=2, metavar=("IP", "PORT"), help=argparse.SUPPRESS)
@@ -452,10 +461,10 @@ def main():
 
     sd = os.path.abspath(args.sounder_dir)
     rep = Report()
-    cfg, bs, ue = check_config(rep, sd, args.conf)
+    cfg, bs, ue = check_config(rep, sd, args.conf, args.topology)
     check_build(rep, sd)
-    check_plugin(rep, args.venv)
-    check_examples(rep)
+    check_plugin(rep, args.venv, args.soapy_root)
+    check_examples(rep, args.examples)
     nodes = list(dict.fromkeys(bs + ue))
     held = check_no_sounder(rep, nodes)
     port = (cfg or {}).get("remote_port", "55132")  # config.cc's default
@@ -470,7 +479,7 @@ def main():
     elif held:
         rep.add("INFO", "stack", "skipped: a sounder holds these radios, and opening them would disturb its run")
     elif up == nodes and nodes:
-        check_versions(rep, sd, nodes, port, plugin_env(args.venv))
+        check_versions(rep, sd, nodes, port, plugin_env(args.venv, args.soapy_root), args.soapy_root)
     else:
         rep.add("INFO", "stack", "skipped: not every radio's server answers")
 

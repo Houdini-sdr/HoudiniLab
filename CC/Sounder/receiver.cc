@@ -8,6 +8,7 @@
 */
 
 #include "include/receiver.h"
+#include "include/run_options.h"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -928,12 +929,9 @@ void Receiver::clientTxPilots(size_t user_id, long long base_time,
       }
     }
   }
-  static const int horizon_env = [] {
-    const char* he = std::getenv("HOUDINI_PILOT_HORIZON");
-    return he != nullptr ? std::atoi(he) : -1;
-  }();
+  const int horizon_opt = Sounder::runOptions().pilot_horizon;
   const int horizon =
-      horizon_env >= 0 ? horizon_env : config_->ue_pilot_horizon();
+      horizon_opt >= 0 ? horizon_opt : config_->ue_pilot_horizon();
   if (horizon > 0 && stampAnchored()) {  // Houdini seated-burst path (any TX ch)
     // AP-31(c): the ladder steps by the TRACKED frame period, not
     // samps_per_frame. The pilot offset is stable across frames only when the
@@ -1061,8 +1059,7 @@ void Receiver::clientTxPilots(size_t user_id, long long base_time,
     // late burst is exactly a phase jump with no other symptom. Drain here, after
     // scheduling, so the cost is once per horizon rather than per burst (AP-10).
     client_radio_set_->drainTxStatus(user_id);
-    static const bool kUeTxDebug = std::getenv("HOUDINI_UE_TX_DEBUG") != nullptr;  // read once
-    if (kUeTxDebug && nsched > 0) {
+    if (Sounder::runOptions().ue_tx_debug && nsched > 0) {
       MLPD_INFO("UE pilot burst: scheduled %d frames up to %lld (pad %lld)\n",
                 nsched, pilot_cursor, burst_pad);
     }
@@ -1168,8 +1165,7 @@ ssize_t Receiver::syncSearch(const std::complex<int16_t>* check_data,
                 static_cast<long>(sync_index), search_window);
     }
   }
-  static const bool kSyncDebug = std::getenv("HOUDINI_SYNC_DEBUG") != nullptr;  // read once
-  if (kSyncDebug) {
+  if (Sounder::runOptions().sync_debug) {
     static std::atomic<int> c{0};
     if ((c.fetch_add(1) % 20) == 0) {
       MLPD_INFO("syncSearch[%s]: window=%zu corr_scale=%.3f (applied %.3f) gold=%zu "
@@ -1195,9 +1191,8 @@ ssize_t Receiver::syncSearch(const std::complex<int16_t>* check_data,
 // nothing.
 static int syncTelemetrySock(void) {
   static const int fd = [] {
-    const char* dst = std::getenv("HOUDINI_CSI_UDP");
-    if (dst == nullptr) return -1;
-    const std::string s(dst);
+    const std::string& s = Sounder::runOptions().csi_udp;
+    if (s.empty()) return -1;
     const auto colon = s.find(':');
     const std::string host =
         (colon == std::string::npos) ? "127.0.0.1" : s.substr(0, colon);
@@ -1629,20 +1624,15 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   // actually goes so the cause is traced rather than assumed. Four buckets,
   // mean us per iteration, logged every HOUDINI_LOOP_PROFILE iterations
   // (0 = off).
-  const size_t loop_profile_every = [] {
-    const char* e = getenv("HOUDINI_LOOP_PROFILE");
-    return e != nullptr ? static_cast<size_t>(atol(e)) : 0;
-  }();
+  const size_t loop_profile_every =
+      Sounder::runOptions().loop_profile > 0 ? static_cast<size_t>(Sounder::runOptions().loop_profile) : 0;
   using profile_clock = std::chrono::steady_clock;
   double prof_rx = 0, prof_sync = 0, prof_tx = 0, prof_slot = 0, prof_all = 0;
   size_t prof_n = 0, prof_sync_searched = 0;
   // Coalesce runs of discarded slots into one read (see the slot loop). ON by
-  // default -- 11.4x on the measured iteration -- with HOUDINI_COALESCE_SLOTS=0
+  // default -- 11.4x on the measured iteration -- with --coalesce_slots=false
   // as the escape hatch back to per-slot reads for A/B.
-  const bool coalesce_throwaway = [] {
-    const char* e = getenv("HOUDINI_COALESCE_SLOTS");
-    return (e == nullptr) || (atoi(e) != 0);
-  }();
+  const bool coalesce_throwaway = Sounder::runOptions().coalesce_slots;
   std::vector<std::complex<int16_t>> throwaway;
   long long rx_beacon_time(0);
   //Always decreases the requested rx samples
@@ -2043,7 +2033,8 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
         // inputs so the offline analyzer can place the TRUE core by
         // exact-waveform correlation and recompute the SNR without the
         // detector-index bias.
-        const char* rwdir = getenv("HOUDINI_DUMP_RESYNC_WIN");
+        const std::string& rwdir_s = Sounder::runOptions().dump_resync_win;
+        const char* rwdir = rwdir_s.empty() ? nullptr : rwdir_s.c_str();
         if (rwdir != nullptr) {
           static std::atomic<int> rwn{0};
           const int wk = rwn.fetch_add(1);
