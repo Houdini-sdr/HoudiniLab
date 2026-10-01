@@ -67,7 +67,9 @@ def bs_rx_worker(bsd, ch, native, dtype, mode, tick_rate, epoch, frame, pilot_sy
     if mode == "none":
         return
     rx = bsd.setupStream(SOAPY_SDR_RX, native, [ch], {})
-    per_packet = rx_framing(bsd, verbose=False)["frame_words"] * (8 // (4 if dtype == np.int16 else 2))
+    # readStream counts CS16 samples whatever the buffer's dtype: two per
+    # 64-bit frame word.
+    per_packet = rx_framing(bsd, verbose=False)["frame_words"] * 2
     win = 4096
     try:
         if mode == "continuous":

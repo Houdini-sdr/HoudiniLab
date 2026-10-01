@@ -4,8 +4,7 @@
  *        device requires (AP-79), between make() and the first setupStream.
  *
  * THE ORDER, and why each step sits where it does. It is the software lane's
- * recipe (its reference driver host/examples/dualband_link.py) and the HS-202
- * plan section 3.2, which the device enforces:
+ * recipe and the HS-202 plan section 3.2, which the device enforces:
  *   1. FORCE_IDLE: a known-idle device, leaks from an earlier session reported.
  *   1b. AP-86, only with the X-band RF front end attached (Plan::xband_fe_state):
  *      the board's STATIC state for this run. After FORCE_IDLE, which
