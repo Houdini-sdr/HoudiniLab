@@ -44,10 +44,9 @@ static constexpr float kBeaconDetectWindowScaler = 2.33f;
 // The sync path's building blocks, each built ONCE in the constructor from the
 // configured beacon shape and the sync block:
 //   - the detector (sync/detector.h): the threshold form and the pick rule
-//     (sync.detector.threshold / sync.detector.pick, HOUDINI_BEACON_THRESH and
-//     HOUDINI_BEACON_PICK as logged overrides while allow_env_overrides
-//     holds). Why first-crossing false-locks on a strong link, why the
-//     power-ratio form is a different test at every level, and why a
+//     (sync.detector.threshold / sync.detector.pick). Why first-crossing
+//     false-locks on a strong link, why the power-ratio form is a different
+//     test at every level, and why a
 //     single-copy replica forces the coherence form are there, in
 //     CommsLib::BeaconPick / BeaconThresh and in DEMO_VERIFICATION
 //     8.138-8.154.
@@ -63,8 +62,8 @@ static constexpr float kBeaconDetectWindowScaler = 2.33f;
 // absorb (DEMO_VERIFICATION.md 4.28/4.29); what is left is pipeline/path
 // latency (about 1 us, measured about 122 samples on-board), which is what
 // tx_advance / ue_tx_advance_ticks calibrate.
-// Every tunable of the sync path is a sync.* knob (sync/sync_config.h): JSON
-// first, environment as a logged override while allow_env_overrides holds.
+// Every tunable of the sync path is a sync.* knob (sync/sync_config.h), set in
+// the config's sync block.
 
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t cond = PTHREAD_COND_INITIALIZER;

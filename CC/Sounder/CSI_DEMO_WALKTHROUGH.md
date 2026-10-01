@@ -41,12 +41,8 @@ display. Every command runs on `<host>` unless it says otherwise.
    cd <path-to-HoudiniLab>/CC/Sounder
    ```
 
-   Select the host plugin built with the radios' release in the same shell
-   before steps 3 and 4 (every config runs on it, section 3):
-
-   ```sh
-   export HOUDINI_SOAPY_ROOT=<host-plugin-prefix>
-   ```
+   Steps 3 and 4 name the host plugin built with the radios' release:
+   `--soapy-root <host-plugin-prefix>` (every config runs on it, section 3).
 
 2. Pick a config from section 3, then put your two radios' addresses in the
    topology file it names. This prints the file name:
@@ -62,13 +58,13 @@ display. Every command runs on `<host>` unless it says otherwise.
    again until it prints `Ready.`:
 
    ```sh
-   python3 csi_gui/check_setup.py --conf files/<config>.json
+   python3 csi_gui/check_setup.py --soapy-root <host-plugin-prefix> --conf files/<config>.json
    ```
 
 4. Start the dashboard with its controls:
 
    ```sh
-   python3 csi_gui/csi_server.py --control --conf files/<config>.json
+   python3 csi_gui/csi_server.py --control --soapy-root <host-plugin-prefix> --conf files/<config>.json
    ```
 
 5. On your workstation, forward the port and open the page:
@@ -171,7 +167,9 @@ cd <path-to-HoudiniLab>/CC/Sounder
 python3 csi_gui/check_setup.py --conf files/<config>.json
 ```
 
-Each FAIL line names what is missing and the section below that installs it.
+With the Houdini plugin in a prefix of its own (section 2.4), add
+`--soapy-root <host-plugin-prefix>`. Each FAIL line names what is missing and
+the section below that installs it.
 
 ### 2.3 System packages
 
@@ -208,13 +206,13 @@ ls $SOAPY_SDR_PLUGIN_PATH      # must contain a Houdini .so module
 
 When the Houdini plugin is installed in a prefix of its own (a release built
 with the radios' device build) instead of the venv, the venv carries no Houdini
-module. Verify the prefix instead, and keep the export in every shell: the setup
-check, the dashboard and the run scripts load the plugin from it.
+module. Verify the prefix instead, and pass it as `--soapy-root
+<host-plugin-prefix>` to the setup check, the dashboard, the framer teardown and
+the run scripts: they load the plugin from it.
 
 ```sh
-export HOUDINI_SOAPY_ROOT=<host-plugin-prefix>
-ls $HOUDINI_SOAPY_ROOT/lib/SoapySDR/modules0.8-3     # must contain a Houdini .so module
-SOAPY_SDR_ROOT=$HOUDINI_SOAPY_ROOT SOAPY_SDR_PLUGIN_PATH= SoapySDRUtil --info   # lists houdinisdr
+ls <host-plugin-prefix>/lib/SoapySDR/modules0.8-3     # must contain a Houdini .so module
+SOAPY_SDR_ROOT=<host-plugin-prefix> SOAPY_SDR_PLUGIN_PATH= SoapySDRUtil --info   # lists houdinisdr
 ```
 
 If `SoapySDRUtil` is missing, or neither the venv's module directory nor the
@@ -225,14 +223,15 @@ walkthrough can work without it.
 One more thing comes from that repository: the framer teardown in section 8.4
 imports `houdini_setup` from its host examples directory. The default location
 is `~/repos/SoapyHoudiniSDR/host/examples`. If you keep it somewhere else,
-export the path once:
+pass the path as `--examples` to the setup check, the teardown, or the
+dashboard (which hands it to both):
 
 ```sh
-export HOUDINI_EXAMPLES=<path-to-SoapyHoudiniSDR>/host/examples
+python3 csi_gui/csi_server.py --control --examples <path-to-SoapyHoudiniSDR>/host/examples --conf files/<config>.json
 ```
 
-This is the same environment variable the HIL tests under `tests/hil/` use for
-the same dependency.
+The HIL tests under `tests/hil/` read the same path from the environment
+variable `HOUDINI_EXAMPLES` instead.
 
 ### 2.5 Get and build the sounder
 
@@ -296,6 +295,11 @@ under `Clients`:
 }
 ```
 
+To run a config against another topology file without editing either,
+pass `--topology <file>`: it overrides the config's `serial_file` on the
+sounder, the setup check, the teardown, and the dashboard (which hands it to
+all three).
+
 Then open the config you plan to run (section 3) and check these fields against
 your bench:
 
@@ -337,7 +341,7 @@ Beyond the gain keys, signal level is set two ways:
 
 Judge the level from the receive side rather than guessing at it. Each card's
 Spectrum tab shows how much of the converter the pilot uses and counts clipped
-samples (section 5.3), and running the sounder with `HOUDINI_CL_RX_DEBUG=1`
+samples (section 5.3), and running the sounder with `--cl_rx_debug`
 makes it print the received RMS and absolute maximum periodically. Samples are
 16 bit, so an absolute maximum near 32767 means you are clipping and should
 attenuate; an RMS in the low tens means you are close to the noise floor and
@@ -359,7 +363,7 @@ list shows. All of them run one client. Each names its own topology file in
 
 | Config | What it runs |
 |---|---|
-| `files/houdini-dualband-xw-steer-slots.json` | **The demo.** Sub-6 2425 MHz at 133 RB plus the X-band IF at 4380 MHz at 270 RB (97.2 MHz), 4096 FFT, 30 kHz spacing; the UE's clock steered onto the beacon; the base station receives only its rx slots and removes the carrier offset before the FFT. Needs a host plugin with the slots gate, 0.3.0 or newer (`HOUDINI_SOAPY_ROOT`, `DEMO_BENCH_RUNBOOK.md` A3) |
+| `files/houdini-dualband-xw-steer-slots.json` | **The demo.** Sub-6 2425 MHz at 133 RB plus the X-band IF at 4380 MHz at 270 RB (97.2 MHz), 4096 FFT, 30 kHz spacing; the UE's clock steered onto the beacon; the base station receives only its rx slots and removes the carrier offset before the FFT. Needs a host plugin with the slots gate, 0.3.0 or newer (`--soapy-root`, `DEMO_BENCH_RUNBOOK.md` A3) |
 | `files/houdini-dualband-xw-steer-slots-fe.json` | The demo through an X-band front end held in a static TX/RX state for the session |
 | `files/houdini-dualband-xw-steer.json` | The demo's widths and steering, receiving every slot (the config of the earlier frozen fallback build) |
 | `files/houdini-dualband-xw-steer-fe.json` | That, through the X-band front end |
@@ -380,8 +384,8 @@ The `-fe` configs set `xband_frontend_static`: they need the X-band front-end
 boards' roles applied on both nodes (`sudo houdini-role status` exits 0 on
 each) and are refused at start without them. The slots configs
 (`bs_rx_slots`) need a host plugin with the slots gate (device 0.3.0 or newer);
-select the release's plugin by exporting `HOUDINI_SOAPY_ROOT=<host-plugin-prefix>`
-before the setup check and the dashboard.
+select the release's plugin with `--soapy-root <host-plugin-prefix>` on the
+setup check and the dashboard.
 
 On a new bench, go up the dual-band ladder one rung at a time: `r0` proves the
 link and the stack, `r1` the converter clocks and the sub-6 band, `r2` adds the
@@ -405,8 +409,8 @@ Pilot and data placement is sample exact: the client pads each burst so its
 start escapes the driver's 3125 ns scheduling grid, and `tx_advance` in the
 config is a bench calibration that seats the burst at its nominal in-slot
 position (247 on the legacy one-rate path, 169 on the dual-band converter
-path). If you change cabling or the RF path, re-derive it: run with
-`HOUDINI_BS_RX_DEBUG=1` across a few restarts and shift `tx_advance` by the
+path). If you change cabling or the RF path, re-derive it: run the sounder with
+`--bs_rx_debug` across a few restarts and shift `tx_advance` by the
 mean `pilot_grid_off` the base station prints (the `_tx_advance_note` of
 `houdini-ul.json` and of each dual-band config gives the details).
 
@@ -431,7 +435,7 @@ Before each attempt it also runs `csi_gui/teardown_framer.py` to release a
 framer that a previous run may have left armed (section 8.4). You will see its
 output prefixed `[teardown]`, and the sounder's prefixed `[sounder]`.
 
-Two defaults assume one particular layout. If yours differs, override them:
+Three defaults assume one particular layout. If yours differs, override them:
 
 - `--sounder-dir <path-to-HoudiniLab>/CC/Sounder` only to run a different
   checkout from the one `csi_server.py` lives in, which is the default. The
@@ -441,6 +445,9 @@ Two defaults assume one particular layout. If yours differs, override them:
   `strings <dir>/build/sounder | grep <a-string-only-the-new-code-logs>`.
 - `--venv <your-houdini-venv>` if no environment is activated and the SoapySDR
   virtual environment is not at `~/houdini_test`.
+- `--soapy-root <host-plugin-prefix>` when the Houdini plugin lives in a prefix
+  of its own (section 2.4): the sounder, the setup check and the teardown load
+  it from there instead of the venv.
 
 That command on its own is deliberately quiet. It prints the teardown, the
 sounder's startup and a `[csi]` datagram counter every five seconds, and
@@ -449,22 +456,23 @@ a short log as a sign that something is wrong. Add `--log-dir <dir>` to keep
 each start's sounder output in `<dir>/sounder_<UTC>.log`, including the
 end-of-run checks it prints at Stop.
 
-If you want the per frame diagnostics instead, export them in the same shell
-before launching. Section 7 describes each one:
+If you want the per frame diagnostics instead, pass them to the sounder with
+the backend's `--sounder-arg` (one flag each, repeatable). Section 7 describes
+each one:
 
 ```sh
-export HOUDINI_BS_RX_DEBUG=1 HOUDINI_UE_TX_DEBUG=1 HOUDINI_CSI_R_DEBUG=1
-python3 csi_gui/csi_server.py --launch --conf files/<config>.json
+python3 csi_gui/csi_server.py --launch --conf files/<config>.json \
+  --sounder-arg=--bs_rx_debug --sounder-arg=--ue_tx_debug --sounder-arg=--csi_r_debug
 ```
 
 Every beacon carrier estimate, rather than one in ten, is a config setting
-(`"sync": {"cfo": {"log_every": 1}}`, section 7.1), not an export.
+(`"sync": {"cfo": {"log_every": 1}}`, section 7.1), not a flag.
 
 On a healthy cabled bench this is a large difference in output and no
 difference in behaviour. Two back to back runs on the same bench measured 6,189
-lines in 60 seconds with the exports set against 342 lines in 85 seconds
+lines in 60 seconds with the three diagnostics on against 342 lines in 85 seconds
 without them, while the `[csi]` datagram counter advanced by an identical 443
-per reporting interval in both. So a quiet log means the exports are unset, not
+per reporting interval in both. So a quiet log means the diagnostics are off, not
 that the demo is running slowly. Check the datagram counter, not the line rate.
 
 ### 4.2 Mode B: run the two pieces yourself
@@ -483,8 +491,7 @@ cd <path-to-HoudiniLab>/CC/Sounder
 source <your-houdini-venv>/bin/activate
 export LD_LIBRARY_PATH=$VIRTUAL_ENV/lib
 export SOAPY_SDR_PLUGIN_PATH=$VIRTUAL_ENV/lib/SoapySDR/modules0.8-3
-export HOUDINI_MAX_FRAME=2000000000        # keep running instead of stopping at max_frame
-./build/sounder --view --conf_file files/<config>.json
+./build/sounder --view --conf_file files/<config>.json --max_frame=2000000000   # keep running instead of stopping at max_frame
 ```
 
 When the plugin lives in a prefix of its own (section 2.4), point SoapySDR at
@@ -492,7 +499,8 @@ it instead of the venv's module directory, as the dashboard does:
 `export SOAPY_SDR_ROOT=<host-plugin-prefix> SOAPY_SDR_PLUGIN_PATH=`.
 
 Note the flag names differ between the two programs. The sounder takes
-`--conf_file`; the dashboard backend takes `--conf`.
+`--conf_file`; the dashboard backend takes `--conf`. The sounder's other
+settings (section 7) are flags on the same command line.
 
 You do **not** need to start a separate beacon transmitter. With
 `bs_hw_framer` set to true, the sounder arms the base station beacon itself.
@@ -514,11 +522,15 @@ from before that path existed, and it is not part of this demo.
 | `--control` | off | Start, Stop, Restart and Check buttons and a config list (the sounder's `files/houdini*.json`) in the page header; section 4.4 |
 | `--conf` | `files/houdini-1u.json` | The config to run (with `--launch` or `--control`), and the one the page's \|H\| axis top comes from (`dashboard_mag_top`) |
 | `--sounder-dir` | the checkout `csi_server.py` is in | Which checkout's `build/sounder` runs |
-| `--venv` | the activated venv, else `~/houdini_test` | The SoapySDR runtime the sounder runs with, and its Houdini plugin unless `HOUDINI_SOAPY_ROOT` names a release prefix |
+| `--venv` | the activated venv, else `~/houdini_test` | The SoapySDR runtime the sounder runs with, and its Houdini plugin unless `--soapy-root` names a release prefix |
+| `--soapy-root` | none | The release's host-plugin prefix (section 2.4), for the sounder, the setup check and the teardown |
+| `--examples` | the teardown's own (`~/repos/SoapyHoudiniSDR/host/examples`) | The SoapyHoudiniSDR host examples the teardown imports (section 2.4) |
+| `--topology` | each config's `serial_file` | A topology file every run uses instead, for the sounder, the setup check and the teardown (section 2.6) |
+| `--sounder-arg=<flag>` | none | One more flag for the sounder's command line (repeatable), for example `--sounder-arg=--core_map=main=15`; section 7 lists them |
 | `--log-dir` | off | Write each start's sounder output to `<dir>/sounder_<UTC>.log` |
 | `--replay FILE=LABEL` | none | With `--control`, a recording offered in the config list under LABEL (repeatable); Start plays it in a loop into this dashboard with no radio, no setup check and no teardown |
 | `--configs` | `all` | With `--control`, the configs the list offers: every `files/houdini*.json` (`all`), or only those carrying a short `_label` (`labelled`: the demo's four) |
-| `--record` | `$HOUDINI_CSI_RECORD`, else off | Record every datagram to a new file for `replay_feed.py` (a name that exists is refused, never overwritten) |
+| `--record` | off | Record every datagram to a new file for `replay_feed.py` (a name that exists is refused, never overwritten) |
 | `--record-max-mb` | 2048 | Stop recording at this size |
 | `--dest-host` | 127.0.0.1 | Where the sounder sends datagrams, when using `--launch` |
 | `--http-host` | 0.0.0.0, or 127.0.0.1 with `--control` | Web server bind address |
@@ -789,7 +801,7 @@ UE pilot burst: scheduled 97 frames up to <tick> (pad 148)
 Re-sync frame 1255: beacon alive on the anchored grid (resid +0 within scatter, snr 47.6 dB), tid 0
 ```
 
-The first appears with `HOUDINI_UE_TX_DEBUG=1` and shows the client keeping
+The first appears with `--ue_tx_debug` and shows the client keeping
 its transmit queue topped up. The second appears on every targeted re-sync
 attempt; `resid` near zero and an SNR in the mid 40s dB on a cabled bench mean
 the anchor is holding. If the client loses the link, the base station side
@@ -804,33 +816,36 @@ The backend prints a count every five seconds:
 
 If that count climbs steadily, the whole chain works. If it stays at zero while
 the sounder is clearly running, the datagrams are not arriving: check that
-`HOUDINI_CSI_UDP` points where the backend is bound, and that nothing between
-the two is dropping UDP.
+the sounder's `--csi_udp` points where the backend is bound, and that nothing
+between the two is dropping UDP.
 
 ## 7. Tuning knobs
 
-All of these are environment variables read by the sounder. Set them in the
-same shell that launches it. The sync knobs (the SNR floor, the beacon carrier
-log rate, the tracker and the steering) are config keys instead, in the
-config's `sync` block (section 7.1).
+All of these are flags of the sounder, its run options
+(`./build/sounder --helpon=main` lists every one). Put them on the sounder's
+command line (mode B), or pass each through the dashboard as
+`--sounder-arg=<flag>` (mode A). The sounder logs a `Run options:` line at
+start naming every one not at its default. The sync knobs (the SNR floor, the
+beacon carrier log rate, the tracker and the steering) are config keys
+instead, in the config's `sync` block (section 7.1).
 
-| Variable | Default | What it does |
+| Flag | Default | What it does |
 |---|---|---|
-| `HOUDINI_CSI_SYM_START` | the zero prefix minus half the cyclic prefix (section 6) | Where the FFT window starts inside a received slot. An integer, or `auto` for the energy edge detector. |
-| `HOUDINI_CSI_NO_TIMING_FIX` | unset | Set it to disable the per frame pilot re-alignment. |
-| `HOUDINI_CSI_FPS` | 30 | Per antenna datagram rate out of the sounder. |
-| `HOUDINI_MAX_FRAME` | from config `max_frame` | Frame count to run. Set large for continuous viewing. |
-| `HOUDINI_CSI_UDP` | `127.0.0.1:9999` with `--view` | Where datagrams go, as `host:port`. |
-| `HOUDINI_CSI_DUMP` | unset | One shot raw slot and H dump for offline analysis. |
-| `HOUDINI_PILOT_HORIZON` | from config `ue_pilot_horizon` (96 in the legacy configs and the dual-band `r1` and `r2`, 10 in the other dual-band ones) | How many frames of client bursts are queued ahead of real time. Larger survives slower host loops; every extra frame delays a timing correction reaching the wire. |
-| `HOUDINI_BS_RX_DEBUG` | unset | Base station prints its rederivation of the client schedule: `pilot_grid_off` should sit within a few samples of zero and hold steady through a run, and `clamped` (slots placed past the capture's edge) should read 0. |
-| `HOUDINI_UE_TX_DEBUG` | unset | Client prints its burst scheduling (frames queued, pad). |
-| `HOUDINI_CORE_MAP` | unset | Where the sounder pins its own threads: `main=<core>,recorder=<core>,bsrx=<core>,ue=<core>`, each the base core of that role (thread i on base + i); a role not named keeps the default layout. Logged at start. For CPU isolation experiments. |
-| `HOUDINI_TX_CPU_AFFINITY` | unset | `c0,c1,...`: the i-th live client TX stream gets the host plugin's `cpu_affinity=ci`, pinning its pacer worker (SH-427: keep the workers off the cores that take the data NIC's interrupts). Logged per stream at open. |
-| `HOUDINI_TX_STREAM_ARGS` | unset | Extra host-plugin arguments for the client's live TX streams, `key=value,key=value` (for example `tx_target_frac=0.75`), each logged at open; `tx_mode`, `tdd` and `mts` are refused. A diagnostic and tuning knob: set it only when the host plugin's owners ask. |
-| `HOUDINI_CSI_R_DEBUG` | unset | Recorder prints the per frame pilot re-alignment it chose (`r`, and the blind score behind it), one line per 30 corrections. |
-| `HOUDINI_TX_HOST_STATUS` | unset | Set it to log the client host plugin's pacer state (`TX_HOST_STATUS`, `TX_BANK_STATUS`) every link-health period. Cheap; the demo runs with it. |
-| `HOUDINI_CNS_DUMP_LOW` | unset | Directory for autopsy dumps of the first few low scoring constellations. The directory must already exist. |
+| `--csi_sym_start` | the zero prefix minus half the cyclic prefix (section 6) | Where the FFT window starts inside a received slot. An integer, or `auto` for the energy edge detector. |
+| `--csi_timing_fix` | on | `--csi_timing_fix=false` disables the per frame pilot re-alignment. |
+| `--csi_fps` | 30 | Per antenna datagram rate out of the sounder. |
+| `--max_frame` | from config `max_frame` | Frame count to run. Set large for continuous viewing. |
+| `--csi_udp` | `127.0.0.1:9999` with `--view` | Where datagrams go, as `host:port`. |
+| `--csi_dump=N` | off | One shot raw slot and H dump for offline analysis, per antenna after N frames (0 or 1: 30), under `--dump_dir`. |
+| `--pilot_horizon` | from config `ue_pilot_horizon` (96 in the legacy configs and the dual-band `r1` and `r2`, 10 in the other dual-band ones) | How many frames of client bursts are queued ahead of real time. Larger survives slower host loops; every extra frame delays a timing correction reaching the wire. |
+| `--bs_rx_debug` | off | Base station prints its rederivation of the client schedule: `pilot_grid_off` should sit within a few samples of zero and hold steady through a run, and `clamped` (slots placed past the capture's edge) should read 0. |
+| `--ue_tx_debug` | off | Client prints its burst scheduling (frames queued, pad). |
+| `--core_map` | unset | Where the sounder pins its own threads: `main=<core>,recorder=<core>,bsrx=<core>,ue=<core>`, each the base core of that role (thread i on base + i); a role not named keeps the default layout. Logged at start. For CPU isolation experiments. |
+| `--tx_cpu_affinity` | unset | `c0,c1,...`: the i-th live client TX stream gets the host plugin's `cpu_affinity=ci`, pinning its pacer worker (SH-427: keep the workers off the cores that take the data NIC's interrupts). Logged per stream at open. |
+| `--tx_stream_args` | unset | Extra host-plugin arguments for the client's live TX streams, `key=value,key=value` (for example `tx_target_frac=0.75`), each logged at open; `tx_mode`, `tdd` and `mts` are refused. A diagnostic and tuning knob: set it only when the host plugin's owners ask. |
+| `--csi_r_debug` | off | Recorder prints the per frame pilot re-alignment it chose (`r`, and the blind score behind it), one line per 30 corrections. |
+| `--tx_host_status` | off | Logs the client host plugin's pacer state (`TX_HOST_STATUS`, `TX_BANK_STATUS`) every link-health period (`--link_health_s`). Cheap; the demo runs with it. |
+| `--cns_dump_low` | unset | Directory for autopsy dumps of the first few low scoring constellations. The directory must already exist. |
 
 ### 7.0 Choosing the beacon waveform
 
@@ -877,7 +892,7 @@ These belong to the timing tracker, the beacon detector, its SNR confirm, the
 beacon's own frequency estimate and the client's clock steering. They live in
 ONE place: a `sync` object in the JSON config, loaded into one validated structure whose
 every value is printed at startup with where it came from (`default`, `json`
-or `env`). Every default below is a measured value, not a guess, and the run
+or `derived`). Every default below is a measured value, not a guess, and the run
 is expected to be correct with all of them left alone.
 
 Three things to know:
@@ -893,17 +908,11 @@ Three things to know:
 2. A key the loader does not know, or a value outside its range, stops the
    client with a message naming the key. A typo cannot quietly leave a knob at
    its default.
-3. The `was` column is the environment variable each knob replaces. Those
-   variables are OFF by default: a stale export in your shell is reported as
-   IGNORED at startup and changes nothing. A config that sets
-   `sync.allow_env_overrides` true gets them back, each override logged; a
-   number outside a knob's range is then pulled to the nearest bound with a
-   note, except for the three knobs whose old readers ignored such a value
-   (`beacon.tx_full_scale`, `detector.first_path_window`,
-   `detector.first_path_floor_db`), which keep their default with a note.
+3. There is no environment override: the config's `sync` block is the only
+   way to set these knobs, so a run's sync settings are all in its config.
    Bench sweeps go through the JSON: `run_shape_campaign.sh` merges
    `SYNC_OVERLAY` (a JSON object) into the `sync` block of every config it
-   writes. The environment path is kept only for old bench scripts.
+   writes.
 
 Example, the block of the demo config
 `files/houdini-dualband-xw-steer-slots.json`:
@@ -918,61 +927,60 @@ Example, the block of the demo config
 ```
 
 <!-- sync-knob-table:begin (generated by ./build/sync_config_schema; sync_config_test diffs it, do not edit by hand) -->
-| key | default | was | range | env out of range | what it does |
-| --- | --- | --- | --- | --- | --- |
-| `sync.beacon.type` | `legacy` |  |  |  | Which beacon waveform the base station transmits (legacy, legacy_guard, dot11, nr, nr_pss, nr_pss_bl; nr_pss_bl is the band-limited mode-V beacon, AP-79). |
-| `sync.beacon.tx_full_scale` | 0.6 | `HOUDINI_BEACON_FS` | 0.001 to 1 | ignored, value kept | Transmit peak of the beacon as a fraction of DAC full scale. 0.6 shipped; lower it to stand in for path loss on a cable. |
-| `sync.detector.threshold` | `auto` | `HOUDINI_BEACON_THRESH` | auto, power, xcorr, coherence | refused | Decision statistic: auto picks coherence for a single-copy replica and the normalised cross-correlation otherwise; power is the original level-dependent form (4th order in amplitude against 2nd) and the Iris/UHD default. |
-| `sync.detector.pfa_per_window` | 0.001 |  | 1e-09 to 0.5 |  | The coherence form's bar when set: the false-alarm probability per search window, turned into a bar by the replica and window lengths (8.163). Unset, corr_scale applies; ignored for the repeated-field forms. |
-| `sync.detector.pick` | `first_path` | `HOUDINI_BEACON_PICK` | first_crossing, cluster_refined, argmax, first_path | refused | Which crossing is returned: first_path (the Houdini default), argmax, cluster_refined, or first_crossing (the Iris/UHD default; unsafe on a strong link). |
-| `sync.detector.first_path_window` | derived | `HOUDINI_FIRST_PATH_WIN` | -1 to 4095 | ignored, value kept | Samples the first-path search looks back from the peak; -1 (default) means half the replica length. Must stay inside the preamble's self-coherent plateau. A correlator quantity: samples, not scaled with the rate. |
-| `sync.detector.first_path_floor_db` | -9 | `HOUDINI_FIRST_PATH_DB` | -30 to 0 | ignored, value kept | How much weaker, in dB of path power, an earlier arrival may be and still be taken as the first path. |
-| `sync.detector.first_path_guard` | 0 | `HOUDINI_FIRST_PATH_GUARD` | 0 to 1 | clamped | Samples immediately before the peak the first-path search skips. A beacon between samples splits its peak over two adjacent taps and the earlier one is the SAME arrival, not an earlier one; 1 skips it. Only 0 and 1: 2 loses a genuine two-sample-earlier arrival and 3 a three-sample one (measured). 0 is the default (DEMO_VERIFICATION.md 8ak). |
-| `sync.detector.corr_scale` | 10 |  | 0.0001 to 1e+07 |  | Resync detection threshold: the bar is 1 / corr_scale, relaxed by one per retry. Read from the legacy per-client top-level array when absent. |
-| `sync.detector.corr_scale_init` | 10 |  | 0.0001 to 1e+07 |  | Acquisition detection threshold (bar 1 / corr_scale_init); defaults to corr_scale. |
-| `sync.detector.min_bar` | 0 |  | 0 to 1 |  | The lowest bar the resync retry relaxation (+1 on corr_scale per retry) may reach; 0 = no limit. Set it with a small corr_scale, where +1 per retry would walk the bar into the noise. |
-| `sync.detector.corr_threads` | 1 | `SOUNDER_CORR_THREADS` | 1 to 256 | clamped | Threads for the correlator's matched filter. 1 shipped; measured a net loss below ~4 on the rig host. |
-| `sync.confirm.snr_floor_db` | 30 | `HOUDINI_SYNC_SNR_DB` | -10 to 80 | clamped | In-window SNR a detection must clear. A property of the link and the waveform: re-derive it when either changes. |
-| `sync.cfo.index_guard` | 8 | `HOUDINI_CFO_INDEX_GUARD` | 0 to 64 | clamped | Samples the carrier estimator's windows slide later than the detected end (AP-39). A correlator quantity: samples, not scaled with the rate. |
-| `sync.cfo.window_margin` | 0 |  | 0 to 32 |  | Samples shrunk from both ends of each estimator window so neither touches the burst's edge (8.164). A correlator quantity: samples, not scaled with the rate. |
-| `sync.cfo.log_every` | 10 | `HOUDINI_CFO_LOG_EVERY` | 1 to 1e+06 | clamped | Print one beacon-CFO log line in this many. |
-| `sync.tracker.type` | `alpha_beta` | `HOUDINI_TRACKER` | alpha_beta, kalman | refused | Which estimator tracks the base station frame grid: alpha_beta (shipped) or kalman. |
-| `sync.tracker.alpha` | 0.5 | `HOUDINI_GRID_ALPHA` | 0 to 1 | clamped | Fraction of each accepted residual applied to the schedule. |
-| `sync.tracker.beta` | 0.1 | `HOUDINI_GRID_BETA` | 0 to 1 | clamped | Fraction of the residual applied to the frame period estimate. |
-| `sync.tracker.step_ppm` | 0.5 | `HOUDINI_GRID_STEP_PPM` | 0 to 1000 | clamped | Most one detection may move the period estimate, ppm. 0 disables the limit. |
-| `sync.tracker.max_ppm` | 100 | `HOUDINI_GRID_MAX_PPM` | 0.1 to 10000 | clamped | Absolute band the period estimate may occupy either side of nominal, ppm. |
-| `sync.tracker.trust_ppm` | 1 | `HOUDINI_GRID_TRUST_PPM` | 0 to 1000 | clamped | How far the tracked period and a fresh acquisition confirm may disagree before the confirm is preferred, ppm. |
-| `sync.tracker.kalman.meas_var` | 0.5 | `HOUDINI_KF_MEAS_VAR` | 1e-06 to 1e+06 | clamped | Kalman only: assumed detector scatter variance, samples squared. |
-| `sync.tracker.kalman.rate_rw` | 1e-09 | `HOUDINI_KF_RATE_RW` | 0 to 1 | clamped | Kalman only: how fast the frame period wanders, samples squared per frame cubed. |
-| `sync.tracker.kalman.innov_gate` | 4 | `HOUDINI_KF_INNOV_GATE` | 0 to 100 | clamped | Kalman only: sigmas an observation may sit from the prediction before it is ignored. 0 disables. |
-| `sync.steer.enable` | false | `HOUDINI_CLOCK_STEER` |  | refused | Steer the UE's clock onto the beacon's with CLOCK_ADJ, from the tracked grid rate, inside the sounder. Needs the UE's clock_ref to be calibrated. Off by default; keep it off for A/B and regression runs of the TX path (SH-427): each CLOCK_ADJ RPC holds the device's stream lock about 200 ms, and each push is a rate step the host pacer re-learns. |
-| `sync.steer.period_s` | 20 | `HOUDINI_CLOCK_STEER_PERIOD_S` | 2 to 3600 | clamped | Seconds between steering decisions; the tracked rate is averaged over each. A held oscillator drifts slowly, so this need not be short. |
-| `sync.steer.gain` | 0.7 |  | 0.05 to 1 |  | Fraction of the averaged offset removed at each push. |
-| `sync.steer.deadband_ppm` | 0.06 |  | 0 to 10 |  | Offsets smaller than this are left alone: half the actuator quantum is the floor of what a push can fix. |
-| `sync.steer.max_offset` | 30 |  | 0 to 400 |  | Bounded authority: never steer further than this many counts from the calibration point. |
-| `sync.steer.max_push` | 2 |  | 1 to 4 |  | Most counts one push may move, so no single frequency step is large. At most 4: the step is fed forward when the push lands, about 0.2 s after the DAC moves (up to 0.4 s when a failed write is read back), so 4 counts (0.5 ppm) leave 12 to 25 samples of grid error, well inside the 246-sample re-sync gate; 50 would leave 150 to 300. |
-| `sync.steer.ppm_per_count` | 0.1251 |  | 0.001 to 10 |  | Actuator gain, ppm per CLOCK_ADJ count (magnitude; +1 count raises the UE clock). Measured 0.1251 (AP-48). |
-| `sync.steer.keep` | false |  |  |  | Leave the steered code in place when the sounder exits instead of releasing to the calibrated hold. |
-| `sync.resync.residual_ppm` | 0.1 | `HOUDINI_SYNC_RESIDUAL_PPM` | 0.0001 to 1000 | clamped | Assumed worst-case clock error after tracking; with sync_tol_samples it sets how often the beacon is looked at. |
-| `sync.resync.scatter_tol_us` | 2 | `HOUDINI_SCATTER_TOL_US` | 0.01 to 1000 | clamped | How far a detection may land from the tracked grid and still count as the same beacon, microseconds. |
-| `sync.resync.confirm_tol_us` | 5.2083 | `HOUDINI_CONFIRM_TOL_US` | 0.01 to 1000 | clamped | The same tolerance during acquisition. Never applied looser than the tracking gate. |
-| `sync.resync.sync_tol_samples` | derived | `HOUDINI_SYNC_TOL_SAMPLES` | 0.5 to 1e+06 | clamped | Timing slack budgeted to drift between looks, samples. Default: a quarter of the OFDM zero prefix. |
-| `sync.resync.retry_max` | 100 | `HOUDINI_RESYNC_RETRY_MAX` | 1 to 100000 | clamped | Misses in one resync period before the client logs an exhausted episode. |
-| `sync.resync.escalate_episodes` | 2 | `HOUDINI_ESCALATE_EPISODES` | 1 to 1000 | clamped | Consecutive exhausted episodes before the client abandons tracking and re-acquires. |
-| `sync.resync.hold_offgrid` | 2 | `HOUDINI_HOLD_OFFGRID` | 1 to 1000 | clamped | Consecutive off-grid detections before the beacon counts as moved. |
-| `sync.resync.acq_refine_span` | 200 | `HOUDINI_ACQ_REFINE_SPAN` | 2 to 100000 | clamped | Frames of baseline acquisition wants before it trusts its rate estimate. |
-| `sync.resync.acq_max_ppm` | 100 | `HOUDINI_ACQ_MAX_PPM` | 0.1 to 10000 | clamped | Plausibility band applied to a rate that acquisition hands back, ppm. |
-| `sync.allow_env_overrides` | false |  |  |  | Whether HOUDINI_* environment variables may override these values (each override is logged; see the policy column). Off by default: sweep through the JSON overlay instead. |
+| key | default | range | what it does |
+| --- | --- | --- | --- |
+| `sync.beacon.type` | `legacy` |  | Which beacon waveform the base station transmits (legacy, legacy_guard, dot11, nr, nr_pss, nr_pss_bl; nr_pss_bl is the band-limited mode-V beacon, AP-79). |
+| `sync.beacon.tx_full_scale` | 0.6 | 0.001 to 1 | Transmit peak of the beacon as a fraction of DAC full scale. 0.6 shipped; lower it to stand in for path loss on a cable. |
+| `sync.detector.threshold` | `auto` | auto, power, xcorr, coherence | Decision statistic: auto picks coherence for a single-copy replica and the normalised cross-correlation otherwise; power is the original level-dependent form (4th order in amplitude against 2nd) and the Iris/UHD default. |
+| `sync.detector.pfa_per_window` | 0.001 | 1e-09 to 0.5 | The coherence form's bar when set: the false-alarm probability per search window, turned into a bar by the replica and window lengths (8.163). Unset, corr_scale applies; ignored for the repeated-field forms. |
+| `sync.detector.pick` | `first_path` | first_crossing, cluster_refined, argmax, first_path | Which crossing is returned: first_path (the Houdini default), argmax, cluster_refined, or first_crossing (the Iris/UHD default; unsafe on a strong link). |
+| `sync.detector.first_path_window` | derived | -1 to 4095 | Samples the first-path search looks back from the peak; -1 (default) means half the replica length. Must stay inside the preamble's self-coherent plateau. A correlator quantity: samples, not scaled with the rate. |
+| `sync.detector.first_path_floor_db` | -9 | -30 to 0 | How much weaker, in dB of path power, an earlier arrival may be and still be taken as the first path. |
+| `sync.detector.first_path_guard` | 0 | 0 to 1 | Samples immediately before the peak the first-path search skips. A beacon between samples splits its peak over two adjacent taps and the earlier one is the SAME arrival, not an earlier one; 1 skips it. Only 0 and 1: 2 loses a genuine two-sample-earlier arrival and 3 a three-sample one (measured). 0 is the default (DEMO_VERIFICATION.md 8ak). |
+| `sync.detector.corr_scale` | 10 | 0.0001 to 1e+07 | Resync detection threshold: the bar is 1 / corr_scale, relaxed by one per retry. Read from the legacy per-client top-level array when absent. |
+| `sync.detector.corr_scale_init` | 10 | 0.0001 to 1e+07 | Acquisition detection threshold (bar 1 / corr_scale_init); defaults to corr_scale. |
+| `sync.detector.min_bar` | 0 | 0 to 1 | The lowest bar the resync retry relaxation (+1 on corr_scale per retry) may reach; 0 = no limit. Set it with a small corr_scale, where +1 per retry would walk the bar into the noise. |
+| `sync.detector.corr_threads` | 1 | 1 to 256 | Threads for the correlator's matched filter. 1 shipped; measured a net loss below ~4 on the rig host. |
+| `sync.confirm.snr_floor_db` | 30 | -10 to 80 | In-window SNR a detection must clear. A property of the link and the waveform: re-derive it when either changes. |
+| `sync.cfo.index_guard` | 8 | 0 to 64 | Samples the carrier estimator's windows slide later than the detected end (AP-39). A correlator quantity: samples, not scaled with the rate. |
+| `sync.cfo.window_margin` | 0 | 0 to 32 | Samples shrunk from both ends of each estimator window so neither touches the burst's edge (8.164). A correlator quantity: samples, not scaled with the rate. |
+| `sync.cfo.log_every` | 10 | 1 to 1e+06 | Print one beacon-CFO log line in this many. |
+| `sync.tracker.type` | `alpha_beta` | alpha_beta, kalman | Which estimator tracks the base station frame grid: alpha_beta (shipped) or kalman. |
+| `sync.tracker.alpha` | 0.5 | 0 to 1 | Fraction of each accepted residual applied to the schedule. |
+| `sync.tracker.beta` | 0.1 | 0 to 1 | Fraction of the residual applied to the frame period estimate. |
+| `sync.tracker.step_ppm` | 0.5 | 0 to 1000 | Most one detection may move the period estimate, ppm. 0 disables the limit. |
+| `sync.tracker.max_ppm` | 100 | 0.1 to 10000 | Absolute band the period estimate may occupy either side of nominal, ppm. |
+| `sync.tracker.trust_ppm` | 1 | 0 to 1000 | How far the tracked period and a fresh acquisition confirm may disagree before the confirm is preferred, ppm. |
+| `sync.tracker.kalman.meas_var` | 0.5 | 1e-06 to 1e+06 | Kalman only: assumed detector scatter variance, samples squared. |
+| `sync.tracker.kalman.rate_rw` | 1e-09 | 0 to 1 | Kalman only: how fast the frame period wanders, samples squared per frame cubed. |
+| `sync.tracker.kalman.innov_gate` | 4 | 0 to 100 | Kalman only: sigmas an observation may sit from the prediction before it is ignored. 0 disables. |
+| `sync.steer.enable` | false |  | Steer the UE's clock onto the beacon's with CLOCK_ADJ, from the tracked grid rate, inside the sounder. Needs the UE's clock_ref to be calibrated. Off by default; keep it off for A/B and regression runs of the TX path (SH-427): each CLOCK_ADJ RPC holds the device's stream lock about 200 ms, and each push is a rate step the host pacer re-learns. |
+| `sync.steer.period_s` | 20 | 2 to 3600 | Seconds between steering decisions; the tracked rate is averaged over each. A held oscillator drifts slowly, so this need not be short. |
+| `sync.steer.gain` | 0.7 | 0.05 to 1 | Fraction of the averaged offset removed at each push. |
+| `sync.steer.deadband_ppm` | 0.06 | 0 to 10 | Offsets smaller than this are left alone: half the actuator quantum is the floor of what a push can fix. |
+| `sync.steer.max_offset` | 30 | 0 to 400 | Bounded authority: never steer further than this many counts from the calibration point. |
+| `sync.steer.max_push` | 2 | 1 to 4 | Most counts one push may move, so no single frequency step is large. At most 4: the step is fed forward when the push lands, about 0.2 s after the DAC moves (up to 0.4 s when a failed write is read back), so 4 counts (0.5 ppm) leave 12 to 25 samples of grid error, well inside the 246-sample re-sync gate; 50 would leave 150 to 300. |
+| `sync.steer.ppm_per_count` | 0.1251 | 0.001 to 10 | Actuator gain, ppm per CLOCK_ADJ count (magnitude; +1 count raises the UE clock). Measured 0.1251 (AP-48). |
+| `sync.steer.keep` | false |  | Leave the steered code in place when the sounder exits instead of releasing to the calibrated hold. |
+| `sync.resync.residual_ppm` | 0.1 | 0.0001 to 1000 | Assumed worst-case clock error after tracking; with sync_tol_samples it sets how often the beacon is looked at. |
+| `sync.resync.scatter_tol_us` | 2 | 0.01 to 1000 | How far a detection may land from the tracked grid and still count as the same beacon, microseconds. |
+| `sync.resync.confirm_tol_us` | 5.2083 | 0.01 to 1000 | The same tolerance during acquisition. Never applied looser than the tracking gate. |
+| `sync.resync.sync_tol_samples` | derived | 0.5 to 1e+06 | Timing slack budgeted to drift between looks, samples. Default: a quarter of the OFDM zero prefix. |
+| `sync.resync.retry_max` | 100 | 1 to 100000 | Misses in one resync period before the client logs an exhausted episode. |
+| `sync.resync.escalate_episodes` | 2 | 1 to 1000 | Consecutive exhausted episodes before the client abandons tracking and re-acquires. |
+| `sync.resync.hold_offgrid` | 2 | 1 to 1000 | Consecutive off-grid detections before the beacon counts as moved. |
+| `sync.resync.acq_refine_span` | 200 | 2 to 100000 | Frames of baseline acquisition wants before it trusts its rate estimate. |
+| `sync.resync.acq_max_ppm` | 100 | 0.1 to 10000 | Plausibility band applied to a rate that acquisition hands back, ppm. |
 <!-- sync-knob-table:end -->
 
-Diagnostics that dump files or print profiles (`HOUDINI_LOOP_PROFILE`,
-`HOUDINI_RX_PROFILE`, `HOUDINI_COALESCE_SLOTS`, `HOUDINI_CSI_NO_PHASE_FIX`,
-`HOUDINI_BS_RX_EVERY`, `HOUDINI_DUMP_*`) stay environment variables: they are
-not configuration, and a dump switch in a shipped JSON is a trap. Every
-`HOUDINI_DUMP_*` file lands under `HOUDINI_DUMP_DIR` (default `/tmp`), so a
-bench can keep its dumps out of `/tmp` with one variable. View mode
-(`HOUDINI_CSI_UDP`, set by `--view`) writes NO HDF5 file and says so at
-startup, so a stray value in your shell cannot silently disable recording.
+Diagnostics that dump files or print profiles (`--loop_profile`,
+`--rx_profile`, `--coalesce_slots`, `--csi_phase_fix`, `--bs_rx_every`, the
+dumps) are sounder flags like the rest of section 7, never `sync` keys: they
+are not configuration, and a dump switch in a shipped JSON is a trap. Every
+`--dump_beacon`, `--dump_gold`, `--dump_win` and `--csi_dump` file lands under
+`--dump_dir` (default `/tmp`), so a bench can keep its dumps out of `/tmp` with
+one flag. View mode (`--csi_udp`, set by `--view`) writes NO HDF5 file and says
+so at startup, so a stray `--csi_udp` cannot silently disable recording.
 
 `sync.resync.retry_max`, `sync.resync.escalate_episodes` and
 `sync.resync.hold_offgrid` are the escalation net. Their defaults were tuned
@@ -982,7 +990,7 @@ wide margin. Change them one at a time against a known good baseline run, and
 keep the net rather than removing it: it is what stands between a lost beacon
 and a client that flies on stale timing without saying so.
 
-`HOUDINI_CSI_SYM_START` is the one worth understanding. The cyclic prefix guard
+`--csi_sym_start` is the one worth understanding. The cyclic prefix guard
 is one sided. A window placed early, still inside the prefix, is a valid
 circular shift and produces a pure phase ramp that the timing fix recovers. A
 window even one sample late pulls the next symbol into the FFT and produces
@@ -1049,8 +1057,7 @@ colleague is using the boards before reaching for it.
 The page is reaching the backend but no datagrams have arrived. Confirm the
 sounder printed its `CSI view mode` line, then confirm the backend datagram
 count is climbing (section 6). If the sounder never printed that line, it is
-not in viewing mode: check that you passed `--view`, or that `HOUDINI_CSI_UDP`
-is set.
+not in viewing mode: check that you passed `--view`, or `--csi_udp`.
 
 ### 8.2 Panels appear but the waterfall tears horizontally
 
@@ -1071,7 +1078,7 @@ Confirm the config's frame carries an uplink data slot (`U` in the schedule:
 equalize. If it does, work through the three causes below in order.
 
 **Cause 1: the FFT window is sitting late and taking in interference.** Try
-`HOUDINI_CSI_SYM_START` a few samples lower and watch the constellation
+the sounder's `--csi_sym_start` a few samples lower and watch the constellation
 tighten. Section 7 explains the asymmetry: early is recoverable, late is not.
 
 **Cause 2: dropped receive packets.** When a receive packet is lost,
@@ -1130,7 +1137,9 @@ It reads the radio addresses from the topology file, opens each one, issues
 the framer abort, clears the transmit RAM, and releases the gate. Name the
 radios one of three ways: `--conf files/<config>.json` (the topology that
 config's `serial_file` names), `--topology <file>`, or `--node <addr>`
-(repeatable). With none of them it refuses rather than guess.
+(repeatable). With none of them it refuses rather than guess. With the
+plugin in a prefix of its own (section 2.4), add `--soapy-root
+<host-plugin-prefix>` to every teardown command in this document.
 
 Read the exit status, not just the output. It is 0 only when every radio was
 cleared, and non-zero when one could not be opened or torn down, which is
@@ -1140,7 +1149,8 @@ before each attempt and prefixes its output `[teardown]`.
 This script opens a connection to each radio, so it is a device-touching
 operation. Do not run it against boards someone else is using.
 
-If it cannot import `houdini_setup`, set `HOUDINI_EXAMPLES` (section 2.4).
+If it cannot import `houdini_setup`, pass
+`--examples <path-to-SoapyHoudiniSDR>/host/examples` (section 2.4).
 
 If the teardown itself reports that an RX stream is still open, a dead process
 left one behind and no teardown can close another process's stream. Restart the

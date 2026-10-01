@@ -86,11 +86,6 @@ bool readWindow(const std::string& path, std::vector<std::complex<int16_t>>* out
 }  // namespace
 
 int main(int argc, char** argv) {
-  // Nothing from the operator's shell may change what this test builds.
-  {
-    for (const auto& k : houdini::sync::SyncConfig::schema())
-      if (k.env != nullptr) unsetenv(k.env);
-  }
   const std::string dir = argc > 1 ? argv[1] : "tests/comms-func/fixtures/golden";
   using houdini::sync::BeaconShape;
   using houdini::sync::Numerology;

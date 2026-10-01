@@ -132,8 +132,7 @@ void HoudiniFramer::buildBeacon(std::vector<int16_t>& iq) {
   }
   float peak = 1e-30f;
   for (const auto& v : loop) peak = std::max(peak, std::abs(v));
-  // TRANSMIT AMPLITUDE, AS A FRACTION OF FULL SCALE: sync.beacon.tx_full_scale
-  // (HOUDINI_BEACON_FS as a logged override while allow_env_overrides holds),
+  // TRANSMIT AMPLITUDE, AS A FRACTION OF FULL SCALE: sync.beacon.tx_full_scale,
   // range-checked by SyncConfig to (0.001, 1], default 0.6. It makes the
   // received level an axis the bench can vary, so a detector claim that
   // depends on level (AP-34: the power-ratio threshold is 4th order in
