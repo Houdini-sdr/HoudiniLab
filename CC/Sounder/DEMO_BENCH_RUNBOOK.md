@@ -21,14 +21,17 @@ demo.
 | Machine | Address | Role | What runs on it |
 |---|---|---|---|
 | Build VM | this repo at `/space/vmshare/repos/HoudiniLab` | Development only | Editing, compile checks, offline analysis. Code ships to the rig as a git bundle over ssh. |
-| Rig host "burton" | `168.6.244.26`, user `houdini` | The whole host side | The sounder and the dashboard backend. A DGX Spark: 20 aarch64 cores, fast ones 5-9 and 15-19. Data NICs `enp1s0f0np0` 192.168.5.11 (UE side) and `enp1s0f1np1` 192.168.6.13 (BS side), MTU 9000. The control network to the boards is `enx00e04c242668` 192.168.10.26. |
-| Base station | `192.168.10.22`, user `houdini` | BS radio | `SoapySDRServer` (systemd) with the device plugin. |
-| Client | `192.168.10.21`, user `houdini` | UE radio | The same stack as the BS. |
+| Rig host "burton" | `168.6.244.26`, user `houdini` | The whole host side | The sounder and the dashboard backend. A DGX Spark: 20 aarch64 cores, fast ones 5-9 and 15-19. Data NICs `enp1s0f0np0` 192.168.5.11 (UE side) and `enp1s0f1np1` 192.168.6.13 (BS side), MTU 9000. |
+| Base station | `168.6.244.22`, user `houdini` | BS radio | `SoapySDRServer` (systemd) with the device plugin. |
+| Client | `168.6.244.21`, user `houdini` | UE radio | The same stack as the BS. |
 | Your workstation | anywhere | Viewer | A browser through an ssh tunnel (section A5). |
 
-The boards sit on a control network only the rig host reaches: from any other
-machine, go through it (`ssh -J houdini@168.6.244.26 houdini@192.168.10.22`).
-Every SoapyRemote control call from the sounder rides that network.
+The boards answer directly on the lab network (`ssh houdini@168.6.244.22`),
+and every SoapyRemote control call from the sounder rides it; the samples ride
+the data NICs above. At the demo venue the boards sat on a separate control
+network that only the rig host reached (192.168.10.x):
+`files/topology-houdini-dualband-venue.json` keeps those addresses for a
+re-demo wired the same way (point the config's `serial_file` at it).
 
 The roles are the reverse of Part B's: here `.22` is the BS and `.21` the UE
 (`files/topology-houdini-dualband.json`). Both boards run their reference in
@@ -82,8 +85,8 @@ The XUD1A is the reworked board (RF 9.5 GHz, LO 13.88 GHz). It needs:
    also tunes the LO to 13.88 GHz on rf16 and loads the doubler tracking
    filter from the XUD1A datasheet's Table 7; no manual LO tune is needed.
    From the rig host (its key is on both nodes; password login is the
-   backup): `ssh houdini@192.168.10.22 'sudo houdini-role apply bs'`.
-2. The LO check: `ssh houdini@192.168.10.22 'sudo houdini-xud1a pll status'` shows
+   backup): `ssh houdini@168.6.244.22 'sudo houdini-role apply bs'`.
+2. The LO check: `ssh houdini@168.6.244.22 'sudo houdini-xud1a pll status'` shows
    `lock_detect=1`, `rf16 ON at 13880000000...` and `doubler tracking table7
    (REG0070 0x23, filter 1 bias 3, ...)`; on 0.3.1 `houdini-role status`
    fails on `.22` unless the doubler reads table7. After any `houdini-xud1a
@@ -236,8 +239,8 @@ run's pid and record). `--replay <log>` applies the same rule to a finished log.
 From your workstation:
 
 The demo serves the dashboard on all addresses (`--http-host 0.0.0.0` in A4
-and A8c, the user's choice for demo day): open `http://168.6.244.26:8080/` on
-the lab network or `http://192.168.10.26:8080/` on the rig network. Anyone who
+and A8c, the user's choice for demo day): open `http://168.6.244.26:8080/`
+(at the venue also `http://192.168.10.26:8080/` on its rig network). Anyone who
 reaches those addresses can Start and Stop the radios. Without `--http-host`,
 `--control` listens on 127.0.0.1 only, and an ssh tunnel is the way in:
 
