@@ -15,7 +15,7 @@ GOOD = [
     "57:004621 INFOR: BS 192.168.10.22: AP-87 slot check: 507470 reads, 25763909760 samples, 0 of them outside the rx "
     "slots (0 reads)",
     "57:004972 INFOR: BS 192.168.10.22: RX_HOST_STATUS rxq_ovfl=0 rxq_ovfl_ch0=0 ring_ovfl=0 tdd_drop=0 tdd_drop_ch0=0 "
-    "tdd_straddle=0 tdd_refused=0",
+    "tdd_straddle=0",
     "57:368354 INFOR: UE 192.168.10.21: RX read check: 2411956 stamped reads, 2411956 on the count, 0 after a gap "
     "(0 samples lost in rx slots, 0 the schedule's gaps), 0 out of order, 0 time jumps",
     "57:000200 INFOR: BS 192.168.10.22 link health: [BS 192.168.10.22] 60.0 s: irq 12/s, preflight ok: clean"
@@ -64,7 +64,7 @@ v = rs.verdict([l for l in GOOD if "RX_HOST_STATUS" not in l]
                + ["57:1 WARNG: BS 192.168.10.22: RX_HOST_STATUS unreadable: RemoteError: unknown key"])
 check("FAIL" in [lv for lv, _ in v] and not any("counters 0" in t for _, t in v),
       "an unreadable RX_HOST_STATUS alone fails instead of passing with no counters (mutation: match any line naming the key)")
-check("FAIL" in levels([l.replace(" tdd_refused=0", "") for l in GOOD]),
+check("FAIL" in levels([l.replace(" tdd_straddle=0", "") for l in GOOD]),
       "an RX_HOST_STATUS without a judged counter fails (mutation: a missing key read as 0)")
 rnf = ["57:1 WARNG: Radios Not Found. Will attempt a retry"] + GOOD
 check("FAIL" not in levels(rnf) and any("retried" in t for lv, t in rs.verdict(rnf) if lv == "WARN"),

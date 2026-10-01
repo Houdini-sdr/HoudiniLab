@@ -24,7 +24,7 @@ from sounder_log import ANSI, alarm_kinds  # noqa: E402,F401  alarm_kinds: rung_
 ERRORS = r"what\(\)|terminate called|bs_rx_slots: TDD_RX_SLOTS|mode V bring-up:"
 
 
-HOST_COUNTERS = ("tdd_straddle", "tdd_refused", "rxq_ovfl", "ring_ovfl")
+HOST_COUNTERS = ("tdd_straddle", "rxq_ovfl", "ring_ovfl")
 
 
 def fpga_version(L):
