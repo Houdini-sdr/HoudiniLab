@@ -7,7 +7,7 @@ A run directory (fstage_run.sh's, or demo_run.sh's) is read through its
 largest *.log, the sounder's; a dashboard session log (csi_server.py
 --log-dir) is given as the file. The summary prints the stack, the X-band
 front end, slots mode, errors, the end-of-run checks, warning counts, UE
-acquisition, the BS framer (with HOUDINI_BS_RX_DEBUG) and the carrier. The
+acquisition, the BS framer (with --bs_rx_debug) and the carrier. The
 verdict, last, is FAIL on an error, on a nonzero end-of-run count, or on a
 missing end-of-run line (they are printed as the radios close, so a run that
 did not close cleanly has none); link-health alarms, lost pilots, untrusted

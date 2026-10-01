@@ -31,7 +31,7 @@
 namespace {
 // Thread count for correlate_mt: an explicit request wins; else the value
 // set through CommsLib::setCorrelatorThreads (sync.detector.corr_threads,
-// SOUNDER_CORR_THREADS as its logged env alias); else 1. Capped at the pool
+// the sounder's config sets it); else 1. Capped at the pool
 // size (hardware concurrency) at dispatch.
 // 0 = nothing set through the API yet: the environment is then read ONCE,
 // which is how the bench tools that link this library without a Config
@@ -41,8 +41,7 @@ unsigned ResolveThreads(unsigned requested) {
   if (requested > 0) return requested;
   const unsigned set = g_corr_threads.load(std::memory_order_relaxed);
   if (set > 0) return set;
-  const int opt = Sounder::runOptions().corr_threads;  // --corr_threads
-  return opt > 0 ? static_cast<unsigned>(opt) : 1u;
+  return 1u;
 }
 
 // Persistent fork-join pool: worker threads are created once and reused, so
@@ -305,7 +304,7 @@ static double firstPathFloorFrac(CommsLib::BeaconThresh form, double db) {
 // case (weak direct, echo +40, stronger) flips from correct to +39 between
 // -8.8 dB and -8.0 dB. So the shipped default clears it by under 1 dB, which is
 // thin -- an earlier comment here claimed it "admits a direct path well under
-// half the echo's power" and that was wishful. Widen with HOUDINI_FIRST_PATH_DB
+// half the echo's power" and that was wishful. Widen with sync.detector.first_path_floor_db
 // if a channel needs it, and re-run beacon_geometry_test when you do.
 
 int CommsLib::find_beacon_avx(

@@ -9,7 +9,7 @@
  * AP-34(a) is what that costs. So the C++ that the sounder will build the
  * beacon from also writes the files the probes read.
  *
- * Formats match what Config::genPilots already dumps under HOUDINI_DUMP_GOLD,
+ * Formats match what Config::genPilots already dumps under --dump_gold,
  * so the existing probes read these without changes:
  *   <name>_core.bin     complex<int16_t>, the transmit core at `--peak` counts
  *   <name>_replica.bin  float pairs (re, im), the matched-filter reference

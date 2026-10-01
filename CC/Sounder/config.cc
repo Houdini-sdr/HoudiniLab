@@ -533,6 +533,17 @@ Config::Config(const std::string& jsonfile, const std::string& directory,
   if (bs_rx_slots_ && !bs_hw_framer_) {
     throw std::invalid_argument("bs_rx_slots needs bs_hw_framer (the native TDD framer arms the pattern)");
   }
+  if (is_houdini() && bs_hw_framer_ && houdini::rxpkt::framerPacket(samps_per_slot_, rate_) > 0 &&
+      houdini::rxpkt::tiledPacketOrDefault(samps_per_slot_) == 0) {
+    // The tiling packet is smaller than 3/4 of the default one: the host's
+    // receive load rises with the packet rate. Allowed (the device refuses a
+    // packet that does not tile, SH-488), and said once.
+    const size_t pkt = houdini::rxpkt::framerPacket(samps_per_slot_, rate_);
+    MLPD_WARN("the BS's TDD framer packet is %zu samples (the default is %zu): %.1fx the packet rate, so more host "
+              "receive load; a slot with a larger divisor avoids it\n",
+              pkt, houdini::rxpkt::deviceSamples(houdini::rxpkt::kDefaultMtu),
+              static_cast<double>(houdini::rxpkt::deviceSamples(houdini::rxpkt::kDefaultMtu)) / pkt);
+  }
   if (is_houdini() && bs_hw_framer_ && houdini::rxpkt::framerPacket(samps_per_slot_, rate_) == 0) {
     throw std::invalid_argument("the BS's TDD framer needs packets that tile the slot (the device refuses a TDD RX "
                                 "packet that does not divide the slot or spans under " +
@@ -1110,7 +1121,7 @@ void Config::genPilots() {
   if (Sounder::runOptions().dump_gold) {  // the exact find_beacon match
     FILE* f = std::fopen(Utils::dumpPath("gold.bin").c_str(), "wb");
     if (f == nullptr) {
-      MLPD_WARN("HOUDINI_DUMP_GOLD: cannot open %s (%s)\n", Utils::dumpPath("gold.bin").c_str(),
+      MLPD_WARN("--dump_gold: cannot open %s (%s)\n", Utils::dumpPath("gold.bin").c_str(),
                 std::strerror(errno));
     }
     if (f) {
@@ -1139,7 +1150,7 @@ void Config::genPilots() {
     // legacy, the shape's own for the others.
     FILE* f = std::fopen(Utils::dumpPath("beacon_core.bin").c_str(), "wb");
     if (f == nullptr) {
-      MLPD_WARN("HOUDINI_DUMP_GOLD: cannot open %s (%s)\n",
+      MLPD_WARN("--dump_gold: cannot open %s (%s)\n",
                 Utils::dumpPath("beacon_core.bin").c_str(), std::strerror(errno));
     }
     if (f) {

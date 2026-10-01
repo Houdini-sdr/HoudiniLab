@@ -1181,7 +1181,7 @@ ssize_t Receiver::syncSearch(const std::complex<int16_t>* check_data,
 // The GUI socket in RecorderWorker is fed from the RECORDING path and carries
 // per-antenna CSI; the sync state lives here in the client RX thread and has no
 // route to it. Rather than plumb a queue across threads, this path opens its own
-// connected UDP socket to the SAME destination (HOUDINI_CSI_UDP) and emits one
+// connected UDP socket to the SAME destination (--csi_udp) and emits one
 // small datagram per resync DETECTION.
 //
 // Per detection, never sampled at display cadence: detections run slower than
@@ -1361,7 +1361,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   // the acquisition gate is CLAMPED by the tracking gate (confirm <= scatter),
   // and a second derivation with the scatter tolerance hardcoded to its
   // default would invert the two gates whenever the tolerance is swept
-  // (HOUDINI_SCATTER_TOL_US, which the walkthrough documents): a lock that
+  // (sync.resync.scatter_tol_us, which the walkthrough documents): a lock that
   // escalates immediately, forever. One derivation, passed in.
   //
   // sync.resync.scatter_tol_us, default 2.0 us = 246 samples: 41x the worst
@@ -1617,11 +1617,11 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
         sync_tol_samples, sync_residual_ppm);
   }
   // AP-31 loop profile. The UE iterates SLOWER than real time (the ratio
-  // moves about 2x with HOUDINI_COALESCE_SLOTS, so quote the measurement, not a
+  // moves about 2x with --coalesce_slots, so quote the measurement, not a
   // single figure), which is why RadioHoudini::recv drains and an unplaced
   // read lands at an arbitrary frame phase. This measures where the iteration
   // actually goes so the cause is traced rather than assumed. Four buckets,
-  // mean us per iteration, logged every HOUDINI_LOOP_PROFILE iterations
+  // mean us per iteration, logged every --loop_profile iterations
   // (0 = off).
   const size_t loop_profile_every =
       Sounder::runOptions().loop_profile > 0 ? static_cast<size_t>(Sounder::runOptions().loop_profile) : 0;
@@ -1986,7 +1986,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
           // unambiguous and the earliest one is the STS preamble. See
           // CommsLib::BeaconPick.
           //
-          // HOUDINI_BEACON_PICK=first selects the first-crossing rule ON THE
+          // sync.detector.pick = first_crossing selects that rule ON THE
           // SAME BINARY. That is not a compatibility escape hatch, it is what
           // makes the pick gateable: both rules on one build removes the
           // "different binary, different day" confound that a two-build gate
@@ -2201,7 +2201,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
               // settings, a third of the real 8.5 ppm offset and ~30x looser
               // than the kick its own note describes. Each arm bounds that its
               // own way -- alpha-beta with a per-update slew limit
-              // (HOUDINI_GRID_STEP_PPM, 14x the measured 0.036 ppm residual, so
+              // (sync.tracker.step_ppm, 14x the measured 0.036 ppm residual, so
               // a normal ~0.003 ppm update is untouched), the kalman with an
               // innovation gate scaled by what it currently knows.
               houdini_frame_period += tracker.deltaPeriod();

@@ -67,8 +67,8 @@ static bool throttleDue(const std::unordered_map<uint32_t, long long>& last, uin
 }
 
 // One constellation dump: [N cp es nsym ndata i32] [H re,im f32]*N
-// [data_ind i32]*ndata [U slot re,im i16]*slot. The format of HOUDINI_CSI_DUMP
-// and HOUDINI_CNS_DUMP_LOW alike (tests/demo-verify/archive/ap15_diff.py and
+// [data_ind i32]*ndata [U slot re,im i16]*slot. The format of --csi_dump
+// and --cns_dump_low alike (tests/demo-verify/archive/ap15_diff.py and
 // ap15_correlate.py read it). False when the file cannot be opened.
 static bool writeCnsDump(const char* path, int N, int cp, int es, int nsym, const std::vector<size_t>& data_ind,
                          const std::vector<std::complex<float>>& H, const short* d, int slot) {
@@ -199,7 +199,7 @@ int RecorderWorker::slotEnergyStart(const short* d, int slot) const {
 }
 
 // Symbol-0 start for a received slot: the fixed csi_sym_start_ (the default), or
-// the energy-edge detector when HOUDINI_CSI_SYM_START=auto.
+// the energy-edge detector when --csi_sym_start=auto.
 int RecorderWorker::symStart(const short* d, int slot) const {
   return !csi_sym_auto_ ? csi_sym_start_ : slotEnergyStart(d, slot);
 }
@@ -632,7 +632,7 @@ void RecorderWorker::sendConstellation(Packet* pkt) {
       if (writeCnsDump(path.c_str(), N, cp, es, nsym, data_ind, H, d, slot)) {
         MLPD_INFO("CSI dump written to %s (antenna %zu)\n", path.c_str(), da);
       } else {
-        MLPD_WARN("HOUDINI_CSI_DUMP: cannot open %s (%s)\n", path.c_str(), std::strerror(errno));
+        MLPD_WARN("--csi_dump: cannot open %s (%s)\n", path.c_str(), std::strerror(errno));
       }
     }
   }
@@ -1037,11 +1037,10 @@ RecorderWorker::~RecorderWorker() { this->finalize(); }
 void RecorderWorker::init(void) {
   this->initCsi();
   if (this->view_mode_) {
-    // Say so, loudly: a stray HOUDINI_CSI_UDP in the environment would
-    // otherwise disable every recording on any backend with no trace.
+    // Say so, loudly: a run started for the dashboard records nothing.
     MLPD_WARN(
-        "VIEW MODE (HOUDINI_CSI_UDP is set): CSI streams to the dashboard and "
-        "NO HDF5 FILE IS WRITTEN. Unset it to record.\n");
+        "VIEW MODE (--view or --csi_udp): CSI streams to the dashboard and "
+        "NO HDF5 FILE IS WRITTEN. Run without both to record.\n");
     return;
   }
   if (this->cfg_->num_bands() > 1) {
@@ -1050,7 +1049,7 @@ void RecorderWorker::init(void) {
     // offline tools would compute a wrong channel without saying so.
     throw std::invalid_argument(
         "recording mode (HDF5) is not supported with channel_ofdm_data_num (the file describes one band): "
-        "run in view mode and use the CSI dumps (HOUDINI_CSI_DUMP)");
+        "run in view mode and use the CSI dumps (--csi_dump)");
   }
   this->hdf5_ = new Hdf5Lib(this->hdf5_name_, "Data");
   // Write Atrributes

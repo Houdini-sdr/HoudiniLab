@@ -48,7 +48,6 @@ DEFINE_bool(tx_host_status, false, "Log TX_HOST_STATUS and TX_BANK_STATUS every 
 DEFINE_int64(max_frame, -1, "Frames to run: < 0 the config's max_frame");
 DEFINE_int32(pilot_horizon, -1, "UE pilot horizon: < 0 the config's ue_pilot_horizon");
 DEFINE_bool(coalesce_slots, true, "Read runs of discarded slots in one call (false: per-slot reads, for A/B)");
-DEFINE_int32(corr_threads, 0, "Beacon correlator threads: 0 the default (1)");
 DEFINE_double(ue_rx_freq_offset_hz, 0.0, "Test injection: detune the UE receive path by this much (Hz)");
 DEFINE_double(ue_tx_freq_offset_hz, 0.0, "Test injection: detune the UE transmit path by this much (Hz)");
 DEFINE_string(csi_udp, "", "Stream live CSI to host:port instead of recording HDF5 (--view: 127.0.0.1:9999)");
@@ -89,7 +88,6 @@ void setRunOptions(void) {
   o.max_frame = FLAGS_max_frame;
   o.pilot_horizon = FLAGS_pilot_horizon;
   o.coalesce_slots = FLAGS_coalesce_slots;
-  o.corr_threads = FLAGS_corr_threads;
   o.ue_rx_freq_offset_hz = FLAGS_ue_rx_freq_offset_hz;
   o.ue_tx_freq_offset_hz = FLAGS_ue_tx_freq_offset_hz;
   o.csi_udp = (FLAGS_view && FLAGS_csi_udp.empty()) ? "127.0.0.1:9999" : FLAGS_csi_udp;

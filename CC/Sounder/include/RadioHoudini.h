@@ -100,7 +100,7 @@ class RadioHoudini : public RadioSoapy {
   static void logModeV(const std::string& label, const std::vector<std::string>& lines);
   /// The converter state as the device reports it (RFDC_SNAPSHOT, the full
   /// RFDC_PREFLIGHT, getChannelInfo per channel in use), written to
-  /// rfdc_<label>_<stage>_<time>.txt under HOUDINI_DUMP_DIR. Every Houdini
+  /// rfdc_<label>_<stage>_<time>.txt under --dump_dir. Every Houdini
   /// run writes one before activate and one at the end, so a run's settings
   /// can be checked against its plan and drift across it is visible. Best
   /// effort: never throws.

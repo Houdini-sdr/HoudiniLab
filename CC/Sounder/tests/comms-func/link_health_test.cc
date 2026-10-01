@@ -128,6 +128,25 @@ int main(int argc, char** argv) {
     check(quiet && closed && eq(h.check().alarms(), {"host.rxq_ovfl_ch0 +7"}),
           "a stream that closes raises nothing (the total's 5 -> 2 is not a clear), and the open stream's drops "
           "alarm by its key (mutation: the totals read, the close then reports +2)");
+    // ch0 closes while ch2 streams on, then a new stream opens on ch0: its
+    // key appears again and counts from zero (2.7), not from the old 2.
+    FakeNode r;
+    r.keys["RX_HOST_STATUS"] = "rxq_ovfl=5 rxq_ovfl_ch0=2 rxq_ovfl_ch2=3";
+    LinkHealth hr(r.read(), "bs", r.clock());
+    const bool open0 = hr.check().alarms().empty();
+    r.keys["RX_HOST_STATUS"] = "rxq_ovfl=3 rxq_ovfl_ch2=3";
+    const bool closed0 = hr.check().alarms().empty();
+    r.keys["RX_HOST_STATUS"] = "rxq_ovfl=63 rxq_ovfl_ch0=60 rxq_ovfl_ch2=3";
+    check(open0 && closed0 && eq(hr.check().alarms(), {"host.rxq_ovfl_ch0 +60"}),
+          "a stream reopened on a channel counts from zero (mutation: the closed stream's key carried, +58)");
+    FakeNode e;
+    LinkHealth he(e.read(), "bs", e.clock());
+    e.keys["RX_HOST_STATUS"] = "";  // a failed RX read: nothing of it returned
+    const bool blank = he.check().alarms().empty();
+    e.keys["RX_HOST_STATUS"] = "rxq_ovfl=0 rxq_ovfl_ch0=0 ring_ovfl=0 ring_ovfl_ch0=0";
+    check(blank && he.check().alarms().empty(),
+          "an empty host read keeps its baseline, so the next full read reports nothing new (mutation: every "
+          "absent host key dropped)");
   }
   {  // 2.7 "Preflight"
     check(preflightItems("ok known DAC0.0:FIFO_OVR(HS-207)").empty() &&
@@ -255,6 +274,8 @@ int main(int argc, char** argv) {
         const auto g = collectCounters(rd);
         check(g.count("tx0.late") == 0 && g.count("tx1.aclose") == 0,
               "pre-HS-220 capture: its TX banks carry no epoch and are not used (mutation: the plain rule restored)");
+        check(txBanksWithoutEpoch(keys.at("TX_BANK_STATUS")) == std::vector<int>{0, 1},
+              "pre-HS-220 capture: both TX banks are named as unjudged (mutation: the epoch-less banks not listed)");
         check(g.at("host.ring_ovfl_ch0") == 22718 && g.at("egress.marked_p0") == 7 && g.at("rx3.aborts") == 0 &&
                   g.count("host.ring_ovfl") == 0,
               "pre-HS-220 capture: the per-stream host keys, four RX banks and the per-port groups parse");
@@ -275,6 +296,8 @@ int main(int argc, char** argv) {
       check(keys.size() == 5, "the current-stack fixture has its 5 keys");
       Read rd = [&keys](const std::string& k) { return keys.count(k) != 0u ? keys.at(k) : std::string(); };
       const auto g = collectCounters(rd);
+      check(txBanksWithoutEpoch(keys["TX_BANK_STATUS"]).empty(),
+            "current capture: no TX bank is unjudged (mutation: every bank listed)");
       check(g.at("tx0.epoch") == 587 && g.at("tx1.epoch") == 521 && g.at("tx0.late") == 0 && g.count("tx0.acked") == 0,
             "current capture: the TX banks carry their epochs (587, 521) and are used (mutation: the epoch parse "
             "broken)");

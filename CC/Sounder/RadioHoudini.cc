@@ -444,6 +444,12 @@ void RadioHoudini::healthLoop(double period_s) {
     for (const auto& f : h.startFailures()) at_start += (at_start.empty() ? "" : "; ") + f;
     MLPD_INFO("%s link health: baseline taken; preflight FAILs standing at start (they alarm on the first check): %s\n",
               label.c_str(), at_start.empty() ? "none" : at_start.c_str());
+    if (!h.txUnjudged().empty()) {
+      std::string chs;
+      for (const int c : h.txUnjudged()) chs += (chs.empty() ? "ch" : ", ch") + std::to_string(c);
+      MLPD_WARN("%s link health: TX bank %s reports no clear epoch (HS-220): its counters are NOT judged\n",
+                label.c_str(), chs.c_str());
+    }
     unsigned long long p_err = app_rx_err_, p_short = app_rx_short_, p_pad = app_rx_pad_,
                        p_txs = app_tx_short_, p_sat = app_tx_sat_;
     for (unsigned n = 1; wait(period_s); ++n) {

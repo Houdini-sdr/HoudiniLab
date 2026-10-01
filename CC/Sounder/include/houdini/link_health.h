@@ -256,13 +256,35 @@ inline Counters counterIncreases(const Counters& prev, const Counters& cur) {
   return out;
 }
 
+/// The TX channels whose bank reports no HS-220 clear epoch: their counters are
+/// never used (collectCounters), so the caller says so once.
+inline std::vector<int> txBanksWithoutEpoch(const std::string& raw) {
+  std::vector<int> out;
+  for (const auto& ch : parseBankStatus(raw))
+    if (ch.second.count("epoch") == 0) out.push_back(ch.first);
+  return out;
+}
+
+/// Whether a host per-stream key belongs to TX_HOST_STATUS (else RX_HOST_STATUS).
+inline bool txHostKey(const std::string& k) { return k.rfind("host.eob_recloses_", 0) == 0; }
+
 /// The previous-check state after this check: every counter read now, plus
 /// the last known value of any counter this read did not return. Do not
 /// replace the state with the read: an empty or partial read would erase the
 /// baseline, and the next full read would then report every counter's whole
-/// running total as new.
+/// running total as new. The exception is a per-stream host key missing from
+/// a host status that returned others: its stream closed, and a key that
+/// appears again counts from zero (HOUDINI_PROTOCOL 2.7), so it is not carried.
 inline Counters carryCounters(const Counters& prev, const Counters& cur) {
-  Counters out = prev;
+  bool host_read[2] = {false, false};  // [0] RX_HOST_STATUS, [1] TX_HOST_STATUS
+  for (const auto& kv : cur)
+    if (kv.first.rfind("host.", 0) == 0) host_read[txHostKey(kv.first) ? 1 : 0] = true;
+  Counters out;
+  for (const auto& kv : prev) {
+    const bool closed = kv.first.rfind("host.", 0) == 0 && host_read[txHostKey(kv.first) ? 1 : 0] &&
+                        cur.count(kv.first) == 0;
+    if (!closed) out.insert(kv);
+  }
   for (const auto& kv : cur) out[kv.first] = kv.second;
   return out;
 }
@@ -311,6 +333,7 @@ class LinkHealth {
     // A FAIL item standing at the start alarms on the first check, even if it
     // is gone by then: it appeared in this read.
     start_failures_ = preflightItems(preflight());
+    tx_unjudged_ = txBanksWithoutEpoch(read_("TX_BANK_STATUS"));
     prev_ = collectCounters(read_);
     prev_irq_ = irq();
     prev_t_ = now_();
@@ -318,6 +341,8 @@ class LinkHealth {
 
   /// The FAIL items the construction read found (all alarmed on the first check).
   const std::set<std::string>& startFailures() const { return start_failures_; }
+  /// The TX channels whose bank has no clear epoch at the start (never judged).
+  const std::vector<int>& txUnjudged() const { return tx_unjudged_; }
 
   Report check() {
     const Counters cur = collectCounters(read_);
@@ -361,6 +386,7 @@ class LinkHealth {
   std::string label_;
   std::function<double()> now_;
   std::set<std::string> start_failures_, standing_;
+  std::vector<int> tx_unjudged_;
   bool first_ = true;
   Counters prev_;
   long long prev_irq_ = 0;

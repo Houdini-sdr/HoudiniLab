@@ -18,11 +18,20 @@
 #                               a level sweep where "no lock" IS the result)
 #   SOUNDER_DIR                 the checkout to run (default: this one)
 #   VENV                        the Soapy venv prefix (default ~/houdini_test)
+#   SYNC_OVERLAY='{...}'        a JSON object merged into every config's sync block
+# Option: --soapy-root DIR      the release's host-plugin prefix (the venv carries none)
 #
 # Output: $OUT/<shape>_r<k>.log per run, $OUT/campaign.log, and a gate_summary
 # over all logs at the end. Exit code is non-zero if any run failed to START
 # (a run ending on the wall clock is the normal outcome, not a failure).
 set -u
+ROOT=
+while [ $# -gt 0 ]; do
+  case $1 in
+    --soapy-root) ROOT=$2; shift 2;;
+    *) echo "run_shape_campaign.sh: unknown argument $1 (the settings are at the head of this file)" >&2; exit 2;;
+  esac
+done
 
 SOUNDER_DIR="${SOUNDER_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 VENV="${VENV:-$HOME/houdini_test}"
@@ -38,12 +47,12 @@ cd "$SOUNDER_DIR" || { echo "no such directory: $SOUNDER_DIR" >&2; exit 1; }
 [ -f "$VENV/bin/activate" ] && . "$VENV/bin/activate"
 export SOAPY_SDR_PLUGIN_PATH="${SOAPY_SDR_PLUGIN_PATH:-$VENV/lib/SoapySDR/modules0.8-3}"
 export LD_LIBRARY_PATH="$VENV/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-# HOUDINI_SOAPY_ROOT: the release's host-plugin prefix (where the venv carries none).
+# --soapy-root: the release's host-plugin prefix (where the venv carries none).
 # Refuse when no Houdini module is where SoapySDR will search: the prefix's
 # module dirs, else each directory of the plugin path.
-if [ -n "${HOUDINI_SOAPY_ROOT:-}" ]; then
-  export SOAPY_SDR_ROOT=$HOUDINI_SOAPY_ROOT SOAPY_SDR_PLUGIN_PATH=
-  SEARCH=$(ls -d "$HOUDINI_SOAPY_ROOT"/lib/SoapySDR/modules* 2>/dev/null)
+if [ -n "$ROOT" ]; then
+  export SOAPY_SDR_ROOT=$ROOT SOAPY_SDR_PLUGIN_PATH=
+  SEARCH=$(ls -d "$ROOT"/lib/SoapySDR/modules* 2>/dev/null)
 else
   SEARCH=$(printf '%s\n' "$SOAPY_SDR_PLUGIN_PATH" | tr ':' '\n')
 fi
@@ -51,7 +60,7 @@ FOUND=
 while IFS= read -r d; do [ -n "$d" ] && [ -f "$d/libHoudiniSDRSupport.so" ] && FOUND=$d; done <<EOF
 $SEARCH
 EOF
-[ -n "$FOUND" ] || { echo "no Houdini host plugin where SoapySDR will search (${HOUDINI_SOAPY_ROOT:-$SOAPY_SDR_PLUGIN_PATH}): export HOUDINI_SOAPY_ROOT=<the release's host-plugin prefix>" >&2; exit 1; }
+[ -n "$FOUND" ] || { echo "no Houdini host plugin where SoapySDR will search (${ROOT:-$SOAPY_SDR_PLUGIN_PATH}): pass --soapy-root <the release's host-plugin prefix>" >&2; exit 1; }
 # Run until the wall clock says stop, never until max_frame.
 
 mkdir -p "$OUT"
@@ -84,12 +93,6 @@ def merge(dst_obj, src_obj):
             dst_obj[k] = v
 sync = d.get("sync") or {}
 overlay = json.loads(os.environ.get("SYNC_OVERLAY", "{}"))
-legacy = {}
-if os.environ.get("HOUDINI_BEACON_FS"):
-    legacy.setdefault("beacon", {})["tx_full_scale"] = float(os.environ["HOUDINI_BEACON_FS"])
-if os.environ.get("HOUDINI_SYNC_SNR_DB"):
-    legacy.setdefault("confirm", {})["snr_floor_db"] = float(os.environ["HOUDINI_SYNC_SNR_DB"])
-merge(sync, legacy)
 merge(sync, overlay)
 if sync:
     d["sync"] = sync

@@ -28,7 +28,6 @@ struct RunOptions {
   long long max_frame = -1;     ///< frames to run: < 0 the config's max_frame
   int pilot_horizon = -1;       ///< UE pilot horizon: < 0 the config's ue_pilot_horizon
   bool coalesce_slots = true;   ///< read runs of discarded slots in one call (off: per-slot reads, for A/B)
-  int corr_threads = 0;         ///< beacon correlator threads: 0 the default (1)
   double ue_rx_freq_offset_hz = 0.0;  ///< a test injection: the UE receive path detuned by this much
   double ue_tx_freq_offset_hz = 0.0;  ///< a test injection: the UE transmit path detuned by this much
 
