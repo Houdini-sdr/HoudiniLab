@@ -133,6 +133,10 @@ class Radio {
   virtual void setup(int ch, double rxgain, double txgain) = 0;
   virtual int recv(void* const* buffs, int samples, long long& frameTime) = 0;
   virtual int activateRecv(long long rxTime = 0, size_t numSamps = 0, int flags = 0) = 0;
+  /// A continuous activateRecv that throws when the device refuses it, as
+  /// activateXmit does: a refused RX activation receives nothing, and a run
+  /// that went on would look alive while every read failed.
+  void activateRecvOrThrow();
   virtual void deactivateRecv() = 0;
   virtual int xmit(const void* const* buffs, int samples, int flags, long long& frameTime) = 0;
   virtual void activateXmit() = 0;

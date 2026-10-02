@@ -440,6 +440,10 @@ add_test(NAME clock_steer COMMAND clock_steer_test)
 add_executable(cns_sample_test tests/comms-func/cns_sample_test.cc)
 target_include_directories(cns_sample_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 add_test(NAME cns_sample COMMAND cns_sample_test)
+add_executable(stream_result_test tests/comms-func/stream_result_test.cc)
+target_include_directories(stream_result_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(stream_result_test -lpthread)
+add_test(NAME stream_result COMMAND stream_result_test)
 
 # AP-79: nr_pss_bl's acquisition thresholds derived on a simulated link.
 add_executable(detection_calibration_test tests/comms-func/detection_calibration_test.cc)
@@ -469,6 +473,16 @@ target_include_directories(radio_houdini_args_test PRIVATE ${CMAKE_CURRENT_SOURC
 target_link_libraries(radio_houdini_args_test houdini_sync -lpthread ${GFLAGS_LIBRARIES} ${UHD_LIBRARIES}
     ${SoapySDR_LIBRARIES} ${HDF5_LIBRARIES} ${MUFFT_LIBRARIES})
 add_test(NAME radio_houdini_args COMMAND radio_houdini_args_test WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+
+# How the receiver's threads end a run on an ended Houdini stream, through fake
+# radio sets: this test's own factory replaces RadioSetFactory.cc.
+set(RECEIVER_FAULT_SOURCES ${SOUNDER_SOURCES})
+list(FILTER RECEIVER_FAULT_SOURCES EXCLUDE REGEX "RadioSetFactory\\.cc$")
+add_executable(receiver_fault_test tests/comms-func/receiver_fault_test.cc ${RECEIVER_FAULT_SOURCES})
+target_include_directories(receiver_fault_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(receiver_fault_test houdini_sync -lpthread ${GFLAGS_LIBRARIES} ${UHD_LIBRARIES}
+    ${SoapySDR_LIBRARIES} ${HDF5_LIBRARIES} ${MUFFT_LIBRARIES})
+add_test(NAME receiver_fault COMMAND receiver_fault_test WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 # AP-85: the host cost of the UE's TX interpolation per lane path. Standalone,
 # not a test: run it on the rig host (./build/tx_interp_bench [rounds]).
 add_executable(tx_interp_bench tests/comms-func/tx_interp_bench.cc)

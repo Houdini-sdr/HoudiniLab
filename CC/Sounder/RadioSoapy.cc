@@ -8,6 +8,7 @@
 */
 #include "include/RadioSoapy.h"
 #include "include/run_options.h"
+#include "include/houdini/stream_result.h"
 
 #include <SoapySDR/Errors.hpp>
 
@@ -499,7 +500,13 @@ int RadioSoapy::activateRecv(long long rxTime, size_t numSamps, int flags) {
   }
 }
 
-void RadioSoapy::deactivateRecv(void) { dev_->deactivateStream(rxs_); }
+// A stop reports a deactivate the device refused. Deactivating a stream that
+// is not active (a second stop, a refused activation) returns 0 on Houdini.
+void RadioSoapy::deactivateRecv(void) {
+  const int rc = dev_->deactivateStream(rxs_);
+  if (rc != 0)
+    MLPD_WARN("%s: deactivateStream(RX) returned %d (%s)\n", params_.label.c_str(), rc, SoapySDR::errToStr(rc));
+}
 
 int RadioSoapy::xmit(const void* const* buffs, int samples, int flags,
                 long long& frameTime) {
@@ -523,7 +530,8 @@ int RadioSoapy::xmit(const void* const* buffs, int samples, int flags,
   // write each to its own single-channel stream at the SAME timed start. Both
   // channels share the board's clock, so one frameTime seats them on the same
   // TDD grid. Return the first short/failed write so the caller's BAD-Write
-  // check still fires.
+  // check still fires, or an ended stream on any channel, which the caller
+  // must end the run on (houdini/stream_result.h).
   int ret = samples;
   for (size_t i = 0; i < tx_streams_.size(); ++i) {
     // A null channel buffer means "nothing on this channel this write" -- the BS
@@ -545,8 +553,8 @@ int RadioSoapy::xmit(const void* const* buffs, int samples, int flags,
     if (r != samples) {
       std::cerr << "unexpected writeStream error (ch " << i << ") "
                 << SoapySDR::errToStr(r) << std::endl;
-      if (ret == samples) ret = r;
     }
+    ret = houdini::stream::mergeWrite(ret, r, samples);
   }
   return ret;
 }
@@ -564,7 +572,12 @@ void RadioSoapy::activateXmit(void) {
 }
 
 void RadioSoapy::deactivateXmit(void) {
-  for (auto* txs : tx_streams_) dev_->deactivateStream(txs);
+  for (size_t i = 0; i < tx_streams_.size(); ++i) {
+    const int rc = dev_->deactivateStream(tx_streams_[i]);
+    if (rc != 0)
+      MLPD_WARN("%s: deactivateStream(TX, tx_stream[%zu]) returned %d (%s)\n", params_.label.c_str(), i, rc,
+                SoapySDR::errToStr(rc));
+  }
 }
 
 int RadioSoapy::getTriggers(void) const {

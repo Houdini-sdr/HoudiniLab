@@ -171,6 +171,13 @@ int main(int argc, char* argv[]) {
       try {
         auto dr = std::make_unique<Sounder::Scheduler>(config.get());
         dr->do_it();
+        // A run a fault stopped is a failed run, and not one to re-try: the
+        // re-try below is for discovery (ReceiverException) only.
+        if (config->faulted()) {
+          std::cerr << "The run stopped on a fault: " << config->faultReason() << std::endl;
+          ret = EXIT_FAILURE;
+          break;
+        }
         ret = EXIT_SUCCESS;
 
       } catch (const SignalException& e) {

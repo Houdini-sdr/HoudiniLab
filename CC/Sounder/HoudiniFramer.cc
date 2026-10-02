@@ -231,7 +231,7 @@ void HoudiniFramer::start(void) {
   }
   for (size_t c = 0; c < radios_.size(); ++c)
     for (size_t i = 0; i < radios_.at(c).size(); ++i)
-      radios_.at(c).at(i)->activateRecv();
+      radios_.at(c).at(i)->activateRecvOrThrow();
 }
 
 // ---- Houdini native-TDD framer (bs_hw_framer + radio_type=houdini) ----------

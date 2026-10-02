@@ -172,7 +172,7 @@ ClientRadioSet::ClientRadioSet(Config* cfg) : _cfg(cfg) {
           std::string tx_ram = "TX_RAM_";
           dev->writeRegisters(tx_ram + c, 0, _cfg->pilot());
         }
-        radios.at(i)->activateRecv();
+        radios.at(i)->activateRecvOrThrow();
         radios.at(i)->activateXmit();
         if (_cfg->frame_mode() == "free_running")
           dev->writeSetting("TRIGGER_GEN", "");
@@ -182,20 +182,20 @@ ClientRadioSet::ClientRadioSet(Config* cfg) : _cfg(cfg) {
       } else {
         if (radios.at(i)->hasHardwareTrigger()) {
           dev->setHardwareTime(0, "TRIGGER");
-          radios.at(i)->activateRecv();
+          radios.at(i)->activateRecvOrThrow();
           radios.at(i)->activateXmit();
           dev->writeSetting("TRIGGER_GEN", "");
         } else if (radios.at(i)->type() != Radio::Type::kSoapyUhd) {
           // No hardware trigger or correlator block (Houdini): software beacon
           // sync (the receiver's search) drives acquisition. Just start streams.
-          radios.at(i)->activateRecv();
+          radios.at(i)->activateRecvOrThrow();
           radios.at(i)->activateXmit();
         } else {
           // For USRP clients always use the internal clock
           dev->setTimeSource("internal");
           dev->setClockSource("internal");
           dev->setHardwareTime(0, "UNKNOWN_PPS");
-          radios.at(i)->activateRecv();
+          radios.at(i)->activateRecvOrThrow();
           radios.at(i)->activateXmit();
         }
       }

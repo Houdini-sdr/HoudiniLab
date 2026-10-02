@@ -117,6 +117,12 @@ class RadioHoudini : public RadioSoapy {
   bool recv_filter_ = true;  // off when the BS framer filters its slices itself
   std::function<long long(long long)> placer_;  // set for one recv() by placeNextWindow
 
+  /// readStream on the RX stream; an ended stream throws
+  /// houdini::stream::Ended instead of returning.
+  int readRx(void* const* buffs, size_t n, int& flags, long long& t, long timeout_us);
+  // Says in the log whether the stream's status queue confirms a stream fault.
+  void reportRxStreamEnd();
+
   // AP-79 link health: the software lane's checks on this handle, on a thread
   // started at the first successful read; plus what only the app can count.
   void maybeStartHealth();

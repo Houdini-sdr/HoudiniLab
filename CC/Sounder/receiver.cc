@@ -441,11 +441,13 @@ void* Receiver::loopRecv_launch(void* in_context) {
   try {
     me->loopRecv(tid, core_id, buffer);
   } catch (const std::exception& e) {
-    MLPD_ERROR("BS receive thread %zu stopped by an exception: %s\n", static_cast<size_t>(tid), e.what());
-    me->config_->running(false);
+    const std::string why = "BS receive thread " + std::to_string(tid) + " stopped by an exception: " + e.what();
+    MLPD_ERROR("%s\n", why.c_str());
+    me->config_->stopOnFault(why);
   } catch (...) {
-    MLPD_ERROR("BS receive thread %zu stopped by an exception of unknown type\n", static_cast<size_t>(tid));
-    me->config_->running(false);
+    const std::string why = "BS receive thread " + std::to_string(tid) + " stopped by an exception of unknown type";
+    MLPD_ERROR("%s\n", why.c_str());
+    me->config_->stopOnFault(why);
   }
   return 0;
 }
@@ -636,11 +638,11 @@ void Receiver::loopRecv(int tid, int core_id, SampleBuffer* rx_buffer) {
                                              rxTimeBs);
 
         if (r < 0) {
-          MLPD_WARN(
-              "BS recv (non-hw-framer path): radioRx returned %d at frame %zu "
-              "slot %zu -- STOPPING sounder (running(false))\n",
-              r, frame_id, slot_id);
-          config_->running(false);
+          const std::string why = "BS radio " + std::to_string(radio_id) + ": radioRx returned " + std::to_string(r) +
+                                  " (" + SoapySDR::errToStr(r) + ") at frame " + std::to_string(frame_id) +
+                                  " slot " + std::to_string(slot_id);
+          MLPD_ERROR("BS recv (non-hw-framer path): %s -- stopping the run\n", why.c_str());
+          config_->stopOnFault(why);
           break;
         }
         if (r != rx_len) {
@@ -671,20 +673,22 @@ void Receiver::loopRecv(int tid, int core_id, SampleBuffer* rx_buffer) {
         long long frameTime = 0;
         const int rx_ret =
             this->base_radio_set_->radioRx(radio_id, cell, samp, frameTime);
-        // A negative return is RECOVERABLE, not fatal. The combined multi-channel
-        // RX stream realigns the channels after a packet loss on one of them and
-        // reports it (OVERFLOW / a realign code, Tier-1 SH-160); a read that
-        // finds nothing reports TIMEOUT. Stopping the sounder on one kills a
-        // 2-channel run about 1 s after sync. Drop the round and keep running --
-        // the receive loop must not kill the sounder on a transient RX hiccup.
-        // Log the code, throttled, so a persistent error is still visible.
+        // A negative return is RECOVERABLE, not fatal: a read that finds nothing
+        // reports TIMEOUT on a healthy stream. Stopping the sounder on one
+        // killed a 2-channel run about 1 s after sync, when the combined RX
+        // stream still reported its realign after a packet loss as a negative
+        // code (SH-160; the plugin now realigns internally and queues an
+        // OVERFLOW event). Drop the round and keep running. An ENDED Houdini
+        // stream never returns here: the radio throws, and this thread's catch
+        // stops the run (houdini/stream_result.h). Log the code, throttled, so
+        // a persistent error is still visible.
         if (rx_ret < 0) {
           static std::atomic<long long> negc{0};
           const long long n = negc.fetch_add(1);
           if ((n % 200) == 0) {
             MLPD_WARN(
                 "BS recv: radioRx returned %d (%s), occurrence %lld -- dropping "
-                "the round (recoverable; combined-RX realign or empty read)\n",
+                "the round (recoverable)\n",
                 rx_ret, SoapySDR::errToStr(rx_ret), n + 1);
           }
         }
@@ -790,11 +794,13 @@ void* Receiver::clientTxRx_launch(void* in_context) {
     else
       me->clientSyncTxRx(tid, core_id, buffer);
   } catch (const std::exception& e) {
-    MLPD_ERROR("UE thread %zu stopped by an exception: %s\n", static_cast<size_t>(tid), e.what());
-    me->config_->running(false);
+    const std::string why = "UE thread " + std::to_string(tid) + " stopped by an exception: " + e.what();
+    MLPD_ERROR("%s\n", why.c_str());
+    me->config_->stopOnFault(why);
   } catch (...) {
-    MLPD_ERROR("UE thread %zu stopped by an exception of unknown type\n", static_cast<size_t>(tid));
-    me->config_->running(false);
+    const std::string why = "UE thread " + std::to_string(tid) + " stopped by an exception of unknown type";
+    MLPD_ERROR("%s\n", why.c_str());
+    me->config_->stopOnFault(why);
   }
   return 0;
 }
@@ -1924,7 +1930,8 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
     const auto prof_t1 = loop_profile_every > 0 ? profile_clock::now() : profile_clock::time_point{};
     if (rx_status < 0) {
       MLPD_ERROR("Rx status reporting error %d, exiting\n", rx_status);
-      config_->running(false);
+      config_->stopOnFault("UE radio " + std::to_string(tid) + ": radioRx returned " + std::to_string(rx_status) +
+                           " (" + SoapySDR::errToStr(rx_status) + ")");
       break;
     }
     if (config_->ul_data_slot_present() == true && !stampAnchored()) {
@@ -2324,7 +2331,9 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
               "Exceeded resync retry limit (%zu) for client %d reached "
               "after %zu resync successes at frame: %zu.  Stopping!\n",
               policy.config().retry_max, tid, policy.successes(), frame_id);
-          config_->running(false);
+          config_->stopOnFault("UE radio " + std::to_string(tid) + ": the resync retry limit (" +
+                               std::to_string(policy.config().retry_max) + ") was exceeded at frame " +
+                               std::to_string(frame_id));
           break;
         }
       }
@@ -2391,7 +2400,9 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
 
         rx_data_status = this->client_radio_set_->radioRx(
             tid, dl_slot_samp.data(), samples_per_slot, rx_data_time);
-        for (size_t ch = 0; ch < config_->cl_sdr_ch(); ++ch) {
+        // A failed read filled nothing: publish no packet from it. The check
+        // after this branch stops the run on it.
+        for (size_t ch = 0; rx_data_status >= 0 && ch < config_->cl_sdr_ch(); ++ch) {
           new (pkts.at(ch)) Packet(frame_id, slot_id, 0, ant_id + ch);
           // push kEventRxSymbol event into the queue
           this->notifyPacket(kClient, frame_id, slot_id, ant_id + ch,
@@ -2489,7 +2500,9 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
             "Rx status reporting error %d during frame %zu , slot %zu, "
             "exiting\n",
             rx_data_status, frame_id, slot_id);
-        config_->running(false);
+        config_->stopOnFault("UE radio " + std::to_string(tid) + ": radioRx returned " +
+                             std::to_string(rx_data_status) + " (" + SoapySDR::errToStr(rx_data_status) +
+                             ") at frame " + std::to_string(frame_id) + " slot " + std::to_string(slot_id));
         break;
       } else if (rx_data_status != static_cast<int>(samples_per_slot)) {
         MLPD_WARN("BAD Receive(%d/%zu) at Time %lld, frame count %zu\n",

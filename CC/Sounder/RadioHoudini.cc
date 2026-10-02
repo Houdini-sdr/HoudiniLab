@@ -34,6 +34,7 @@
 #include "include/rx_recorder_grid.h"  // TimeGridTracker
 #include "include/utils.h"
 #include "include/houdini/stream_args.h"
+#include "include/houdini/stream_result.h"
 
 SoapySDR::Kwargs RadioHoudini::deviceArgs(const RadioParams& p) {
   // SoapyHoudiniSDR node: the id is the board IP. Address the remote node
@@ -491,10 +492,17 @@ int RadioHoudini::xmit(const void* const* buffs, int samples, int flags,
   // interpolated here as a whole and padded to a whole 8-sample TX beat. The
   // time is in ns and does not change; the caller counts in ticks, so a full
   // write reports its own sample count back.
+  // A live TX stream (a host stream) that ended throws (houdini/stream_result.h);
+  // a replay load writes through to the device and keeps its return code.
+  const auto endedThrows = [this](int r) {
+    if (params_.tx_mode == "stream")
+      houdini::stream::throwIfEnded(r, params_.label + ": the TX stream ended (writeStream STREAM_ERROR)");
+  };
   if (tx_interp_.empty() || samples <= 0) {
     const int r0 = RadioSoapy::xmit(buffs, samples, flags, frameTime);
     // RadioSoapy::xmit returns 0 on a radio with no TX stream: not a short write.
     if (!params_.tx_channels.empty() && r0 < samples) app_tx_short_.fetch_add(1, std::memory_order_relaxed);
+    endedThrows(r0);
     return r0;
   }
   // Each lane through its own interpolator; every lane's output is the same
@@ -518,6 +526,7 @@ int RadioHoudini::xmit(const void* const* buffs, int samples, int flags,
   const int r = RadioSoapy::xmit(o.buffs.data(), static_cast<int>(o.samples), flags, frameTime);
   if (!params_.tx_channels.empty() && r < static_cast<int>(o.samples))
     app_tx_short_.fetch_add(1, std::memory_order_relaxed);
+  endedThrows(r);
   if (r < 0) return r;
   return houdini::boundary::inputSamplesWritten(r, samples);
 }
@@ -536,6 +545,49 @@ long long RadioHoudini::txTimeNs(long long frame_ticks, double rate_hz, bool tdd
   constexpr long long kNsPerMs = 1000000LL;
   const long long q = tdd_pilot ? kTddGridNs : kNsPerMs;
   return ((ns + q / 2) / q) * q;  // snap to the accepted grid
+}
+
+// Every read of the RX stream. An ended stream (houdini/stream_result.h)
+// throws instead of returning, so no caller loop can retry it.
+int RadioHoudini::readRx(void* const* buffs, size_t n, int& flags, long long& t, long timeout_us) {
+  const int r = dev_->readStream(rxs_, buffs, n, flags, t, timeout_us);
+  if (houdini::stream::ended(r)) {
+    app_rx_err_.fetch_add(1, std::memory_order_relaxed);  // the callers count the others
+    reportRxStreamEnd();
+    throw houdini::stream::Ended(params_.label + ": the RX stream ended (readStream STREAM_ERROR)");
+  }
+  return r;
+}
+
+// The plugin queues exactly one STREAM_ERROR status event for a stream fault
+// and none for a caller error (a null lane buffer, a read while direct buffers
+// are held), so the log says which it was instead of inferring it from the
+// return alone; the plugin's own ERROR line names where and why. Bounded: other
+// events may be queued ahead of it.
+void RadioHoudini::reportRxStreamEnd() {
+  constexpr int kMaxEvents = 32;
+  int st = SOAPY_SDR_TIMEOUT;
+  int read = 0;
+  while (read < kMaxEvents) {
+    size_t mask = 0;
+    int fl = 0;
+    long long t = 0;
+    st = dev_->readStreamStatus(rxs_, mask, fl, t, 0);
+    ++read;
+    if (st == SOAPY_SDR_STREAM_ERROR || st == SOAPY_SDR_TIMEOUT || st == SOAPY_SDR_NOT_SUPPORTED) break;
+  }
+  const char* what;
+  if (st == SOAPY_SDR_STREAM_ERROR)
+    what = "the stream's status event confirms a stream fault; the plugin's ERROR line names the cause";
+  else if (st == SOAPY_SDR_TIMEOUT)
+    what = "the stream's status queue holds no fault event: a caller error (a null lane buffer, or a read while "
+           "direct buffers are held), not a stream fault";
+  else if (st == SOAPY_SDR_NOT_SUPPORTED)
+    what = "the stream has no status queue, so the cause is unconfirmed";
+  else
+    what = "no fault event among the first queued status events, so the cause is unconfirmed";
+  MLPD_ERROR("%s: readStream returned STREAM_ERROR, the run stops (%s; status read %d time(s), last %d %s)\n",
+             params_.label.c_str(), what, read, st, SoapySDR::errToStr(st));
 }
 
 // SoapyHoudiniSDR delivers about one packet (2032 samples at the default MTU,
@@ -574,7 +626,7 @@ int RadioHoudini::recv(void* const* buffs, int samples, long long& frameTime) {
                         : std::chrono::steady_clock::time_point{};
   int drained_chunks = 0, drained_samps = 0;
   int dr = 0;
-  while ((dr = dev_->readStream(rxs_, jb.data(), drain_samps, jf, jt, 0)) > 0) {
+  while ((dr = readRx(jb.data(), drain_samps, jf, jt, 0)) > 0) {
     ++drained_chunks;
     drained_samps += dr;
   }
@@ -600,7 +652,7 @@ int RadioHoudini::recv(void* const* buffs, int samples, long long& frameTime) {
     placer_ = nullptr;
     int pf = 0;
     long long pt = 0;
-    int pr = dev_->readStream(rxs_, jb.data(), drain_samps, pf, pt, 1000000);
+    int pr = readRx(jb.data(), drain_samps, pf, pt, 1000000);
     if (pr < 0) app_rx_err_.fetch_add(1, std::memory_order_relaxed);
     if (pr > 0 && (pf & SOAPY_SDR_HAS_TIME) != 0 && rx_rate_ > 0.0) {
       long long head_ns = pt + Sounder::sampleToNs(pr, rx_rate_);
@@ -615,7 +667,7 @@ int RadioHoudini::recv(void* const* buffs, int samples, long long& frameTime) {
           MLPD_WARN("placed RX window %lld samples ahead (limit %lld): read unplaced\n", left, kMaxSkip);
           break;
         }
-        pr = dev_->readStream(rxs_, jb.data(), static_cast<size_t>(std::min<long long>(left, drain_samps)), pf,
+        pr = readRx(jb.data(), static_cast<size_t>(std::min<long long>(left, drain_samps)), pf,
                               pt, 1000000);
         if (pr < 0) app_rx_err_.fetch_add(1, std::memory_order_relaxed);
         if (pr <= 0 || (pf & SOAPY_SDR_HAS_TIME) == 0) break;
@@ -659,7 +711,7 @@ int RadioHoudini::recv(void* const* buffs, int samples, long long& frameTime) {
     int flags = 0;
     long long t = 0;
     int r =
-        dev_->readStream(rxs_, cur.data(), samples - got, flags, t, 1000000);
+        readRx(cur.data(), samples - got, flags, t, 1000000);
     if (r <= 0) {
       if (r < 0) app_rx_err_.fetch_add(1, std::memory_order_relaxed);
       if (got > 0) app_rx_short_.fetch_add(1, std::memory_order_relaxed);

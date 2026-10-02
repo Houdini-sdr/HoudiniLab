@@ -124,7 +124,7 @@ void IrisFramer::arm() {
     if (!kUseSoapyUHD) {
       for (size_t i = 0; i < radios_.at(c).size(); i++) {
         auto* dev = radios_.at(c).at(i)->RawDev();
-        radios_.at(c).at(i)->activateRecv();
+        radios_.at(c).at(i)->activateRecvOrThrow();
         radios_.at(c).at(i)->activateXmit();
         dev->setHardwareTime(0, "TRIGGER");
       }
@@ -140,7 +140,7 @@ void IrisFramer::arm() {
       std::this_thread::sleep_for(std::chrono::seconds(2));
       // Activate Rx and Tx streamers
       for (size_t i = 0; i < radios_.at(c).size(); i++) {
-        radios_.at(c).at(i)->activateRecv();
+        radios_.at(c).at(i)->activateRecvOrThrow();
         radios_.at(c).at(i)->activateXmit();
       }
     }
