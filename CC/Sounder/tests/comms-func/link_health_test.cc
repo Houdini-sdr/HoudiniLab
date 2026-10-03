@@ -109,15 +109,15 @@ int main(int argc, char** argv) {
     FakeNode c;
     c.keys["TX_HOST_STATUS"] = "eob_recloses=4 eob_recloses_ch0=1 eob_recloses_ch1=3 cold_releases_ch0=0 "
                                "cold_window_ms_ch0=inf rate_ppm_ch0=-31.34";
-    c.keys["RX_HOST_STATUS"] = "rxq_ovfl=0 rxq_ovfl_ch0=0 tdd_drop=9 tdd_drop_ch0=9 tdd_straddle_ch2=0 tdd_refused_ch2=0";
+    c.keys["RX_HOST_STATUS"] = "rxq_ovfl=0 rxq_ovfl_ch0=0 tdd_drop=9 tdd_drop_ch0=9 tdd_straddle_ch2=0";
     const auto g = collectCounters(c.read());
     check(g.at("host.eob_recloses_ch0") == 1 && g.at("host.eob_recloses_ch1") == 3 && g.count("host.eob_recloses") == 0 &&
               g.count("host.rxq_ovfl") == 0,
           "host fields are the per-stream keys, never the totals (mutation: the totals read)");
-    check(g.count("host.tdd_straddle_ch2") == 1 && g.count("host.tdd_refused_ch2") == 1 &&
-              g.count("host.tdd_drop_ch0") == 0 && g.count("host.cold_releases_ch0") == 0,
-          "tdd_straddle and tdd_refused alarm, tdd_drop (the slot cut) and the pacer's other keys do not (mutation: "
-          "the 2.7 host field list changed)");
+    check(g.count("host.tdd_straddle_ch2") == 1 && g.count("host.tdd_drop_ch0") == 0 &&
+              g.count("host.cold_releases_ch0") == 0,
+          "tdd_straddle alarms, tdd_drop (the slot cut) and the pacer's other keys do not (mutation: the host field "
+          "list changed)");
     FakeNode n;
     n.keys["RX_HOST_STATUS"] = "rxq_ovfl=5 rxq_ovfl_ch0=2 rxq_ovfl_ch2=3";
     LinkHealth h(n.read(), "bs", n.clock());
@@ -301,10 +301,13 @@ int main(int argc, char** argv) {
       check(g.at("tx0.epoch") == 587 && g.at("tx1.epoch") == 521 && g.at("tx0.late") == 0 && g.count("tx0.acked") == 0,
             "current capture: the TX banks carry their epochs (587, 521) and are used (mutation: the epoch parse "
             "broken)");
-      check(g.count("host.tdd_refused_ch2") == 1 && g.count("host.tdd_straddle_ch0") == 1 &&
-                g.count("host.eob_recloses_ch1") == 1 && g.count("host.tdd_drop_ch0") == 0 &&
-                g.count("host.rxq_ovfl") == 0 && g.count("host.anchor_rejects_ch0") == 0,
+      check(g.count("host.tdd_straddle_ch0") == 1 && g.count("host.eob_recloses_ch1") == 1 &&
+                g.count("host.tdd_drop_ch0") == 0 && g.count("host.rxq_ovfl") == 0 &&
+                g.count("host.anchor_rejects_ch0") == 0,
             "current capture: the host alarm fields per stream, not tdd_drop, the totals or the pacer's state");
+      check(g.count("host.tdd_refused_ch2") == 0,
+            "current capture: its tdd_refused, a key HOUDINI_PROTOCOL 6 retired, is not judged (mutation: the "
+            "retired key left in the host field list)");
       double t = 0.0;
       LinkHealth h(rd, "ue", [&t] { return t += 5.0; });
       const auto first = h.check().alarms();

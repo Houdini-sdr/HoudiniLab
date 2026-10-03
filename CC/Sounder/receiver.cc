@@ -677,11 +677,11 @@ void Receiver::loopRecv(int tid, int core_id, SampleBuffer* rx_buffer) {
         // reports TIMEOUT on a healthy stream. Stopping the sounder on one
         // killed a 2-channel run about 1 s after sync, when the combined RX
         // stream still reported its realign after a packet loss as a negative
-        // code (SH-160; the plugin now realigns internally and queues an
-        // OVERFLOW event). Drop the round and keep running. An ENDED Houdini
-        // stream never returns here: the radio throws, and this thread's catch
-        // stops the run (houdini/stream_result.h). Log the code, throttled, so
-        // a persistent error is still visible.
+        // code (SH-160, since fixed in the plugin). Drop the round and keep
+        // running. An ENDED Houdini stream never returns here: the radio
+        // throws, and this thread's catch stops the run
+        // (houdini/stream_result.h). Log the code, throttled, so a persistent
+        // error is still visible.
         if (rx_ret < 0) {
           static std::atomic<long long> negc{0};
           const long long n = negc.fetch_add(1);

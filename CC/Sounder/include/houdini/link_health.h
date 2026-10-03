@@ -183,7 +183,9 @@ inline const std::vector<std::string>& rxAlarmFields() {
   return f;
 }
 inline const std::vector<std::string>& hostAlarmFields() {
-  static const std::vector<std::string> f = {"rxq_ovfl", "ring_ovfl", "eob_recloses", "tdd_straddle", "tdd_refused"};
+  // tdd_refused left RX_HOST_STATUS with HOUDINI_PROTOCOL 6: a map the packets do
+  // not tile now ends the stream (STREAM_ERROR) instead of counting.
+  static const std::vector<std::string> f = {"rxq_ovfl", "ring_ovfl", "eob_recloses", "tdd_straddle"};
   return f;
 }
 

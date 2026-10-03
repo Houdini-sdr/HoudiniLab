@@ -275,7 +275,7 @@ steered, cabled):
 | Beacon SNR at the UE | about 39-47 dB wired | the sync card's `beacon SNR`; over the air the detector floor is 25 dB |
 | Pilot seat at the BS (`pilot_grid_off`) | within a few samples, steady within a run | it moves by a few samples between sessions (VL1 0/+1, RV1 -3/-4), untraced: the converters' MTS latency lands differently each session but does not predict the move (9.73); the slot margin is +-32 |
 | BS frames per second | about 50 (slots config), about 57 (all-rx config) | from the HOUDINI_BS_RX lines |
-| End-of-run lines | `RX read check`: 0 lost in rx slots, 0 out of order, 0 time jumps; `AP-87 slot check`: 0 outside the rx slots; `RX_HOST_STATUS`: tdd_straddle 0, tdd_refused 0, and on fpga 1.34 tdd_drop 0 | anything nonzero is a finding, not noise |
+| End-of-run lines | `RX read check`: 0 lost in rx slots, 0 out of order, 0 time jumps; `AP-87 slot check`: 0 outside the rx slots; `RX_HOST_STATUS`: tdd_straddle 0, and on fpga 1.34 tdd_drop 0 (a TDD map the packets do not tile ends the stream, and the run with it) | anything nonzero is a finding, not noise |
 
 ## A7. Known limits
 
