@@ -623,8 +623,9 @@ arm has a record row yet; the steps stay here for when one is run.
   CAP_SYS_NICE to `build/sounder` (`sudo setcap cap_sys_nice+ep build/sounder`, lost
   on every rebuild), and the sounder's `--tx_stream_args=rt_priority=40` (SCHED_FIFO;
   40 stays under the kernel's threaded-IRQ and RCU priorities, which default to 50),
-  always with the workers pinned. Without the capability the plugin warns and runs at
-  normal priority: read the log for that warning.
+  always with the workers pinned. Without the capability (or an `RLIMIT_RTPRIO` of
+  at least 40) the plugin refuses the TX stream's setup, so the UE radio does not
+  open: its log line reads `rt_priority=40: the kernel refused SCHED_FIFO 40`.
 - The plugin's receive workers take the same `cpu_affinity=<cpu>` argument per RX
   stream (the sounder has no RX pass-through knob yet; add one if an arm needs them
   on 18 and 19).
