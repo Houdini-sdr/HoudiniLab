@@ -269,20 +269,27 @@ void ClientRadioSet::init(ClientRadioContext* context) {
     throw;
   }
   if (has_runtime_error == false) {
-    auto* dev = radios.at(i)->RawDev();
-    SoapySDR::Kwargs info = dev->getHardwareInfo();
+    // setup() reads the device back (Houdini: getFrequency, which the plugin
+    // throws on when the PLL reads 0 or the zone is unreadable). Still on the
+    // init thread, so a throw drops the radio with its reason, as a failed
+    // open does.
+    try {
+      for (auto ch : channels) {
+        double rxgain = _cfg->cl_rxgain_vec().at(ch).at(
+            i);  // w/CBRS 3.6GHz [0:105], 2.5GHZ [0:108]
+        double txgain = _cfg->cl_txgain_vec().at(ch).at(
+            i);  // w/CBRS 3.6GHz [0:105], 2.5GHZ [0:105]
+        radios.at(i)->setup(ch, rxgain, txgain);
+      }
 
-    for (auto ch : channels) {
-      double rxgain = _cfg->cl_rxgain_vec().at(ch).at(
-          i);  // w/CBRS 3.6GHz [0:105], 2.5GHZ [0:108]
-      double txgain = _cfg->cl_txgain_vec().at(ch).at(
-          i);  // w/CBRS 3.6GHz [0:105], 2.5GHZ [0:105]
-      radios.at(i)->setup(ch, rxgain, txgain);
-    }
-
-    // The AGC block is an Iris feature (a capability, not a platform test).
-    if (radios.at(i)->hasAgc()) {
-      initAGC(dev, _cfg);
+      // The AGC block is an Iris feature (a capability, not a platform test).
+      if (radios.at(i)->hasAgc()) {
+        initAGC(radios.at(i)->RawDev(), _cfg);
+      }
+    } catch (const std::exception& err) {
+      MLPD_WARN("ClientRadioSet radio %d (%s, %s) channel setup failed: %s\n", i, p.id.c_str(),
+                Radio::name(type), err.what());
+      radios.at(i).reset();
     }
   }
   MLPD_TRACE("ClientRadioSet: Init complete\n");

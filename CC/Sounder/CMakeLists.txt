@@ -483,6 +483,15 @@ target_include_directories(receiver_fault_test PRIVATE ${CMAKE_CURRENT_SOURCE_DI
 target_link_libraries(receiver_fault_test houdini_sync -lpthread ${GFLAGS_LIBRARIES} ${UHD_LIBRARIES}
     ${SoapySDR_LIBRARIES} ${HDF5_LIBRARIES} ${MUFFT_LIBRARIES})
 add_test(NAME receiver_fault COMMAND receiver_fault_test WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+# A radio whose channel setup throws on a set's init thread fails the set
+# instead of aborting: this test's fake radio replaces Radio.cc.
+set(RADIO_SET_SETUP_SOURCES ${SOUNDER_SOURCES})
+list(FILTER RADIO_SET_SETUP_SOURCES EXCLUDE REGEX "^Radio\\.cc$")
+add_executable(radio_set_setup_test tests/comms-func/radio_set_setup_test.cc ${RADIO_SET_SETUP_SOURCES})
+target_include_directories(radio_set_setup_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(radio_set_setup_test houdini_sync -lpthread ${GFLAGS_LIBRARIES} ${UHD_LIBRARIES}
+    ${SoapySDR_LIBRARIES} ${HDF5_LIBRARIES} ${MUFFT_LIBRARIES})
+add_test(NAME radio_set_setup COMMAND radio_set_setup_test WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 # AP-85: the host cost of the UE's TX interpolation per lane path. Standalone,
 # not a test: run it on the rig host (./build/tx_interp_bench [rounds]).
 add_executable(tx_interp_bench tests/comms-func/tx_interp_bench.cc)
