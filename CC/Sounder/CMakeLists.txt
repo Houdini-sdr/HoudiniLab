@@ -492,6 +492,13 @@ target_include_directories(radio_set_setup_test PRIVATE ${CMAKE_CURRENT_SOURCE_D
 target_link_libraries(radio_set_setup_test houdini_sync -lpthread ${GFLAGS_LIBRARIES} ${UHD_LIBRARIES}
     ${SoapySDR_LIBRARIES} ${HDF5_LIBRARIES} ${MUFFT_LIBRARIES})
 add_test(NAME radio_set_setup COMMAND radio_set_setup_test WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+# The TDD framer's arm retry reloads the beacon as a fresh load, through a fake
+# radio and device.
+add_executable(framer_rearm_test tests/comms-func/framer_rearm_test.cc ${SOUNDER_SOURCES})
+target_include_directories(framer_rearm_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(framer_rearm_test houdini_sync -lpthread ${GFLAGS_LIBRARIES} ${UHD_LIBRARIES}
+    ${SoapySDR_LIBRARIES} ${HDF5_LIBRARIES} ${MUFFT_LIBRARIES})
+add_test(NAME framer_rearm COMMAND framer_rearm_test WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 # AP-85: the host cost of the UE's TX interpolation per lane path. Standalone,
 # not a test: run it on the rig host (./build/tx_interp_bench [rounds]).
 add_executable(tx_interp_bench tests/comms-func/tx_interp_bench.cc)

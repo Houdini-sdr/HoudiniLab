@@ -482,7 +482,17 @@ void HoudiniFramer::armTdd(void) {
                               ",loops=1,offs=" + std::to_string(offs));
       };
       setup_framer();
-      htdd_epoch_ = armTddOnce(dev, setup_framer, htdd_symbol_ticks_,
+      // A retry re-runs the setup after the ladder's raw TX_CLEAR_ALL, which
+      // rewinds the device's replay fill but not the host stream's: the reload
+      // would append at the pre-clear fill and be refused (past the RAM depth,
+      // and from F6b2 an append at a stale fill). Deactivating the replay
+      // stream rewinds the host's fill, so the reload is a fresh load at 0.
+      // The first setup needs none: nothing was loaded before its ladder.
+      const auto reload = [&]() {
+        r->deactivateXmit();
+        setup_framer();
+      };
+      htdd_epoch_ = armTddOnce(dev, reload, htdd_symbol_ticks_,
                                   static_cast<long long>(spf_tdd));
       if (cfg_->bs_rx_slots()) {
         // The device's own record of the rx slots it cuts to, against ours.
