@@ -10,8 +10,8 @@ front end, slots mode, errors, the end-of-run checks, warning counts, UE
 acquisition, the BS framer (with --bs_rx_debug) and the carrier. The
 verdict, last, is FAIL on an error, on a nonzero end-of-run count, on a
 missing end-of-run line (they are printed as the radios close, so a run that
-did not close cleanly has none), or when no data flowed (the UE never detected
-the beacon, or the BS produced no constellation); link-health alarms, lost
+did not close cleanly has none), or when no data flowed (the UE never locked
+on the beacon, or the BS produced no constellation); link-health alarms, lost
 pilots, untrusted windows and late releases are warnings to read. Exits 1 on
 FAIL.
 """
@@ -56,10 +56,11 @@ def verdict(L):
     # Data flowed (AP-112): every other check below reads clean on an idle
     # link, so a run that carried nothing passed them (DEMO_VERIFICATION 9.83,
     # the nodes cabled in loopback). The UE locks on the beacon first, and the
-    # BS's CSI view then scores constellations from its uplink.
-    if not any("clientSyncBeacon" in l or "syncSearch: detection" in l for l in L):
-        out.append(("FAIL", "UE: never detected the beacon (no syncSearch detection or clientSyncBeacon line): "
-                            "no data flowed"))
+    # BS's CSI view then scores constellations from its uplink. Only a confirmed
+    # lock counts: a detection line is written before the SNR floor and the
+    # confirm judge it, and a rejected one is a clientSyncBeacon line too.
+    if not any("lock CONFIRMED" in l for l in L):
+        out.append(("FAIL", "UE: never locked on the beacon (no 'lock CONFIRMED' line): no data flowed"))
     cns = cns_total(L)
     if not cns or cns[0] == 0:
         out.append(("FAIL", "BS: no constellation record (no CNS summary with datagrams): no UE uplink reached the "

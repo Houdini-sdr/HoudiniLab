@@ -20,7 +20,8 @@ GOOD = [
     "(0 samples lost in rx slots, 0 the schedule's gaps), 0 out of order, 0 time jumps",
     "57:000200 INFOR: BS 192.168.10.22 link health: [BS 192.168.10.22] 60.0 s: irq 12/s, preflight ok: clean"
     " | app: rx_err +0, rx_short +0, rx_pad +0, tx_short +0, tx_sat +0",
-    "29:011822 INFOR: clientSyncBeacon [0]: idx 190198 snr 46.9 dB",
+    "3:176656 INFOR: houdiniAcquireAnchor [0]: lock CONFIRMED (resid -1 over 206 frames, confirm 21) -> frame "
+    "anchor 140786886, bootstrap period 122879.9613 (-0.0387 samp/frame)",
     "42:198592 INFOR: CNS score 0.995 rot -0.0 deg at frame 553 (512 datagrams, 0 low); P->U 500.0 us, so +180.0 deg "
     "per kHz of uncorrected CFO",
 ]
@@ -32,16 +33,25 @@ def swap(L, old, new):
 check("FAIL" not in levels(GOOD) and "WARN" not in levels(GOOD), "a clean slots-mode run passes with no warnings: %s" % rs.verdict(GOOD))
 # AP-112, DEMO_VERIFICATION 9.83: clean read checks and counters on a link that
 # carried nothing. Each signal on its own, then both gone.
-nolock = [l for l in GOOD if "clientSyncBeacon" not in l]
-check(any(lv == "FAIL" and "never detected the beacon" in t for lv, t in rs.verdict(nolock)),
-      "a UE that never detected the beacon fails (mutation: the beacon rule removed)")
+nolock = [l for l in GOOD if "lock CONFIRMED" not in l]
+check(any(lv == "FAIL" and "never locked on the beacon" in t for lv, t in rs.verdict(nolock)),
+      "a UE that never locked on the beacon fails (mutation: the beacon rule removed)")
+# Detections are not a lock: the detector logs a crossing before the SNR floor
+# judges it, and a rejected one is a clientSyncBeacon line (the rejection is
+# from a real capture, the detection from receiver.cc's format).
+hunted = nolock + [
+    "2:694464 INFOR: clientSyncBeacon [0]: rejected low-SNR detection (idx 18311, 0.5 dB < 30.0 dB floor), count 1",
+    "2:694470 INFOR: syncSearch: detection #1 statistic 0.3121 vs bar 0.3000 (xcorr), idx 18311 in 122880",
+    "2:701000 INFOR: clientSyncBeacon [0]: idx 18311 snr 31.2 dB"]
+check(any(lv == "FAIL" and "never locked on the beacon" in t for lv, t in rs.verdict(hunted)),
+      "detections without a confirmed lock fail (mutation: any detection or clientSyncBeacon line taken as a lock)")
 nocns = [l for l in GOOD if "datagrams" not in l]
 check(any(lv == "FAIL" and "no constellation record" in t for lv, t in rs.verdict(nocns)),
       "a run whose BS scored no constellation fails (mutation: the constellation rule removed)")
 zero = swap(GOOD, "(512 datagrams, 0 low)", "(0 datagrams, 0 low)")
 check(any(lv == "FAIL" and "no constellation record" in t for lv, t in rs.verdict(zero)),
       "a CNS summary of zero datagrams is no data (mutation: any summary line taken as data)")
-idle = [l for l in GOOD if "clientSyncBeacon" not in l and "datagrams" not in l]
+idle = [l for l in GOOD if "lock CONFIRMED" not in l and "datagrams" not in l]
 check(sum(lv == "FAIL" for lv in levels(idle)) == 2,
       "the 9.83 shape, clean checks and no data, fails on both counts (mutation: PASS on clean counters alone)")
 check("FAIL" in levels(swap(GOOD, "(0 samples lost in rx slots, 128820113280", "(1920 samples lost in rx slots, 128820113280")),
