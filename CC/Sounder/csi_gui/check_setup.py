@@ -215,23 +215,33 @@ def running_sounders():
     return found
 
 
+def gflag(argv, name):
+    """The value gflags gives flag `name` on this command line: '-name' and
+    '--name' alike, '=value' or the next word, the last one winning, nothing
+    after a bare '--'."""
+    val, i = None, 1
+    while i < len(argv):
+        a = argv[i]
+        if a == "--":
+            break
+        a = "-" + a if a.startswith("-") and not a.startswith("--") else a
+        if a == "--" + name and i + 1 < len(argv):
+            val, i = argv[i + 1], i + 2
+            continue
+        if a.startswith("--" + name + "="):
+            val = a.split("=", 1)[1]
+        i += 1
+    return val
+
+
 def radios_of(pid):
     """The radio addresses a running sounder uses, from its --conf_file and its
     working directory, or None when that cannot be read (another user's process)."""
     try:
         with open(os.path.join(PROC, str(pid), "cmdline"), "rb") as f:
             argv = f.read().decode("utf-8", "replace").split("\0")
-        # gflags reads '-flag' as '--flag', so either spelling names the flag.
-        argv = ["-" + a if a.startswith("-") and not a.startswith("--") else a for a in argv]
         cwd = os.readlink(os.path.join(PROC, str(pid), "cwd"))
-        conf = None
-        for i, a in enumerate(argv):
-            if a == "--conf_file" and i + 1 < len(argv):
-                conf = argv[i + 1]
-            elif a.startswith("--conf_file="):
-                conf = a.split("=", 1)[1]
-        topo = next((argv[i + 1] for i, a in enumerate(argv[:-1]) if a == "--topology"), None) or \
-            next((a.split("=", 1)[1] for a in argv if a.startswith("--topology=")), None)
+        conf, topo = gflag(argv, "conf_file"), gflag(argv, "topology")
         if not topo:  # the sounder's --topology overrides its config's serial_file
             with open(os.path.join(cwd, conf), encoding="utf-8") as f:
                 topo = json.load(f)["serial_file"]
