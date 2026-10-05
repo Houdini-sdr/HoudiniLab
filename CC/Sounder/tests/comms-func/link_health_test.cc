@@ -83,12 +83,12 @@ int main(int argc, char** argv) {
   }
   {  // an empty or partial read between two full ones must not erase the baseline
     const Counters full{{"a.x", 10}, {"b.y", 7}};
-    const Counters kept = carryCounters(carryCounters(Counters{}, full), Counters{});
+    const Counters kept = carryCounters(carryCounters(Counters{}, full, HostRead{}), Counters{}, HostRead{});
     check(counterIncreases(kept, full).empty(),
           "an empty read does not erase the baseline: the next full read reports nothing new (mutation: prev = cur, "
           "every counter's running total reads as new)");
     const Counters later{{"a.x", 12}, {"b.y", 7}};
-    check(counterIncreases(carryCounters(kept, Counters{{"b.y", 7}}), later) == Counters{{"a.x", 2}},
+    check(counterIncreases(carryCounters(kept, Counters{{"b.y", 7}}, HostRead{}), later) == Counters{{"a.x", 2}},
           "a partial read keeps the missing counter's last value (mutation: prev = cur, a +12 false alarm)");
   }
   {  // 2.7 "Egress counters" and "No other alarm": standing at a ceiling or a sticky bit is not an alarm

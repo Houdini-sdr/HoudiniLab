@@ -288,7 +288,7 @@ inline bool txHostKey(const std::string& k) { return k.rfind("host.eob_recloses_
 /// a host status that answered (`host_read`, also when its last stream closed):
 /// its stream closed, and a key that appears again counts from zero
 /// (HOUDINI_PROTOCOL 2.7), so it is not carried.
-inline Counters carryCounters(const Counters& prev, const Counters& cur, const HostRead& host_read = {}) {
+inline Counters carryCounters(const Counters& prev, const Counters& cur, const HostRead& host_read) {
   Counters out;
   for (const auto& kv : prev) {
     const bool closed = kv.first.rfind("host.", 0) == 0 && (txHostKey(kv.first) ? host_read.tx : host_read.rx) &&
