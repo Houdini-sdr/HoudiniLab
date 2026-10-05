@@ -165,8 +165,8 @@ def check_plugin(rep, venv, root=None):
     mods = [m for m in glob.glob(os.path.join(moddir, "*.so")) if "houdini" in os.path.basename(m).lower()]
     if not mods:
         rep.add("FAIL", "plugin", "no Houdini module in %s%s" % (moddir, " (--soapy-root)" if root else ""),
-                "Pass --soapy-root <the release's host-plugin prefix> (on the demo rig ~/houdini_0.3.1, "
-                "the build the radios run) before the check and the dashboard (walkthrough section 2.4).")
+                "Pass --soapy-root <the host-plugin prefix of the radios' release> before the check and the "
+                "dashboard (walkthrough section 2.4; the demo rig's is in DEMO_BENCH_RUNBOOK A3).")
         return
     util = os.path.join(venv, "bin", "SoapySDRUtil")
     env = plugin_env(venv, root)
@@ -221,6 +221,8 @@ def radios_of(pid):
     try:
         with open(os.path.join(PROC, str(pid), "cmdline"), "rb") as f:
             argv = f.read().decode("utf-8", "replace").split("\0")
+        # gflags reads '-flag' as '--flag', so either spelling names the flag.
+        argv = ["-" + a if a.startswith("-") and not a.startswith("--") else a for a in argv]
         cwd = os.readlink(os.path.join(PROC, str(pid), "cwd"))
         conf = None
         for i, a in enumerate(argv):
@@ -444,8 +446,8 @@ def check_versions(rep, sd, nodes, port, env, root=None):
         if hb and db and hb != db:
             rep.add("WARN", "plugin build %s" % ip, "the host plugin (host_build %s) is not this radio's device "
                     "build (%s)" % (hb, db),
-                    "Pass --soapy-root with the prefix built with the radios' release (on the demo rig "
-                    "~/houdini_0.3.1).")
+                    "Pass --soapy-root with the prefix built with the radios' release (the demo rig's is in "
+                    "DEMO_BENCH_RUNBOOK A3).")
 
 
 def main():

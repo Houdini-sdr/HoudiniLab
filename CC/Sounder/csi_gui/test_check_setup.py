@@ -282,6 +282,15 @@ other = fake_sounder(4243, ["./build/sounder", "--conf_file=files/houdini-other.
 rc, rep, lv = run(); check(rc == 0 and lv["radios free"] == "PASS" and lv.get("stack match") == "PASS",
                            "a sounder on other radios does not block, and the stacks are read (mutation: any sounder blocks)")
 shutil.rmtree(other)
+# Its --topology overrides its config's serial_file, in either gflags spelling.
+for argv in (["--conf_file=files/houdini-other.json", "--topology", "files/topo.json"],
+             ["-conf_file", "files/houdini-other.json", "-topology=files/topo.json"]):
+    over = fake_sounder(4245, ["./build/sounder"] + argv, sd)
+    rc, rep, lv = run("--quick")
+    check(rc == 1 and lv["radios free"] == "FAIL",
+          "a sounder whose topology override names these radios holds them: %s (mutation: the override ignored, or "
+          "read in one spelling only)" % " ".join(argv))
+    shutil.rmtree(over)
 unknown = fake_sounder(4244, ["./build/sounder"], sd)  # no --conf_file: its radios cannot be read
 before = open(os.path.join(root, "unmade")).read()
 rc, rep, lv = run()
