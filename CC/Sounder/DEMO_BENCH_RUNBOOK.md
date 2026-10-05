@@ -137,14 +137,17 @@ The XUD1A is the reworked board (RF 9.5 GHz, LO 13.88 GHz). It needs:
 - **Host plugin.** Activate the venv `~/houdini_test` before anything: it is
   the SoapySDR runtime and the Python bindings, and it carries NO Houdini
   module. The Houdini host plugin is the release's own prefix, built with the
-  radios' device build: `~/houdini_0.3.1`. `--soapy-root $HOME/houdini_0.3.1`
+  radios' device build: `~/houdini_0.4.0` (this code needs SoapyHoudiniSDR
+  0.4.0; `~/houdini_0.3.1` is kept only as the host half of a revert to the
+  previous release, which this code does not run on). `--soapy-root $HOME/houdini_0.4.0`
   selects it for every config: on `check_setup.py`, `run_rung.sh`,
   `fstage_run.sh`, `teardown_framer.py` and `reg_snap.py`, AND on the dashboard,
   which hands it to its Check, Start and teardown; `demo_run.sh` takes the
   prefix as its fourth argument. Without it no radio opens. The setup check's
   stack line shows which one loaded (`host_build`, equal to `device_build`; a
   mismatch is a WARN). Going back a release is a deploy of that release's host
-  prefix and device modules: the software lane's, on the user's go.
+  prefix and device modules (the software lane's, on the user's go) plus a
+  checkout of this repo from before that release's changes.
 - **Cores.** The sounder's `--core_map` places its threads by role and the
   main thread pins itself only after the radios start, so the plugin's BS
   receive workers run on the housekeeping cores 0-9 (AP-81, 9.44). The launch
@@ -159,13 +162,13 @@ On the rig:
 source ~/houdini_test/bin/activate
 cd ~/repos/HoudiniLab-rxwin/CC/Sounder
 cat /sys/devices/system/cpu/isolated   # 15-19 when A9 stage 1 is in force
-python3 csi_gui/check_setup.py --soapy-root $HOME/houdini_0.3.1 --conf files/houdini-dualband-xw-steer-slots.json   # must print Ready, egress PASS on both nodes.
+python3 csi_gui/check_setup.py --soapy-root $HOME/houdini_0.4.0 --conf files/houdini-dualband-xw-steer-slots.json   # must print Ready, egress PASS on both nodes.
 # served on every address (A5); the four demo configs and the replays in the list (A8b); one log per Start (A8c step 4)
 # --soapy-root: the host plugin of the radios' release, for every config (A3)
 # --core_map, --tx_cpu_affinity: isolated (A9); 18,19 while a BS receive flow lands on 16 (pacer_core_check, A8c)
 # --tx_host_status: logs the host pacer's state every health period (free)
 python3 csi_gui/csi_server.py --control --http-host 0.0.0.0 --configs labelled \
-  --soapy-root $HOME/houdini_0.3.1 \
+  --soapy-root $HOME/houdini_0.4.0 \
   --sounder-arg=--core_map=main=15 --sounder-arg=--tx_cpu_affinity=18,19 --sounder-arg=--tx_host_status \
   --replay "$HOME/demo_rec/replays/xband_chain_bench_60s.rec=Replay, X-band bench" \
   --replay "$HOME/demo_rec/replays/xband_ota_60s.rec=Replay, X-band over the air" \
@@ -211,7 +214,7 @@ watch, the MER every 15 s, three spectra), files them into the run directory
 and ends with `run_summary.py`'s verdict against A6 (its exit status):
 
 ```sh
-tests/demo-verify/demo_run.sh <TAG> files/houdini-dualband-xw-steer-slots.json 2100 ~/houdini_0.3.1
+tests/demo-verify/demo_run.sh <TAG> files/houdini-dualband-xw-steer-slots.json 2100 ~/houdini_0.4.0
 ```
 
 It hands the sounder the A4 placement itself (`--core-map` and
@@ -476,11 +479,11 @@ nodes: isolation, the 100G ports, roles, the XUD1A LO and its Table 7 filter, th
 boards, the builds, the FPGA and the egress, each radio opened with retries), then `check_setup.py --quick`
 (its radios just proven by the go/no-go), then the dashboard with
 the line of step 4 on the X-band chain's config, in the foreground of its terminal: Stop on
-the page, then Ctrl-C there. The steps below are what it does, by hand. It hands the
-host-plugin prefix and the core placement over as environment variables, which the setup
-check and the dashboard do not read: until the software lane switches it to the
-`--soapy-root` and `--sounder-arg` arguments of steps 3 and 4 (SH-486 item 10), bring the
-demo up with the steps below.
+the page, then Ctrl-C there. The steps below are what it does, by hand. From
+SoapyHoudiniSDR 0.4.0 it hands the check and the dashboard the `--soapy-root` and
+`--sounder-arg` arguments of steps 3 and 4, its prefix defaulting to `~/houdini_<version>`.
+An older copy exports environment variables that nothing reads now: if
+`grep -c -- --soapy-root ~/start_demo.sh` prints 0, bring the demo up with the steps below.
 
 1. On the rig host: `cat /sys/devices/system/cpu/isolated` reads `15-19`.
 2. For the X-band RF chain only: the roles and the LO check (A2b steps 1 and 2:
@@ -491,7 +494,7 @@ demo up with the steps below.
    ```sh
    source ~/houdini_test/bin/activate
    cd ~/repos/HoudiniLab-rxwin/CC/Sounder
-   python3 csi_gui/check_setup.py --soapy-root $HOME/houdini_0.3.1 --conf files/houdini-dualband-xw-steer-slots.json
+   python3 csi_gui/check_setup.py --soapy-root $HOME/houdini_0.4.0 --conf files/houdini-dualband-xw-steer-slots.json
    ```
 
    Ready, egress PASS on both nodes, the stacks match (the stack line's
@@ -504,7 +507,7 @@ demo up with the steps below.
    ```sh
    # optional: add --record ~/demo_rec/<name>.rec to record a fallback; a new name each start
    python3 csi_gui/csi_server.py --control --http-host 0.0.0.0 --configs labelled \
-     --soapy-root $HOME/houdini_0.3.1 \
+     --soapy-root $HOME/houdini_0.4.0 \
      --sounder-arg=--core_map=main=15 --sounder-arg=--tx_cpu_affinity=18,19 --sounder-arg=--tx_host_status \
      --replay "$HOME/demo_rec/replays/xband_chain_bench_60s.rec=Replay, X-band bench" \
      --replay "$HOME/demo_rec/replays/xband_ota_60s.rec=Replay, X-band over the air" \

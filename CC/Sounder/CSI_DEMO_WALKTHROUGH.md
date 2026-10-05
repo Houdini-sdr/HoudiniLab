@@ -139,6 +139,9 @@ fails.
   Houdini server, on a firmware stack your team has blessed. Board bring up is
   owned by the SoapyHoudiniSDR and Houdini-Streaming projects and is not
   covered here. If you did not set the boards up yourself, ask whoever did.
+  This code needs SoapyHoudiniSDR 0.4.0: its device module on both nodes and
+  its host plugin's prefix on `<host>` (each host plugin refuses another
+  release's radios). The setup check's `stack` lines show the release.
 - **A clock plan for the two boards.** Each board's reference is a device
   setting (`clock_ref`) that whoever provisions the boards sets; the full
   setup check (section 2.2) prints it on its `clock` line for each radio. One
