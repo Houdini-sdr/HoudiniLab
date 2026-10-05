@@ -6,7 +6,7 @@ the TDD framer STROBE, scored by the CLIENT's own gold correlation.
 The decoupled design is impossible (an armed framer silences a continuous replay), so
 the beacon must ride the framer strobe -- but that path gave the client only ~11 dB
 gold correlation while continuous replay synced. This isolates the strobe datapath:
-load /tmp/beacon_ram.bin (dumped by buildHoudiniBeacon, HOUDINI_DUMP_BEACON=1) into
+load /tmp/beacon_ram.bin (dumped by buildHoudiniBeacon, the sounder's --dump_beacon) into
 the replay RAM, play it two ways on .21, capture on .22, and for each correlate the
 capture against /tmp/gold.bin (gold_cf32, the 128-tap the client matches) exactly like
 find_beacon. If continuous >> strobe on the SAME RAM, the strobe datapath is the fault.
@@ -15,7 +15,7 @@ find_beacon. If continuous >> strobe on the SAME RAM, the strobe datapath is the
   B  strobe      TDD_SCHED '6..' + TDD_REPLAY_STROBE len=n_load/2 loops=forever + arm
 
 Run on the DGX (after: source houdini_test/bin/activate), having first produced the
-dumps by running the sounder once with HOUDINI_DUMP_BEACON=1 HOUDINI_DUMP_GOLD=1:
+dumps by running the sounder once with --dump_beacon --dump_gold:
     python3 houdini_beacon_ab.py
 """
 import argparse

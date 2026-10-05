@@ -30,12 +30,10 @@
 
 namespace {
 // Thread count for correlate_mt: an explicit request wins; else the value
-// set through CommsLib::setCorrelatorThreads (sync.detector.corr_threads,
-// the sounder's config sets it); else 1. Capped at the pool
-// size (hardware concurrency) at dispatch.
-// 0 = nothing set through the API yet: the environment is then read ONCE,
-// which is how the bench tools that link this library without a Config
-// (bench-correlator-rate, beacon_geometry_test, houdini_loopback) take it.
+// set through CommsLib::setCorrelatorThreads (the config's
+// sync.detector.corr_threads); else 1, which is what a program that links
+// this library without a Config gets (beacon_geometry_test). Capped at the
+// pool size (hardware concurrency) at dispatch.
 std::atomic<unsigned> g_corr_threads{0u};
 unsigned ResolveThreads(unsigned requested) {
   if (requested > 0) return requested;

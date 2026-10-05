@@ -455,9 +455,9 @@ int main() {
     f.extpin_unknown = true;
     auto p = uePlan();
     p.xband_fe_state = "tx";
-    std::string why;
-    try { houdini::modev::bringUp(f, p); } catch (const std::runtime_error& e) { why = e.what(); }
-    check(why.find("TDD_EXTPIN_CTRL: unknown setting") != std::string::npos && idx(f.calls, "rate TX ") < 0,
+    std::string why_x;
+    try { houdini::modev::bringUp(f, p); } catch (const std::runtime_error& e) { why_x = e.what(); }
+    check(why_x.find("TDD_EXTPIN_CTRL: unknown setting") != std::string::npos && idx(f.calls, "rate TX ") < 0,
           "AP-86: a plugin without the front-end keys stops the bring-up at the write, before any converter write "
           "[mutation: the write's error caught and the bring-up continued]");
   }

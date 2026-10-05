@@ -10,8 +10,6 @@
 #include "include/run_options.h"
 #include "include/houdini/stream_result.h"
 
-#include <SoapySDR/Errors.hpp>
-
 #include <algorithm>
 #include <chrono>
 #include <cmath>

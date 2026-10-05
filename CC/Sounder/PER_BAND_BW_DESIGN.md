@@ -135,7 +135,7 @@ halfband) to the 47-tap halfband, both zero phase, so no delay enters (P2b
 checks it on the X-band lane itself).
 
 What the rig must re-measure: nothing is recalibrated, but `pilot_grid_off` is
-logged (HOUDINI_BS_RX_DEBUG=1) and compared against the 1596 control (prediction
+logged (the sounder's `--bs_rx_debug`) and compared against the 1596 control (prediction
 P2). If a config ever put the X-band on lane 0 (`rx_channel` "CA"), the framer
 would edge-detect on the wide pilot and 169 would need re-deriving; no shipped
 config does, and the design note records it rather than guarding it.
@@ -317,7 +317,7 @@ Setup: the AP-79 V1/V2 stack, layout and wiring (`.22` BS, `.21` UE, the rig
 host `.26`), preflight as `DEMO_BENCH_RUNBOOK.md`. Interleaved A/B, the same
 session: B = `files/houdini-dualband.json` (the control), X =
 `files/houdini-dualband-xw.json`, in the order X, B, X, B, X, B, each about
-5 minutes with `HOUDINI_BS_RX_DEBUG=1` and `HOUDINI_CSI_DUMP` set, the X runs
+5 minutes with the sounder's `--bs_rx_debug` and `--csi_dump` (fstage_run.sh passes both), the X runs
 under their own rung tag (for example `xw`, so `fstage_report.py` never averages
 them with 1596-tone runs). Carrier offset is the dominant MER term (9.13, 9.49),
 so every MER comparison is at a matched offset window, and one run is not a

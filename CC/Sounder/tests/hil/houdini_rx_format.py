@@ -10,7 +10,7 @@ one-sided (upper SB only) so the wideband Gold code is half-cut and find_beacon 
 by gold correlation + sideband split, to pin the format as the cause.
 
 Run on the DGX (after: source houdini_test/bin/activate), needs /tmp/beacon_ram.bin +
-/tmp/gold.bin (from a sounder run with HOUDINI_DUMP_BEACON=1 HOUDINI_DUMP_GOLD=1):
+/tmp/gold.bin (from a sounder run with --dump_beacon --dump_gold):
     python3 houdini_rx_format.py
 """
 import os
