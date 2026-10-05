@@ -174,16 +174,23 @@ int main() {
     std::string txt3((std::istreambuf_iterator<char>(in3)), std::istreambuf_iterator<char>());
     const size_t sat3 = txt3.find(sym_key);
     std::string why3;
+    bool ue_only_loaded = false;
     if (sat3 != std::string::npos) {
       txt3.replace(sat3, sym_key.size(), "\"ofdm_symbol_per_slot\": 13,");
       const char* tmp3 = "files/.sh488_untiled_tmp.json";
       std::ofstream(tmp3) << txt3;
       try { Config bad(tmp3, "/tmp", false, false, false); } catch (const std::invalid_argument& e) { why3 = e.what(); }
+      // A client-only run opens no BS, so no BS framer: the same config loads.
+      try { Config ue(tmp3, "/tmp", false, true, false); ue_only_loaded = true; } catch (const std::exception& e) {
+        std::printf("client-only config: %s\n", e.what());
+      }
       std::remove(tmp3);
     }
     check(why3.find("tile the slot") != std::string::npos,
           "a framer config without bs_rx_slots and with a slot no packet tiles is refused at load [mutation: the "
           "check gated on bs_rx_slots]");
+    check(ue_only_loaded, "the same config loads for a client-only run, which arms no BS framer [mutation: the "
+                          "check not gated on a present BS]");
     // The rule is the Houdini device's: the same config read as Iris, with an
     // odd slot no packet divides, loads.
     std::ifstream in4("files/houdini-r0.json");

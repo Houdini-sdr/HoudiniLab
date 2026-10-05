@@ -533,7 +533,7 @@ Config::Config(const std::string& jsonfile, const std::string& directory,
   if (bs_rx_slots_ && !bs_hw_framer_) {
     throw std::invalid_argument("bs_rx_slots needs bs_hw_framer (the native TDD framer arms the pattern)");
   }
-  if (is_houdini() && bs_hw_framer_ && houdini::rxpkt::framerPacket(samps_per_slot_, rate_) > 0 &&
+  if (is_houdini() && bs_present_ && bs_hw_framer_ && houdini::rxpkt::framerPacket(samps_per_slot_, rate_) > 0 &&
       houdini::rxpkt::tiledPacketOrDefault(samps_per_slot_) == 0) {
     // The tiling packet is smaller than 3/4 of the default one: the host's
     // receive load rises with the packet rate. Allowed (the device refuses a
@@ -544,7 +544,7 @@ Config::Config(const std::string& jsonfile, const std::string& directory,
               pkt, houdini::rxpkt::deviceSamples(houdini::rxpkt::kDefaultMtu),
               static_cast<double>(houdini::rxpkt::deviceSamples(houdini::rxpkt::kDefaultMtu)) / pkt);
   }
-  if (is_houdini() && bs_hw_framer_ && houdini::rxpkt::framerPacket(samps_per_slot_, rate_) == 0) {
+  if (is_houdini() && bs_present_ && bs_hw_framer_ && houdini::rxpkt::framerPacket(samps_per_slot_, rate_) == 0) {
     throw std::invalid_argument("the BS's TDD framer needs packets that tile the slot (the device refuses a TDD RX "
                                 "packet that does not divide the slot or spans under " +
                                 std::to_string(houdini::rxpkt::kMinFramerTicks) + " ticks, SH-488); a " +
