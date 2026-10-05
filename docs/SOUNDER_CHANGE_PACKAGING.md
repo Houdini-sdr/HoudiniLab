@@ -108,7 +108,7 @@ own. They are the candidate `fix/legacy-sounder` series.
 
 DECIDED 2026-09-03 (recorded in `RADIO_PLATFORM_SEAM.md` section 1): the
 environment-override default flips to off with the bench scripts moved to
-the JSON overlay; the ledger and walkthrough stay and the raw captures and
+the JSON overlay (since removed outright, AP-111); the ledger and walkthrough stay and the raw captures and
 superseded probes move out at branch landing; Iris and UHD remain
 inspection-only with a build matrix; the packet width and the portable
 correlator are accepted; Agora's radio abstraction is adopted in shape, not
@@ -124,6 +124,7 @@ need its own verification against `master`'s tree. Order of operations: push
 the PR; the raw captures leave the tip before the PR (section 4, item 3,
 folded into the landing).
 
+Still open:
 
 - Whether the evidence captures (`tests/demo-verify/evidence`, 3.9 MB), the
   ledgers (`DEMO_VERIFICATION.md`, `DEMO_BENCH_RUNBOOK.md`, `BACKLOG.md`,

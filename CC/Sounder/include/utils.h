@@ -51,8 +51,8 @@ class Utils {
     if (s <= -32768.0f) return -32768;
     return static_cast<int16_t>(s);
   }
-  /// Where the dump diagnostics and per-node records write (HOUDINI_DUMP_*,
-  /// --csi_dump, ...): --dump_dir, else /tmp. `file` is the bare
+  /// Where the dump diagnostics and per-node records write (the --dump_*
+  /// flags, --csi_dump, ...): --dump_dir, else /tmp. `file` is the bare
   /// file name.
   static std::string dumpPath(const char* file);
   static std::vector<std::complex<int16_t>> cfloat_to_cint16(

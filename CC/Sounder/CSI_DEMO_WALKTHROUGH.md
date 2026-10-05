@@ -366,7 +366,7 @@ list shows. All of them run one client. Each names its own topology file in
 
 | Config | What it runs |
 |---|---|
-| `files/houdini-dualband-xw-steer-slots.json` | **The demo.** Sub-6 2425 MHz at 133 RB plus the X-band IF at 4380 MHz at 270 RB (97.2 MHz), 4096 FFT, 30 kHz spacing; the UE's clock steered onto the beacon; the base station receives only its rx slots and removes the carrier offset before the FFT. Needs a host plugin with the slots gate, 0.3.0 or newer (`--soapy-root`, `DEMO_BENCH_RUNBOOK.md` A3) |
+| `files/houdini-dualband-xw-steer-slots.json` | **The demo.** Sub-6 2425 MHz at 133 RB plus the X-band IF at 4380 MHz at 270 RB (97.2 MHz), 4096 FFT, 30 kHz spacing; the UE's clock steered onto the beacon; the base station receives only its rx slots and removes the carrier offset before the FFT. Needs the release's host plugin (`--soapy-root`, section 2.1; `DEMO_BENCH_RUNBOOK.md` A3) |
 | `files/houdini-dualband-xw-steer-slots-fe.json` | The demo through an X-band front end held in a static TX/RX state for the session |
 | `files/houdini-dualband-xw-steer.json` | The demo's widths and steering, receiving every slot (the config of the earlier frozen fallback build) |
 | `files/houdini-dualband-xw-steer-fe.json` | That, through the X-band front end |
@@ -386,9 +386,9 @@ list shows. All of them run one client. Each names its own topology file in
 The `-fe` configs set `xband_frontend_static`: they need the X-band front-end
 boards' roles applied on both nodes (`sudo houdini-role status` exits 0 on
 each) and are refused at start without them. The slots configs
-(`bs_rx_slots`) need a host plugin with the slots gate (device 0.3.0 or newer);
-select the release's plugin with `--soapy-root <host-plugin-prefix>` on the
-setup check and the dashboard.
+(`bs_rx_slots`) use the host plugin's slots gate, which the release in
+section 2.1 has; select that release's plugin with
+`--soapy-root <host-plugin-prefix>` on the setup check and the dashboard.
 
 On a new bench, go up the dual-band ladder one rung at a time: `r0` proves the
 link and the stack, `r1` the converter clocks and the sub-6 band, `r2` adds the

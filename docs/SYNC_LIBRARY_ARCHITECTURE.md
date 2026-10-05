@@ -100,9 +100,10 @@ consumes and returns plain structs, so the same sequence runs in a test against
 ## 5. Configuration
 
 A `sync` object in the existing JSON config, one struct in code, validated on
-load. Diagnostics that dump files or print profiles stay as environment
-variables: they are not configuration, and a dump switch in a shipped JSON is a
-foot-gun. Numeric and behavioural knobs move.
+load. Diagnostics that dump files or print profiles are the sounder's flags
+(`--dump_*`, the `--*_debug` switches), not JSON keys: they are not
+configuration, and a dump switch in a shipped JSON is a foot-gun. Numeric and
+behavioural knobs move.
 
 ```json
 "sync": {

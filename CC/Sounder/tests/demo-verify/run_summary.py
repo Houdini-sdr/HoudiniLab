@@ -58,7 +58,8 @@ def verdict(L):
     # the nodes cabled in loopback). The UE locks on the beacon first, and the
     # BS's CSI view then scores constellations from its uplink. Only a confirmed
     # lock counts: a detection line is written before the SNR floor and the
-    # confirm judge it, and a rejected one is a clientSyncBeacon line too.
+    # confirm judge it, and a rejected one is a clientSyncBeacon line too. Every
+    # Houdini run acquires through houdiniAcquireAnchor (Config::sync_model).
     if not any("lock CONFIRMED" in l for l in L):
         out.append(("FAIL", "UE: never locked on the beacon (no 'lock CONFIRMED' line): no data flowed"))
     cns = cns_total(L)
