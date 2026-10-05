@@ -21,7 +21,9 @@
  * sample rate on the DGX Spark.
  *
  * Usage: correlator-rate-bench [iters [threads]]; threads is the correlator's
- * thread count (the sounder's sync.detector.corr_threads), 1 by default.
+ * thread count (the sounder's sync.detector.corr_threads), 1 by default. The
+ * correlator caps it at the host's cores, and runs a window under 4096
+ * samples on one thread whatever is set.
  */
 #include <sys/types.h>  // ssize_t
 
@@ -34,6 +36,7 @@
 #include <cstdlib>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "comms-lib.h"
@@ -93,7 +96,12 @@ int main(int argc, char** argv) {
   const size_t beacon_pos = 501;
   const int iters = (argc > 1) ? std::atoi(argv[1]) : 200;
   const int threads = (argc > 2) ? std::atoi(argv[2]) : 1;
-  if (threads > 0) CommsLib::setCorrelatorThreads(static_cast<unsigned>(threads));
+  if (threads < 1) {
+    std::fprintf(stderr, "usage: correlator-rate-bench [iters [threads]]: threads must be at least 1\n");
+    return 2;
+  }
+  CommsLib::setCorrelatorThreads(static_cast<unsigned>(threads));
+  const unsigned used = std::min(static_cast<unsigned>(threads), std::max(1u, std::thread::hardware_concurrency()));
   const int warmup = 20;
   const std::vector<size_t> windows = {1024,  2048,  4096,  8192,
                                        16384, 32768, 65536};
@@ -103,9 +111,10 @@ int main(int argc, char** argv) {
 
   printf("UE beacon correlator (CommsLib::find_beacon_avx) throughput\n");
   printf(
-      "seqLen=%d reps=%d iters=%d threads=%d   Houdini rates: 30.72 / 61.44 / "
+      "seqLen=%d reps=%d iters=%d threads=%u%s   Houdini rates: 30.72 / 61.44 / "
       "122.88 MSPS\n\n",
-      kSeqLen, kGoldReps, iters, threads);
+      kSeqLen, kGoldReps, iters, used,
+      used < static_cast<unsigned>(threads) ? " (capped at the cores)" : "");
   printf("%9s %12s %10s   %-14s %s\n", "window", "usec/call", "MSPS",
          "sustains", "detect");
 
