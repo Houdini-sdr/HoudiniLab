@@ -31,9 +31,10 @@
 namespace {
 // Thread count for correlate_mt: an explicit request wins; else the value
 // set through CommsLib::setCorrelatorThreads (the config's
-// sync.detector.corr_threads); else 1, which is what a program that links
-// this library without a Config gets (beacon_geometry_test). Capped at the
-// pool size (hardware concurrency) at dispatch.
+// sync.detector.corr_threads, or correlator-rate-bench's threads argument);
+// else 1, which is what a program that links this library without a Config
+// and sets nothing gets (beacon_geometry_test). Capped at the pool size
+// (hardware concurrency) at dispatch.
 std::atomic<unsigned> g_corr_threads{0u};
 unsigned ResolveThreads(unsigned requested) {
   if (requested > 0) return requested;
