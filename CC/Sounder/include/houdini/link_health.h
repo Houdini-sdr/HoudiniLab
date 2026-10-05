@@ -189,9 +189,17 @@ inline const std::vector<std::string>& hostAlarmFields() {
   return f;
 }
 
+/// Which host statuses answered a pass. An answer always carries its totals
+/// (`eob_recloses=`, `rxq_ovfl=`, ..), also with no stream of its direction
+/// open, so a status with no counts at all returned nothing.
+struct HostRead {
+  bool rx = false;
+  bool tx = false;
+};
+
 /// The alarm counters from one pass over the status keys, flattened to
 /// {'tx0.late', 'rx0.gated', 'host.rxq_ovfl_ch0', 'egress.drop_p0', ..}.
-inline Counters collectCounters(const Read& read) {
+inline Counters collectCounters(const Read& read, HostRead* host_read = nullptr) {
   Counters out;
   auto bank = [&out](const std::string& raw, const std::string& pre, const std::vector<std::string>& fields) {
     for (const auto& ch : parseBankStatus(raw)) {
@@ -216,7 +224,9 @@ inline Counters collectCounters(const Read& read) {
   bank(read("RX_BANK_STATUS"), "rx", rxAlarmFields());
   // The per-stream keys only: a closing stream takes its counts out of the total.
   for (const char* key : {"TX_HOST_STATUS", "RX_HOST_STATUS"}) {
-    for (const auto& kv : parseFlatCounts(read(key))) {
+    const Counters flat = parseFlatCounts(read(key));
+    if (host_read != nullptr && !flat.empty()) (key[0] == 'T' ? host_read->tx : host_read->rx) = true;
+    for (const auto& kv : flat) {
       const auto at = kv.first.rfind("_ch");
       if (at == std::string::npos || !detail::isDigits(kv.first.substr(at + 3))) continue;
       const std::string field = kv.first.substr(0, at);
@@ -275,15 +285,13 @@ inline bool txHostKey(const std::string& k) { return k.rfind("host.eob_recloses_
 /// replace the state with the read: an empty or partial read would erase the
 /// baseline, and the next full read would then report every counter's whole
 /// running total as new. The exception is a per-stream host key missing from
-/// a host status that returned others: its stream closed, and a key that
-/// appears again counts from zero (HOUDINI_PROTOCOL 2.7), so it is not carried.
-inline Counters carryCounters(const Counters& prev, const Counters& cur) {
-  bool host_read[2] = {false, false};  // [0] RX_HOST_STATUS, [1] TX_HOST_STATUS
-  for (const auto& kv : cur)
-    if (kv.first.rfind("host.", 0) == 0) host_read[txHostKey(kv.first) ? 1 : 0] = true;
+/// a host status that answered (`host_read`, also when its last stream closed):
+/// its stream closed, and a key that appears again counts from zero
+/// (HOUDINI_PROTOCOL 2.7), so it is not carried.
+inline Counters carryCounters(const Counters& prev, const Counters& cur, const HostRead& host_read = {}) {
   Counters out;
   for (const auto& kv : prev) {
-    const bool closed = kv.first.rfind("host.", 0) == 0 && host_read[txHostKey(kv.first) ? 1 : 0] &&
+    const bool closed = kv.first.rfind("host.", 0) == 0 && (txHostKey(kv.first) ? host_read.tx : host_read.rx) &&
                         cur.count(kv.first) == 0;
     if (!closed) out.insert(kv);
   }
@@ -347,7 +355,8 @@ class LinkHealth {
   const std::vector<int>& txUnjudged() const { return tx_unjudged_; }
 
   Report check() {
-    const Counters cur = collectCounters(read_);
+    HostRead host_read;
+    const Counters cur = collectCounters(read_, &host_read);
     const long long ir = irq();
     const double t = now_();
     const double dt = std::max(t - prev_t_, 1e-9);
@@ -368,7 +377,7 @@ class LinkHealth {
     for (const auto& i : now_items) standing_.insert(preflightKey(i));
     first_ = false;
     r.increases = counterIncreases(prev_, cur);
-    prev_ = carryCounters(prev_, cur);
+    prev_ = carryCounters(prev_, cur, host_read);
     prev_irq_ = ir;
     prev_t_ = t;
     return r;

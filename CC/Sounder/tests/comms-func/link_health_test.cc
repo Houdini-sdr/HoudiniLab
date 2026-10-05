@@ -139,6 +139,18 @@ int main(int argc, char** argv) {
     r.keys["RX_HOST_STATUS"] = "rxq_ovfl=63 rxq_ovfl_ch0=60 rxq_ovfl_ch2=3";
     check(open0 && closed0 && eq(hr.check().alarms(), {"host.rxq_ovfl_ch0 +60"}),
           "a stream reopened on a channel counts from zero (mutation: the closed stream's key carried, +58)");
+    // The LAST TX stream closes: the status answers with its total alone, and
+    // a stream reopened on ch0 still counts from zero.
+    FakeNode t;
+    t.keys["TX_HOST_STATUS"] = "eob_recloses=5 eob_recloses_ch0=5";
+    LinkHealth ht(t.read(), "ue", t.clock());
+    const bool open_t = ht.check().alarms().empty();
+    t.keys["TX_HOST_STATUS"] = "eob_recloses=0";
+    const bool closed_t = ht.check().alarms().empty();
+    t.keys["TX_HOST_STATUS"] = "eob_recloses=7 eob_recloses_ch0=7";
+    check(open_t && closed_t && eq(ht.check().alarms(), {"host.eob_recloses_ch0 +7"}),
+          "after the last stream's close a reopened stream counts from zero (mutation: a status judged answered "
+          "only by its per-stream keys, the old 5 carried, +2)");
     FakeNode e;
     LinkHealth he(e.read(), "bs", e.clock());
     e.keys["RX_HOST_STATUS"] = "";  // a failed RX read: nothing of it returned
