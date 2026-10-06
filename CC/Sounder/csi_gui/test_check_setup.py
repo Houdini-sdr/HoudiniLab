@@ -70,7 +70,7 @@ open(os.path.join(fake, "SoapySDR.py"), "w").write(
     "        setattr(self, '__closed__', True)\n"
     "    def __del__(self): self.close()\n"
     % (root, info_file, os.path.join(root, "clock.json"), egress_file, os.path.join(root, "unmade")))
-HEALTHY = "drop=p0:0,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marked=p0:0,p1:0,p2:0,p3:0"
+HEALTHY = "drop=p0:0,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marked=0"
 json.dump({"127.0.0.1": HEALTHY, "127.0.0.2": HEALTHY}, open(egress_file, "w"))
 clock_file = os.path.join(root, "clock.json")
 def clock_adj(dac, cal=408):
@@ -108,7 +108,7 @@ check(lv.get("stack match") == "PASS" and lv.get("server 127.0.0.2") == "PASS", 
 check(sorted(open(os.path.join(root, "unmade")).read().split()) == ["127.0.0.1", "127.0.0.2"],
       "each radio opened for its stack is closed exactly once, not dropped at exit (fails on a direct Device.unmake: the binding's __del__ repeats it)")
 check(all(l != "WARN" for l in lv.values()), "no warnings on a ready host: %s" % lv)
-# Fails under: never reading CLOCK_ADJ (both then report INFO 'not readable').
+# Fails under: never reading CLOCK_ADJ (both then FAIL 'read back empty').
 check(all(r["level"] == "INFO" and "offset 0" in r["detail"] for r in rep["results"]
           if r["what"] in ("clock 127.0.0.1", "clock 127.0.0.2"))
       and lv.get("clock 127.0.0.1") == "INFO" and lv.get("clock 127.0.0.2") == "INFO",
@@ -145,18 +145,18 @@ json.dump({"127.0.0.1": same, "127.0.0.2": same}, open(info_file, "w"))
 rc, rep, lv = run()
 check(lv.get("egress 127.0.0.1") == "PASS" and lv.get("egress 127.0.0.2") == "PASS",
       "healthy egress passes on each node (breaks if check_egress is not called)")
-json.dump({"127.0.0.1": HEALTHY, "127.0.0.2": "drop=p0:255,p1:0,p2:0,p3:0;stall_seen=1,stall_evt=255;marked=p0:0,p1:0,p2:0,p3:0"},
+json.dump({"127.0.0.1": HEALTHY, "127.0.0.2": "drop=p0:255,p1:0,p2:0,p3:0;stall_seen=1,stall_evt=255;marked=0"},
           open(egress_file, "w"))
 rc, rep, lv = run()
 check(rc == 1 and lv["egress 127.0.0.2"] == "FAIL" and lv["egress 127.0.0.1"] == "PASS",
       "a sticky stall fails that node only (breaks if the stall branch is a WARN or keyed to the wrong node)")
-json.dump({"127.0.0.1": HEALTHY, "127.0.0.2": "drop=p0:17,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marked=p0:0,p1:0,p2:0,p3:0"},
+json.dump({"127.0.0.1": HEALTHY, "127.0.0.2": "drop=p0:17,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marked=0"},
           open(egress_file, "w"))
 rc, rep, lv = run()
 check(rc == 0 and lv["egress 127.0.0.2"] == "PASS", "drops without the stall bit pass (breaks if any nonzero count fails)")
 # Saturated at 255 (only an egress reset clears them): a WARN naming the port,
 # since the run's link health is then blind to new drops; not a FAIL.
-json.dump({"127.0.0.1": HEALTHY, "127.0.0.2": "drop=p0:255,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marked=p0:0,p1:0,p2:0,p3:0"},
+json.dump({"127.0.0.1": HEALTHY, "127.0.0.2": "drop=p0:255,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marked=0"},
           open(egress_file, "w"))
 rc, rep, lv = run()
 det = [r["detail"] for r in rep["results"] if r["what"] == "egress 127.0.0.2"]
@@ -216,7 +216,7 @@ check(rc == 1 and lv.get("stack 127.0.0.2") == "FAIL" and fix and "run this chec
       and "venv" not in fix[0],
       "a timeout that persists FAILs with the slow-open advice, not the venv's (mutation: the old advice): %s" % fix)
 os.remove(slow)
-# The device's single marked=N form (older builds printed it per port).
+# The device's single marked=N count.
 json.dump({"127.0.0.1": "drop=p0:0,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marked=1",
            "127.0.0.2": "drop=p0:0,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marked=255"}, open(egress_file, "w"))
 rc, rep, lv = run()
@@ -227,11 +227,20 @@ json.dump({"127.0.0.1": "drop=p0:0,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marke
            "127.0.0.2": "drop=p0:3,p1:2,p2:0,p3:255;stall_seen=1,stall_evt=7;marked=5"}, open(egress_file, "w"))
 rc, rep, lv = run()
 check(rc == 1 and lv["egress 127.0.0.1"] == "PASS" and lv["egress 127.0.0.2"] == "FAIL",
-      "0.3.1's strings (the software lane's T0): clean passes, a recorded stall fails (mutation: stall_seen not read)")
+      "the device's own strings (its lifecycle test's golden lines): clean passes, a recorded stall fails (mutation: "
+      "stall_seen not read)")
 json.dump({"127.0.0.1": HEALTHY}, open(egress_file, "w"))
 rc, rep, lv = run()
-check(rc == 0 and lv["egress 127.0.0.2"] == "WARN", "an unreadable EGRESS_STATUS is a WARN (breaks if it passes silently or fails the run)")
+check(rc == 1 and lv.get("stack 127.0.0.2") == "FAIL" and "egress 127.0.0.2" not in lv and lv["egress 127.0.0.1"] == "PASS",
+      "an EGRESS_STATUS read that throws fails that node's stack read (mutation: the old fallback, a WARN): %s" % lv)
 json.dump({"127.0.0.1": HEALTHY, "127.0.0.2": HEALTHY}, open(egress_file, "w"))
+json.dump({"127.0.0.1": same, "127.0.0.2": {k: v for k, v in same.items() if k != "host_version"}}, open(info_file, "w"))
+rc, rep, lv = run()
+det = [r["detail"] for r in rep["results"] if r["what"] == "stack 127.0.0.2"]
+check(rc == 1 and lv.get("stack 127.0.0.2") == "FAIL" and det and "host_version" in det[0] and "stack match" not in lv
+      and "lockstep 127.0.0.2" not in lv,
+      "a hardware info that lacks a stack key FAILs that node, naming the key (mutation: an absent key tolerated): %s" % lv)
+json.dump({"127.0.0.1": same, "127.0.0.2": same}, open(info_file, "w"))
 rc, rep, lv = run(conf="files/houdini-bad.json"); check(rc == 1 and lv["config"] == "FAIL", "a config that is not JSON fails 'config'")
 rc, rep, lv = run(conf="files/none.json"); check(rc == 1 and lv["config"] == "FAIL", "a missing config fails 'config'")
 os.utime(os.path.join(sd, "a.cc"), None); os.utime(exe, (time.time() - 60, time.time() - 60))

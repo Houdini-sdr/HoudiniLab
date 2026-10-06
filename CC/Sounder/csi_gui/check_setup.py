@@ -18,7 +18,7 @@ What it checks, in order:
   4. the SoapyHoudiniSDR host examples the framer teardown imports;
   5. no other sounder on this host holds these radios (one on other radios is named);
   6. each radio's server answers on the config's remote port;
-  7. (full form only) each radio's stack: gateware, firmware, plugin and protocol
+  7. (full form only) each radio's stack: gateware, firmware and plugin
      versions, which must agree between the nodes; each radio's data egress,
      which must not have stalled (EGRESS_STATUS stall_seen); and each radio's
      clock steering offset (CLOCK_ADJ), which should be 0.
@@ -312,15 +312,10 @@ def hwinfo(ip, port):
                            "remote:driver": "houdinisdr-device", "remote:type": "houdinisdr",
                            "timeout": "3000000"})
     try:
+        # A read that throws fails this node's stack read (check_versions).
         info = dict(sdr.getHardwareInfo())
-        try:
-            info["egress_status"] = sdr.readSetting("EGRESS_STATUS")
-        except Exception as e:  # an older plugin: check_egress says so
-            info["egress_status"] = "unreadable: %s" % e
-        try:
-            info["_clock_adj"] = str(sdr.readSetting("CLOCK_ADJ"))
-        except Exception:  # a plugin without the setting
-            info["_clock_adj"] = ""
+        info["egress_status"] = sdr.readSetting("EGRESS_STATUS")
+        info["_clock_adj"] = str(sdr.readSetting("CLOCK_ADJ"))
         return info
     finally:
         # A clean close: a connection dropped at process exit leaves a
@@ -336,25 +331,24 @@ def check_egress(rep, ip, raw):
     # merge sat in a frame without progress, as when the host's data port went
     # down under it, the radio sends nothing more over a link that is up, until
     # its gateware is reloaded. The per-port drop counts alone are not that.
-    m = re.search(r"stall_seen=(\d+)", raw or "")
+    m = re.search(r"stall_seen=(\d+)", raw)
     if m is None:
-        rep.add("WARN", "egress %s" % ip, "EGRESS_STATUS not readable (%s)" % (raw or "empty")[:120],
-                "Update the radio's firmware and this host's plugin; until then a stalled data path shows only as a run with no samples.")
+        rep.add("FAIL", "egress %s" % ip, "EGRESS_STATUS has no stall_seen field (%s)" % (raw or "empty")[:120],
+                "Run the check again; if it persists, the radio does not run the plugin's release (ask whoever "
+                "maintains the boards).")
     elif int(m.group(1)):
         rep.add("FAIL", "egress %s" % ip, "the radio's data egress has stalled (%s); it will send no samples although its link is up" % raw,
                 "Reload the radio's gateware (PL) or reboot the radio. A bounce of this host's data port (a host reboot, a cable pull) causes it.")
     else:
         # The per-port drop counters and the one marked-frame counter saturate
         # at 255 and only a node boot or a PL reload clears them: saturated,
-        # the run's link health cannot see a new egress drop (it reports them
-        # as blind). Older device builds printed marked per port.
-        full = []
-        for grp, body in re.findall(r"(drop|marked)=([^;]*)", raw or ""):
-            ports = re.findall(r"(p\d+):(\d+)", body)
-            if ports:
-                full += ["%s %s" % (grp, port) for port, v in ports if int(v) >= 255]
-            elif body.strip().isdigit() and int(body) >= 255:
-                full.append(grp)
+        # the run's link health cannot see a new egress drop.
+        drop = re.search(r"drop=([^;]*)", raw)
+        marked = re.search(r"marked=(\d+)", raw)
+        full = ["drop %s" % port for port, v in re.findall(r"(p\d+):(\d+)", drop.group(1) if drop else "")
+                if int(v) >= 255]
+        if marked and int(marked.group(1)) >= 255:
+            full.append("marked")
         if full:
             rep.add("WARN", "egress %s" % ip, "no data-path stall recorded, but the egress counters %s are saturated "
                     "at 255, so a new egress drop in the run goes unseen" % ", ".join(full),
@@ -380,7 +374,8 @@ def check_clock(rep, ip, port, st, root=None):
     f = dict(kv.split("=", 1) for kv in st.split() if "=" in kv)
     off = f.get("offset", "")
     if not st:
-        rep.add("INFO", "clock %s" % ip, "CLOCK_ADJ not readable (a plugin without the setting)")
+        rep.add("FAIL", "clock %s" % ip, "CLOCK_ADJ read back empty",
+                "Run the check again; if it persists, ask whoever maintains the boards.")
     elif f.get("ref") == "calibrated" and not off.lstrip("-").isdigit():
         # Calibrated but out of its hold: PLL1 is tracking, so the tick is not at
         # the calibrated frequency (the device warns at make() too).
@@ -428,32 +423,39 @@ def check_versions(rep, sd, nodes, port, env, root=None):
         else:
             fix = "If the radio is held by another run, stop that run first."
         rep.add("FAIL", "stack %s" % ip, "could not read the radio's hardware info (%s)" % err[:160], fix)
+    for ip in list(infos):
+        missing = [k for k in MUST_MATCH if k not in infos[ip]]
+        if missing:
+            rep.add("FAIL", "stack %s" % ip, "the radio's hardware info lacks %s: not a SoapyHoudiniSDR 0.4.0 stack"
+                    % ", ".join(missing), "Run with the release's host prefix (--soapy-root) against radios on "
+                    "that release (ask whoever maintains the boards).")
+            del infos[ip]
     if not infos:
         return
     for ip, info in infos.items():
-        rep.add("INFO", "stack %s" % ip, " ".join("%s=%s" % (k, info.get(k, "<absent>")) for k in MUST_MATCH))
+        rep.add("INFO", "stack %s" % ip, " ".join("%s=%s" % (k, info[k]) for k in MUST_MATCH))
         # The driver's release lockstep: one release on the host plugin and the
-        # radio's device module (node_version.h lockstepMismatch, the sounder's twin).
-        hv, dv = info.get("host_version"), info.get("device_version")
-        if hv and dv and hv != dv:
+        # radio's device module.
+        hv, dv = info["host_version"], info["device_version"]
+        if hv != dv:
             rep.add("FAIL", "lockstep %s" % ip, "the host plugin is release %s and the radio's device module %s"
                     % (hv, dv), "Run with the host prefix of the radio's release, or deploy the plugin's release "
                     "to the radio (ask whoever maintains the boards).")
-        check_egress(rep, ip, info.get("egress_status"))
-        check_clock(rep, ip, port, info.get("_clock_adj", ""), root)
+        check_egress(rep, ip, info["egress_status"])
+        check_clock(rep, ip, port, info["_clock_adj"], root)
     if len(infos) < 2:
         return
-    diff = [k for k in MUST_MATCH if len({i.get(k, "<absent>") for i in infos.values()}) > 1]
+    diff = [k for k in MUST_MATCH if len({i[k] for i in infos.values()}) > 1]
     if diff:
         rep.add("FAIL", "stack match", "the nodes differ in %s" % ", ".join(diff),
                 "Put both radios on the same blessed stack (ask whoever maintains the boards).")
     else:
-        rep.add("PASS", "stack match", "both nodes on the same gateware, firmware, plugin and protocol")
+        rep.add("PASS", "stack match", "both nodes on the same gateware, firmware and plugin")
     # A release pairs the host plugin with the radios' device build (lockstep);
     # a mismatch is a stale or wrong --soapy-root.
     for ip, info in sorted(infos.items()):
-        hb, db = info.get("host_build"), info.get("device_build")
-        if hb and db and hb != db:
+        hb, db = info["host_build"], info["device_build"]
+        if hb != db:
             rep.add("WARN", "plugin build %s" % ip, "the host plugin (host_build %s) is not this radio's device "
                     "build (%s)" % (hb, db),
                     "Pass --soapy-root with the prefix built with the radios' release (the demo rig's is in "
