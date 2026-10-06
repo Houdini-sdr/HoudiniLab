@@ -84,11 +84,11 @@ check([t for lv, t in v if lv == "WARN"] == ["late releases (host pacer): ch0 0,
       "late releases are the cumulative counter's peak per channel, not its line count (mutation: count lines)")
 # With a readable status beside it (a second radio, or a read that worked once),
 # only the explicit rule can fail the unreadable one.
-v = rs.verdict(GOOD + ["57:1 WARNG: BS 192.168.10.22: RX_HOST_STATUS unreadable: RemoteError: unknown key"])
+v = rs.verdict(GOOD + ["57:1 WARNG: BS 192.168.10.22: RX_HOST_STATUS unreadable: RX_HOST_STATUS: rxq_ovfl_ch0 is unreadable"])
 check(any(lv == "FAIL" and "unreadable" in t for lv, t in v),
       "an unreadable RX_HOST_STATUS fails even beside a readable one (mutation: drop the unreadable rule)")
 v = rs.verdict([l for l in GOOD if "RX_HOST_STATUS" not in l]
-               + ["57:1 WARNG: BS 192.168.10.22: RX_HOST_STATUS unreadable: RemoteError: unknown key"])
+               + ["57:1 WARNG: BS 192.168.10.22: RX_HOST_STATUS unreadable: RX_HOST_STATUS: rxq_ovfl_ch0 is unreadable"])
 check("FAIL" in [lv for lv, _ in v] and not any("counters 0" in t for _, t in v),
       "an unreadable RX_HOST_STATUS alone fails instead of passing with no counters (mutation: match any line naming the key)")
 check("FAIL" in levels([l.replace(" tdd_straddle=0", "") for l in GOOD]),
@@ -130,10 +130,11 @@ check(rs.pilot_frames(PB) == (14, 2), "a schedule line counts its N frames (muta
 C31 = ["57:1 INFOR: UE 192.168.10.21 TX_HOST_STATUS: eob_recloses=0 eob_recloses_ch0=0 eob_recloses_ch1=0 offset_us_ch0=-25.8 "
        "offset_samples_ch0=4 offset_implausible_ch0=0 anchor_rejects_ch0=0 rate_ppm_ch0=-0.00 late_refusals_ch0=0 "
        "write_min_margin_us_ch0=29753.6 release_min_margin_us_ch0=-64417.1 release_late_ch0=24691 burst_refusals_ch0=0 "
-       "cold_releases_ch0=12710 cold_window_ms_ch0=249.6"]
+       "cold_releases_ch0=12710 cold_window_ms_ch0=249.6 ring_bytes_ch0=268435456 ring_slots_ch0=32768"]
 w31 = [t for lv, t in rs.verdict(GOOD + C31) if lv == "WARN"]
 check(any("late releases" in t and "ch0 24691" in t for t in w31) and not any("12710" in t for t in w31),
-      "0.3.1's TX_HOST_STATUS: release_late read as before, the cold keys not taken for it (mutation: a looser key "
+      "0.4.0's TX_HOST_STATUS (its key order, the ring keys last): release_late read, the cold and ring keys not "
+      "taken for it (mutation: a looser key "
       "pattern): %s" % w31)
 # main: the exit status is the verdict's, read from a run directory's largest log
 d = tempfile.mkdtemp(prefix="run_summary_")
