@@ -24,9 +24,9 @@ difference between "cleared" and "could not clear".
 This opens a connection to each radio, so it IS a device-touching operation. Do
 not run it against boards someone else is using.
 
-Requires the SoapyHoudiniSDR host examples (for `houdini_setup`). Point
-HOUDINI_EXAMPLES at them if they are not at the default location, matching how
-`tests/hil/beacon_tdd.py` resolves the same dependency.
+Requires the SoapyHoudiniSDR host examples (for `houdini_setup`): --examples
+names them if they are not at the default location, and --soapy-root names the
+release's host-plugin prefix.
 """
 import argparse
 import json
@@ -42,23 +42,22 @@ _SOUNDER = os.path.dirname(_HERE)
 _HIL = os.path.join(_SOUNDER, "tests", "hil")
 
 # Cross-repo dependency: houdini_setup ships with the SoapyHoudiniSDR host
-# examples. Same env var and default that tests/hil uses.
-_EXAMPLES = os.environ.get(
-    "HOUDINI_EXAMPLES",
-    os.path.expanduser("~/repos/SoapyHoudiniSDR/host/examples"))
+# examples (--examples, the same default as tests/hil).
+DEFAULT_EXAMPLES = os.path.expanduser("~/repos/SoapyHoudiniSDR/host/examples")
 
 SOAPY_SDR_RX = None   # bound in _import_deps once SoapySDR is importable
 
 
-def _import_deps():
+def _import_deps(examples, soapy_root=None):
     """Import the two dependencies, with a message that says how to fix a miss."""
-    # The Houdini plugin lives in the release prefix HOUDINI_SOAPY_ROOT names
-    # (the venv carries none): SoapySDR searches that root, the venv's plugin
-    # path emptied, as check_setup.plugin_env sets it for the dashboard. Set before
-    # anything imports SoapySDR (houdini_setup and beacon_tdd both do).
-    if os.environ.get("HOUDINI_SOAPY_ROOT"):
-        os.environ.update(SOAPY_SDR_ROOT=os.environ["HOUDINI_SOAPY_ROOT"], SOAPY_SDR_PLUGIN_PATH="")
-    for p in (_HIL, _EXAMPLES):
+    # The Houdini plugin lives in the release prefix --soapy-root names (the
+    # venv carries none): SoapySDR searches that root (the loader's own
+    # SOAPY_SDR_ROOT), its plugin path emptied, as check_setup.plugin_env sets
+    # it for the dashboard. Set before anything imports SoapySDR
+    # (houdini_setup and beacon_tdd both do).
+    if soapy_root:
+        os.environ.update(SOAPY_SDR_ROOT=soapy_root, SOAPY_SDR_PLUGIN_PATH="")
+    for p in (_HIL, examples):
         if p not in sys.path:
             sys.path.insert(0, p)
     try:
@@ -67,9 +66,9 @@ def _import_deps():
         sys.stderr.write(
             "error: cannot import houdini_setup (%s)\n"
             "  Looked in: %s\n"
-            "  This ships with the SoapyHoudiniSDR host examples. Set\n"
-            "  HOUDINI_EXAMPLES to that directory, or check the repo out\n"
-            "  alongside this one.\n" % (e, _EXAMPLES))
+            "  This ships with the SoapyHoudiniSDR host examples. Pass\n"
+            "  --examples with that directory, or check the repo out\n"
+            "  alongside this one.\n" % (e, examples))
         return None, None
     try:
         from beacon_tdd import _teardown
@@ -232,6 +231,10 @@ def main():
                     help="channel to open (default: %(default)s)")
     ap.add_argument("--passes", type=int, default=2,
                     help="teardown repeats per radio (default: %(default)s)")
+    ap.add_argument("--examples", default=DEFAULT_EXAMPLES, metavar="DIR",
+                    help="the SoapyHoudiniSDR host examples (houdini_setup) (default: %(default)s)")
+    ap.add_argument("--soapy-root", default=None, metavar="DIR",
+                    help="the release's host-plugin prefix (the venv carries no Houdini module)")
     args = ap.parse_args()
 
     nodes, err = resolve_nodes(args.node, args.topology, args.conf)
@@ -239,7 +242,7 @@ def main():
         sys.stderr.write(err)
         return 2
 
-    hs, teardown = _import_deps()
+    hs, teardown = _import_deps(args.examples, args.soapy_root)
     if hs is None:
         return 2
 

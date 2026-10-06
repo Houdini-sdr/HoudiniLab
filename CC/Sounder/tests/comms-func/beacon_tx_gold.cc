@@ -20,6 +20,7 @@
  *   ./beacon_tx_gold --tx-ip <BS_IP> --tx-ch 1 --nco-mhz 500
  */
 #include <SoapySDR/Device.hpp>
+#include <SoapySDR/Errors.hpp>
 #include <SoapySDR/Formats.hpp>
 
 #include <algorithm>
@@ -134,7 +135,11 @@ int main(int argc, char** argv) {
   long long tns = 0;
   int flags = 0;
   dev->writeStream(txs, buffs, n_load, flags, tns, 1000000);  // load replay RAM
-  dev->activateStream(txs);
+  // The driver refuses a load that is not a whole number of 16-sample beats (DS-19).
+  if (const int rc = dev->activateStream(txs); rc != 0) {
+    std::fprintf(stderr, "activateStream(TX replay, %zu samples) refused: %s\n", n_load, SoapySDR::errToStr(rc));
+    return 1;
+  }
   std::printf("TX %s ch%d: %zu-sample replay loop @ NCO %.0f MHz (rx period %d) "
               "-- Ctrl-C to stop\n", tx_ip.c_str(), tx_ch, n_load, nco / 1e6, period);
   std::fflush(stdout);

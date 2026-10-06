@@ -100,9 +100,10 @@ consumes and returns plain structs, so the same sequence runs in a test against
 ## 5. Configuration
 
 A `sync` object in the existing JSON config, one struct in code, validated on
-load. Diagnostics that dump files or print profiles stay as environment
-variables: they are not configuration, and a dump switch in a shipped JSON is a
-foot-gun. Numeric and behavioural knobs move.
+load. Diagnostics that dump files or print profiles are the sounder's flags
+(`--dump_*`, the `--*_debug` switches), not JSON keys: they are not
+configuration, and a dump switch in a shipped JSON is a foot-gun. Numeric and
+behavioural knobs move.
 
 ```json
 "sync": {
@@ -118,8 +119,7 @@ foot-gun. Numeric and behavioural knobs move.
   "resync":   { "residual_ppm": 0.1, "scatter_tol_us": 2.0,
                 "confirm_tol_us": 5.2083, "retry_max": 100,
                 "escalate_episodes": 2, "hold_offgrid": 2,
-                "acq_refine_span": 200, "acq_max_ppm": 100 },
-  "allow_env_overrides": false
+                "acq_refine_span": 200, "acq_max_ppm": 100 }
 }
 ```
 
@@ -139,12 +139,10 @@ Rules:
   in which case the coherence form takes the bar that probability implies;
   the plan's original "pfa by default under auto" was not adopted, so the
   shipped configurations are unchanged.
-- `allow_env_overrides` defaults to FALSE since 2026-09-03 (seam step S0,
-  decided with the user): the JSON is the configuration and the bench
-  scripts sweep through the campaign overlay. A config can turn the
-  HOUDINI_* readers back on, each override logged; a stale export while
-  they are off is reported as IGNORED. The environment path is removed next
-  release.
+- The JSON is the only configuration: the environment path is removed
+  (AP-111, the no-env-knobs rule [user]), a config that still sets
+  `allow_env_overrides` is refused as an unknown key, and the bench scripts
+  sweep through the campaign overlay.
 - `detector.pfa_per_window` is the coherence form's bar when a configuration
   sets it (P3, landed 2026-09-03): the detector turns it into a bar from the
   replica and window lengths; unset, or on a repeated-field form, corr_scale
@@ -160,7 +158,7 @@ Rules:
   channels at 8.5 ppm, SNR 10 to 45 dB, fractional delay 0 to 1 with two
   kernels, noise-only windows for the false-alarm rate.
 - Regression: golden windows. A handful of resync slices per shape captured on
-  the rig (`HOUDINI_DUMP_RESYNC_WIN` exists) committed as small fixtures; the
+  the rig (the sounder's `--dump_resync_win` exists) committed as small fixtures; the
   detector, confirm and CFO estimator must return the recorded answers. This is
   the byte-identity guard for the migration.
 - Property: the index convention `end == strobe + beacon_size` for every shape,
@@ -189,9 +187,9 @@ changes behaviour re-runs the offline suite first.
 
 ## 8. Decisions that are the user's
 
-1. **Environment overrides**: remove outright at P2, or keep for one release
-   behind `allow_env_overrides` (recommended: keep one release, logged and
-   off by default, then remove).
+1. **Environment overrides**: DECIDED [user], removed (AP-111, the
+   no-env-knobs rule); the plan had been one release behind
+   `allow_env_overrides`, off by default.
 2. **Location**: `CC/Sounder/sync/` (recommended: keeps one CMake project and
    the existing CI) or a top-level `CC/libsync` shared with `rx-recorder`.
 3. **Default beacon**: `legacy` throughout (recommended); an NR-shaped default

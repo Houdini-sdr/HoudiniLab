@@ -93,15 +93,14 @@ def main():
     ap.add_argument("--venv", default=os.path.expanduser("~/houdini_test"))
     ap.add_argument("--http-port", type=int, default=8080)
     ap.add_argument("--frames", type=int, default=14, help="frames scored per run")
+    ap.add_argument("--soapy-root", default=None, metavar="DIR",
+                    help="the release's host-plugin prefix, passed to the dashboard")
     ap.add_argument("--dump", type=int, metavar="N", default=0,
                     help="also keep a CSI dump, skipping N constellation frames "
                          "(must be >1: the first frames are pre-settling)")
     args = ap.parse_args()
     url = "http://localhost:%d/stream" % args.http_port
 
-    env = dict(os.environ)
-    if args.dump:
-        env["HOUDINI_CSI_DUMP"] = str(args.dump)
 
     print("run  conc    verdict    pilot_peak%s" % ("  dump" if args.dump else ""))
     results = []
@@ -113,9 +112,11 @@ def main():
         proc = subprocess.Popen(
             ["python3", "csi_gui/csi_server.py", "--launch", "--conf", args.conf,
              "--sounder-dir", args.sounder_dir, "--venv", args.venv,
-             "--http-port", str(args.http_port)],
+             "--http-port", str(args.http_port)]
+            + (["--soapy-root", args.soapy_root] if args.soapy_root else [])
+            + (["--sounder-arg=--csi_dump=%d" % args.dump] if args.dump else []),
             cwd=args.sounder_dir, stdout=open("/tmp/score_run_%d.log" % run, "w"),
-            stderr=subprocess.STDOUT, start_new_session=True, env=env)
+            stderr=subprocess.STDOUT, start_new_session=True)
 
         cs, peaks = [], []
         if snap(url) is not None:

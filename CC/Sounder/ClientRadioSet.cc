@@ -8,6 +8,7 @@
   * ----------------------------------------------------------
   */
 #include "include/ClientRadioSet.h"
+#include "include/run_options.h"
 
 #include <pthread.h>
 
@@ -36,23 +37,13 @@ static void initAGC(SoapySDR::Device* dev, Config* cfg);
 
 // Deliberate UE carrier detune for CFO-estimator validation (AP-33/AP-34).
 // Both boards share a 10 MHz reference, so there is no natural CFO to measure
-// against; HOUDINI_UE_RX_FREQ_OFFSET_HZ imposes a KNOWN one on the UE receive
+// against; --ue_rx_freq_offset_hz imposes a KNOWN one on the UE receive
 // path only -- pure carrier offset, no sample-timing drift, so the beacon
 // estimator can be checked for sign and scale against a truth it cannot infer.
-// HOUDINI_UE_TX_FREQ_OFFSET_HZ detunes the UE transmit path instead, which is
-// what the BS then sees. Both default to 0 = nominal.
-static double envFreqOffsetHz(const char* name) {
-  const char* v = std::getenv(name);
-  return (v != nullptr) ? std::strtod(v, nullptr) : 0.0;
-}
-static double ueRxFreqOffsetHz(void) {
-  static const double v = envFreqOffsetHz("HOUDINI_UE_RX_FREQ_OFFSET_HZ");
-  return v;
-}
-static double ueTxFreqOffsetHz(void) {
-  static const double v = envFreqOffsetHz("HOUDINI_UE_TX_FREQ_OFFSET_HZ");
-  return v;
-}
+// --ue_tx_freq_offset_hz detunes the UE transmit path instead, which is what
+// the BS then sees. Both default to 0 = nominal.
+static double ueRxFreqOffsetHz(void) { return Sounder::runOptions().ue_rx_freq_offset_hz; }
+static double ueTxFreqOffsetHz(void) { return Sounder::runOptions().ue_tx_freq_offset_hz; }
 
 ClientRadioSet::ClientRadioSet(Config* cfg) : _cfg(cfg) {
   size_t num_radios = _cfg->num_cl_sdrs();
@@ -181,7 +172,7 @@ ClientRadioSet::ClientRadioSet(Config* cfg) : _cfg(cfg) {
           std::string tx_ram = "TX_RAM_";
           dev->writeRegisters(tx_ram + c, 0, _cfg->pilot());
         }
-        radios.at(i)->activateRecv();
+        radios.at(i)->activateRecvOrThrow();
         radios.at(i)->activateXmit();
         if (_cfg->frame_mode() == "free_running")
           dev->writeSetting("TRIGGER_GEN", "");
@@ -191,20 +182,20 @@ ClientRadioSet::ClientRadioSet(Config* cfg) : _cfg(cfg) {
       } else {
         if (radios.at(i)->hasHardwareTrigger()) {
           dev->setHardwareTime(0, "TRIGGER");
-          radios.at(i)->activateRecv();
+          radios.at(i)->activateRecvOrThrow();
           radios.at(i)->activateXmit();
           dev->writeSetting("TRIGGER_GEN", "");
         } else if (radios.at(i)->type() != Radio::Type::kSoapyUhd) {
           // No hardware trigger or correlator block (Houdini): software beacon
           // sync (the receiver's search) drives acquisition. Just start streams.
-          radios.at(i)->activateRecv();
+          radios.at(i)->activateRecvOrThrow();
           radios.at(i)->activateXmit();
         } else {
           // For USRP clients always use the internal clock
           dev->setTimeSource("internal");
           dev->setClockSource("internal");
           dev->setHardwareTime(0, "UNKNOWN_PPS");
-          radios.at(i)->activateRecv();
+          radios.at(i)->activateRecvOrThrow();
           radios.at(i)->activateXmit();
         }
       }
@@ -278,20 +269,27 @@ void ClientRadioSet::init(ClientRadioContext* context) {
     throw;
   }
   if (has_runtime_error == false) {
-    auto* dev = radios.at(i)->RawDev();
-    SoapySDR::Kwargs info = dev->getHardwareInfo();
+    // setup() reads the device back (Houdini: getFrequency, which the plugin
+    // throws on when the PLL reads 0 or the zone is unreadable). Still on the
+    // init thread, so a throw drops the radio with its reason, as a failed
+    // open does.
+    try {
+      for (auto ch : channels) {
+        double rxgain = _cfg->cl_rxgain_vec().at(ch).at(
+            i);  // w/CBRS 3.6GHz [0:105], 2.5GHZ [0:108]
+        double txgain = _cfg->cl_txgain_vec().at(ch).at(
+            i);  // w/CBRS 3.6GHz [0:105], 2.5GHZ [0:105]
+        radios.at(i)->setup(ch, rxgain, txgain);
+      }
 
-    for (auto ch : channels) {
-      double rxgain = _cfg->cl_rxgain_vec().at(ch).at(
-          i);  // w/CBRS 3.6GHz [0:105], 2.5GHZ [0:108]
-      double txgain = _cfg->cl_txgain_vec().at(ch).at(
-          i);  // w/CBRS 3.6GHz [0:105], 2.5GHZ [0:105]
-      radios.at(i)->setup(ch, rxgain, txgain);
-    }
-
-    // The AGC block is an Iris feature (a capability, not a platform test).
-    if (radios.at(i)->hasAgc()) {
-      initAGC(dev, _cfg);
+      // The AGC block is an Iris feature (a capability, not a platform test).
+      if (radios.at(i)->hasAgc()) {
+        initAGC(radios.at(i)->RawDev(), _cfg);
+      }
+    } catch (const std::exception& err) {
+      MLPD_WARN("ClientRadioSet radio %d (%s, %s) channel setup failed: %s\n", i, p.id.c_str(),
+                Radio::name(type), err.what());
+      radios.at(i).reset();
     }
   }
   MLPD_TRACE("ClientRadioSet: Init complete\n");
@@ -348,12 +346,9 @@ void ClientRadioSet::setRxFilter(size_t radio_id, bool on) {
 
 std::string ClientRadioSet::readRadioSetting(size_t radio_id, const std::string& key) {
   if (radio_id >= radios.size() || radios.at(radio_id) == nullptr) return "";
-  try {
-    return radios.at(radio_id)->RawDev()->readSetting(key);
-  } catch (const std::exception& e) {
-    MLPD_WARN("UE %zu: readSetting(%s) failed: %s\n", radio_id, key.c_str(), e.what());
-    return "";
-  }
+  // A refused read throws to the caller, so its reason reaches the line that
+  // acts on it (the clock steering's OFF line names it).
+  return radios.at(radio_id)->RawDev()->readSetting(key);
 }
 
 bool ClientRadioSet::writeRadioSetting(size_t radio_id, const std::string& key, const std::string& value) {
@@ -406,8 +401,7 @@ int ClientRadioSet::radioTx(size_t radio_id, const void* const* buffs,
     long long frameTimeNs = radios.at(radio_id)->txTimeNs(
         frameTime, _cfg->rate(), _cfg->ue_tdd_pilot(), _cfg->ue_tx_advance_ticks());
     const int r = radios.at(radio_id)->xmit(buffs, numSamps, flags, frameTimeNs);
-    static const bool kTxDebug = std::getenv("HOUDINI_UE_TX_DEBUG") != nullptr;  // read once
-    if (kTxDebug) {
+    if (Sounder::runOptions().ue_tx_debug) {
       static std::atomic<int> c{0};
       if ((c.fetch_add(1) % 20) == 0) {
         try {

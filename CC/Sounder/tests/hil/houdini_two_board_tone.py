@@ -86,7 +86,9 @@ def start_tone(ip, ch, nco_hz, bb_hz, amp, n=4096):
             except Exception:  # noqa: BLE001
                 pass
             time.sleep(0.3)
-    sdr.activateStream(txs)                 # free-running continuous replay
+    if sdr.activateStream(txs) != 0:  # free-running continuous replay
+        raise RuntimeError("activateStream(TX replay) refused (DS-19: a load must be a whole "
+                           "number of 16-sample beats)")
     got_nco = float(sdr.getFrequency(SOAPY_SDR_TX, ch))
     print(f"  {ip}: DAC ch{ch}  RF = {(got_nco + act_bb)/1e6:.3f} MHz "
           f"(NCO {got_nco/1e6:.3f} + baseband {act_bb/1e6:.3f}), amp {amp}")

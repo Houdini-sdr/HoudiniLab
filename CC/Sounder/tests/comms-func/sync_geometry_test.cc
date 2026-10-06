@@ -166,14 +166,14 @@ int main() {
   }
 
   // ---- THE DOCUMENTED SWEEP -------------------------------------------
-  // sync.resync.scatter_tol_us (HOUDINI_SCATTER_TOL_US) is a sweep knob
+  // sync.resync.scatter_tol_us is a sweep knob
   // (walkthrough 7.1). The acquisition gate is CLAMPED by the tracking one, so
   // any caller deriving the two from different scatter tolerances inverts
   // them: a copy re-derived at the default tolerance gives, at 4 us, a
   // tracking gate of 492 against an acquisition gate of 640. There is one
   // derivation, threaded through; this walks the sweep so the invariant is
   // checked across it rather than at the default.
-  std::printf("=== HOUDINI_SCATTER_TOL_US swept, shipped rate ===\n");
+  std::printf("=== sync.resync.scatter_tol_us swept, shipped rate ===\n");
   for (double tol_us : {1.0, 2.0, 4.0, 8.3333, 12.0, 20.0, 60.0}) {
     const auto g = houdini::sync::computeSyncGeometry(122.88e6, 4096, 122880, kReplicaLen, 0, tol_us,
                                                 kConfirmUs, kSyncTolSamples,
@@ -218,7 +218,7 @@ int main() {
                                                 kConfirmUs, kSyncTolSamples,
                                                 kResidualPpm);
     check(g.scatter_clamped && g.usable && g.accept_window_frac >= 0.20,
-          "an absurd HOUDINI_SCATTER_TOL_US is clamped to a usable window");
+          "an absurd sync.resync.scatter_tol_us is clamped to a usable window");
   }
   {
     // A zero rate would divide by zero in the cadence; the fallback keeps the

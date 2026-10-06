@@ -69,7 +69,7 @@ RE_BEACON = re.compile(r"Beacon: type (\S+), core (\d+) samples")
 # residual spread all stay normal. Measured 2026-09-02: an arm with 55 % of its
 # detections false-locking passed a gate on those three metrics (8.129/8.130).
 RE_DETECT = re.compile(r"detection idx (-?\d+) snr ([-\d.]+) dB")
-# The shipped HOUDINI_SYNC_SNR_DB. A detection under this is rejected.
+# The shipped sync.confirm.snr_floor_db. A detection under this is rejected.
 SNR_FLOOR_DB = 30.0
 
 

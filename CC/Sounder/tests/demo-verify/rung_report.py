@@ -62,8 +62,7 @@ def main(path):
     # side reads "clean" can still carry app counters, so the level decides.
     alarms = [l for l in L if "WARNG" in l and "link health: [" in l]
     kinds = alarm_kinds(alarms)
-    sat = sum("saturated" in l for l in alarms)
-    print("health alarm lines %d (%d carry the standing egress-saturation item); kinds: %s" % (len(alarms), sat, dict(kinds)))
+    print("health alarm lines %d; kinds: %s" % (len(alarms), dict(kinds)))
     print("UE tx0 totals: late %d, under %d, zerofill %d; TX status events %d" % (ue_tx0_totals(L) + (sum("TX status:" in l for l in L),)))
     print("state records:", sum("RFDC state record" in l for l in L), "| CSI dump:", any("CSI dump written" in l for l in L))
 

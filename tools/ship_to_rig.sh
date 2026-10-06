@@ -1,5 +1,9 @@
 #!/bin/bash
-# usage: tools/ship_to_rig.sh <user@rig-host> <rig worktree> [<branch>]
+# usage: tools/ship_to_rig.sh [options] <user@rig-host> <rig worktree> [<branch>]
+#   --load-max N       refuse while the rig host's 1 min load is over N (default 2)
+#   --venv DIR         the venv on the rig host (default ~/houdini_test)
+#   --check-string S   require the new sounder binary to carry S (no single quotes)
+#   --jobs N           make -j on the rig host (default 8)
 #
 # Ship <branch> (default: the current branch) from this checkout into an existing
 # worktree of the same repository on the rig host, build it there with the host's
@@ -7,10 +11,12 @@
 # every step, each one a trap already paid for:
 #
 #   - Before anything is copied it refuses while a sounder runs on the rig host,
-#     while the host is busy (1 min load average over LOAD_MAX, default 2: another
-#     lane's hardware tests measure host timing, and a build disturbs them), and
-#     while the rig worktree has uncommitted changes (a config edited on the rig,
-#     say a re-derived tx_advance, would be silently reverted by the reset).
+#     while a hardware-in-the-loop suite runs there (`pytest ... tests/hil`: a
+#     suite that has just started shows little load, AP-107), while the host is
+#     busy (1 min load average over --load-max: another lane's hardware tests
+#     measure host timing, and a build disturbs them), and while the rig
+#     worktree has uncommitted changes (a config edited on the rig, say a
+#     re-derived tx_advance, would be silently reverted by the reset).
 #   - It bundles <rig HEAD>..<branch> (the rig worktree's HEAD must be an ancestor
 #     of <branch>), copies the bundle, and fetches INSIDE the rig worktree:
 #     FETCH_HEAD is per worktree, so a fetch in the main checkout leaves this
@@ -18,23 +24,36 @@
 #   - It relinks CC/Sounder/mufft after the reset when the reset left it an empty
 #     directory (`ln -sfn` onto a directory would nest the link), pointing at the
 #     rig repository's main checkout; a populated mufft is left alone.
-#   - It configures and builds with the venv sourced (VENV, default ~/houdini_test)
+#   - It configures and builds with the venv sourced (--venv)
 #     and a fresh build directory's cmake pointed at the venv's SoapySDR
 #     (SoapySDR_DIR; without it the configure fails), never under `set -e`
 #     (sourcing the venv's activate under it aborts the shell). A failed configure
 #     leaves no cache behind, so the next ship configures again.
 #   - It gates on make's own exit status: ctest after a failed build runs the OLD
 #     binaries and passes.
-#   - With CHECK_STRING set, it requires the new sounder binary to carry that
+#   - With --check-string, it requires the new sounder binary to carry that
 #     string (pick one only the new code emits; no single quotes).
 #   - Any failure after the reset puts the worktree back on its previous commit and
 #     rebuilds it, so the checkout's sources and its binary never disagree.
 #   - The rig host's aarch64 toolchain reaches fewer headers transitively than an
 #     x86 development machine: a C++ change is not done until it built here.
 #
-# Environment: LOAD_MAX (default 2), VENV (default ~/houdini_test on the rig),
-# CHECK_STRING (optional), JOBS (default 8). Exit 0 only when every step passed.
+# Exit 0 only when every step passed.
 set -u
+
+# The options, for the local half and passed on to the rig-host half.
+LOAD_MAX=2; VENV=; CHECK_STRING=; JOBS=8; ARGS=()
+while [ $# -gt 0 ]; do
+  case $1 in
+    --load-max) LOAD_MAX=$2; shift 2;;
+    --venv) VENV=$2; shift 2;;
+    --check-string) CHECK_STRING=$2; shift 2;;
+    --jobs) JOBS=$2; shift 2;;
+    *) ARGS+=("$1"); shift;;
+  esac
+done
+set -- "${ARGS[@]}"
+[ -n "$VENV" ] || VENV=$HOME/houdini_test
 
 relink_mufft() {  # in the worktree root
   local M=CC/Sounder/mufft MAIN
@@ -60,12 +79,12 @@ configure_if_needed() {  # in CC/Sounder, the venv active
 build_and_test() {  # in the worktree root, the venv active; 0 only when all passed
   cd CC/Sounder || return 1
   configure_if_needed || { echo "FAIL: cmake (build/cmake.log)"; cd ../..; return 1; }
-  (cd build && nice -n 10 make -j"${JOBS:-8}" > make.log 2>&1)
+  (cd build && nice -n 10 make -j"$JOBS" > make.log 2>&1)
   local RC=$?
   if [ "$RC" -ne 0 ]; then
     echo "FAIL: make exited $RC"; grep -E "error|Error" build/make.log | head -5; cd ../..; return 1
   fi
-  if [ -n "${CHECK_STRING:-}" ] && ! strings build/sounder | grep -qF -- "$CHECK_STRING"; then
+  if [ -n "$CHECK_STRING" ] && ! strings build/sounder | grep -qF -- "$CHECK_STRING"; then
     echo "FAIL: the new sounder binary does not carry '$CHECK_STRING'"; cd ../..; return 1
   fi
   (cd build && nice -n 10 ctest -j4 > ctest.log 2>&1)
@@ -80,9 +99,14 @@ if [ "${1:-}" = "--preflight" ]; then
   WT=$2
   cd "$WT" || { echo "FAIL: no worktree $WT"; exit 1; }
   if pgrep -x sounder >/dev/null; then echo "FAIL: a sounder is running on this host"; exit 1; fi
+  # Detection only, never a kill: the bracket keeps the pattern from matching itself.
+  if pgrep -f '[p]ytest.*tests/hil' >/dev/null; then
+    echo "FAIL: a hardware-in-the-loop suite is running on this host (pytest tests/hil); another lane is measuring"
+    exit 1
+  fi
   LOAD=$(cut -d' ' -f1 /proc/loadavg)
-  if awk -v l="$LOAD" -v m="${LOAD_MAX:-2}" 'BEGIN { exit !(l > m) }'; then
-    echo "FAIL: the host is busy (load $LOAD over ${LOAD_MAX:-2}); another lane may be measuring"; exit 1
+  if awk -v l="$LOAD" -v m="$LOAD_MAX" 'BEGIN { exit !(l > m) }'; then
+    echo "FAIL: the host is busy (load $LOAD over $LOAD_MAX); another lane may be measuring"; exit 1
   fi
   DIRTY=$(git status --porcelain --untracked-files=no | grep -v " CC/Sounder/mufft$")
   if [ -n "$DIRTY" ]; then
@@ -103,9 +127,9 @@ if [ "${1:-}" = "--remote" ]; then
     [ "$(git rev-parse HEAD)" = "$OLD" ] && return
     echo "rolling the worktree back to ${OLD:0:12} and rebuilding it"
     # shellcheck disable=SC1090
-    [ -n "${VIRTUAL_ENV:-}" ] || source "${VENV:-$HOME/houdini_test}/bin/activate"
+    [ -n "${VIRTUAL_ENV:-}" ] || source "$VENV/bin/activate"
     git reset -q --hard "$OLD" && relink_mufft &&
-      (cd CC/Sounder && configure_if_needed && cd build && nice -n 10 make -j"${JOBS:-8}" > make.log 2>&1) &&
+      (cd CC/Sounder && configure_if_needed && cd build && nice -n 10 make -j"$JOBS" > make.log 2>&1) &&
       echo "rolled back: sources and binary at ${OLD:0:12}" || echo "ROLLBACK INCOMPLETE: check $WT by hand"
   }
   if [ -n "$BUNDLE" ]; then
@@ -116,21 +140,24 @@ if [ "${1:-}" = "--remote" ]; then
   relink_mufft || { echo "FAIL: CC/Sounder/mufft does not resolve"; rollback; exit 1; }
   echo "rig worktree at $(git log --oneline -1 | cut -c1-72)"
   # shellcheck disable=SC1090
-  source "${VENV:-$HOME/houdini_test}/bin/activate" || { echo "FAIL: no venv ${VENV:-$HOME/houdini_test}"; rollback; exit 1; }
+  source "$VENV/bin/activate" || { echo "FAIL: no venv $VENV"; rollback; exit 1; }
   if ! build_and_test; then rollback; exit 1; fi
   echo "OK: built and tested at $(git log --oneline -1 | cut -c1-12)"
   exit 0
 fi
 
-[ $# -ge 2 ] || { sed -n '2,3p' "$0"; exit 2; }
+[ $# -ge 2 ] || { sed -n '2,7p' "$0"; exit 2; }
 RIG=$1; WT=$2; BR=${3:-$(git rev-parse --abbrev-ref HEAD)}
-case "${CHECK_STRING:-}" in *"'"*) echo "FAIL: CHECK_STRING must not contain a single quote"; exit 2;; esac
+case "$CHECK_STRING" in *"'"*) echo "FAIL: --check-string must not contain a single quote"; exit 2;; esac
 HEAD_LOCAL=$(git rev-parse --verify "$BR^{commit}") || { echo "FAIL: no branch $BR here"; exit 1; }
 RIG_HEAD=$(ssh -o BatchMode=yes "$RIG" "git -C '$WT' rev-parse HEAD") || { echo "FAIL: cannot read $WT on $RIG"; exit 1; }
 REMOTE_SELF=/tmp/ship_to_rig_$$.sh
 scp -q "$0" "$RIG:$REMOTE_SELF" || { echo "FAIL: copy this script to $RIG"; exit 1; }
-ENVS="LOAD_MAX='${LOAD_MAX:-2}' VENV='${VENV:-}' CHECK_STRING='${CHECK_STRING:-}' JOBS='${JOBS:-8}'"
-ssh -o BatchMode=yes "$RIG" "$ENVS bash $REMOTE_SELF --preflight '$WT'" || { ssh -o BatchMode=yes "$RIG" "rm -f $REMOTE_SELF"; exit 1; }
+# The rig-host half takes the same options. --venv, when not given here, is
+# left to the rig-host side's own default (its home directory).
+OPTS="--load-max '$LOAD_MAX' --check-string '$CHECK_STRING' --jobs '$JOBS'"
+[ "$VENV" != "$HOME/houdini_test" ] && OPTS="$OPTS --venv '$VENV'"
+ssh -o BatchMode=yes "$RIG" "bash $REMOTE_SELF $OPTS --preflight '$WT'" || { ssh -o BatchMode=yes "$RIG" "rm -f $REMOTE_SELF"; exit 1; }
 BUNDLE_REMOTE=""
 if [ "$RIG_HEAD" != "$HEAD_LOCAL" ]; then
   git merge-base --is-ancestor "$RIG_HEAD" "$HEAD_LOCAL" ||
@@ -147,4 +174,4 @@ if [ "$RIG_HEAD" != "$HEAD_LOCAL" ]; then
 else
   echo "$RIG:$WT is already at ${HEAD_LOCAL:0:12}; building and testing it"
 fi
-ssh -o BatchMode=yes "$RIG" "$ENVS bash $REMOTE_SELF --remote '$WT' '$BUNDLE_REMOTE' '$BR'; rc=\$?; rm -f $REMOTE_SELF; exit \$rc"
+ssh -o BatchMode=yes "$RIG" "bash $REMOTE_SELF $OPTS --remote '$WT' '$BUNDLE_REMOTE' '$BR'; rc=\$?; rm -f $REMOTE_SELF; exit \$rc"

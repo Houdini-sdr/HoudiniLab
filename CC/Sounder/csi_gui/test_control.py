@@ -3,7 +3,7 @@
 # HTTP route is exercised end to end. Stdlib only; run from csi_gui/ (ctest does).
 import json, os, signal, sys, tempfile, threading, time, types, urllib.request, urllib.error
 sys.argv = ["x"]
-for k in ("HOUDINI_SOAPY_ROOT", "SOAPY_SDR_ROOT"):  # the runbook's A4 exports one; the venv's plugin is asserted
+for k in ("SOAPY_SDR_ROOT",):  # the loader's own; the venv's plugin is asserted
     os.environ.pop(k, None)
 import importlib.util
 spec = importlib.util.spec_from_file_location("cs", "csi_server.py"); cs = importlib.util.module_from_spec(spec); spec.loader.exec_module(cs)
@@ -60,13 +60,29 @@ check(sup.env.get("SOAPY_SDR_PLUGIN_PATH") == os.path.join(sd, "lib", "SoapySDR"
 # the setup check's plugin_env (the same values would pass the check above).
 # Both names are patched, so reaching the function as check_setup.plugin_env passes too.
 real_env = cs.plugin_env
-sentinel = lambda venv: {"PLUGIN_ENV_SENTINEL": venv}
+sentinel = lambda venv, root=None: {"PLUGIN_ENV_SENTINEL": venv, "ROOT": root}
 cs.plugin_env = sys.modules["check_setup"].plugin_env = sentinel
 try:
-    probe = cs.SounderSupervisor(args, "127.0.0.1:1")
+    probe = cs.SounderSupervisor(types.SimpleNamespace(**dict(vars(args), soapy_root="/rel")), "127.0.0.1:1")
 finally:
     cs.plugin_env = sys.modules["check_setup"].plugin_env = real_env
-check(probe.env.get("PLUGIN_ENV_SENTINEL") == sd, "the supervisor takes its environment from the setup check's plugin_env")
+check(probe.env.get("PLUGIN_ENV_SENTINEL") == sd and probe.env.get("ROOT") == "/rel",
+      "the supervisor takes its environment from the setup check's plugin_env, with --soapy-root (mutation: the "
+      "root not passed)")
+# The sounder is told its run on its command line: the CSI destination, the
+# frame count, the topology and the operator's --sounder-arg flags; the setup
+# check and the teardown take the same prefix, examples and topology.
+opt = cs.SounderSupervisor(types.SimpleNamespace(**dict(vars(args), soapy_root="/rel", examples="/ex",
+                                                        topology="files/topo-v.json",
+                                                        sounder_arg=["--core_map=main=15", "--tx_host_status"])),
+                           "127.0.0.1:7")
+check(opt.cmd[-5:] == ["--csi_udp=127.0.0.1:7", "--max_frame=1", "--topology=files/topo-v.json",
+                       "--core_map=main=15", "--tx_host_status"],
+      "the sounder's command carries its run options (mutation: a flag dropped, or the env path back): %s" % opt.cmd)
+check(opt.td_cmd == ["python3", "csi_gui/teardown_framer.py", "--soapy-root", "/rel", "--examples", "/ex",
+                     "--topology", "files/topo-v.json"],
+      "the teardown takes the prefix, the examples and --topology over the config's (mutation: the config's "
+      "serial_file used): %s" % opt.td_cmd)
 
 # --log-dir: each start's output lands in its own file as the sounder wrote it
 # (the report tools match its lines), after the command and the teardown.

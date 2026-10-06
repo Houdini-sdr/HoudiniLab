@@ -1,6 +1,6 @@
 /**
  * @file houdini/stream_args.h
- * @brief Extra TX stream arguments from the environment (HOUDINI_TX_STREAM_ARGS),
+ * @brief Extra TX stream arguments from the sounder's --tx_stream_args,
  *        for the host plugin's diagnostic and tuning knobs (for example
  *        tx_target_frac, SH-427) without a rebuild of either side.
  *

@@ -1,4 +1,4 @@
-// HOUDINI_CORE_MAP parsing (houdini/core_map.h). Each assertion names the
+// --core_map parsing (houdini/core_map.h). Each assertion names the
 // mutation that breaks it.
 #include <cstdio>
 #include <string>

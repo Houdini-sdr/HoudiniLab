@@ -39,13 +39,6 @@ bool throws(const std::string& json) {
 }
 }  // namespace
 
-// The operator's shell may export HOUDINI_* (the bench scripts do). Every
-// section below except the environment one must see none of them.
-void clearEnv() {
-  for (const auto& k : SyncConfig::schema())
-    if (k.env != nullptr) unsetenv(k.env);
-}
-
 // The walkthrough's knob table is generated from the schema and committed;
 // this diff is what keeps the two from drifting. The path comes from CMake;
 // without it the check is skipped, loudly.
@@ -69,7 +62,6 @@ void checkWalkthroughTable(const char* path) {
 }
 
 int main(int argc, char** argv) {
-  clearEnv();
   if (argc > 1) checkWalkthroughTable(argv[1]);
   else std::printf("SKIP  walkthrough table diff (no path given)\n");
   // 1. Defaults are the shipped values, every provenance "default".
@@ -193,81 +185,36 @@ int main(int argc, char** argv) {
     check(throws(R"({"beacon_type": "dot11", "sync": {"beacon": {"type": "nr"}}})"),
           "top-level and sync beacon types that disagree throw");
   }
-  // 6. Environment overrides: applied and logged when a config allows them,
-  //    refused (and reported) by default.
-  const std::string kEnvOn = R"({"sync": {"allow_env_overrides": true}})";
+  // 6. The JSON is the only source: no environment variable sets a knob
+  //    (houdini-agents conventions/no-env-knobs.md).
   {
+    check(throws(R"({"sync": {"allow_env_overrides": true}})"),
+          "the retired allow_env_overrides key is refused as unknown (mutation: the key kept in the schema)");
     setenv("HOUDINI_SCATTER_TOL_US", "3.5", 1);
-    setenv("HOUDINI_BEACON_THRESH", "nolag", 1);
     setenv("HOUDINI_TRACKER", "kf", 1);
-    const auto c = SyncConfig::loadFromText(kEnvOn);
-    check(c.resync.scatter_tol_us == 3.5 && c.provenanceOf("resync.scatter_tol_us") == Source::kEnv,
-          "env: numeric override lands with provenance env");
-    check(c.detector.threshold == ThresholdForm::kCoherence && c.tracker.type == TrackerType::kKalman,
-          "env: legacy spellings nolag and kf map to coherence and kalman");
-    const auto d0 = SyncConfig::loadFromText("{}");
-    bool said0 = false;
-    for (const auto& w : d0.warnings()) said0 |= (w.find("IGNORED") != std::string::npos);
-    check(d0.resync.scatter_tol_us == 2.0 && !d0.allow_env_overrides && said0,
-          "env: refused and reported by DEFAULT");
-    const auto d = SyncConfig::loadFromText(R"({"sync": {"allow_env_overrides": false}})");
-    check(d.resync.scatter_tol_us == 2.0 && d.provenanceOf("resync.scatter_tol_us") == Source::kDefault,
-          "env: refused when allow_env_overrides is false");
-    bool said = false;
-    for (const auto& w : d.warnings()) said |= (w.find("IGNORED") != std::string::npos);
-    check(said, "env: the refusal is reported");
-    setenv("HOUDINI_SCATTER_TOL_US", "abc", 1);
-    const auto e = SyncConfig::loadFromText(kEnvOn);
-    check(e.resync.scatter_tol_us == 2.0, "env: a non-number is ignored, not zero");
-    setenv("HOUDINI_SCATTER_TOL_US", "5000", 1);
-    const auto f = SyncConfig::loadFromText(kEnvOn);
-    check(f.resync.scatter_tol_us == 1000.0, "env: an out-of-range value is CLAMPED to the range");
-    bool clamped_note = false;
-    for (const auto& w : f.warnings()) clamped_note |= (w.find("clamped") != std::string::npos);
-    check(clamped_note, "env: the clamp is reported");
-    setenv("HOUDINI_ESCALATE_EPISODES", "0", 1);
-    setenv("HOUDINI_RESYNC_RETRY_MAX", "2.5", 1);
-    const auto g = SyncConfig::loadFromText(kEnvOn);
-    check(g.resync.escalate_episodes == 1 && g.resync.retry_max == 2,
-          "env: an int knob at 0 clamps to its minimum and 2.5 floors to 2 (the old readers' meaning)");
-    setenv("HOUDINI_BEACON_PICK", "first", 1);
-    const auto h = SyncConfig::loadFromText(kEnvOn);
-    check(h.detector.pick == PickRule::kFirstCrossing, "env: the legacy spelling first maps to first_crossing");
+    const auto c = SyncConfig::loadFromText("{}");
+    unsetenv("HOUDINI_SCATTER_TOL_US");
+    unsetenv("HOUDINI_TRACKER");
+    bool mentioned = false;
+    for (const auto& w : c.warnings()) mentioned |= (w.find("HOUDINI_") != std::string::npos);
+    check(c.resync.scatter_tol_us == 2.0 && c.tracker.type == TrackerType::kAlphaBeta &&
+              c.provenanceOf("resync.scatter_tol_us") == Source::kDefault && !mentioned,
+          "an exported variable changes nothing and is not read (mutation: an environment reader restored)");
+    const auto h = SyncConfig::loadFromText(R"({"sync": {"detector": {"pick": "first_crossing"}}})");
     bool noted_first = false;
     for (const auto& w : h.warnings()) noted_first |= (w.find("AP-34") != std::string::npos);
-    check(noted_first, "validate: first_crossing is noted as diagnostic only");
-    setenv("HOUDINI_BEACON_PICK", "strongest", 1);
-    const auto i = SyncConfig::loadFromText(kEnvOn);
-    check(i.detector.pick == PickRule::kFirstPath, "env: an unknown enum name is ignored, not fatal");
-    clearEnv();
-    // Three knobs keep their pre-schema readers' behaviour and IGNORE an
-    // out-of-range value (EP::kIgnoreOutOfRange); the others clamp.
-    setenv("HOUDINI_BEACON_FS", "0", 1);
-    setenv("HOUDINI_FIRST_PATH_DB", "3", 1);
-    setenv("HOUDINI_FIRST_PATH_WIN", "5000", 1);
-    setenv("HOUDINI_GRID_ALPHA", "50", 1);
-    const auto j = SyncConfig::loadFromText(kEnvOn);
-    check(j.beacon.tx_full_scale == 0.6 && j.detector.first_path_floor_db == -9.0 &&
-              j.detector.first_path_window == -1,
-          "env: BEACON_FS=0, FIRST_PATH_DB=3, FIRST_PATH_WIN=5000 keep their defaults (as before)");
-    int ignored_notes = 0;
-    for (const auto& w : j.warnings()) ignored_notes += (w.find("kept, as the old reader did") != std::string::npos);
-    check(ignored_notes == 3, "env: each ignored override is reported (" + std::to_string(ignored_notes) + " of 3)");
-    check(j.provenanceOf("beacon.tx_full_scale") == Source::kDefault &&
-              j.provenanceOf("detector.first_path_floor_db") == Source::kDefault &&
-              j.provenanceOf("detector.first_path_window") == Source::kDefault,
-          "env: an ignored override leaves provenance at default");
+    check(h.detector.pick == PickRule::kFirstCrossing && noted_first,
+          "validate: first_crossing is noted as diagnostic only");
+    check(throws(R"({"sync": {"detector": {"pick": "strongest"}}})"),
+          "an unknown enum name is refused (mutation: ignored and the default kept)");
     check(!throws(R"({"sync": {"_note.v2": "x"}})"), "a comment key with a dot is still a comment");
-    check(j.tracker.alpha == 1.0, "env: GRID_ALPHA=50 clamps to 1, not passed through (AP-56)");
-    const std::string dj = j.describe();
-    check(dj.find("tracker.alpha = 1  [env]") != std::string::npos, "describe shows [env] for an override");
-    clearEnv();
     check(throws(R"({"sync": {"detector.threshold": "power"}})"),
           "a flat dotted key is refused, not silently ignored");
     const auto mc = SyncConfig::loadFromText(R"({"sync": {"detector": {"threshold": "Coherence"}}})");
     check(mc.detector.threshold == ThresholdForm::kCoherence, "json: enum names are case-insensitive");
-    const auto sb = SyncConfig::loadFromText(R"({"sync": {"allow_env_overrides": "false"}})");
-    check(!sb.allow_env_overrides, "json: a string false is accepted for a bool knob");
+    const auto sb = SyncConfig::loadFromText(R"({"sync": {"steer": {"enable": "false"}}})");
+    check(!sb.steer.enable && sb.provenanceOf("steer.enable") == Source::kJson,
+          "json: a string false is accepted for a bool knob");
   }
   // 7. The generated views exist and name every knob.
   {
@@ -287,9 +234,8 @@ int main(int argc, char** argv) {
     bool fixed_note = false;
     for (const auto& w : fixed.warnings()) fixed_note |= (w.find("fixed-period") != std::string::npos);
     check(fixed_note, "validate: alpha = beta = 0 is noted as a fixed-period grid");
-    check(m.find("`sync.confirm.snr_floor_db`") != std::string::npos &&
-              m.find("`HOUDINI_SYNC_SNR_DB`") != std::string::npos,
-          "schema table carries the key and the environment name it replaces");
+    check(m.find("`sync.confirm.snr_floor_db`") != std::string::npos && m.find("HOUDINI_") == std::string::npos,
+          "the schema table carries every key and no environment name (mutation: the env column restored)");
   }
   // 8. resolve(): the sentinels fill from the shape with provenance "derived";
   //     an explicit value is left alone; the operation is idempotent.

@@ -8,6 +8,7 @@
 */
 
 #include "include/receiver.h"
+#include "include/run_options.h"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -43,10 +44,9 @@ static constexpr float kBeaconDetectWindowScaler = 2.33f;
 // The sync path's building blocks, each built ONCE in the constructor from the
 // configured beacon shape and the sync block:
 //   - the detector (sync/detector.h): the threshold form and the pick rule
-//     (sync.detector.threshold / sync.detector.pick, HOUDINI_BEACON_THRESH and
-//     HOUDINI_BEACON_PICK as logged overrides while allow_env_overrides
-//     holds). Why first-crossing false-locks on a strong link, why the
-//     power-ratio form is a different test at every level, and why a
+//     (sync.detector.threshold / sync.detector.pick). Why first-crossing
+//     false-locks on a strong link, why the power-ratio form is a different
+//     test at every level, and why a
 //     single-copy replica forces the coherence form are there, in
 //     CommsLib::BeaconPick / BeaconThresh and in DEMO_VERIFICATION
 //     8.138-8.154.
@@ -62,8 +62,8 @@ static constexpr float kBeaconDetectWindowScaler = 2.33f;
 // absorb (DEMO_VERIFICATION.md 4.28/4.29); what is left is pipeline/path
 // latency (about 1 us, measured about 122 samples on-board), which is what
 // tx_advance / ue_tx_advance_ticks calibrate.
-// Every tunable of the sync path is a sync.* knob (sync/sync_config.h): JSON
-// first, environment as a logged override while allow_env_overrides holds.
+// Every tunable of the sync path is a sync.* knob (sync/sync_config.h), set in
+// the config's sync block.
 
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
@@ -441,11 +441,13 @@ void* Receiver::loopRecv_launch(void* in_context) {
   try {
     me->loopRecv(tid, core_id, buffer);
   } catch (const std::exception& e) {
-    MLPD_ERROR("BS receive thread %zu stopped by an exception: %s\n", static_cast<size_t>(tid), e.what());
-    me->config_->running(false);
+    const std::string why = "BS receive thread " + std::to_string(tid) + " stopped by an exception: " + e.what();
+    MLPD_ERROR("%s\n", why.c_str());
+    me->config_->stopOnFault(why);
   } catch (...) {
-    MLPD_ERROR("BS receive thread %zu stopped by an exception of unknown type\n", static_cast<size_t>(tid));
-    me->config_->running(false);
+    const std::string why = "BS receive thread " + std::to_string(tid) + " stopped by an exception of unknown type";
+    MLPD_ERROR("%s\n", why.c_str());
+    me->config_->stopOnFault(why);
   }
   return 0;
 }
@@ -636,11 +638,11 @@ void Receiver::loopRecv(int tid, int core_id, SampleBuffer* rx_buffer) {
                                              rxTimeBs);
 
         if (r < 0) {
-          MLPD_WARN(
-              "BS recv (non-hw-framer path): radioRx returned %d at frame %zu "
-              "slot %zu -- STOPPING sounder (running(false))\n",
-              r, frame_id, slot_id);
-          config_->running(false);
+          const std::string why = "BS radio " + std::to_string(radio_id) + ": radioRx returned " + std::to_string(r) +
+                                  " (" + SoapySDR::errToStr(r) + ") at frame " + std::to_string(frame_id) +
+                                  " slot " + std::to_string(slot_id);
+          MLPD_ERROR("BS recv (non-hw-framer path): %s -- stopping the run\n", why.c_str());
+          config_->stopOnFault(why);
           break;
         }
         if (r != rx_len) {
@@ -671,20 +673,22 @@ void Receiver::loopRecv(int tid, int core_id, SampleBuffer* rx_buffer) {
         long long frameTime = 0;
         const int rx_ret =
             this->base_radio_set_->radioRx(radio_id, cell, samp, frameTime);
-        // A negative return is RECOVERABLE, not fatal. The combined multi-channel
-        // RX stream realigns the channels after a packet loss on one of them and
-        // reports it (OVERFLOW / a realign code, Tier-1 SH-160); a read that
-        // finds nothing reports TIMEOUT. Stopping the sounder on one kills a
-        // 2-channel run about 1 s after sync. Drop the round and keep running --
-        // the receive loop must not kill the sounder on a transient RX hiccup.
-        // Log the code, throttled, so a persistent error is still visible.
+        // A negative return is RECOVERABLE, not fatal: a read that finds nothing
+        // reports TIMEOUT on a healthy stream. Stopping the sounder on one
+        // killed a 2-channel run about 1 s after sync, when the combined RX
+        // stream still reported its realign after a packet loss as a negative
+        // code (SH-160, since fixed in the plugin). Drop the round and keep
+        // running. An ENDED Houdini stream never returns here: the radio
+        // throws, and this thread's catch stops the run
+        // (houdini/stream_result.h). Log the code, throttled, so a persistent
+        // error is still visible.
         if (rx_ret < 0) {
           static std::atomic<long long> negc{0};
           const long long n = negc.fetch_add(1);
           if ((n % 200) == 0) {
             MLPD_WARN(
                 "BS recv: radioRx returned %d (%s), occurrence %lld -- dropping "
-                "the round (recoverable; combined-RX realign or empty read)\n",
+                "the round (recoverable)\n",
                 rx_ret, SoapySDR::errToStr(rx_ret), n + 1);
           }
         }
@@ -790,11 +794,13 @@ void* Receiver::clientTxRx_launch(void* in_context) {
     else
       me->clientSyncTxRx(tid, core_id, buffer);
   } catch (const std::exception& e) {
-    MLPD_ERROR("UE thread %zu stopped by an exception: %s\n", static_cast<size_t>(tid), e.what());
-    me->config_->running(false);
+    const std::string why = "UE thread " + std::to_string(tid) + " stopped by an exception: " + e.what();
+    MLPD_ERROR("%s\n", why.c_str());
+    me->config_->stopOnFault(why);
   } catch (...) {
-    MLPD_ERROR("UE thread %zu stopped by an exception of unknown type\n", static_cast<size_t>(tid));
-    me->config_->running(false);
+    const std::string why = "UE thread " + std::to_string(tid) + " stopped by an exception of unknown type";
+    MLPD_ERROR("%s\n", why.c_str());
+    me->config_->stopOnFault(why);
   }
   return 0;
 }
@@ -928,12 +934,9 @@ void Receiver::clientTxPilots(size_t user_id, long long base_time,
       }
     }
   }
-  static const int horizon_env = [] {
-    const char* he = std::getenv("HOUDINI_PILOT_HORIZON");
-    return he != nullptr ? std::atoi(he) : -1;
-  }();
+  const int horizon_opt = Sounder::runOptions().pilot_horizon;
   const int horizon =
-      horizon_env >= 0 ? horizon_env : config_->ue_pilot_horizon();
+      horizon_opt >= 0 ? horizon_opt : config_->ue_pilot_horizon();
   if (horizon > 0 && stampAnchored()) {  // Houdini seated-burst path (any TX ch)
     // AP-31(c): the ladder steps by the TRACKED frame period, not
     // samps_per_frame. The pilot offset is stable across frames only when the
@@ -1061,8 +1064,7 @@ void Receiver::clientTxPilots(size_t user_id, long long base_time,
     // late burst is exactly a phase jump with no other symptom. Drain here, after
     // scheduling, so the cost is once per horizon rather than per burst (AP-10).
     client_radio_set_->drainTxStatus(user_id);
-    static const bool kUeTxDebug = std::getenv("HOUDINI_UE_TX_DEBUG") != nullptr;  // read once
-    if (kUeTxDebug && nsched > 0) {
+    if (Sounder::runOptions().ue_tx_debug && nsched > 0) {
       MLPD_INFO("UE pilot burst: scheduled %d frames up to %lld (pad %lld)\n",
                 nsched, pilot_cursor, burst_pad);
     }
@@ -1168,8 +1170,7 @@ ssize_t Receiver::syncSearch(const std::complex<int16_t>* check_data,
                 static_cast<long>(sync_index), search_window);
     }
   }
-  static const bool kSyncDebug = std::getenv("HOUDINI_SYNC_DEBUG") != nullptr;  // read once
-  if (kSyncDebug) {
+  if (Sounder::runOptions().sync_debug) {
     static std::atomic<int> c{0};
     if ((c.fetch_add(1) % 20) == 0) {
       MLPD_INFO("syncSearch[%s]: window=%zu corr_scale=%.3f (applied %.3f) gold=%zu "
@@ -1186,7 +1187,7 @@ ssize_t Receiver::syncSearch(const std::complex<int16_t>* check_data,
 // The GUI socket in RecorderWorker is fed from the RECORDING path and carries
 // per-antenna CSI; the sync state lives here in the client RX thread and has no
 // route to it. Rather than plumb a queue across threads, this path opens its own
-// connected UDP socket to the SAME destination (HOUDINI_CSI_UDP) and emits one
+// connected UDP socket to the SAME destination (--csi_udp) and emits one
 // small datagram per resync DETECTION.
 //
 // Per detection, never sampled at display cadence: detections run slower than
@@ -1195,9 +1196,8 @@ ssize_t Receiver::syncSearch(const std::complex<int16_t>* check_data,
 // nothing.
 static int syncTelemetrySock(void) {
   static const int fd = [] {
-    const char* dst = std::getenv("HOUDINI_CSI_UDP");
-    if (dst == nullptr) return -1;
-    const std::string s(dst);
+    const std::string& s = Sounder::runOptions().csi_udp;
+    if (s.empty()) return -1;
     const auto colon = s.find(':');
     const std::string host =
         (colon == std::string::npos) ? "127.0.0.1" : s.substr(0, colon);
@@ -1367,7 +1367,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
   // the acquisition gate is CLAMPED by the tracking gate (confirm <= scatter),
   // and a second derivation with the scatter tolerance hardcoded to its
   // default would invert the two gates whenever the tolerance is swept
-  // (HOUDINI_SCATTER_TOL_US, which the walkthrough documents): a lock that
+  // (sync.resync.scatter_tol_us, which the walkthrough documents): a lock that
   // escalates immediately, forever. One derivation, passed in.
   //
   // sync.resync.scatter_tol_us, default 2.0 us = 246 samples: 41x the worst
@@ -1623,26 +1623,21 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
         sync_tol_samples, sync_residual_ppm);
   }
   // AP-31 loop profile. The UE iterates SLOWER than real time (the ratio
-  // moves about 2x with HOUDINI_COALESCE_SLOTS, so quote the measurement, not a
+  // moves about 2x with --coalesce_slots, so quote the measurement, not a
   // single figure), which is why RadioHoudini::recv drains and an unplaced
   // read lands at an arbitrary frame phase. This measures where the iteration
   // actually goes so the cause is traced rather than assumed. Four buckets,
-  // mean us per iteration, logged every HOUDINI_LOOP_PROFILE iterations
+  // mean us per iteration, logged every --loop_profile iterations
   // (0 = off).
-  const size_t loop_profile_every = [] {
-    const char* e = getenv("HOUDINI_LOOP_PROFILE");
-    return e != nullptr ? static_cast<size_t>(atol(e)) : 0;
-  }();
+  const size_t loop_profile_every =
+      Sounder::runOptions().loop_profile > 0 ? static_cast<size_t>(Sounder::runOptions().loop_profile) : 0;
   using profile_clock = std::chrono::steady_clock;
   double prof_rx = 0, prof_sync = 0, prof_tx = 0, prof_slot = 0, prof_all = 0;
   size_t prof_n = 0, prof_sync_searched = 0;
   // Coalesce runs of discarded slots into one read (see the slot loop). ON by
-  // default -- 11.4x on the measured iteration -- with HOUDINI_COALESCE_SLOTS=0
+  // default -- 11.4x on the measured iteration -- with --coalesce_slots=false
   // as the escape hatch back to per-slot reads for A/B.
-  const bool coalesce_throwaway = [] {
-    const char* e = getenv("HOUDINI_COALESCE_SLOTS");
-    return (e == nullptr) || (atoi(e) != 0);
-  }();
+  const bool coalesce_throwaway = Sounder::runOptions().coalesce_slots;
   std::vector<std::complex<int16_t>> throwaway;
   long long rx_beacon_time(0);
   //Always decreases the requested rx samples
@@ -1935,7 +1930,8 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
     const auto prof_t1 = loop_profile_every > 0 ? profile_clock::now() : profile_clock::time_point{};
     if (rx_status < 0) {
       MLPD_ERROR("Rx status reporting error %d, exiting\n", rx_status);
-      config_->running(false);
+      config_->stopOnFault("UE radio " + std::to_string(tid) + ": radioRx returned " + std::to_string(rx_status) +
+                           " (" + SoapySDR::errToStr(rx_status) + ")");
       break;
     }
     if (config_->ul_data_slot_present() == true && !stampAnchored()) {
@@ -1997,7 +1993,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
           // unambiguous and the earliest one is the STS preamble. See
           // CommsLib::BeaconPick.
           //
-          // HOUDINI_BEACON_PICK=first selects the first-crossing rule ON THE
+          // sync.detector.pick = first_crossing selects that rule ON THE
           // SAME BINARY. That is not a compatibility escape hatch, it is what
           // makes the pick gateable: both rules on one build removes the
           // "different binary, different day" confound that a two-build gate
@@ -2043,7 +2039,8 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
         // inputs so the offline analyzer can place the TRUE core by
         // exact-waveform correlation and recompute the SNR without the
         // detector-index bias.
-        const char* rwdir = getenv("HOUDINI_DUMP_RESYNC_WIN");
+        const std::string& rwdir_s = Sounder::runOptions().dump_resync_win;
+        const char* rwdir = rwdir_s.empty() ? nullptr : rwdir_s.c_str();
         if (rwdir != nullptr) {
           static std::atomic<int> rwn{0};
           const int wk = rwn.fetch_add(1);
@@ -2211,7 +2208,7 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
               // settings, a third of the real 8.5 ppm offset and ~30x looser
               // than the kick its own note describes. Each arm bounds that its
               // own way -- alpha-beta with a per-update slew limit
-              // (HOUDINI_GRID_STEP_PPM, 14x the measured 0.036 ppm residual, so
+              // (sync.tracker.step_ppm, 14x the measured 0.036 ppm residual, so
               // a normal ~0.003 ppm update is untouched), the kalman with an
               // innovation gate scaled by what it currently knows.
               houdini_frame_period += tracker.deltaPeriod();
@@ -2334,7 +2331,9 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
               "Exceeded resync retry limit (%zu) for client %d reached "
               "after %zu resync successes at frame: %zu.  Stopping!\n",
               policy.config().retry_max, tid, policy.successes(), frame_id);
-          config_->running(false);
+          config_->stopOnFault("UE radio " + std::to_string(tid) + ": the resync retry limit (" +
+                               std::to_string(policy.config().retry_max) + ") was exceeded at frame " +
+                               std::to_string(frame_id));
           break;
         }
       }
@@ -2401,7 +2400,9 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
 
         rx_data_status = this->client_radio_set_->radioRx(
             tid, dl_slot_samp.data(), samples_per_slot, rx_data_time);
-        for (size_t ch = 0; ch < config_->cl_sdr_ch(); ++ch) {
+        // A failed read filled nothing: publish no packet from it. The check
+        // after this branch stops the run on it.
+        for (size_t ch = 0; rx_data_status >= 0 && ch < config_->cl_sdr_ch(); ++ch) {
           new (pkts.at(ch)) Packet(frame_id, slot_id, 0, ant_id + ch);
           // push kEventRxSymbol event into the queue
           this->notifyPacket(kClient, frame_id, slot_id, ant_id + ch,
@@ -2499,7 +2500,9 @@ void Receiver::clientSyncTxRx(int tid, int core_id, SampleBuffer* rx_buffer) {
             "Rx status reporting error %d during frame %zu , slot %zu, "
             "exiting\n",
             rx_data_status, frame_id, slot_id);
-        config_->running(false);
+        config_->stopOnFault("UE radio " + std::to_string(tid) + ": radioRx returned " +
+                             std::to_string(rx_data_status) + " (" + SoapySDR::errToStr(rx_data_status) +
+                             ") at frame " + std::to_string(frame_id) + " slot " + std::to_string(slot_id));
         break;
       } else if (rx_data_status != static_cast<int>(samples_per_slot)) {
         MLPD_WARN("BAD Receive(%d/%zu) at Time %lld, frame count %zu\n",

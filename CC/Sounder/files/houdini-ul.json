@@ -53,5 +53,5 @@
     ],
     "ue_pilot_horizon": 96,
     "ue_modulation": "QPSK",
-    "_tx_advance_note": "BENCH CALIBRATION for the wired one-rate setup, not a live mechanism, derived from the BS-side pilot_grid_off measurement (DEMO_VERIFICATION.md 4.31/4.35): with the zero-padded burst (sample-exact placement, 4.48) the seat residual is a CONSTANT; 247 = the 205 snap-era value + the measured +42 residual, landing the pilot at its nominal +128 prefix seat. Re-derive after any cabling or latency change: run with HOUDINI_BS_RX_DEBUG=1 across a few restarts and shift tx_advance by the mean pilot_grid_off."
+    "_tx_advance_note": "BENCH CALIBRATION for the wired one-rate setup, not a live mechanism, derived from the BS-side pilot_grid_off measurement (DEMO_VERIFICATION.md 4.31/4.35): with the zero-padded burst (sample-exact placement, 4.48) the seat residual is a CONSTANT; 247 = the 205 snap-era value + the measured +42 residual, landing the pilot at its nominal +128 prefix seat. Re-derive after any cabling or latency change: run with --bs_rx_debug across a few restarts and shift tx_advance by the mean pilot_grid_off."
 }

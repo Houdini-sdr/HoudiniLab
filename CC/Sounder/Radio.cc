@@ -7,6 +7,8 @@
 
 #include <stdexcept>
 
+#include <SoapySDR/Errors.hpp>
+
 #include "include/RadioHoudini.h"
 #include "include/RadioSoapy.h"
 #include "include/config.h"
@@ -30,6 +32,13 @@ std::unique_ptr<Radio> Radio::create(Type type, const RadioParams& params) {
       return std::make_unique<RadioHoudini>(params);
   }
   throw std::invalid_argument("Radio::create: unknown radio type");
+}
+
+void Radio::activateRecvOrThrow() {
+  const int rc = activateRecv();
+  if (rc != 0)
+    throw std::runtime_error(params_.label + ": activateStream(RX) refused: " + SoapySDR::errToStr(rc) + " (" +
+                             std::to_string(rc) + ")");
 }
 
 Radio::Type radioTypeFor(const Config& cfg) {

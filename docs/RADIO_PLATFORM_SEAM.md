@@ -31,7 +31,8 @@ review-fix round (DEMO_VERIFICATION 8.175 to 8.182). Companion to
 2. **Environment overrides of the sync knobs default to off.** The bench
    scripts write their sweeps into the JSON overlay instead
    (`run_shape_campaign.sh`, `SYNC_OVERLAY`). Every override is still logged
-   when a config turns them back on.
+   when a config turns them back on. Superseded by AP-111: the environment
+   path is removed, and a config that sets `allow_env_overrides` is refused.
 3. **Tree hygiene at branch landing, not before.** The ledger and the
    walkthrough stay (they are the verification record of this code); the
    raw evidence captures and the superseded bench probes move out or are

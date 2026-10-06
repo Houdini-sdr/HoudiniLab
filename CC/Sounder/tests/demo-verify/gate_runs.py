@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """The fabric packet gate seen in the BS's raw reads: gate_runs.py <dump dir>
-(the BS landing dumps of a run with HOUDINI_BS_DUMP_FRAME set; needs numpy).
+(the BS landing dumps of a run with --bs_dump_frame set; needs numpy).
 DEMO_VERIFICATION.md 9.70 (SM3) is this tool's reading of fpga 1.34.
 
-HoudiniFramer's landing dump (HOUDINI_BS_DUMP_FRAME) writes lane 0 of one read
+HoudiniFramer's landing dump (--bs_dump_frame) writes lane 0 of one read
 exactly as recv built it: every sample at its stamp's position, the gaps
 between delivered packets zero-filled. Real samples are ADC noise or signal,
 never an exact 0+0j run of a packet's length, so each delivered run of samples

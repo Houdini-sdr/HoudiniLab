@@ -6,7 +6,7 @@ the TDD framer STROBE, scored by the CLIENT's own gold correlation.
 The decoupled design is impossible (an armed framer silences a continuous replay), so
 the beacon must ride the framer strobe -- but that path gave the client only ~11 dB
 gold correlation while continuous replay synced. This isolates the strobe datapath:
-load /tmp/beacon_ram.bin (dumped by buildHoudiniBeacon, HOUDINI_DUMP_BEACON=1) into
+load /tmp/beacon_ram.bin (dumped by buildHoudiniBeacon, the sounder's --dump_beacon) into
 the replay RAM, play it two ways on .21, capture on .22, and for each correlate the
 capture against /tmp/gold.bin (gold_cf32, the 128-tap the client matches) exactly like
 find_beacon. If continuous >> strobe on the SAME RAM, the strobe datapath is the fault.
@@ -15,7 +15,7 @@ find_beacon. If continuous >> strobe on the SAME RAM, the strobe datapath is the
   B  strobe      TDD_SCHED '6..' + TDD_REPLAY_STROBE len=n_load/2 loops=forever + arm
 
 Run on the DGX (after: source houdini_test/bin/activate), having first produced the
-dumps by running the sounder once with HOUDINI_DUMP_BEACON=1 HOUDINI_DUMP_GOLD=1:
+dumps by running the sounder once with --dump_beacon --dump_gold:
     python3 houdini_beacon_ab.py
 """
 import argparse
@@ -42,12 +42,7 @@ from beacon_tdd import (_arm, _teardown, _cmd, GRID_TICKS, SYM,  # noqa: E402
 
 
 def to_complex(lanes):
-    try:
-        return np.asarray(hs.iq_from_lanes(lanes, "interleaved"), dtype=np.complex128)
-    except Exception:  # noqa: BLE001
-        L = lanes.astype(np.float64)
-        q = L[:, 1] if lanes.shape[1] < 3 else L[:, 2]
-        return L[:, 0] + 1j * q
+    return np.asarray(hs.iq_from_lanes(lanes, "interleaved"), dtype=np.complex128)
 
 
 def mf(x, h):
@@ -143,7 +138,9 @@ def main():
     try:
         # ---- A: continuous replay ----
         tsd.writeStream(txs, [cs16], n_load, 0, 0)
-        tsd.activateStream(txs)
+        if tsd.activateStream(txs) != 0:
+            raise RuntimeError("activateStream(TX replay) refused (DS-19: a load must be a whole "
+                               "number of 16-sample beats)")
         time.sleep(0.2)
         iqA = capture()
         snrA, _ = gold_snr(iqA, a.center_mhz, rx_rate, gold)

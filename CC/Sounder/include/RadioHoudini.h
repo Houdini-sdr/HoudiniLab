@@ -100,7 +100,7 @@ class RadioHoudini : public RadioSoapy {
   static void logModeV(const std::string& label, const std::vector<std::string>& lines);
   /// The converter state as the device reports it (RFDC_SNAPSHOT, the full
   /// RFDC_PREFLIGHT, getChannelInfo per channel in use), written to
-  /// rfdc_<label>_<stage>_<time>.txt under HOUDINI_DUMP_DIR. Every Houdini
+  /// rfdc_<label>_<stage>_<time>.txt under --dump_dir. Every Houdini
   /// run writes one before activate and one at the end, so a run's settings
   /// can be checked against its plan and drift across it is visible. Best
   /// effort: never throws.
@@ -116,6 +116,12 @@ class RadioHoudini : public RadioSoapy {
   std::unique_ptr<houdini::boundary::RxLaneFilters> rx_filters_;       // any lane filtered
   bool recv_filter_ = true;  // off when the BS framer filters its slices itself
   std::function<long long(long long)> placer_;  // set for one recv() by placeNextWindow
+
+  /// readStream on the RX stream; an ended stream throws
+  /// houdini::stream::Ended instead of returning.
+  int readRx(void* const* buffs, size_t n, int& flags, long long& t, long timeout_us);
+  // Says in the log whether the stream's status queue confirms a stream fault.
+  void reportRxStreamEnd();
 
   // AP-79 link health: the software lane's checks on this handle, on a thread
   // started at the first successful read; plus what only the app can count.

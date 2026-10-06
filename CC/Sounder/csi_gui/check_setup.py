@@ -18,7 +18,7 @@ What it checks, in order:
   4. the SoapyHoudiniSDR host examples the framer teardown imports;
   5. no other sounder on this host holds these radios (one on other radios is named);
   6. each radio's server answers on the config's remote port;
-  7. (full form only) each radio's stack: gateware, firmware, plugin and protocol
+  7. (full form only) each radio's stack: gateware, firmware and plugin
      versions, which must agree between the nodes; each radio's data egress,
      which must not have stalled (EGRESS_STATUS stall_seen); and each radio's
      clock steering offset (CLOCK_ADJ), which should be 0.
@@ -44,12 +44,12 @@ import sys
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SOUNDER = os.path.dirname(_HERE)
 sys.path.insert(0, _HERE)
-from teardown_framer import _EXAMPLES, roles_from_topology  # noqa: E402  one reader, not two
+from teardown_framer import DEFAULT_EXAMPLES, roles_from_topology  # noqa: E402  one reader, not two
 
 # The keys every node in one run must agree on: the sounder's own list
 # (include/node_version.h, kMustMatch), so the two cannot disagree about a bench.
 MUST_MATCH = ("fpga_version", "fpga_commit", "fpga_board", "device_version",
-              "device_build", "host_version", "host_build", "proto_version")
+              "device_build", "host_version", "host_build")
 
 
 class Report:
@@ -63,7 +63,7 @@ class Report:
         return any(r["level"] == "FAIL" for r in self.lines)
 
 
-def check_config(rep, sd, conf):
+def check_config(rep, sd, conf, topology=None):
     """Returns (config dict, [base station ips], [client ips]) or (None, [], [])."""
     path = conf if os.path.isabs(conf) else os.path.join(sd, conf)
     try:
@@ -77,7 +77,7 @@ def check_config(rep, sd, conf):
         rep.add("FAIL", "config", "%s is not valid JSON: %s" % (conf, e),
                 "Fix the JSON syntax at the line and column shown.")
         return None, [], []
-    topo = cfg.get("serial_file")
+    topo = topology or cfg.get("serial_file")
     if not topo:
         rep.add("FAIL", "config", "%s names no topology (serial_file)" % conf,
                 "Add \"serial_file\": \"files/topology-<name>.json\" to the config.")
@@ -137,39 +137,39 @@ def plugin_dir(venv):
     return os.path.join(venv, "lib", "SoapySDR", "modules0.8-3")
 
 
-def plugin_env(venv):
+def plugin_env(venv, root=None):
     """The environment that loads the Houdini plugin; csi_server.py runs the sounder in it.
 
-    HOUDINI_SOAPY_ROOT selects the release's host-plugin prefix (built with the
-    radios' device build; the venv then carries no Houdini module), exactly as
-    tests/demo-verify/run_rung.sh does, so the dashboard's Check and Start run
-    the stack a scripted run validated.
+    `root` (--soapy-root) is the release's host-plugin prefix (built with the
+    radios' device build; the venv then carries no Houdini module): SoapySDR
+    then searches only that prefix (SOAPY_SDR_ROOT, the loader's own variable,
+    with its plugin path emptied), exactly as tests/demo-verify/run_rung.sh
+    does, so the dashboard's Check and Start run the stack a scripted run
+    validated.
     """
     env = dict(os.environ, LD_LIBRARY_PATH=os.path.join(venv, "lib"), SOAPY_SDR_PLUGIN_PATH=plugin_dir(venv))
-    root = os.environ.get("HOUDINI_SOAPY_ROOT")
     if root:
         env.update(SOAPY_SDR_ROOT=root, SOAPY_SDR_PLUGIN_PATH="")
     return env
 
 
-def check_plugin(rep, venv):
-    # The Houdini module comes from HOUDINI_SOAPY_ROOT's prefix when it is set
+def check_plugin(rep, venv, root=None):
+    # The Houdini module comes from the --soapy-root prefix when one is given
     # (plugin_env loads it from there), else from the venv's own module dir.
-    root = os.environ.get("HOUDINI_SOAPY_ROOT")
     moddir = plugin_dir(root or venv)
     if not os.path.isdir(venv):
         rep.add("FAIL", "plugin", "venv %s not found" % venv,
                 "Pass the SoapySDR venv as --venv (walkthrough section 2.4); the Houdini plugin's own prefix goes "
-                "in HOUDINI_SOAPY_ROOT, not here.")
+                "in --soapy-root, not here.")
         return
     mods = [m for m in glob.glob(os.path.join(moddir, "*.so")) if "houdini" in os.path.basename(m).lower()]
     if not mods:
-        rep.add("FAIL", "plugin", "no Houdini module in %s%s" % (moddir, " (HOUDINI_SOAPY_ROOT)" if root else ""),
-                "Export HOUDINI_SOAPY_ROOT=<the release's host-plugin prefix> (on the demo rig ~/houdini_0.3.1, "
-                "the build the radios run) before the check and the dashboard (walkthrough section 2.4).")
+        rep.add("FAIL", "plugin", "no Houdini module in %s%s" % (moddir, " (--soapy-root)" if root else ""),
+                "Pass --soapy-root <the host-plugin prefix of the radios' release> before the check and the "
+                "dashboard (walkthrough section 2.4; the demo rig's is in DEMO_BENCH_RUNBOOK A3).")
         return
     util = os.path.join(venv, "bin", "SoapySDRUtil")
-    env = plugin_env(venv)
+    env = plugin_env(venv, root)
     try:
         out = subprocess.run([util, "--info"], env=env, timeout=30, stdout=subprocess.PIPE,
                              stderr=subprocess.STDOUT).stdout.decode("utf-8", "replace")
@@ -186,17 +186,18 @@ def check_plugin(rep, venv):
     rep.add("PASS", "plugin", "%s loads (%s)" % (os.path.basename(mods[0]), fac[0].split("...")[-1].strip()))
 
 
-def check_examples(rep):
-    ex = _EXAMPLES  # where the teardown will look
+def check_examples(rep, ex):
+    # `ex`: where the teardown will look (--examples)
     if os.path.isfile(os.path.join(ex, "houdini_setup.py")):
         rep.add("PASS", "teardown", "houdini_setup found in %s" % ex)
     else:
         rep.add("WARN", "teardown", "houdini_setup.py not in %s" % ex,
-                "The framer teardown before each start needs it: export HOUDINI_EXAMPLES="
+                "The framer teardown before each start needs it: pass --examples "
                 "<path-to-SoapyHoudiniSDR>/host/examples (walkthrough section 2.4).")
 
 
 PROC = "/proc"  # the process table read below; --proc-root points the test at its own
+HWINFO_ATTEMPTS = 3  # tries of a radio's hardware-info read that timed out
 
 
 def running_sounders():
@@ -214,6 +215,25 @@ def running_sounders():
     return found
 
 
+def gflag(argv, name):
+    """The value gflags gives flag `name` on this command line: '-name' and
+    '--name' alike, '=value' or the next word, the last one winning, nothing
+    after a bare '--'."""
+    val, i = None, 1
+    while i < len(argv):
+        a = argv[i]
+        if a == "--":
+            break
+        a = "-" + a if a.startswith("-") and not a.startswith("--") else a
+        if a == "--" + name and i + 1 < len(argv):
+            val, i = argv[i + 1], i + 2
+            continue
+        if a.startswith("--" + name + "="):
+            val = a.split("=", 1)[1]
+        i += 1
+    return val
+
+
 def radios_of(pid):
     """The radio addresses a running sounder uses, from its --conf_file and its
     working directory, or None when that cannot be read (another user's process)."""
@@ -221,14 +241,10 @@ def radios_of(pid):
         with open(os.path.join(PROC, str(pid), "cmdline"), "rb") as f:
             argv = f.read().decode("utf-8", "replace").split("\0")
         cwd = os.readlink(os.path.join(PROC, str(pid), "cwd"))
-        conf = None
-        for i, a in enumerate(argv):
-            if a == "--conf_file" and i + 1 < len(argv):
-                conf = argv[i + 1]
-            elif a.startswith("--conf_file="):
-                conf = a.split("=", 1)[1]
-        with open(os.path.join(cwd, conf), encoding="utf-8") as f:
-            topo = json.load(f)["serial_file"]
+        conf, topo = gflag(argv, "conf_file"), gflag(argv, "topology")
+        if not topo:  # the sounder's --topology overrides its config's serial_file
+            with open(os.path.join(cwd, conf), encoding="utf-8") as f:
+                topo = json.load(f)["serial_file"]
         with open(os.path.join(cwd, topo), encoding="utf-8") as f:
             bs, ue = roles_from_topology(json.load(f))
         return set(bs + ue)
@@ -297,14 +313,18 @@ def hwinfo(ip, port):
                            "timeout": "3000000"})
     try:
         info = dict(sdr.getHardwareInfo())
-        try:
-            info["egress_status"] = sdr.readSetting("EGRESS_STATUS")
-        except Exception as e:  # an older plugin: check_egress says so
-            info["egress_status"] = "unreadable: %s" % e
-        try:
-            info["_clock_adj"] = str(sdr.readSetting("CLOCK_ADJ"))
-        except Exception:  # a plugin without the setting
-            info["_clock_adj"] = ""
+        # A failed EGRESS_STATUS or CLOCK_ADJ read FAILs that check with its own
+        # error (the CLOCK_ADJ read goes to the clock chip and can fail on a
+        # healthy node); the stack read stands. A TIMEOUT is re-raised instead:
+        # check_versions retries the whole read (a slow first open), and a late
+        # reply must not be read as the next key's answer on this connection.
+        for key, field in (("EGRESS_STATUS", "egress_status"), ("CLOCK_ADJ", "_clock_adj")):
+            try:
+                info[field] = str(sdr.readSetting(key))
+            except Exception as e:  # noqa: BLE001
+                if "TIMEOUT" in str(e):
+                    raise
+                info[field + "_error"] = str(e)
         return info
     finally:
         # A clean close: a connection dropped at process exit leaves a
@@ -315,30 +335,33 @@ def hwinfo(ip, port):
         sdr.close()
 
 
-def check_egress(rep, ip, raw):
+def check_egress(rep, ip, raw, err=None):
     # The stall bit is sticky (REGISTERS.md, EGRESS_STALL_WD): once the egress
     # merge sat in a frame without progress, as when the host's data port went
     # down under it, the radio sends nothing more over a link that is up, until
     # its gateware is reloaded. The per-port drop counts alone are not that.
-    m = re.search(r"stall_seen=(\d+)", raw or "")
-    if m is None:
-        rep.add("WARN", "egress %s" % ip, "EGRESS_STATUS not readable (%s)" % (raw or "empty")[:120],
-                "Update the radio's firmware and this host's plugin; until then a stalled data path shows only as a run with no samples.")
+    if err is not None:
+        rep.add("FAIL", "egress %s" % ip, "the EGRESS_STATUS read failed (%s)" % err[:160],
+                "Run the check again; if it persists, ask whoever maintains the boards.")
+        return
+    m = re.search(r"stall_seen=(\d+)", raw)
+    drop = re.search(r"drop=([^;]*)", raw)
+    marked = re.search(r"marked=(\d+)", raw)
+    lacks = [f for f, g in (("stall_seen", m), ("drop", drop), ("marked", marked)) if g is None]
+    if lacks:
+        rep.add("FAIL", "egress %s" % ip, "EGRESS_STATUS lacks %s (%s)" % (", ".join(lacks), (raw or "empty")[:120]),
+                "Run the check again; if it persists, the radio does not run the plugin's release (ask whoever "
+                "maintains the boards).")
     elif int(m.group(1)):
         rep.add("FAIL", "egress %s" % ip, "the radio's data egress has stalled (%s); it will send no samples although its link is up" % raw,
                 "Reload the radio's gateware (PL) or reboot the radio. A bounce of this host's data port (a host reboot, a cable pull) causes it.")
     else:
         # The per-port drop counters and the one marked-frame counter saturate
         # at 255 and only a node boot or a PL reload clears them: saturated,
-        # the run's link health cannot see a new egress drop (it reports them
-        # as blind). Older device builds printed marked per port.
-        full = []
-        for grp, body in re.findall(r"(drop|marked)=([^;]*)", raw or ""):
-            ports = re.findall(r"(p\d+):(\d+)", body)
-            if ports:
-                full += ["%s %s" % (grp, port) for port, v in ports if int(v) >= 255]
-            elif body.strip().isdigit() and int(body) >= 255:
-                full.append(grp)
+        # the run's link health cannot see a new egress drop.
+        full = ["drop %s" % port for port, v in re.findall(r"(p\d+):(\d+)", drop.group(1)) if int(v) >= 255]
+        if int(marked.group(1)) >= 255:
+            full.append("marked")
         if full:
             rep.add("WARN", "egress %s" % ip, "no data-path stall recorded, but the egress counters %s are saturated "
                     "at 255, so a new egress drop in the run goes unseen" % ", ".join(full),
@@ -348,79 +371,113 @@ def check_egress(rep, ip, raw):
             rep.add("PASS", "egress %s" % ip, "no data-path stall recorded")
 
 
-def release_cmd(ip, port):
+def release_cmd(ip, port, root=None):
     """The shell line that releases a node's clock into its calibrated hold, in
-    the plugin environment this check ran with (HOUDINI_SOAPY_ROOT's prefix)."""
-    root = os.environ.get("HOUDINI_SOAPY_ROOT")
+    the plugin environment this check ran with (the --soapy-root prefix)."""
     pre = "SOAPY_SDR_ROOT=%s SOAPY_SDR_PLUGIN_PATH= " % shlex.quote(root) if root else ""
     return (pre + "python3 -c \"import SoapySDR as S; d = S.Device({'driver': 'houdinisdr', 'remote': "
             "'tcp://%s:%s', 'remote:driver': 'houdinisdr-device', 'remote:type': 'houdinisdr', 'timeout': "
             "'3000000'}); d.writeSetting('CLOCK_ADJ', 'release'); d.close()\"" % (ip, port))
 
 
-def check_clock(rep, ip, port, st):
+def check_clock(rep, ip, port, st, root=None, err=None):
     """A radio's CLOCK_ADJ state. A node left steered (a steering run that did
     not release, or a steering script) runs every later run off its
     calibration point, and a run with steering off never reads it."""
+    if err is not None:
+        rep.add("FAIL", "clock %s" % ip, "the CLOCK_ADJ read failed (%s)" % err[:160],
+                "Run the check again; if it persists, ask whoever maintains the boards (the read goes to the "
+                "radio's clock chip).")
+        return
     f = dict(kv.split("=", 1) for kv in st.split() if "=" in kv)
     off = f.get("offset", "")
     if not st:
-        rep.add("INFO", "clock %s" % ip, "CLOCK_ADJ not readable (a plugin without the setting)")
+        rep.add("FAIL", "clock %s" % ip, "CLOCK_ADJ read back empty",
+                "Run the check again; if it persists, ask whoever maintains the boards.")
     elif f.get("ref") == "calibrated" and not off.lstrip("-").isdigit():
         # Calibrated but out of its hold: PLL1 is tracking, so the tick is not at
         # the calibrated frequency (the device warns at make() too).
         rep.add("WARN", "clock %s" % ip, "ref=calibrated but the hold is not in force (CLOCK_ADJ %s)" % st,
-                "Release it back into the calibrated hold before the run: " + release_cmd(ip, port))
+                "Release it back into the calibrated hold before the run: " + release_cmd(ip, port, root))
     elif not off.lstrip("-").isdigit():
         rep.add("INFO", "clock %s" % ip, "ref=%s: not held at a calibration code, no steering offset"
                 % f.get("ref", "?"))
     elif int(off) != 0:
         rep.add("WARN", "clock %s" % ip, "left steered %+d counts from its calibration code (CLOCK_ADJ %s)"
                 % (int(off), st),
-                "Release it before the run: " + release_cmd(ip, port))
+                "Release it before the run: " + release_cmd(ip, port, root))
     else:
         rep.add("INFO", "clock %s" % ip, "ref=%s, at its calibration code %s (offset 0)"
                 % (f.get("ref", "?"), f.get("cal_dac", "?")))
 
 
-def check_versions(rep, sd, nodes, port, env):
+def check_versions(rep, sd, nodes, port, env, root=None):
     infos = {}
     for ip in nodes:
         # A child process with a timeout: a radio that accepts the connection but
-        # never answers must not hang the check.
-        try:
-            out = subprocess.run([sys.executable, os.path.abspath(__file__), "--hwinfo", ip, str(port)],
-                                 cwd=sd, env=env, timeout=60, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            if out.returncode != 0:
-                raise RuntimeError((out.stderr.decode("utf-8", "replace").strip().splitlines() or ["?"])[-1])
-            infos[ip] = json.loads(out.stdout)
-        except (subprocess.TimeoutExpired, RuntimeError, ValueError) as e:
-            rep.add("FAIL", "stack %s" % ip, "could not read the radio's hardware info (%s)" % str(e)[:160],
-                    "Run this check with the venv's python. If the radio is held by another "
-                    "run, stop that run first.")
+        # never answers must not hang the check. A node's first opens after its
+        # boot can take 3.3 s against the 3 s open timeout (DEMO_VERIFICATION
+        # 9.83), so a timeout is tried again, as the dashboard's radio opens are.
+        for attempt in range(1, HWINFO_ATTEMPTS + 1):
+            err = None
+            try:
+                out = subprocess.run([sys.executable, os.path.abspath(__file__), "--hwinfo", ip, str(port)],
+                                     cwd=sd, env=env, timeout=60, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                if out.returncode != 0:
+                    raise RuntimeError((out.stderr.decode("utf-8", "replace").strip().splitlines() or ["?"])[-1])
+                infos[ip] = json.loads(out.stdout)
+            except (subprocess.TimeoutExpired, RuntimeError, ValueError) as e:
+                err = str(e)
+            if err is None or "TIMEOUT" not in err:
+                break
+        if err is None:
+            continue
+        if "TIMEOUT" in err:
+            fix = ("The radio did not answer within the open timeout in %d tries. A node's first opens after its "
+                   "boot can be that slow: run this check again. If it persists, its SoapySDRServer is stuck "
+                   "(restart it with the rig booked)." % HWINFO_ATTEMPTS)
+        elif "No module named" in err:
+            fix = "Run this check with the venv's python (--venv, and its bin/python3)."
+        else:
+            fix = "If the radio is held by another run, stop that run first."
+        rep.add("FAIL", "stack %s" % ip, "could not read the radio's hardware info (%s)" % err[:160], fix)
+    for ip in list(infos):
+        missing = [k for k in MUST_MATCH if k not in infos[ip]]
+        if missing:
+            rep.add("FAIL", "stack %s" % ip, "the radio's hardware info lacks %s: not a SoapyHoudiniSDR 0.4.0 stack"
+                    % ", ".join(missing), "Run with the release's host prefix (--soapy-root) against radios on "
+                    "that release (ask whoever maintains the boards).")
+            del infos[ip]
     if not infos:
         return
     for ip, info in infos.items():
-        rep.add("INFO", "stack %s" % ip, " ".join("%s=%s" % (k, info.get(k, "<absent>")) for k in MUST_MATCH))
-        check_egress(rep, ip, info.get("egress_status"))
-        check_clock(rep, ip, port, info.get("_clock_adj", ""))
+        rep.add("INFO", "stack %s" % ip, " ".join("%s=%s" % (k, info[k]) for k in MUST_MATCH))
+        # The driver's release lockstep: one release on the host plugin and the
+        # radio's device module.
+        hv, dv = info["host_version"], info["device_version"]
+        if hv != dv:
+            rep.add("FAIL", "lockstep %s" % ip, "the host plugin is release %s and the radio's device module %s"
+                    % (hv, dv), "Run with the host prefix of the radio's release, or deploy the plugin's release "
+                    "to the radio (ask whoever maintains the boards).")
+        check_egress(rep, ip, info.get("egress_status", ""), info.get("egress_status_error"))
+        check_clock(rep, ip, port, info.get("_clock_adj", ""), root, info.get("_clock_adj_error"))
     if len(infos) < 2:
         return
-    diff = [k for k in MUST_MATCH if len({i.get(k, "<absent>") for i in infos.values()}) > 1]
+    diff = [k for k in MUST_MATCH if len({i[k] for i in infos.values()}) > 1]
     if diff:
         rep.add("FAIL", "stack match", "the nodes differ in %s" % ", ".join(diff),
                 "Put both radios on the same blessed stack (ask whoever maintains the boards).")
     else:
-        rep.add("PASS", "stack match", "both nodes on the same gateware, firmware, plugin and protocol")
+        rep.add("PASS", "stack match", "both nodes on the same gateware, firmware and plugin")
     # A release pairs the host plugin with the radios' device build (lockstep);
-    # a mismatch is a stale or wrong HOUDINI_SOAPY_ROOT.
+    # a mismatch is a stale or wrong --soapy-root.
     for ip, info in sorted(infos.items()):
-        hb, db = info.get("host_build"), info.get("device_build")
-        if hb and db and hb != db:
+        hb, db = info["host_build"], info["device_build"]
+        if hb != db:
             rep.add("WARN", "plugin build %s" % ip, "the host plugin (host_build %s) is not this radio's device "
                     "build (%s)" % (hb, db),
-                    "Point HOUDINI_SOAPY_ROOT at the prefix built with the radios' release (on the demo rig "
-                    "~/houdini_0.3.1).")
+                    "Pass --soapy-root with the prefix built with the radios' release (the demo rig's is in "
+                    "DEMO_BENCH_RUNBOOK A3).")
 
 
 def main():
@@ -429,8 +486,15 @@ def main():
                     help="the config you will run, relative to the sounder directory")
     ap.add_argument("--sounder-dir", default=_SOUNDER)
     ap.add_argument("--venv", default=os.environ.get("VIRTUAL_ENV") or os.path.expanduser("~/houdini_test"),
-                    help="the SoapySDR venv (default: $VIRTUAL_ENV, else %(default)s); the Houdini plugin comes "
-                         "from HOUDINI_SOAPY_ROOT's prefix when that is set")
+                    help="the SoapySDR venv (default: the active one, else %(default)s); the Houdini plugin comes "
+                         "from --soapy-root's prefix when one is given")
+    ap.add_argument("--soapy-root", default=None, metavar="DIR",
+                    help="the release's host-plugin prefix (the venv carries no Houdini module)")
+    ap.add_argument("--examples", default=DEFAULT_EXAMPLES, metavar="DIR",
+                    help="the SoapyHoudiniSDR host examples the framer teardown imports (default %(default)s)")
+    ap.add_argument("--topology", default=None, metavar="FILE",
+                    help="the topology file the run will use, overriding the config's serial_file "
+                         "(the sounder's --topology)")
     ap.add_argument("--quick", action="store_true", help="skip check 7 (does not open the radios)")
     ap.add_argument("--json", action="store_true", help="print the report as JSON (for the dashboard)")
     ap.add_argument("--hwinfo", nargs=2, metavar=("IP", "PORT"), help=argparse.SUPPRESS)
@@ -445,10 +509,10 @@ def main():
 
     sd = os.path.abspath(args.sounder_dir)
     rep = Report()
-    cfg, bs, ue = check_config(rep, sd, args.conf)
+    cfg, bs, ue = check_config(rep, sd, args.conf, args.topology)
     check_build(rep, sd)
-    check_plugin(rep, args.venv)
-    check_examples(rep)
+    check_plugin(rep, args.venv, args.soapy_root)
+    check_examples(rep, args.examples)
     nodes = list(dict.fromkeys(bs + ue))
     held = check_no_sounder(rep, nodes)
     port = (cfg or {}).get("remote_port", "55132")  # config.cc's default
@@ -463,7 +527,7 @@ def main():
     elif held:
         rep.add("INFO", "stack", "skipped: a sounder holds these radios, and opening them would disturb its run")
     elif up == nodes and nodes:
-        check_versions(rep, sd, nodes, port, plugin_env(args.venv))
+        check_versions(rep, sd, nodes, port, plugin_env(args.venv, args.soapy_root), args.soapy_root)
     else:
         rep.add("INFO", "stack", "skipped: not every radio's server answers")
 

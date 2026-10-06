@@ -5,7 +5,7 @@
 # enter it, so it passes in an operator's shell mid-run. Stdlib only; run from
 # csi_gui/ (ctest does).
 import json, os, shutil, socket, subprocess, sys, tempfile, threading, time
-for k in ("HOUDINI_SOAPY_ROOT", "SOAPY_SDR_ROOT"):  # the runbook's A4 exports one
+for k in ("SOAPY_SDR_ROOT",):  # the loader's own; the check sets it from --soapy-root
     os.environ.pop(k, None)
 fails = 0
 def check(ok, what):
@@ -47,8 +47,21 @@ open(os.path.join(fake, "SoapySDR.py"), "w").write(
     "                (os.environ.get('SOAPY_SDR_ROOT') and os.environ.get('SOAPY_SDR_PLUGIN_PATH') == '')), 'no plugin path'\n"
     "        assert int(a.get('timeout', '0')) >= 1000000, 'no timeout: the plugin default is 300 ms'\n"
     "        self.ip = a['remote'].split('//')[1].split(':')[0]\n"
+    "        slow = os.path.join(%r, 'slow_' + self.ip)\n"
+    "        if os.path.exists(slow):\n"
+    "            n = int(open(slow).read())\n"
+    "            if n > 0:\n"
+    "                open(slow, 'w').write(str(n - 1))\n"
+    "                raise RuntimeError('SoapyRPCUnpacker::recv() TIMEOUT')\n"
     "    def getHardwareInfo(self): return json.load(open(%r))[self.ip]\n"
     "    def readSetting(self, k):\n"
+    "        import os\n"
+    "        se = os.path.join(%r, 'slowegress_' + self.ip)\n"
+    "        if k == 'EGRESS_STATUS' and os.path.exists(se):\n"
+    "            n = int(open(se).read())\n"
+    "            if n > 0:\n"
+    "                open(se, 'w').write(str(n - 1))\n"
+    "                raise RuntimeError('SoapyRPCUnpacker::recv() TIMEOUT')\n"
     "        if k == 'CLOCK_ADJ': return json.load(open(%r))[self.ip]\n"
     "        assert k == 'EGRESS_STATUS', k\n"
     "        v = json.load(open(%r)).get(self.ip)\n"
@@ -63,18 +76,18 @@ open(os.path.join(fake, "SoapySDR.py"), "w").write(
     "        except AttributeError: Device.unmake(self)\n"
     "        setattr(self, '__closed__', True)\n"
     "    def __del__(self): self.close()\n"
-    % (info_file, os.path.join(root, "clock.json"), egress_file, os.path.join(root, "unmade")))
-HEALTHY = "drop=p0:0,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marked=p0:0,p1:0,p2:0,p3:0"
+    % (root, info_file, root, os.path.join(root, "clock.json"), egress_file, os.path.join(root, "unmade")))
+HEALTHY = "drop=p0:0,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marked=0"
 json.dump({"127.0.0.1": HEALTHY, "127.0.0.2": HEALTHY}, open(egress_file, "w"))
 clock_file = os.path.join(root, "clock.json")
 def clock_adj(dac, cal=408):
     return "holdover=1 man_dac=%d rb_dac=%d pll1_locked=1 ref=calibrated cal_dac=%d offset=%d" % (dac, dac, cal, dac - cal)
 json.dump({"127.0.0.1": clock_adj(404, 404), "127.0.0.2": clock_adj(408)}, open(clock_file, "w"))
 same = {k: "v1" for k in ("fpga_version", "fpga_commit", "fpga_board", "device_version",
-                          "device_build", "host_version", "host_build", "proto_version")}
+                          "device_build", "host_version", "host_build")}
 json.dump({"127.0.0.1": same, "127.0.0.2": same}, open(info_file, "w"))
 
-env = dict(os.environ, HOUDINI_EXAMPLES=ex, PYTHONPATH=fake)
+env = dict(os.environ, PYTHONPATH=fake)
 for k in ("SOAPY_SDR_PLUGIN_PATH", "LD_LIBRARY_PATH", "VIRTUAL_ENV"):  # the checker must set them itself
     env.pop(k, None)
 open(os.path.join(sd, "files", "topo-other.json"), "w").write(
@@ -90,7 +103,8 @@ def fake_sounder(pid, argv, cwd):
     return d
 def run(*extra, conf="files/houdini-x.json"):
     out = subprocess.run([sys.executable, os.path.abspath("check_setup.py"), "--sounder-dir", sd,
-                          "--venv", venv, "--conf", conf, "--json", "--proc-root", fproc] + list(extra),
+                          "--venv", venv, "--examples", ex, "--conf", conf, "--json", "--proc-root", fproc]
+                         + list(extra),
                          env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
     rep = json.loads(out.stdout)
     return out.returncode, rep, {r["what"]: r["level"] for r in rep["results"]}
@@ -101,7 +115,7 @@ check(lv.get("stack match") == "PASS" and lv.get("server 127.0.0.2") == "PASS", 
 check(sorted(open(os.path.join(root, "unmade")).read().split()) == ["127.0.0.1", "127.0.0.2"],
       "each radio opened for its stack is closed exactly once, not dropped at exit (fails on a direct Device.unmake: the binding's __del__ repeats it)")
 check(all(l != "WARN" for l in lv.values()), "no warnings on a ready host: %s" % lv)
-# Fails under: never reading CLOCK_ADJ (both then report INFO 'not readable').
+# Fails under: never reading CLOCK_ADJ (both then FAIL 'read back empty').
 check(all(r["level"] == "INFO" and "offset 0" in r["detail"] for r in rep["results"]
           if r["what"] in ("clock 127.0.0.1", "clock 127.0.0.2"))
       and lv.get("clock 127.0.0.1") == "INFO" and lv.get("clock 127.0.0.2") == "INFO",
@@ -138,49 +152,45 @@ json.dump({"127.0.0.1": same, "127.0.0.2": same}, open(info_file, "w"))
 rc, rep, lv = run()
 check(lv.get("egress 127.0.0.1") == "PASS" and lv.get("egress 127.0.0.2") == "PASS",
       "healthy egress passes on each node (breaks if check_egress is not called)")
-json.dump({"127.0.0.1": HEALTHY, "127.0.0.2": "drop=p0:255,p1:0,p2:0,p3:0;stall_seen=1,stall_evt=255;marked=p0:0,p1:0,p2:0,p3:0"},
+json.dump({"127.0.0.1": HEALTHY, "127.0.0.2": "drop=p0:255,p1:0,p2:0,p3:0;stall_seen=1,stall_evt=255;marked=0"},
           open(egress_file, "w"))
 rc, rep, lv = run()
 check(rc == 1 and lv["egress 127.0.0.2"] == "FAIL" and lv["egress 127.0.0.1"] == "PASS",
       "a sticky stall fails that node only (breaks if the stall branch is a WARN or keyed to the wrong node)")
-json.dump({"127.0.0.1": HEALTHY, "127.0.0.2": "drop=p0:17,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marked=p0:0,p1:0,p2:0,p3:0"},
+json.dump({"127.0.0.1": HEALTHY, "127.0.0.2": "drop=p0:17,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marked=0"},
           open(egress_file, "w"))
 rc, rep, lv = run()
 check(rc == 0 and lv["egress 127.0.0.2"] == "PASS", "drops without the stall bit pass (breaks if any nonzero count fails)")
 # Saturated at 255 (only an egress reset clears them): a WARN naming the port,
 # since the run's link health is then blind to new drops; not a FAIL.
-json.dump({"127.0.0.1": HEALTHY, "127.0.0.2": "drop=p0:255,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marked=p0:0,p1:0,p2:0,p3:0"},
+json.dump({"127.0.0.1": HEALTHY, "127.0.0.2": "drop=p0:255,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marked=0"},
           open(egress_file, "w"))
 rc, rep, lv = run()
 det = [r["detail"] for r in rep["results"] if r["what"] == "egress 127.0.0.2"]
 check(rc == 0 and lv["egress 127.0.0.2"] == "WARN" and det and "drop p0" in det[0] and lv["egress 127.0.0.1"] == "PASS",
       "saturated egress drop counters are a WARN naming the port (mutation: only the stall bit read)")
-# The plugin from HOUDINI_SOAPY_ROOT's prefix: the venv without a Houdini module
+# The plugin from the --soapy-root prefix: the venv without a Houdini module
 # (the demo rig's, since the release prefixes carry it) and the prefix with one.
 vmod = os.path.join(venv, "lib", "SoapySDR", "modules0.8-3", "libHoudiniSDRSupport.so")
 rel = os.path.join(root, "rel"); os.makedirs(os.path.join(rel, "lib", "SoapySDR", "modules0.8-3"))
 open(os.path.join(rel, "lib", "SoapySDR", "modules0.8-3", "libHoudiniSDRSupport.so"), "w").close()
 os.rename(vmod, vmod + ".off")
-env_saved = env; env = dict(env_saved, HOUDINI_SOAPY_ROOT=rel)
-rc, rep, lv = run("--quick")
-check(lv.get("plugin") == "PASS", "the plugin is found in HOUDINI_SOAPY_ROOT's prefix when the venv has none "
+rc, rep, lv = run("--quick", "--soapy-root", rel)
+check(lv.get("plugin") == "PASS", "the plugin is found in the --soapy-root prefix when the venv has none "
       "(mutation: only the venv's module dir searched)")
-env = env_saved
 rc, rep, lv = run("--quick")
 det = [r["fix"] for r in rep["results"] if r["what"] == "plugin"]
-check(rc == 1 and lv.get("plugin") == "FAIL" and det and "HOUDINI_SOAPY_ROOT" in det[0],
-      "no module in the venv and no HOUDINI_SOAPY_ROOT fails, naming the variable (mutation: the old advice)")
-# The full check under HOUDINI_SOAPY_ROOT with the venv's module still absent
+check(rc == 1 and lv.get("plugin") == "FAIL" and det and "--soapy-root" in det[0],
+      "no module in the venv and no --soapy-root fails, naming the option (mutation: the old advice)")
+# The full check under --soapy-root with the venv's module still absent
 # (the rig's layout): the radios are read through that prefix, and a steered
 # node's release line carries it.
 json.dump({"127.0.0.1": clock_adj(404, 404), "127.0.0.2": clock_adj(411)}, open(clock_file, "w"))
-env_saved = env; env = dict(env_saved, HOUDINI_SOAPY_ROOT=rel)
-rc, rep, lv = run()
-env = env_saved
+rc, rep, lv = run("--soapy-root", rel)
 os.rename(vmod + ".off", vmod)
 fix = [r["fix"] for r in rep["results"] if r["what"] == "clock 127.0.0.2"]
 check(lv.get("stack match") == "PASS" and fix and fix[0].startswith("Release it before the run: SOAPY_SDR_ROOT=%s SOAPY_SDR_PLUGIN_PATH= python3" % rel),
-      "under HOUDINI_SOAPY_ROOT the full check reads the radios and the printed release carries the prefix "
+      "under --soapy-root the full check reads the radios and the printed release carries the prefix "
       "(mutation: a bare python3 line, which finds no Houdini module on the rig): %s" % (fix[:1],))
 json.dump({"127.0.0.1": clock_adj(404, 404), "127.0.0.2": clock_adj(408)}, open(clock_file, "w"))
 # A host plugin that is not the radios' device build: a WARN per node.
@@ -191,8 +201,29 @@ check(rc == 0 and lv.get("stack match") == "PASS" and lv.get("plugin build 127.0
       and lv.get("plugin build 127.0.0.2") == "WARN",
       "a host plugin that is not the radios' device build is a WARN per node, not a failure (mutation: builds not "
       "compared): %s" % lv)
+# Both nodes' host plugins a different release than their device modules: the
+# nodes agree (stack match), and each one FAILs the driver's release lockstep.
+json.dump({"127.0.0.1": dict(same, host_version="v2"), "127.0.0.2": dict(same, host_version="v2")}, open(info_file, "w"))
+rc, rep, lv = run()
+check(rc == 1 and lv.get("stack match") == "PASS" and lv.get("lockstep 127.0.0.1") == "FAIL"
+      and lv.get("lockstep 127.0.0.2") == "FAIL",
+      "a host release that is not the radio's device release FAILs each node (mutation: the lockstep check "
+      "removed, the nodes agreeing passes): %s" % lv)
 json.dump({"127.0.0.1": same, "127.0.0.2": same}, open(info_file, "w"))
-# The device's single marked=N form (older builds printed it per port).
+# A slow first open (DEMO_VERIFICATION 9.83: 3.34 s against the 3 s timeout):
+# one timeout is tried again and passes; one that persists names the slow
+# open, not the venv.
+slow = os.path.join(root, "slow_127.0.0.2")
+open(slow, "w").write("1"); rc, rep, lv = run()
+check(rc == 0 and lv.get("stack match") == "PASS",
+      "one timed-out hardware-info read is tried again and the check passes (mutation: no retry): %s" % lv)
+open(slow, "w").write("9"); rc, rep, lv = run()
+fix = [r["fix"] for r in rep["results"] if r["what"] == "stack 127.0.0.2"]
+check(rc == 1 and lv.get("stack 127.0.0.2") == "FAIL" and fix and "run this check again" in fix[0]
+      and "venv" not in fix[0],
+      "a timeout that persists FAILs with the slow-open advice, not the venv's (mutation: the old advice): %s" % fix)
+os.remove(slow)
+# The device's single marked=N count.
 json.dump({"127.0.0.1": "drop=p0:0,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marked=1",
            "127.0.0.2": "drop=p0:0,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marked=255"}, open(egress_file, "w"))
 rc, rep, lv = run()
@@ -203,11 +234,43 @@ json.dump({"127.0.0.1": "drop=p0:0,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marke
            "127.0.0.2": "drop=p0:3,p1:2,p2:0,p3:255;stall_seen=1,stall_evt=7;marked=5"}, open(egress_file, "w"))
 rc, rep, lv = run()
 check(rc == 1 and lv["egress 127.0.0.1"] == "PASS" and lv["egress 127.0.0.2"] == "FAIL",
-      "0.3.1's strings (the software lane's T0): clean passes, a recorded stall fails (mutation: stall_seen not read)")
+      "the device's own strings (its lifecycle test's golden lines): clean passes, a recorded stall fails (mutation: "
+      "stall_seen not read)")
 json.dump({"127.0.0.1": HEALTHY}, open(egress_file, "w"))
 rc, rep, lv = run()
-check(rc == 0 and lv["egress 127.0.0.2"] == "WARN", "an unreadable EGRESS_STATUS is a WARN (breaks if it passes silently or fails the run)")
+det = [r["detail"] for r in rep["results"] if r["what"] == "egress 127.0.0.2"]
+check(rc == 1 and lv.get("egress 127.0.0.2") == "FAIL" and det and "unknown key" in det[0]
+      and lv.get("stack 127.0.0.2") == "INFO" and lv.get("stack match") == "PASS" and lv.get("egress 127.0.0.1") == "PASS",
+      "an EGRESS_STATUS read that throws FAILs the egress check with its error, and the stack read stands "
+      "(mutations: the old WARN fallback; the read failing the whole stack): %s" % lv)
 json.dump({"127.0.0.1": HEALTHY, "127.0.0.2": HEALTHY}, open(egress_file, "w"))
+se = os.path.join(root, "slowegress_127.0.0.2")
+open(se, "w").write("1"); rc, rep, lv = run()
+check(rc == 0 and lv.get("egress 127.0.0.2") == "PASS" and lv.get("clock 127.0.0.2") == "INFO"
+      and lv.get("stack match") == "PASS",
+      "an EGRESS_STATUS read that times out once is retried with the whole read and passes (mutation: a timeout "
+      "taken as the egress check's FAIL): %s" % lv)
+os.remove(se)
+json.dump({"127.0.0.1": HEALTHY, "127.0.0.2": "drop=p0:0,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0"}, open(egress_file, "w"))
+rc, rep, lv = run()
+det = [r["detail"] for r in rep["results"] if r["what"] == "egress 127.0.0.2"]
+check(rc == 1 and lv.get("egress 127.0.0.2") == "FAIL" and det and "lacks marked" in det[0],
+      "an EGRESS_STATUS without its marked count FAILs, naming it (mutation: a missing group tolerated): %s" % lv)
+json.dump({"127.0.0.1": HEALTHY, "127.0.0.2": HEALTHY}, open(egress_file, "w"))
+json.dump({"127.0.0.1": clock_adj(404, 404)}, open(clock_file, "w"))
+rc, rep, lv = run()
+check(rc == 1 and lv.get("clock 127.0.0.2") == "FAIL" and lv.get("stack 127.0.0.2") == "INFO"
+      and lv.get("stack match") == "PASS",
+      "a CLOCK_ADJ read that throws FAILs the clock check, and the stack read stands (mutation: the read failing "
+      "the whole stack): %s" % lv)
+json.dump({"127.0.0.1": clock_adj(404, 404), "127.0.0.2": clock_adj(408)}, open(clock_file, "w"))
+json.dump({"127.0.0.1": same, "127.0.0.2": {k: v for k, v in same.items() if k != "host_version"}}, open(info_file, "w"))
+rc, rep, lv = run()
+det = [r["detail"] for r in rep["results"] if r["what"] == "stack 127.0.0.2"]
+check(rc == 1 and lv.get("stack 127.0.0.2") == "FAIL" and det and "host_version" in det[0] and "stack match" not in lv
+      and "lockstep 127.0.0.2" not in lv,
+      "a hardware info that lacks a stack key FAILs that node, naming the key (mutation: an absent key tolerated): %s" % lv)
+json.dump({"127.0.0.1": same, "127.0.0.2": same}, open(info_file, "w"))
 rc, rep, lv = run(conf="files/houdini-bad.json"); check(rc == 1 and lv["config"] == "FAIL", "a config that is not JSON fails 'config'")
 rc, rep, lv = run(conf="files/none.json"); check(rc == 1 and lv["config"] == "FAIL", "a missing config fails 'config'")
 os.utime(os.path.join(sd, "a.cc"), None); os.utime(exe, (time.time() - 60, time.time() - 60))
@@ -240,8 +303,8 @@ os.rename(exe, exe + ".x"); rc, rep, lv = run("--quick"); check(rc == 1 and lv["
 open(util, "w").write("#!/bin/sh\necho 'Available factories... remote'\n")
 rc, rep, lv = run("--quick"); check(rc == 1 and lv["plugin"] == "FAIL", "SoapySDR not loading the Houdini module fails 'plugin'")
 open(util, "w").write("#!/bin/sh\necho 'Available factories... houdinisdr, remote'\n")
-env["HOUDINI_EXAMPLES"] = root; rc, rep, lv = run("--quick")
-check(rc == 0 and lv["teardown"] == "WARN", "missing host examples is a WARN"); env["HOUDINI_EXAMPLES"] = ex
+rc, rep, lv = run("--quick", "--examples", root)
+check(rc == 0 and lv["teardown"] == "WARN", "missing host examples is a WARN (mutation: --examples ignored)")
 # A sounder run from the sounder directory with a --conf_file, as the real one is.
 held = fake_sounder(4242, ["./build/sounder", "--conf_file", "files/houdini-x.json"], sd)
 rc, rep, lv = run("--quick"); check(rc == 1 and lv["radios free"] == "FAIL", "a sounder on the same radios fails 'radios free'")
@@ -258,6 +321,19 @@ other = fake_sounder(4243, ["./build/sounder", "--conf_file=files/houdini-other.
 rc, rep, lv = run(); check(rc == 0 and lv["radios free"] == "PASS" and lv.get("stack match") == "PASS",
                            "a sounder on other radios does not block, and the stacks are read (mutation: any sounder blocks)")
 shutil.rmtree(other)
+# Its --topology overrides its config's serial_file, read as gflags reads it:
+# either spelling, the last occurrence winning, nothing after a bare '--'.
+for argv in (["--conf_file=files/houdini-other.json", "--topology", "files/topo.json"],
+             ["-conf_file", "files/houdini-other.json", "-topology=files/topo.json"],
+             ["--conf_file=files/houdini-other.json", "--topology", "files/topo-other.json",
+              "--topology=files/topo.json"],
+             ["--conf_file=files/houdini-x.json", "--", "--topology=files/topo-other.json"]):
+    over = fake_sounder(4245, ["./build/sounder"] + argv, sd)
+    rc, rep, lv = run("--quick")
+    check(rc == 1 and lv["radios free"] == "FAIL",
+          "a sounder whose topology names these radios holds them: %s (mutation: the override ignored, read in "
+          "one spelling only, the first occurrence taken, or read past '--')" % " ".join(argv))
+    shutil.rmtree(over)
 unknown = fake_sounder(4244, ["./build/sounder"], sd)  # no --conf_file: its radios cannot be read
 before = open(os.path.join(root, "unmade")).read()
 rc, rep, lv = run()
@@ -269,42 +345,19 @@ shutil.rmtree(unknown)
 srv.shutdown(socket.SHUT_RDWR); srv.close()
 rc, rep, lv = run(); check(rc == 1 and lv["server 127.0.0.1"] == "FAIL" and "stack match" not in lv,
                           "a server that does not answer fails, and the stack read is skipped")
-# plugin_env, the environment the dashboard's Start runs the sounder in, follows
-# HOUDINI_SOAPY_ROOT exactly as run_rung.sh does.
+# plugin_env, the environment the dashboard's Start runs the sounder in, takes
+# the --soapy-root prefix exactly as run_rung.sh does.
 import check_setup
-saved = os.environ.pop("HOUDINI_SOAPY_ROOT", None)
 orig_root = os.environ.get("SOAPY_SDR_ROOT")
 e0 = check_setup.plugin_env("/v")
-os.environ["HOUDINI_SOAPY_ROOT"] = "/slots"
-e1 = check_setup.plugin_env("/v")
-os.environ.pop("HOUDINI_SOAPY_ROOT")
-if saved is not None:
-    os.environ["HOUDINI_SOAPY_ROOT"] = saved
+e1 = check_setup.plugin_env("/v", "/slots")
 check(e0["SOAPY_SDR_PLUGIN_PATH"] == "/v/lib/SoapySDR/modules0.8-3" and e0.get("SOAPY_SDR_ROOT") == orig_root,
-      "without HOUDINI_SOAPY_ROOT the venv's plugin loads (mutation: the root applied always)")
+      "without a root the venv's plugin loads (mutation: the root applied always)")
 check(e1.get("SOAPY_SDR_ROOT") == "/slots" and e1.get("SOAPY_SDR_PLUGIN_PATH") == "",
-      "with HOUDINI_SOAPY_ROOT that prefix loads, not the venv's (mutation: the variable ignored, so the dashboard "
-      "runs a slots config on the default plugin; or the venv's module path left set, which SoapySDR searches too)")
-# The operator's own environment rides along: the runbook's launch knobs (the
-# core map, the TX worker pinning) reach the sounder only through this dict.
-knobs = {"HOUDINI_CORE_MAP": "main=3", "HOUDINI_TX_CPU_AFFINITY": "4,5"}
-saved_knobs = {k: os.environ.get(k) for k in knobs}
-os.environ.update(knobs)
-os.environ.pop("HOUDINI_SOAPY_ROOT", None)  # e2 is the case without it, whatever the shell exported
-e2 = check_setup.plugin_env("/v")
-os.environ["HOUDINI_SOAPY_ROOT"] = "/slots"
-e3 = check_setup.plugin_env("/v")
-os.environ.pop("HOUDINI_SOAPY_ROOT")
-if saved is not None:
-    os.environ["HOUDINI_SOAPY_ROOT"] = saved
-for k, v in saved_knobs.items():
-    if v is None:
-        os.environ.pop(k, None)
-    else:
-        os.environ[k] = v
-check(all(e.get(k) == v for e in (e2, e3) for k, v in knobs.items()) and e2.get("PATH") == os.environ.get("PATH"),
-      "the operator's HOUDINI_CORE_MAP, HOUDINI_TX_CPU_AFFINITY and PATH reach the sounder, with and without "
-      "HOUDINI_SOAPY_ROOT (mutation: build the environment from scratch instead of from os.environ, even one that keeps PATH and PYTHONPATH)")
+      "with a root that prefix loads, not the venv's (mutation: the root ignored, so the dashboard runs a slots "
+      "config on the default plugin; or the venv's module path left set, which SoapySDR searches too)")
+check(e1.get("PATH") == os.environ.get("PATH"),
+      "the operator's PATH rides along (mutation: the environment built from scratch)")
 # The teardown's radios, by hand: --node, else --topology, else the topology
 # the config names, else a refusal (a default topology names one bench only).
 import teardown_framer as tf

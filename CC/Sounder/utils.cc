@@ -10,6 +10,7 @@
 
 #include <cstdlib>
 #include "include/utils.h"
+#include "include/run_options.h"
 
 int pin_to_core(int core_id) {
   pthread_t current_thread = pthread_self();
@@ -193,8 +194,7 @@ std::vector<int> Utils::ReadVector(const std::string filename,
 }
 
 std::string Utils::dumpPath(const char* file) {
-  const char* d = std::getenv("HOUDINI_DUMP_DIR");
-  std::string dir = (d != nullptr && *d != '\0') ? d : "/tmp";
+  std::string dir = Sounder::runOptions().dump_dir.empty() ? "/tmp" : Sounder::runOptions().dump_dir;
   if (dir.back() != '/') dir += '/';
   return dir + file;
 }

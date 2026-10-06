@@ -76,7 +76,7 @@ Wire formats (little-endian), one datagram per (frame, antenna) per kind:
         (i r + (r - 1) / 2 - nfft / 2) * rate / nfft with r = nfft / nbins. Each bin
         is the power in its rbw_hz = rate / nbins band, in dB re the int16 rail: a
         full-scale complex tone reads 0 dBFS. In the recorder's (conjugated) sense,
-        as the CSI. A few per second per antenna (HOUDINI_CSI_SPC_FPS, default 4).
+        as the CSI. A few per second per antenna (the sounder's --csi_spc_fps, default 4).
 """
 import argparse
 import collections
@@ -816,13 +816,24 @@ class SounderSupervisor:
         # The plugin's environment (the setup check's), plus what `source
         # venv/bin/activate` would set.
         venv = args.venv
-        self.env = plugin_env(venv)
+        self.env = plugin_env(venv, getattr(args, "soapy_root", None))
         self.env["VIRTUAL_ENV"] = venv
         self.env["PATH"] = os.path.join(venv, "bin") + os.pathsep + self.env.get("PATH", "")
-        self.env["HOUDINI_CSI_UDP"] = udp_dest
-        self.env["HOUDINI_MAX_FRAME"] = str(args.max_frame)
+        # What the sounder is told on its command line (its run options): the
+        # CSI destination, the frame count, the stream rate, the topology, and
+        # the operator's --sounder-arg flags (a core map, the pacer cpus).
+        self.sounder_args = ["--csi_udp=%s" % udp_dest, "--max_frame=%d" % args.max_frame]
         if args.csi_fps:
-            self.env["HOUDINI_CSI_FPS"] = str(args.csi_fps)
+            self.sounder_args.append("--csi_fps=%s" % args.csi_fps)
+        if getattr(args, "topology", None):
+            self.sounder_args.append("--topology=%s" % args.topology)
+        self.sounder_args += list(getattr(args, "sounder_arg", None) or [])
+        # The setup check and the teardown take the same prefix, examples and topology.
+        self.tool_args = []
+        for flag, val in (("--soapy-root", getattr(args, "soapy_root", None)),
+                          ("--examples", getattr(args, "examples", None))):
+            if val:
+                self.tool_args += [flag, val]
         self.log_dir = getattr(args, "log_dir", None)
         # --configs labelled: the page offers only the configs carrying a short `_label`
         # (the demo's handful), not every files/houdini*.json.
@@ -862,12 +873,12 @@ class SounderSupervisor:
             self.conf = conf
             self._set(conf=conf)
             return
-        topo = _topology_of(self.sd, conf)
-        self.td_cmd = ["python3", "csi_gui/teardown_framer.py"]
+        topo = getattr(self.args, "topology", None) or _topology_of(self.sd, conf)
+        self.td_cmd = ["python3", "csi_gui/teardown_framer.py"] + self.tool_args
         if topo:
             self.td_cmd += ["--topology", topo]
         self.cmd = ["./build/sounder", "--view", "--conf_file", conf,
-                    "--storepath", self.args.storepath]
+                    "--storepath", self.args.storepath] + self.sounder_args
         self.conf = conf
         self._set(conf=conf)
 
@@ -979,7 +990,9 @@ class SounderSupervisor:
         """Run csi_gui/check_setup.py for the current config; keep its report for
         the page. Returns False when it found a FAIL (or could not run)."""
         self._set(state="checking")
-        cmd = ["python3", "csi_gui/check_setup.py", "--conf", self.conf, "--json"]
+        cmd = ["python3", "csi_gui/check_setup.py", "--conf", self.conf, "--json"] + self.tool_args
+        if getattr(self.args, "topology", None):
+            cmd += ["--topology", self.args.topology]
         if quick:
             cmd.append("--quick")
         try:
@@ -1137,9 +1150,9 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--udp-host", default="0.0.0.0", help="CSI UDP bind host")
     ap.add_argument("--udp-port", type=int, default=9999, help="CSI UDP bind port")
-    ap.add_argument("--record", default=os.environ.get("HOUDINI_CSI_RECORD") or None,
+    ap.add_argument("--record", default=None,
                     help="append every datagram to this file for replay_feed.py, the "
-                         "canned-data fallback (default: $HOUDINI_CSI_RECORD, else off)")
+                         "canned-data fallback (default: off)")
     ap.add_argument("--record-max-mb", type=float, default=2048.0,
                     help="stop recording at this size (default: %(default)s)")
     ap.add_argument("--http-host", default=None,
@@ -1176,15 +1189,27 @@ def main():
                          "the --conf config is always offered")
     ap.add_argument("--venv", default=os.environ.get("VIRTUAL_ENV") or os.path.expanduser("~/houdini_test"),
                     help="virtualenv prefix holding SoapySDR (and the Houdini plugin, "
-                         "unless HOUDINI_SOAPY_ROOT names a release prefix), used when "
+                         "unless --soapy-root names a release prefix), used when "
                          "--launch or --control runs the sounder (default: the activated "
                          "venv, else %(default)s)")
+    ap.add_argument("--soapy-root", default=None, metavar="DIR",
+                    help="the release's host-plugin prefix, for the sounder, the setup check and the "
+                         "teardown (the venv carries no Houdini module)")
+    ap.add_argument("--examples", default=None, metavar="DIR",
+                    help="the SoapyHoudiniSDR host examples the teardown imports (default: the "
+                         "teardown's own)")
+    ap.add_argument("--topology", default=None, metavar="FILE",
+                    help="the topology file every run uses, overriding the configs' serial_file "
+                         "(e.g. the demo venue's)")
+    ap.add_argument("--sounder-arg", action="append", default=[], metavar="ARG",
+                    help="one more flag for the sounder's command line, e.g. --sounder-arg=--core_map=main=15 "
+                         "(repeatable; the sounder's run options, ./build/sounder --helpon=main)")
     ap.add_argument("--conf", default="files/houdini-1u.json")
     ap.add_argument("--storepath", default="/tmp/houdini_hdf5")
     ap.add_argument("--max-frame", type=int, default=2_000_000_000,
-                    help="HOUDINI_MAX_FRAME for continuous viewing")
+                    help="the sounder's --max_frame, for continuous viewing")
     ap.add_argument("--csi-fps", type=float, default=0.0,
-                    help="HOUDINI_CSI_FPS per-antenna stream rate (0 = sounder default 30)")
+                    help="the sounder's --csi_fps, the per-antenna stream rate (0 = its default 30)")
     ap.add_argument("--log-dir", default=None,
                     help="with --launch/--control, write each sounder start's output to "
                          "<dir>/sounder_<UTC>.log for the report tools (default: off)")

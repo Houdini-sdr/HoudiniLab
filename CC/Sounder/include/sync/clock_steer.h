@@ -193,7 +193,12 @@ class ClockSteerSession {
   /// the end like our own. Returns armed().
   bool arm() {
     if (!cfg_.enable || armed()) return armed();
-    const std::string st = safeRead();
+    std::string err;
+    const std::string st = safeRead(&err);
+    if (!err.empty()) {
+      say(true, "requested but OFF: the CLOCK_ADJ read failed: %s", err.c_str());
+      return false;
+    }
     const long cal = clockAdjCode(clockAdjField(st, "cal_dac")), rb = clockAdjCode(clockAdjField(st, "rb_dac"));
     if (clockAdjField(st, "ref") != "calibrated" || clockAdjField(st, "holdover") != "1" || cal < 0 || rb < 0) {
       say(true, "requested but OFF: CLOCK_ADJ reads '%s' (needs ref=calibrated in its hold, holdover=1, with "
@@ -343,12 +348,16 @@ class ClockSteerSession {
       return -1;
     }
   }
-  std::string safeRead() {
+  /// The read, or "" with the failure's text in *err when it throws.
+  std::string safeRead(std::string* err = nullptr) {
     try {
       return read_();
+    } catch (const std::exception& e) {
+      if (err != nullptr) *err = e.what();
     } catch (...) {
-      return "";
+      if (err != nullptr) *err = "an unknown exception";
     }
+    return "";
   }
   /// Start a job; false (the decision is dropped, the next window retries)
   /// when no thread can be started.

@@ -1,6 +1,6 @@
 """Readers for the sounder's measurement dumps, one copy shared by the fstage_*
-tools: the CNS dump (HOUDINI_CSI_DUMP), the beacon RAM (HOUDINI_DUMP_BEACON)
-and the UE's re-sync windows (HOUDINI_DUMP_RESYNC_WIN), plus where the beacon
+tools: the CNS dump (--csi_dump), the beacon RAM (--dump_beacon)
+and the UE's re-sync windows (--dump_resync_win), plus where the beacon
 sits in a window and which samples are clear of it."""
 import collections, glob, os
 import numpy as np

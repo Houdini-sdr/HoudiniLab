@@ -43,12 +43,7 @@ from beacon_tdd import _arm, _teardown, SYM, ARM_MARGIN  # noqa: E402
 
 
 def to_complex(lanes):
-    try:
-        return np.asarray(hs.iq_from_lanes(lanes, "interleaved"), dtype=np.complex128)
-    except Exception:  # noqa: BLE001
-        L = lanes.astype(np.float64)
-        q = L[:, 1] if lanes.shape[1] < 3 else L[:, 2]
-        return L[:, 0] + 1j * q
+    return np.asarray(hs.iq_from_lanes(lanes, "interleaved"), dtype=np.complex128)
 
 
 def band_rms(rsd, rx_ch, rnative, rdtype, center_mhz, rx_rate, secs, cap_mb):
@@ -102,7 +97,9 @@ def main():
     results = []
     try:
         tsd.writeStream(txs, [cs16], a.n_load, 0, 0)   # load replay RAM
-        tsd.activateStream(txs)                        # CONTINUOUS replay
+        if tsd.activateStream(txs) != 0:  # CONTINUOUS replay
+            raise RuntimeError("activateStream(TX replay) refused (DS-19: a load must be a whole "
+                               "number of 16-sample beats)")
         time.sleep(0.2)
         for sched in [s.strip() for s in a.scheds.split(",") if s.strip()]:
             if sched != "none":

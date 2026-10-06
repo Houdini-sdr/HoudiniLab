@@ -1,12 +1,12 @@
 /**
  * @file houdini/core_map.h
- * @brief Where the sounder pins its own threads (HOUDINI_CORE_MAP), for CPU
+ * @brief Where the sounder pins its own threads (--core_map), for CPU
  *        isolation on the rig host: "main=15,recorder=18,bsrx=5,ue=6".
  *
  * Each named role gets that base core, and its i-th thread base + i; a role
  * not named keeps the default layout (main on the scheduler's start core, the
  * recorders after it, then the BS receive threads, then the UE threads). The
- * host plugin's TX pacer workers have their own knob, HOUDINI_TX_CPU_AFFINITY.
+ * host plugin's TX pacer workers have their own knob, --tx_cpu_affinity.
  *
  * RENEW OPEN SOURCE LICENSE: http://renew-wireless.org/license
  */

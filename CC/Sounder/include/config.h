@@ -20,6 +20,7 @@
 #include <limits>
 #include <map>
 
+#include "houdini/run_fault.h"
 #include "sync/beacon_shape.h"
 #include "sync/rx_path_fixes.h"
 #include "sync/sync_config.h"
@@ -189,6 +190,15 @@ class Config {
 
   inline bool running(void) const { return this->running_.load(); }
   inline void running(bool value) { this->running_ = value; }
+  /// Stops the run on a fault it cannot continue past and records why, so the
+  /// sounder exits with a failure (houdini/run_fault.h). A normal end (the
+  /// timer, max_frame, a signal) stops through running(false) and exits clean.
+  inline void stopOnFault(const std::string& why) {
+    this->fault_.record(why);
+    this->running_ = false;
+  }
+  inline bool faulted(void) const { return this->fault_.recorded(); }
+  inline std::string faultReason(void) const { return this->fault_.reason(); }
 
   inline const std::string& frame_mode(void) const { return this->frame_mode_; }
   inline const std::string& bs_channel(void) const { return this->bs_channel_; }
@@ -559,6 +569,7 @@ class Config {
   std::vector<std::string> dl_tx_fd_data_files_;
 
   std::atomic<bool> running_;
+  houdini::RunFault fault_;
   bool core_alloc_;
   size_t bs_rx_thread_num_;
   size_t cl_rx_thread_num_;
