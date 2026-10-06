@@ -312,10 +312,15 @@ def hwinfo(ip, port):
                            "remote:driver": "houdinisdr-device", "remote:type": "houdinisdr",
                            "timeout": "3000000"})
     try:
-        # A read that throws fails this node's stack read (check_versions).
         info = dict(sdr.getHardwareInfo())
-        info["egress_status"] = sdr.readSetting("EGRESS_STATUS")
-        info["_clock_adj"] = str(sdr.readSetting("CLOCK_ADJ"))
+        # A failed EGRESS_STATUS or CLOCK_ADJ read FAILs that check with its own
+        # error (the CLOCK_ADJ read goes to the clock chip and can fail on a
+        # healthy node); the stack read stands.
+        for key, field in (("EGRESS_STATUS", "egress_status"), ("CLOCK_ADJ", "_clock_adj")):
+            try:
+                info[field] = str(sdr.readSetting(key))
+            except Exception as e:  # noqa: BLE001
+                info[field + "_error"] = str(e)
         return info
     finally:
         # A clean close: a connection dropped at process exit leaves a
@@ -326,14 +331,21 @@ def hwinfo(ip, port):
         sdr.close()
 
 
-def check_egress(rep, ip, raw):
+def check_egress(rep, ip, raw, err=None):
     # The stall bit is sticky (REGISTERS.md, EGRESS_STALL_WD): once the egress
     # merge sat in a frame without progress, as when the host's data port went
     # down under it, the radio sends nothing more over a link that is up, until
     # its gateware is reloaded. The per-port drop counts alone are not that.
+    if err is not None:
+        rep.add("FAIL", "egress %s" % ip, "the EGRESS_STATUS read failed (%s)" % err[:160],
+                "Run the check again; if it persists, ask whoever maintains the boards.")
+        return
     m = re.search(r"stall_seen=(\d+)", raw)
-    if m is None:
-        rep.add("FAIL", "egress %s" % ip, "EGRESS_STATUS has no stall_seen field (%s)" % (raw or "empty")[:120],
+    drop = re.search(r"drop=([^;]*)", raw)
+    marked = re.search(r"marked=(\d+)", raw)
+    lacks = [f for f, g in (("stall_seen", m), ("drop", drop), ("marked", marked)) if g is None]
+    if lacks:
+        rep.add("FAIL", "egress %s" % ip, "EGRESS_STATUS lacks %s (%s)" % (", ".join(lacks), (raw or "empty")[:120]),
                 "Run the check again; if it persists, the radio does not run the plugin's release (ask whoever "
                 "maintains the boards).")
     elif int(m.group(1)):
@@ -343,11 +355,8 @@ def check_egress(rep, ip, raw):
         # The per-port drop counters and the one marked-frame counter saturate
         # at 255 and only a node boot or a PL reload clears them: saturated,
         # the run's link health cannot see a new egress drop.
-        drop = re.search(r"drop=([^;]*)", raw)
-        marked = re.search(r"marked=(\d+)", raw)
-        full = ["drop %s" % port for port, v in re.findall(r"(p\d+):(\d+)", drop.group(1) if drop else "")
-                if int(v) >= 255]
-        if marked and int(marked.group(1)) >= 255:
+        full = ["drop %s" % port for port, v in re.findall(r"(p\d+):(\d+)", drop.group(1)) if int(v) >= 255]
+        if int(marked.group(1)) >= 255:
             full.append("marked")
         if full:
             rep.add("WARN", "egress %s" % ip, "no data-path stall recorded, but the egress counters %s are saturated "
@@ -367,10 +376,15 @@ def release_cmd(ip, port, root=None):
             "'3000000'}); d.writeSetting('CLOCK_ADJ', 'release'); d.close()\"" % (ip, port))
 
 
-def check_clock(rep, ip, port, st, root=None):
+def check_clock(rep, ip, port, st, root=None, err=None):
     """A radio's CLOCK_ADJ state. A node left steered (a steering run that did
     not release, or a steering script) runs every later run off its
     calibration point, and a run with steering off never reads it."""
+    if err is not None:
+        rep.add("FAIL", "clock %s" % ip, "the CLOCK_ADJ read failed (%s)" % err[:160],
+                "Run the check again; if it persists, ask whoever maintains the boards (the read goes to the "
+                "radio's clock chip).")
+        return
     f = dict(kv.split("=", 1) for kv in st.split() if "=" in kv)
     off = f.get("offset", "")
     if not st:
@@ -441,8 +455,8 @@ def check_versions(rep, sd, nodes, port, env, root=None):
             rep.add("FAIL", "lockstep %s" % ip, "the host plugin is release %s and the radio's device module %s"
                     % (hv, dv), "Run with the host prefix of the radio's release, or deploy the plugin's release "
                     "to the radio (ask whoever maintains the boards).")
-        check_egress(rep, ip, info["egress_status"])
-        check_clock(rep, ip, port, info["_clock_adj"], root)
+        check_egress(rep, ip, info.get("egress_status", ""), info.get("egress_status_error"))
+        check_clock(rep, ip, port, info.get("_clock_adj", ""), root, info.get("_clock_adj_error"))
     if len(infos) < 2:
         return
     diff = [k for k in MUST_MATCH if len({i[k] for i in infos.values()}) > 1]

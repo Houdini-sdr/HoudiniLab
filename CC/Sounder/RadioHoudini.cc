@@ -275,7 +275,8 @@ RadioHoudini::RadioHoudini(const RadioParams& params,
                            // The readback cross-checks the packet the device derived from the
                            // HOUDINI_MTU kwarg (rxpkt::mtuFor).
                            const std::string fw = dev.readSetting("HOUDINI_RX_FRAME_WORDS");
-                           const size_t got = 2 * std::stoul(fw);
+                           const bool num = !fw.empty() && fw.find_first_not_of("0123456789") == std::string::npos;
+                           const size_t got = num ? 2 * std::stoul(fw) : 0;  // else the error below names it
                            if (got != pkt)
                              throw std::runtime_error(label + ": RX packet " + std::to_string(got) +
                                                       " samples (HOUDINI_RX_FRAME_WORDS '" + fw + "'), asked " +
@@ -575,7 +576,7 @@ void RadioHoudini::reportRxStreamEnd() {
     long long t = 0;
     st = dev_->readStreamStatus(rxs_, mask, fl, t, 0);
     ++read;
-    if (st != 0) break;
+    if (st == SOAPY_SDR_STREAM_ERROR || st == SOAPY_SDR_TIMEOUT) break;  // other events (OVERFLOW) are skipped
   }
   const char* what;
   if (st == SOAPY_SDR_STREAM_ERROR)
@@ -583,8 +584,6 @@ void RadioHoudini::reportRxStreamEnd() {
   else if (st == SOAPY_SDR_TIMEOUT)
     what = "the stream's status queue holds no fault event: a caller error (a null lane buffer, or a read while "
            "direct buffers are held), not a stream fault";
-  else if (st != 0)
-    what = "the status read itself failed, so the cause is unconfirmed";
   else
     what = "no fault event among the first queued status events, so the cause is unconfirmed";
   MLPD_ERROR("%s: readStream returned STREAM_ERROR, the run stops (%s; status read %d time(s), last %d %s)\n",

@@ -231,9 +231,24 @@ check(rc == 1 and lv["egress 127.0.0.1"] == "PASS" and lv["egress 127.0.0.2"] ==
       "stall_seen not read)")
 json.dump({"127.0.0.1": HEALTHY}, open(egress_file, "w"))
 rc, rep, lv = run()
-check(rc == 1 and lv.get("stack 127.0.0.2") == "FAIL" and "egress 127.0.0.2" not in lv and lv["egress 127.0.0.1"] == "PASS",
-      "an EGRESS_STATUS read that throws fails that node's stack read (mutation: the old fallback, a WARN): %s" % lv)
+det = [r["detail"] for r in rep["results"] if r["what"] == "egress 127.0.0.2"]
+check(rc == 1 and lv.get("egress 127.0.0.2") == "FAIL" and det and "unknown key" in det[0]
+      and lv.get("stack 127.0.0.2") == "INFO" and lv.get("stack match") == "PASS" and lv.get("egress 127.0.0.1") == "PASS",
+      "an EGRESS_STATUS read that throws FAILs the egress check with its error, and the stack read stands "
+      "(mutations: the old WARN fallback; the read failing the whole stack): %s" % lv)
+json.dump({"127.0.0.1": HEALTHY, "127.0.0.2": "drop=p0:0,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0"}, open(egress_file, "w"))
+rc, rep, lv = run()
+det = [r["detail"] for r in rep["results"] if r["what"] == "egress 127.0.0.2"]
+check(rc == 1 and lv.get("egress 127.0.0.2") == "FAIL" and det and "lacks marked" in det[0],
+      "an EGRESS_STATUS without its marked count FAILs, naming it (mutation: a missing group tolerated): %s" % lv)
 json.dump({"127.0.0.1": HEALTHY, "127.0.0.2": HEALTHY}, open(egress_file, "w"))
+json.dump({"127.0.0.1": clock_adj(404, 404)}, open(clock_file, "w"))
+rc, rep, lv = run()
+check(rc == 1 and lv.get("clock 127.0.0.2") == "FAIL" and lv.get("stack 127.0.0.2") == "INFO"
+      and lv.get("stack match") == "PASS",
+      "a CLOCK_ADJ read that throws FAILs the clock check, and the stack read stands (mutation: the read failing "
+      "the whole stack): %s" % lv)
+json.dump({"127.0.0.1": clock_adj(404, 404), "127.0.0.2": clock_adj(408)}, open(clock_file, "w"))
 json.dump({"127.0.0.1": same, "127.0.0.2": {k: v for k, v in same.items() if k != "host_version"}}, open(info_file, "w"))
 rc, rep, lv = run()
 det = [r["detail"] for r in rep["results"] if r["what"] == "stack 127.0.0.2"]

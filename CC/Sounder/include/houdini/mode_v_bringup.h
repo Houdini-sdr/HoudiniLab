@@ -454,7 +454,8 @@ inline PostSetup postSetupCheck(SoapySDR::Device& dev, const Result& r) {
     const std::string addr = ti->second + "." + bl->second;
     const std::string mode = detail::blockField(cal, addr, "cal");
     if (mode.empty()) {
-      ps.log.push_back("WARNING: RFDC_ADC_CAL has no entry for " + addr + " (RX ch" + std::to_string(x.channel) + "); calibration mode not verified");
+      throw std::runtime_error("mode V: RFDC_ADC_CAL has no cal= entry for ADC " + addr + " (RX ch" +
+                               std::to_string(x.channel) + "), so its calibration mode cannot be verified");
     } else if (mode != "mode" + std::to_string(x.cal_mode)) {
       throw std::runtime_error("mode V: RX ch" + std::to_string(x.channel) + " (ADC " + addr + ") runs cal=" + mode +
                                ", wanted mode" + std::to_string(x.cal_mode));

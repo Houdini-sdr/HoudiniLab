@@ -52,6 +52,7 @@ class FakeDevice : public SoapySDR::Device {
   bool invsinc_off = false;      ///< inverse sinc reads off
   bool unsynced = false;         ///< channels report rfdc_mts_synced=0
   bool wrong_cal = false;        ///< every ADC block reads cal=mode2
+  bool cal_missing = false;      ///< RFDC_ADC_CAL lists no block (a broken report)
   std::string preflight = "ok known DAC0.0:FIFO_OVR(HS-207)";
   // AP-86: the X-band front end, as the SoapyHoudiniSDR 0.4.0 plugin behaves.
   bool extpin_not_adopted = false;   ///< the board never adopts the static: STAT never shows it
@@ -125,7 +126,7 @@ class FakeDevice : public SoapySDR::Device {
       const size_t chs[4] = {0, 1, 2, 3};
       const char* addr[4] = {"0.0", "0.1", "2.0", "2.1"};
       const auto it = lists_.find("RFDC_ADC_CAL");
-      for (size_t i = 0; i < 4; ++i) {
+      for (size_t i = 0; i < 4 && !cal_missing; ++i) {
         std::string m = "mode2";
         if (!wrong_cal && it != lists_.end() && it->second.count(chs[i])) m = it->second.at(chs[i]).substr(4);  // "cal=modeK"
         s += (s.empty() ? "" : " ") + std::string(addr[i]) + ":dither=on,cal=" + m + ",cal_intent=" + m + ",dither_intent=policy";
@@ -361,6 +362,9 @@ int main() {
   check(throwsRt([] { FakeDevice f; f.wrong_cal = true; const auto r = houdini::modev::bringUp(f, bsPlan());
                       houdini::modev::postSetupCheck(f, r); }),
         "sub-6 RX running cal Mode 2 after the setups (wanted Mode 1) is refused");
+  check(throwsRt([] { FakeDevice f; f.cal_missing = true; const auto r = houdini::modev::bringUp(f, bsPlan());
+                      houdini::modev::postSetupCheck(f, r); }),
+        "an RX block RFDC_ADC_CAL does not report is refused, not passed unverified [mutation: the old WARNING]");
 
   std::printf("-- mutation matrix (each line must read PASS: the mutant was caught) --\n");
   check(!orderOk(moved(ue.calls, "RFDC_DAC_FS=", "rate TX ")), "mutant RFDC_DAC_FS before the TX rates is rejected");
