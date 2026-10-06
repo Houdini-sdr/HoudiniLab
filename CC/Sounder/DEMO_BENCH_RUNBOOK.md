@@ -62,7 +62,7 @@ cabled run's levels with 9.69 to 9.71, not with 9.60/9.61.
 
 ## A2b. The X-band RF chain (F2b: through the XUD1A and both ADTR1107 boards)
 
-From device 0.3.1. The X-band IF leaves `.21` DAC_A, goes up to RF 9.5 GHz in
+The X-band IF leaves `.21` DAC_A, goes up to RF 9.5 GHz in
 the XUD1A's channel A and out through `.21`'s ADTR1107, crosses a 20 dB pad
 into `.22`'s ADTR1107, comes back down to IF in the XUD1A's channel B and
 reaches `.22` ADC_B:
@@ -85,8 +85,8 @@ The XUD1A is the reworked board (RF 9.5 GHz, LO 13.88 GHz). It needs:
    backup): `ssh houdini@192.168.10.22 'sudo houdini-role apply bs'`.
 2. The LO check: `ssh houdini@192.168.10.22 'sudo houdini-xud1a pll status'` shows
    `lock_detect=1`, `rf16 ON at 13880000000...` and `doubler tracking table7
-   (REG0070 0x23, filter 1 bias 3, ...)`; on 0.3.1 `houdini-role status`
-   fails on `.22` unless the doubler reads table7. After any `houdini-xud1a
+   (REG0070 0x23, filter 1 bias 3, ...)`; `houdini-role status` fails on
+   `.22` unless the doubler reads table7. After any `houdini-xud1a
    bist`, sweep or manual tune on `.22`, run `sudo houdini-role apply bs`
    again before a run (bist parks the lines and turns the LO off).
 
@@ -138,16 +138,14 @@ The XUD1A is the reworked board (RF 9.5 GHz, LO 13.88 GHz). It needs:
   the SoapySDR runtime and the Python bindings, and it carries NO Houdini
   module. The Houdini host plugin is the release's own prefix, built with the
   radios' device build: `~/houdini_0.4.0` (this code needs SoapyHoudiniSDR
-  0.4.0; `~/houdini_0.3.1` is kept only as the host half of a revert to the
-  previous release, which this code does not run on). `--soapy-root $HOME/houdini_0.4.0`
+  0.4.0). `--soapy-root $HOME/houdini_0.4.0`
   selects it for every config: on `check_setup.py`, `run_rung.sh`,
   `fstage_run.sh`, `teardown_framer.py` and `reg_snap.py`, AND on the dashboard,
   which hands it to its Check, Start and teardown; `demo_run.sh` takes the
   prefix as its fourth argument. Without it no radio opens. The setup check's
   stack line shows which one loaded (`host_build`, equal to `device_build`; a
-  mismatch is a WARN). Going back a release is a deploy of that release's host
-  prefix and device modules (the software lane's, on the user's go) plus a
-  checkout of this repo from before that release's changes.
+  mismatch is a WARN). `~/houdini_0.3.1` on the rig host is the software
+  lane's regression prefix; this code does not run on it.
 - **Cores.** The sounder's `--core_map` places its threads by role and the
   main thread pins itself only after the radios start, so the plugin's BS
   receive workers run on the housekeeping cores 0-9 (AP-81, 9.44). The launch
@@ -325,7 +323,7 @@ steered, cabled):
   durable guard is keeping every NIC receive queue off the pacer cores (AP-106).
 - **Egress drop counters saturate (HS-212).** Each radio's per-port egress
   drop counters, and its one marked-frame counter (a single count after the
-  ports merge; device builds before 0.3.1 print it per port), stop at 255; a
+  ports merge), stop at 255; a
   throughput test fills them (9.73). Judge a run by each counter's change
   over the run, not its value: a marked frame at a stream's teardown is the
   designed cleanup. A
@@ -479,11 +477,10 @@ nodes: isolation, the 100G ports, roles, the XUD1A LO and its Table 7 filter, th
 boards, the builds, the FPGA and the egress, each radio opened with retries), then `check_setup.py --quick`
 (its radios just proven by the go/no-go), then the dashboard with
 the line of step 4 on the X-band chain's config, in the foreground of its terminal: Stop on
-the page, then Ctrl-C there. The steps below are what it does, by hand. From
-SoapyHoudiniSDR 0.4.0 it hands the check and the dashboard the `--soapy-root` and
-`--sounder-arg` arguments of steps 3 and 4, its prefix defaulting to `~/houdini_<version>`.
-An older copy exports environment variables that nothing reads now: if
-`grep -c -- --soapy-root ~/start_demo.sh` prints 0, bring the demo up with the steps below.
+the page, then Ctrl-C there. The steps below are what it does, by hand. It hands the
+check and the dashboard the `--soapy-root` and `--sounder-arg` arguments of steps 3 and 4,
+its prefix defaulting to `~/houdini_<version>`; `~/start_demo.sh` and its siblings are
+symlinks into the rig host's SoapyHoudiniSDR checkout.
 
 1. On the rig host: `cat /sys/devices/system/cpu/isolated` reads `15-19`.
 2. For the X-band RF chain only: the roles and the LO check (A2b steps 1 and 2:
