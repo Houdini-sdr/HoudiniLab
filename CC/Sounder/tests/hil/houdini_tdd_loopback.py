@@ -100,7 +100,7 @@ def main():
     ue = hs.open_device(node=a.ue_ip, ch=a.tx_ch, verbose=False)
     bsd, ued = bs["sdr"], ue["sdr"]
     native, dtype, bps = bs["native_fmt"], bs["dtype"], bs["bytes_per_samp"]
-    tick_rate = float(dict(bsd.getHardwareInfo()).get("tick_rate_hz", 122.88e6))
+    tick_rate = float(dict(bsd.getHardwareInfo())["tick_rate_hz"])
     frame = a.spf * SYM
 
     for sdr in (bsd, ued):

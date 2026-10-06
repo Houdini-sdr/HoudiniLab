@@ -40,12 +40,7 @@ SPUR_HZ = (30.72e6, 61.44e6)  # internal Fs/4, Fs/2 of the 122.88 stream
 
 
 def to_complex(lanes):
-    try:
-        return np.asarray(hs.iq_from_lanes(lanes, "interleaved"), dtype=np.complex64)
-    except Exception:  # noqa: BLE001
-        L = lanes.astype(np.float32)
-        q = L[:, 1] if lanes.shape[1] < 3 else L[:, 2]
-        return (L[:, 0] + 1j * q).astype(np.complex64)
+    return np.asarray(hs.iq_from_lanes(lanes, "interleaved"), dtype=np.complex64)
 
 
 def fold(f, fs):
@@ -63,8 +58,7 @@ def best_nonspur_peak(freqs, mag, dc_guard=1e6, spur_guard=0.5e6):
 
 
 def capture(txd, rxd, a, dac_nco, adc_nco, native, dtype):
-    dac_rate = float(dict(txd.getChannelInfo(SOAPY_SDR_TX, a.tx_ch)).get(
-        "rfdc_effective_rate_hz", 983.04e6))
+    dac_rate = float(dict(txd.getChannelInfo(SOAPY_SDR_TX, a.tx_ch))["rfdc_effective_rate_hz"])
     f_bb = a.tone_mhz * 1e6
     tx = None
     try:
@@ -126,10 +120,8 @@ def main():
               else hs.open_device(node=a.rx_ip, ch=a.rx_ch, verbose=False))
     txd, rxd = tx_ctx["sdr"], rx_ctx["sdr"]
     native, dtype = rx_ctx["native_fmt"], rx_ctx["dtype"]
-    fs_adc = float(dict(rxd.getChannelInfo(SOAPY_SDR_RX, a.rx_ch)).get(
-        "rfdc_sample_rate_hz", 1228.8e6))
-    fs_dac = float(dict(txd.getChannelInfo(SOAPY_SDR_TX, a.tx_ch)).get(
-        "rfdc_sample_rate_hz", 1966.08e6))
+    fs_adc = float(dict(rxd.getChannelInfo(SOAPY_SDR_RX, a.rx_ch))["rfdc_sample_rate_hz"])
+    fs_dac = float(dict(txd.getChannelInfo(SOAPY_SDR_TX, a.tx_ch))["rfdc_sample_rate_hz"])
     print(f"Fs_dac={fs_dac/1e6:.1f} (zone1<{fs_dac/2e6:.0f})  "
           f"Fs_adc={fs_adc/1e6:.1f} (zone1<{fs_adc/2e6:.0f})")
 

@@ -169,7 +169,7 @@ def main():
     sdr = tx_ctx["sdr"]
     native, dtype = rx_ctx["native_fmt"], rx_ctx["dtype"]
     bps = rx_ctx["bytes_per_samp"]
-    tick_rate = float(dict(sdr.getHardwareInfo()).get("tick_rate_hz", 122.88e6))
+    tick_rate = float(dict(sdr.getHardwareInfo())["tick_rate_hz"])
 
     _teardown(sdr)                                     # start clean
     ladder = list(sdr.listSampleRates(SOAPY_SDR_TX, a.tx_ch))

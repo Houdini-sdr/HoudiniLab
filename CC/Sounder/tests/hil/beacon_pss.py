@@ -70,12 +70,7 @@ def lowpass(ntaps, fc):
 
 
 def to_complex(lanes):
-    try:
-        return np.asarray(hs.iq_from_lanes(lanes, "interleaved"), dtype=np.complex64)
-    except Exception:  # noqa: BLE001
-        L = lanes.astype(np.float32)
-        q = L[:, 1] if lanes.shape[1] < 3 else L[:, 2]
-        return (L[:, 0] + 1j * q).astype(np.complex64)
+    return np.asarray(hs.iq_from_lanes(lanes, "interleaved"), dtype=np.complex64)
 
 
 def main():
@@ -119,8 +114,7 @@ def main():
     native, dtype = rx_ctx["native_fmt"], rx_ctx["dtype"]
     # The TX REPLAY BRAM clocks at the DAC effective rate, NOT the host stream rate
     # (the working CW test fed tx_iq_tone dac_rate=983.04) -> generate at that rate.
-    dac_rate = float(dict(txd.getChannelInfo(SOAPY_SDR_TX, a.tx_ch)).get(
-        "rfdc_effective_rate_hz", 983.04e6))
+    dac_rate = float(dict(txd.getChannelInfo(SOAPY_SDR_TX, a.tx_ch))["rfdc_effective_rate_hz"])
     scs = dac_rate / a.n_fft
     print(f"  replay rate {dac_rate/1e6:.2f} MSPS -> SCS {scs/1e3:.0f} kHz, "
           f"occupied {a.n_sc*scs/1e6:.2f} MHz")

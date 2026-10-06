@@ -53,12 +53,7 @@ def matched_filter(x, h):
 
 
 def to_complex(lanes):
-    try:
-        return np.asarray(hs.iq_from_lanes(lanes, "interleaved"), dtype=np.complex128)
-    except Exception:  # noqa: BLE001
-        L = lanes.astype(np.float64)
-        q = L[:, 1] if lanes.shape[1] < 3 else L[:, 2]
-        return L[:, 0] + 1j * q
+    return np.asarray(hs.iq_from_lanes(lanes, "interleaved"), dtype=np.complex128)
 
 
 def bs_rx_worker(bsd, ch, native, dtype, mode, tick_rate, epoch, frame, pilot_sym,
@@ -120,7 +115,7 @@ def main():
     bsd, rsd = bs["sdr"], rx["sdr"]
     native, dtype = bs["native_fmt"], bs["dtype"]
     rnative, rdtype = rx["native_fmt"], rx["dtype"]
-    tick_rate = float(dict(bsd.getHardwareInfo()).get("tick_rate_hz", 122.88e6))
+    tick_rate = float(dict(bsd.getHardwareInfo())["tick_rate_hz"])
 
     _teardown(bsd)
     ladder = list(bsd.listSampleRates(SOAPY_SDR_TX, a.tx_ch))

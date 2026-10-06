@@ -49,12 +49,7 @@ def matched_filter(x, h):
 
 
 def to_complex(lanes):
-    try:
-        return np.asarray(hs.iq_from_lanes(lanes, "interleaved"), dtype=np.complex128)
-    except Exception:  # noqa: BLE001
-        L = lanes.astype(np.float64)
-        q = L[:, 1] if lanes.shape[1] < 3 else L[:, 2]
-        return L[:, 0] + 1j * q
+    return np.asarray(hs.iq_from_lanes(lanes, "interleaved"), dtype=np.complex128)
 
 
 def wrap(x, P):
@@ -125,7 +120,7 @@ def main():
     rx_ctx = hs.open_device(node=a.rx_ip, ch=a.rx_ch, verbose=False)
     tsd, rsd = tx_ctx["sdr"], rx_ctx["sdr"]
     rnative, rdtype = rx_ctx["native_fmt"], rx_ctx["dtype"]
-    tick_rate = float(dict(tsd.getHardwareInfo()).get("tick_rate_hz", 122.88e6))
+    tick_rate = float(dict(tsd.getHardwareInfo())["tick_rate_hz"])
 
     _teardown(tsd)
     ladder = list(tsd.listSampleRates(SOAPY_SDR_TX, a.tx_ch))

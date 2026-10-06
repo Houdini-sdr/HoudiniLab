@@ -47,12 +47,7 @@ def upsample(x, f):
 
 
 def to_complex(lanes):
-    try:
-        return np.asarray(hs.iq_from_lanes(lanes, "interleaved"), dtype=np.complex64)
-    except Exception:  # noqa: BLE001
-        L = lanes.astype(np.float32)
-        q = L[:, 1] if lanes.shape[1] < 3 else L[:, 2]
-        return (L[:, 0] + 1j * q).astype(np.complex64)
+    return np.asarray(hs.iq_from_lanes(lanes, "interleaved"), dtype=np.complex64)
 
 
 def main():

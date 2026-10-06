@@ -126,8 +126,7 @@ def main():
     ladder = list(sdr.listSampleRates(SOAPY_SDR_TX, a.tx_ch))
     if ladder:
         sdr.setSampleRate(SOAPY_SDR_TX, a.tx_ch, max(ladder))
-    dac_rate = float(dict(sdr.getChannelInfo(SOAPY_SDR_TX, a.tx_ch)).get(
-        "rfdc_effective_rate_hz", 983.04e6))
+    dac_rate = float(dict(sdr.getChannelInfo(SOAPY_SDR_TX, a.tx_ch))["rfdc_effective_rate_hz"])
     nco = a.nco_mhz * 1e6
 
     tx = None

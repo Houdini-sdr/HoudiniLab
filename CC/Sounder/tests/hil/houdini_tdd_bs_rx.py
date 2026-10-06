@@ -94,7 +94,7 @@ def main():
     bsd, ued = bs["sdr"], ue["sdr"]
     native, dtype = bs["native_fmt"], bs["dtype"]
     bps = bs["bytes_per_samp"]
-    tick_rate = float(dict(bsd.getHardwareInfo()).get("tick_rate_hz", 122.88e6))
+    tick_rate = float(dict(bsd.getHardwareInfo())["tick_rate_hz"])
 
     _teardown(bsd)
     for sdr, ch in ((bsd, a.tx_ch), (ued, a.tx_ch)):
