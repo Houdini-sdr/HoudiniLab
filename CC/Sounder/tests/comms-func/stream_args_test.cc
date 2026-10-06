@@ -1,4 +1,4 @@
-// HOUDINI_TX_STREAM_ARGS parsing (houdini/stream_args.h). Each assertion names
+// --tx_stream_args parsing (houdini/stream_args.h). Each assertion names
 // the mutation that breaks it.
 #include <cstdio>
 #include <string>

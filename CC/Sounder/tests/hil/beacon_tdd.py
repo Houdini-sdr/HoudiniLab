@@ -31,18 +31,22 @@ import time
 
 import numpy as np
 
-_EX = os.environ.get(
-    "HOUDINI_EXAMPLES",
-    os.path.expanduser("~/repos/SoapyHoudiniSDR/host/examples"))
-if _EX not in sys.path:
-    sys.path.insert(0, _EX)
+# The SoapyHoudiniSDR host examples (houdini_setup). An importer (the
+# dashboard's teardown, the TDD scripts) has put them on sys.path already; run
+# as a script, --examples names them (default: the usual checkout).
+if __name__ == "__main__":
+    _EX = next((sys.argv[i + 1] for i, x in enumerate(sys.argv[:-1]) if x == "--examples"), None) or \
+        next((x.split("=", 1)[1] for x in sys.argv if x.startswith("--examples=")), None) or \
+        os.path.expanduser("~/repos/SoapyHoudiniSDR/host/examples")
+    if _EX not in sys.path:
+        sys.path.insert(0, _EX)
 
 import SoapySDR  # noqa: E402
 from SoapySDR import (SOAPY_SDR_RX, SOAPY_SDR_TX, SOAPY_SDR_HAS_TIME,  # noqa: E402
                       SOAPY_SDR_END_BURST)
 import houdini_setup as hs  # noqa: E402
-from houdini_setup import (run_burst, rx_stream_args, rx_framing,  # noqa: E402
-                           iq_from_cs16, tx_iq_tone, tx_lfm_chirp)
+from houdini_setup import (run_burst, rx_framing, iq_from_cs16,  # noqa: E402
+                           tx_iq_tone, tx_lfm_chirp)
 
 # TDD framer grid constants (from test_tdd.py).
 GRID_TICKS = 384
@@ -145,6 +149,7 @@ def main():
     ap.add_argument("--bw-mhz", type=float, default=30.0, help="chirp bandwidth")
     ap.add_argument("--n-sc", type=int, default=4, help="zc subcarriers")
     ap.add_argument("--n-load", type=int, default=2048, help="replay RAM samples")
+    ap.add_argument("--examples", help="the SoapyHoudiniSDR host examples (read before the imports)")
     ap.add_argument("--amp", type=float, default=0.25)
     ap.add_argument("--spf", type=int, default=100, help="symbols per frame")
     ap.add_argument("--beacon-sym", type=int, default=0)
@@ -164,7 +169,7 @@ def main():
     sdr = tx_ctx["sdr"]
     native, dtype = rx_ctx["native_fmt"], rx_ctx["dtype"]
     bps = rx_ctx["bytes_per_samp"]
-    tick_rate = float(dict(sdr.getHardwareInfo()).get("tick_rate_hz", 122.88e6))
+    tick_rate = float(dict(sdr.getHardwareInfo())["tick_rate_hz"])
 
     _teardown(sdr)                                     # start clean
     ladder = list(sdr.listSampleRates(SOAPY_SDR_TX, a.tx_ch))
@@ -182,7 +187,7 @@ def main():
           f"ADC {a.adc_nco} -> RF {a.dac_nco+a.center_mhz:.1f} MHz")
 
     tx = sdr.setupStream(SOAPY_SDR_TX, native, [a.tx_ch], {"tx_mode": "replay"})
-    rx = sdr.setupStream(SOAPY_SDR_RX, native, [a.rx_ch], rx_stream_args(a.rx_ch))
+    rx = sdr.setupStream(SOAPY_SDR_RX, native, [a.rx_ch], {})
     res = {}
     try:
         if a.matched:                                  # reference recipe: one NCO

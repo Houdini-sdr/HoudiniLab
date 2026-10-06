@@ -4,8 +4,8 @@ fallback. The datagrams go out exactly as the sounder sent them, at their
 recorded pace, so every panel (channel, constellation, CIR, ADC, beacon sync)
 shows real rig data with no radios.
 
-Record during a good run by starting the dashboard with ``--record FILE`` (or
-``HOUDINI_CSI_RECORD=FILE`` in its environment, which a scripted run inherits).
+Record during a good run by starting the dashboard with ``--record FILE`` (a
+scripted run: ``demo_run.sh --record FILE``).
 Replay:
 
     python3 csi_server.py &                      # terminal 1

@@ -7,6 +7,8 @@
   * RENEW OPEN SOURCE LICENSE: http://renew-wireless.org/license
 */
 #include "include/RadioSoapy.h"
+#include "include/run_options.h"
+#include "include/houdini/stream_result.h"
 
 #include <algorithm>
 #include <chrono>
@@ -17,6 +19,7 @@
 #include <cstring>
 #include <iostream>
 #include <sstream>
+#include <stdexcept>
 #include <vector>
 
 #include "SoapySDR/Errors.hpp"
@@ -240,18 +243,18 @@ RadioSoapy::RadioSoapy(const RadioParams& params, Type type, const SoapySDR::Kwa
       // The ADC half of the MTS rule (the software lane's): the group needs an
       // RX member on ADC tile 0. The planned nodes have one (RX ch0); a node
       // that omits it is refused here, naming the fix, rather than left to a
-      // sync that fails or lands unsynced. Skipped when the driver does not
-      // report tiles.
+      // sync that fails or lands unsynced. Only a Houdini radio asks for MTS,
+      // and it reports every channel's tile.
       if (want_mts && !rx_channels.empty()) {
-        bool tile0 = false, reported = false;
+        bool tile0 = false;
         for (auto ch : rx_channels) {
           const auto info = dev_->getChannelInfo(SOAPY_SDR_RX, ch);
           const auto it = info.find("rfdc_tile_index");
-          if (it == info.end()) continue;
-          reported = true;
+          if (it == info.end())
+            throw std::runtime_error("getChannelInfo(RX, " + std::to_string(ch) + ") reports no rfdc_tile_index");
           tile0 = tile0 || it->second == "0";
         }
-        if (reported && !tile0) {
+        if (!tile0) {
           throw std::invalid_argument(
               "MTS needs an RX channel on ADC tile 0 (channel A or B); add one "
               "to rx_channel / ue_rx_channel");
@@ -266,13 +269,14 @@ RadioSoapy::RadioSoapy(const RadioParams& params, Type type, const SoapySDR::Kwa
       // SH-235: the Houdini driver rejects a multi-channel TX stream on both
       // modes (replay beacon and live pilot). Open one single-channel TX stream
       // per channel; xmit routes each channel's buffer to its own stream.
-      // SH-427 diagnostic (HOUDINI_TX_CPU_AFFINITY="c0,c1,..."): the i-th live
+      // SH-427 diagnostic (--tx_cpu_affinity=c0,c1,..): the i-th live
       // (tx_mode=stream, the UE) TX stream gets the plugin's cpu_affinity = ci,
       // to test whether its pacer worker's stalls are contention for a core.
       std::vector<std::string> tx_cpus;
-      if (const char* e = std::getenv("HOUDINI_TX_CPU_AFFINITY")) {
-        std::string list(e), item;
-        for (std::istringstream in(list); std::getline(in, item, ',');) tx_cpus.push_back(item);
+      if (!Sounder::runOptions().tx_cpu_affinity.empty()) {
+        std::string item;
+        for (std::istringstream in(Sounder::runOptions().tx_cpu_affinity); std::getline(in, item, ',');)
+          tx_cpus.push_back(item);
       }
       size_t tx_i = 0;
       for (auto ch : tx_channels) {
@@ -280,7 +284,7 @@ RadioSoapy::RadioSoapy(const RadioParams& params, Type type, const SoapySDR::Kwa
         const auto mode = a.find("tx_mode");
         if (tx_i < tx_cpus.size() && mode != a.end() && mode->second == "stream") {
           a["cpu_affinity"] = tx_cpus[tx_i];
-          MLPD_INFO("TX ch%zu stream: cpu_affinity=%s (HOUDINI_TX_CPU_AFFINITY)\n", ch, tx_cpus[tx_i].c_str());
+          MLPD_INFO("TX ch%zu stream: cpu_affinity=%s (--tx_cpu_affinity)\n", ch, tx_cpus[tx_i].c_str());
         }
         ++tx_i;
         tx_streams_.push_back(dev_->setupStream(SOAPY_SDR_TX, soapyFmt, {ch}, a));
@@ -494,7 +498,13 @@ int RadioSoapy::activateRecv(long long rxTime, size_t numSamps, int flags) {
   }
 }
 
-void RadioSoapy::deactivateRecv(void) { dev_->deactivateStream(rxs_); }
+// A stop reports a deactivate the device refused. Deactivating a stream that
+// is not active (a second stop, a refused activation) returns 0 on Houdini.
+void RadioSoapy::deactivateRecv(void) {
+  const int rc = dev_->deactivateStream(rxs_);
+  if (rc != 0)
+    MLPD_WARN("%s: deactivateStream(RX) returned %d (%s)\n", params_.label.c_str(), rc, SoapySDR::errToStr(rc));
+}
 
 int RadioSoapy::xmit(const void* const* buffs, int samples, int flags,
                 long long& frameTime) {
@@ -518,7 +528,8 @@ int RadioSoapy::xmit(const void* const* buffs, int samples, int flags,
   // write each to its own single-channel stream at the SAME timed start. Both
   // channels share the board's clock, so one frameTime seats them on the same
   // TDD grid. Return the first short/failed write so the caller's BAD-Write
-  // check still fires.
+  // check still fires, or an ended stream on any channel, which the caller
+  // must end the run on (houdini/stream_result.h).
   int ret = samples;
   for (size_t i = 0; i < tx_streams_.size(); ++i) {
     // A null channel buffer means "nothing on this channel this write" -- the BS
@@ -540,8 +551,8 @@ int RadioSoapy::xmit(const void* const* buffs, int samples, int flags,
     if (r != samples) {
       std::cerr << "unexpected writeStream error (ch " << i << ") "
                 << SoapySDR::errToStr(r) << std::endl;
-      if (ret == samples) ret = r;
     }
+    ret = houdini::stream::mergeWrite(ret, r, samples);
   }
   return ret;
 }
@@ -549,16 +560,22 @@ int RadioSoapy::xmit(const void* const* buffs, int samples, int flags,
 void RadioSoapy::activateXmit(void) {
   // for USRP device start tx stream UHD_INIT_TIME_SEC sec in the future
   for (auto* txs : tx_streams_) {
-    if (!isUhd()) {
-      dev_->activateStream(txs);
-    } else {
-      dev_->activateStream(txs, SOAPY_SDR_HAS_TIME, UHD_INIT_TIME_SEC * 1e9, 0);
-    }
+    const int rc = !isUhd() ? dev_->activateStream(txs)
+                            : dev_->activateStream(txs, SOAPY_SDR_HAS_TIME, UHD_INIT_TIME_SEC * 1e9, 0);
+    // A refused activation transmits nothing; the Houdini driver refuses, for
+    // one, a replay load that is not a whole number of 16-sample beats (DS-19).
+    if (rc != 0)
+      throw std::runtime_error(params_.label + ": activateStream(TX) refused: " + SoapySDR::errToStr(rc));
   }
 }
 
 void RadioSoapy::deactivateXmit(void) {
-  for (auto* txs : tx_streams_) dev_->deactivateStream(txs);
+  for (size_t i = 0; i < tx_streams_.size(); ++i) {
+    const int rc = dev_->deactivateStream(tx_streams_[i]);
+    if (rc != 0)
+      MLPD_WARN("%s: deactivateStream(TX, tx_stream[%zu]) returned %d (%s)\n", params_.label.c_str(), i, rc,
+                SoapySDR::errToStr(rc));
+  }
 }
 
 int RadioSoapy::getTriggers(void) const {

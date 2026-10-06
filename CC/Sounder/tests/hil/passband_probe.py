@@ -34,12 +34,7 @@ from sigqual import tone_spectrum, peak_in  # noqa: E402
 
 
 def to_complex(lanes):
-    try:
-        return np.asarray(hs.iq_from_lanes(lanes, "interleaved"), dtype=np.complex64)
-    except Exception:  # noqa: BLE001
-        L = lanes.astype(np.float32)
-        q = L[:, 1] if lanes.shape[1] < 3 else L[:, 2]
-        return (L[:, 0] + 1j * q).astype(np.complex64)
+    return np.asarray(hs.iq_from_lanes(lanes, "interleaved"), dtype=np.complex64)
 
 
 def fold(f, fs):
@@ -74,10 +69,8 @@ def main():
               else hs.open_device(node=a.rx_ip, ch=a.rx_ch, verbose=False))
     txd, rxd = tx_ctx["sdr"], rx_ctx["sdr"]
     native, dtype = rx_ctx["native_fmt"], rx_ctx["dtype"]
-    dac_rate = float(dict(txd.getChannelInfo(SOAPY_SDR_TX, a.tx_ch)).get(
-        "rfdc_effective_rate_hz", 983.04e6))
-    fs_adc = float(dict(rxd.getChannelInfo(SOAPY_SDR_RX, a.rx_ch)).get(
-        "rfdc_sample_rate_hz", 1228.8e6))
+    dac_rate = float(dict(txd.getChannelInfo(SOAPY_SDR_TX, a.tx_ch))["rfdc_effective_rate_hz"])
+    fs_adc = float(dict(rxd.getChannelInfo(SOAPY_SDR_RX, a.rx_ch))["rfdc_sample_rate_hz"])
     dac_nco = a.dac_nco * 1e6
     adc_nco = a.adc_nco * 1e6 if a.adc_nco is not None else abs(fold(dac_nco, fs_adc))
     print(f"carrier: DAC NCO {dac_nco/1e6:.1f} MHz -> RF ~{dac_nco/1e6:.0f} MHz, "
@@ -94,7 +87,9 @@ def main():
             txd.setFrequency(SOAPY_SDR_TX, a.tx_ch, dac_nco)
             cs16 = np.ascontiguousarray(iq_a, dtype=np.int16).view(np.int32)
             txd.writeStream(tx, [cs16], cs16.size, 0, 0)
-            txd.activateStream(tx)
+            if txd.activateStream(tx) != 0:
+                raise RuntimeError("activateStream(TX replay) refused (DS-19: a load must be a whole "
+                                   "number of 16-sample beats)")
         rxd.setSampleRate(SOAPY_SDR_RX, a.rx_ch, a.rate_mhz * 1e6)
         rxd.setFrequency(SOAPY_SDR_RX, a.rx_ch, adc_nco)
         fs = float(rxd.getSampleRate(SOAPY_SDR_RX, a.rx_ch))

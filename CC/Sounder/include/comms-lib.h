@@ -217,7 +217,7 @@ class CommsLib {
     // The other trade is discrimination against the preamble: the lag product
     // puts the preamble plateau ~1/L^2 below the peak, and without it the
     // separation is only ~1/L, 21 dB instead of 42.
-    kCoherence,  // HOUDINI_BEACON_THRESH=nolag is an alias of "coherence"
+    kCoherence,
   };
 
   // Functions using AVX
@@ -350,8 +350,7 @@ class CommsLib {
   // Portable + multi-threaded matched filter (see comms-lib-portable.cc),
   // equivalent to the float correlate_avx. Compiles and auto-vectorizes on both
   // x86 and aarch64. num_threads=0 => the value set by setCorrelatorThreads
-  // (sync.detector.corr_threads); if none was set, SOUNDER_CORR_THREADS read
-  // once (the bench tools' path); else 1.
+  // (sync.detector.corr_threads), else one thread.
   static std::vector<std::complex<float>> correlate_mt(
       const std::vector<std::complex<float>>& f,
       const std::vector<std::complex<float>>& g, unsigned num_threads = 0);

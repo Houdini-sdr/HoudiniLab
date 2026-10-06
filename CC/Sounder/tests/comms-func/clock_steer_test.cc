@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <mutex>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -172,6 +173,17 @@ static void sessionTests() {
     auto s = b.make();
     // Fails under: arming on any ref (the actuator exists only under calibrated).
     check(!s.arm(), "a node not on ref=calibrated is not armed");
+  }
+  {
+    Bench b;
+    ClockSteerSession s(
+        b.cfg, []() -> std::string { throw std::runtime_error("CLOCK_ADJ: unknown setting"); },
+        [](const std::string&) { return false; }, [&b](bool, const std::string& m) { b.log.push_back(m); },
+        [&b] { return b.t; });
+    // Fails under: the read's error dropped (the OFF line then reads like a
+    // node out of its hold, "CLOCK_ADJ reads ''").
+    check(!s.arm() && !b.log.empty() && b.log.back().find("read failed: CLOCK_ADJ: unknown setting") != std::string::npos,
+          "a CLOCK_ADJ read that throws leaves steering off and the OFF line names the read's error");
   }
   {
     Bench b;

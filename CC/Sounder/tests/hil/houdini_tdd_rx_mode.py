@@ -41,8 +41,7 @@ import SoapySDR  # noqa: E402
 from SoapySDR import (SOAPY_SDR_RX, SOAPY_SDR_TX, SOAPY_SDR_HAS_TIME,  # noqa: E402
                       SOAPY_SDR_END_BURST)
 import houdini_setup as hs  # noqa: E402
-from houdini_setup import (run_burst, rx_stream_args, rx_framing,  # noqa: E402
-                           tx_lfm_chirp)
+from houdini_setup import run_burst, rx_framing, tx_lfm_chirp  # noqa: E402
 from beacon_tdd import (build_beacon, _arm, _teardown, _ns_of_tick,  # noqa: E402
                         _hw_tick, _next_window_tick, GRID_TICKS, SYM, ARM_MARGIN)
 
@@ -54,12 +53,7 @@ def matched_filter(x, h):
 
 
 def to_complex(lanes):
-    try:
-        return np.asarray(hs.iq_from_lanes(lanes, "interleaved"), dtype=np.complex128)
-    except Exception:  # noqa: BLE001
-        L = lanes.astype(np.float64)
-        q = L[:, 1] if lanes.shape[1] < 3 else L[:, 2]
-        return L[:, 0] + 1j * q
+    return np.asarray(hs.iq_from_lanes(lanes, "interleaved"), dtype=np.complex128)
 
 
 def bs_rx_worker(bsd, ch, native, dtype, mode, tick_rate, epoch, frame, pilot_sym,
@@ -67,8 +61,10 @@ def bs_rx_worker(bsd, ch, native, dtype, mode, tick_rate, epoch, frame, pilot_sy
     """Run .21 RX in `mode` until stop is set."""
     if mode == "none":
         return
-    rx = bsd.setupStream(SOAPY_SDR_RX, native, [ch], rx_stream_args(ch))
-    per_packet = rx_framing(bsd, verbose=False)["frame_words"] * (8 // (4 if dtype == np.int16 else 2))
+    rx = bsd.setupStream(SOAPY_SDR_RX, native, [ch], {})
+    # readStream counts CS16 samples whatever the buffer's dtype: two per
+    # 64-bit frame word.
+    per_packet = rx_framing(bsd, verbose=False)["frame_words"] * 2
     win = 4096
     try:
         if mode == "continuous":
@@ -119,7 +115,7 @@ def main():
     bsd, rsd = bs["sdr"], rx["sdr"]
     native, dtype = bs["native_fmt"], bs["dtype"]
     rnative, rdtype = rx["native_fmt"], rx["dtype"]
-    tick_rate = float(dict(bsd.getHardwareInfo()).get("tick_rate_hz", 122.88e6))
+    tick_rate = float(dict(bsd.getHardwareInfo())["tick_rate_hz"])
 
     _teardown(bsd)
     ladder = list(bsd.listSampleRates(SOAPY_SDR_TX, a.tx_ch))

@@ -9,6 +9,7 @@
 
 #include "houdini/rx_packet.h"
 #include "include/config.h"
+#include "include/run_options.h"
 
 #include <cerrno>
 #include <cstring>
@@ -134,7 +135,10 @@ Config::Config(const std::string& jsonfile, const std::string& directory,
   cl_rx_ch_ = Utils::strToChannels(cl_rx_channel_).size();
   cl_sdr_ch_ = cl_rx_ch_;  // legacy: the recorded-antenna (RX) count per UE SDR
 
-  auto serials_file = tddConf.value("serial_file", "./files/topology.json");
+  // --topology names another file than the config's (e.g. the demo venue's).
+  const std::string serials_file = Sounder::runOptions().topology.empty()
+                                       ? tddConf.value("serial_file", "./files/topology.json")
+                                       : Sounder::runOptions().topology;
   loadTopology(serials_file, bs_only, client_only, calibrate);
   std::cout << "Topology: "
             << "\n"
@@ -336,11 +340,9 @@ Config::Config(const std::string& jsonfile, const std::string& directory,
   beacon_radio_ = beacon_ant_ / bs_sdr_ch_;
   beacon_ch_ = beacon_ant_ % bs_sdr_ch_;
   max_frame_ = tddConf.value("max_frame", 0);
-  // Env override (used by the live-CSI GUI to run the sounder ~indefinitely in
-  // viewing mode, where max_frame would otherwise stop the BS loop).
-  if (const char* mf = std::getenv("HOUDINI_MAX_FRAME")) {
-    max_frame_ = static_cast<size_t>(std::strtoull(mf, nullptr, 10));
-  }
+  // --max_frame overrides it (the live-CSI dashboard runs the sounder about
+  // indefinitely in viewing mode, where max_frame would stop the BS loop).
+  if (Sounder::runOptions().max_frame >= 0) max_frame_ = static_cast<size_t>(Sounder::runOptions().max_frame);
   bs_hw_framer_ = tddConf.value("bs_hw_framer", true);
   // AP-87: the BS receives only its rx slots (the real TDD pattern and the
   // device's SH-347 slots mode); checked below once the slot size is known.
@@ -531,9 +533,23 @@ Config::Config(const std::string& jsonfile, const std::string& directory,
   if (bs_rx_slots_ && !bs_hw_framer_) {
     throw std::invalid_argument("bs_rx_slots needs bs_hw_framer (the native TDD framer arms the pattern)");
   }
-  if (bs_rx_slots_ && houdini::rxpkt::tiledPacketOrDefault(samps_per_slot_) == 0) {
-    throw std::invalid_argument("bs_rx_slots needs packets that tile the slot (the device cuts whole packets at the "
-                                "slot edges); a " + std::to_string(samps_per_slot_) + "-sample slot has no such packet");
+  if (is_houdini() && bs_present_ && bs_hw_framer_ && houdini::rxpkt::framerPacket(samps_per_slot_, rate_) > 0 &&
+      houdini::rxpkt::tiledPacketOrDefault(samps_per_slot_) == 0) {
+    // The tiling packet is smaller than 3/4 of the default one: the host's
+    // receive load rises with the packet rate. Allowed (the device refuses a
+    // packet that does not tile, SH-488), and said once.
+    const size_t pkt = houdini::rxpkt::framerPacket(samps_per_slot_, rate_);
+    MLPD_WARN("the BS's TDD framer packet is %zu samples (the default is %zu): %.1fx the packet rate, so more host "
+              "receive load; a slot with a larger divisor avoids it\n",
+              pkt, houdini::rxpkt::deviceSamples(houdini::rxpkt::kDefaultMtu),
+              static_cast<double>(houdini::rxpkt::deviceSamples(houdini::rxpkt::kDefaultMtu)) / pkt);
+  }
+  if (is_houdini() && bs_present_ && bs_hw_framer_ && houdini::rxpkt::framerPacket(samps_per_slot_, rate_) == 0) {
+    throw std::invalid_argument("the BS's TDD framer needs packets that tile the slot (the device refuses a TDD RX "
+                                "packet that does not divide the slot or spans under " +
+                                std::to_string(houdini::rxpkt::kMinFramerTicks) + " ticks, SH-488); a " +
+                                std::to_string(samps_per_slot_) + "-sample slot at " + std::to_string(rate_ / 1e6) +
+                                " MSPS has no such packet");
   }
   // The Houdini TDD framer cuts ONE pilot slot per frame: it keeps the
   // schedule's 'P' as the pilot and centres the burst search on it, so a
@@ -1102,10 +1118,10 @@ void Config::genPilots() {
                     : ")")
             << ", PAPR " << shape.paprDb() << " dB" << std::endl;
 
-  if (getenv("HOUDINI_DUMP_GOLD") != nullptr) {  // the exact find_beacon match
+  if (Sounder::runOptions().dump_gold) {  // the exact find_beacon match
     FILE* f = std::fopen(Utils::dumpPath("gold.bin").c_str(), "wb");
     if (f == nullptr) {
-      MLPD_WARN("HOUDINI_DUMP_GOLD: cannot open %s (%s)\n", Utils::dumpPath("gold.bin").c_str(),
+      MLPD_WARN("--dump_gold: cannot open %s (%s)\n", Utils::dumpPath("gold.bin").c_str(),
                 std::strerror(errno));
     }
     if (f) {
@@ -1126,7 +1142,7 @@ void Config::genPilots() {
   // CommsLib::BeaconPick::kTargetedArgmax (comms-lib.h; BACKLOG AP-34).
   beacon_ci16_ = Utils::cfloat_to_cint16(shape.core());
   beacon_size_ = beacon_ci16_.size();
-  if (getenv("HOUDINI_DUMP_GOLD") != nullptr) {
+  if (Sounder::runOptions().dump_gold) {
     // The beacon core for the CONFIGURED shape (pre-prefix, unconjugated, at
     // the shape's own scale) -- what buildHoudiniBeacon conjugates and scales
     // into the replay RAM. Lets offline tools (tests/demo-verify) construct the
@@ -1134,7 +1150,7 @@ void Config::genPilots() {
     // legacy, the shape's own for the others.
     FILE* f = std::fopen(Utils::dumpPath("beacon_core.bin").c_str(), "wb");
     if (f == nullptr) {
-      MLPD_WARN("HOUDINI_DUMP_GOLD: cannot open %s (%s)\n",
+      MLPD_WARN("--dump_gold: cannot open %s (%s)\n",
                 Utils::dumpPath("beacon_core.bin").c_str(), std::strerror(errno));
     }
     if (f) {

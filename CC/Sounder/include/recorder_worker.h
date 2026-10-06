@@ -5,7 +5,7 @@
 ----------------------------------------------------------------------
  Per-thread handler of received slots: writes them to HDF5 (recording mode)
  or computes the live view and streams it to the dashboard over UDP (view
- mode, HOUDINI_CSI_UDP set).
+ mode, --csi_udp set).
 ---------------------------------------------------------------------
 */
 #ifndef SOUNDER_RECORDER_WORKER_H_
@@ -48,7 +48,7 @@ class RecorderWorker {
   size_t antenna_offset_;
   size_t num_antennas_;
 
-  // --- View mode (HOUDINI_CSI_UDP=host:port set): no HDF5 file. Per antenna,
+  // --- View mode (--csi_udp=host:port set): no HDF5 file. Per antenna,
   // the pilot slot gives H (against the config's frequency-domain pilot, so any
   // pilot sequence works) and the uplink-data slot the equalized constellation;
   // both, the raw-ADC envelope, the spectrum, the impulse response and the
@@ -87,16 +87,16 @@ class RecorderWorker {
   void sendMeta(uint32_t ant, long long now_ns);
   double csi_throttle_ns_ = 0.0;                // per-antenna min send interval
   // OFDM symbol-0 start within a received slot: the zero prefix less half a CP
-  // (initCsi says why), or an integer from HOUDINI_CSI_SYM_START. The energy-edge
-  // detector slotEnergyStart() is opt-in only (HOUDINI_CSI_SYM_START=auto): its 15%
+  // (initCsi says why), or an integer from --csi_sym_start. The energy-edge
+  // detector slotEnergyStart() is opt-in only (--csi_sym_start=auto): its 15%
   // threshold can trigger on pre-symbol leakage and mis-align the FFT windows.
   int csi_sym_start_ = 0;       // may be negative (see initCsi)
-  bool csi_sym_auto_ = false;   // HOUDINI_CSI_SYM_START=auto: the energy-edge detector
+  bool csi_sym_auto_ = false;   // --csi_sym_start=auto: the energy-edge detector
   // Pilot-to-data timing re-align: the data slot can sit a few samples off the
   // pilot the cached H came from, which ramps H across the band and rings the
   // constellation. Per constellation frame, an integer search then a fractional
   // fit from the data slot's own pilot tones (sendConstellation). Default from
-  // the platform (sync/rx_path_fixes.h); HOUDINI_CSI_NO_TIMING_FIX turns it off.
+  // the platform (sync/rx_path_fixes.h); --csi_timing_fix=false turns it off.
   bool csi_timing_fix_ = false;
   // AP-38: per-symbol common-phase correction from the pilot tones. Tier 2
   // of the standard OFDM receiver, and the only correction that follows a

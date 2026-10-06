@@ -1,26 +1,23 @@
 /**
  * @file houdini/link_health.h
- * @brief The software lane's link-health monitor (SoapyHoudiniSDR
- *        host/examples/link_health.py + setting_reports.py, feat/dual-band-freqplan
- *        d3ade5a), ported so the sounder can run it on its OWN device handle
- *        during the dual-band demo (AP-79). A second make() on a node resets
- *        it, so the monitor must never open its own connection.
+ * @brief The link-alarm monitor of a long session, on the sounder's OWN device
+ *        handle (a second make() on a node resets it). Its rules are the
+ *        software lane's contract, SoapyHoudiniSDR shared/HOUDINI_PROTOCOL.md
+ *        section 2.7 "Link alarms on a long session"; their Python twin is gone.
  *
- * Every read is passive. Counters are judged by their INCREASE since the
- * previous check: a counter that goes down was cleared (a stream setup clears
- * its channel's bank) and is re-based, not flagged. The egress per-port counts
- * saturate at 255 and stall_seen is sticky (only an eth reset clears either),
- * so those are flagged whenever they stand there. The preflight is judged
- * against its own baseline: the FAIL items standing at the start (SH-421's
- * idle ADC sibling, until its fix lands) are reported once, and a check alarms
- * only on an item that is new or comes back. Any change of a configuration
- * section of RFDC_SNAPSHOT since the baseline is drift.
+ * Every read is passive, and each counter is judged by its change since its
+ * previous read. A rise alarms. The RX bank, host and egress counters carry no
+ * epoch, so a fall means the counter was cleared and its current value is the
+ * rise; the TX bank re-baselines on its clear epoch instead (HS-220), and a poll
+ * caught in a clear is not used. Host fields come from the per-stream
+ * '<field>_ch<N>' keys, never the totals, which fall when a stream closes. A
+ * preflight item is keyed on its text before the first '=' and alarms on the
+ * first read it appears in, a standing item at the session's start included.
+ * Nothing else alarms: no configuration drift, and no counter merely standing
+ * at its ceiling or a sticky bit merely standing set.
  *
- * The parsers mirror setting_reports.py function for function (the T0-pinned
- * reference; unknown bank fields are ignorable, the bank strings are
- * append-only) and link_health_test pins them against real captures from a
- * streaming mode-V node. What this cannot see, the application counts itself:
- * readStream flags, short reads, timestamp jumps, writeStream returns.
+ * What this cannot see, the application counts itself: readStream flags, short
+ * reads, timestamp jumps, writeStream returns.
  *
  * RENEW OPEN SOURCE LICENSE: http://renew-wireless.org/license
  */
@@ -98,9 +95,8 @@ inline Counters parseFlatCounts(const std::string& raw) {
 }
 
 /// EGRESS_STATUS 'drop=p0:a,p1:b;stall_seen=s,stall_evt=e;marked=m' ->
-/// {'drop_p0': a, .., 'stall_seen': s, 'stall_evt': e, 'marked': m}. The drop
-/// counters are per port; marked is one counter after the ports merge, which
-/// older device builds printed per port ('marked=p0:m,p1:0,..' -> 'marked_p0').
+/// {'drop_p0': a, .., 'stall_seen': s, 'stall_evt': e, 'marked': m}. A group
+/// of 'p<k>:<n>' items is per port ('<group>_p<k>'), any other is flat.
 inline Counters parseEgressStatus(const std::string& raw) {
   Counters out;
   for (const auto& group : detail::split(raw, ';')) {
@@ -148,73 +144,27 @@ inline std::set<std::string> preflightItems(const std::string& line) {
   return out;
 }
 
-/// RFDC_SNAPSHOT -> {section: text} for its configuration sections. A section
-/// opens at a line '<lowercase_keyword>:'; any other line continues the open
-/// one. The counter sections (rx_intr, tx_banks, rx_banks) are dropped.
-inline std::map<std::string, std::string> snapshotConfig(const std::string& raw) {
-  std::map<std::string, std::string> out;
-  std::string cur;
-  bool open = false;
-  for (const auto& line : detail::split(raw, '\n')) {
-    size_t i = 0;
-    while (i < line.size() && (std::islower(static_cast<unsigned char>(line[i])) != 0 || line[i] == '_')) ++i;
-    if (i > 0 && i < line.size() && line[i] == ':') {
-      cur = line.substr(0, i);
-      std::string rest = line.substr(i + 1);
-      if (!rest.empty() && std::isspace(static_cast<unsigned char>(rest[0])) != 0) rest = rest.substr(1);
-      out[cur] = rest;
-      open = true;
-    } else if (open) {
-      std::string& s = out[cur];
-      s = s.empty() ? line : s + "\n" + line;
-      while (!s.empty() && s.back() == '\n') s.pop_back();
-    }
-  }
-  for (const char* c : {"rx_intr", "tx_banks", "rx_banks"}) out.erase(c);
-  return out;
-}
-
-/// The snapshot lines that differ from the baseline: 'blocks: <old> -> <new>'.
-inline std::vector<std::string> configDrift(const std::map<std::string, std::string>& base,
-                                            const std::map<std::string, std::string>& now) {
-  std::vector<std::string> out;
-  std::set<std::string> secs;
-  for (const auto& kv : base) secs.insert(kv.first);
-  for (const auto& kv : now) secs.insert(kv.first);
-  for (const auto& sec : secs) {
-    const auto ia = base.find(sec), ib = now.find(sec);
-    const auto a = ia == base.end() ? std::vector<std::string>{} : detail::split(ia->second, '\n');
-    const auto b = ib == now.end() ? std::vector<std::string>{} : detail::split(ib->second, '\n');
-    if (a == b) continue;
-    for (size_t i = 0; i < std::max(a.size(), b.size()); ++i) {
-      const std::string la = i < a.size() ? a[i] : "", lb = i < b.size() ? b[i] : "";
-      if (la != lb) out.push_back(sec + ": " + la + " -> " + lb);
-    }
-  }
-  return out;
-}
-
-// The alarm fields (link_health.py): the TX clean-burst set plus the TDD/stream
-// set; RX gated windows and timed-start aborts; the host drop and re-close totals.
+// The alarm fields (HOUDINI_PROTOCOL 2.7): the TX bank's event counters, the RX
+// bank's gated windows and timed-start aborts, the host's per-stream drops,
+// re-closes and slot straddles. tdd_drop is the slot cut itself, not a fault.
 inline const std::vector<std::string>& txAlarmFields() {
   static const std::vector<std::string> f = {"drops", "late",  "under",  "seqerr", "zerofill",
                                              "efault", "smiss", "clkerr", "aclose", "malformed"};
   return f;
 }
 
-/// HS-220: the TX event counters WRAP mod 2^16 (earlier gateware saturated them), and
-/// the CLEAR_EPOCH register, read before and after them
-/// (TX_BANK_STATUS "epoch=<before>:<after>", [16] clear_busy, [15:0] clears
-/// since the PL load), says whether a clear came between two polls. The
-/// TX_STREAM_CONTRACT section 2 rule, as the host plugin's
-/// shared/houdini_tx_counter_delta.h applies it: a poll is usable only if both
-/// reads match with bit 16 clear; within one epoch a delta is taken mod 2^16;
-/// after an epoch change the values ARE the counts since the clear. A bank
-/// without the field (a pre-HS-220 node) keeps the plain rule.
+/// HS-220: the TX event counters WRAP mod 2^16, and the CLEAR_EPOCH register,
+/// read before and after them (TX_BANK_STATUS "epoch=<before>:<after>", [16]
+/// clear_busy, [15:0] clears since the PL load), says whether a clear came
+/// between two polls. The TX_STREAM_CONTRACT section 2 rule, as the host
+/// plugin's shared/houdini_tx_counter_delta.h applies it: a poll is usable only
+/// if both reads match with bit 16 clear; within one epoch a wrapping counter's
+/// delta is taken mod 2^16; after an epoch change the values ARE the counts
+/// since the clear.
 inline bool txWrapsMod16(const std::string& field) {
   // All nine HS-220 wrapping counters, so a field added to txAlarmFields later
-  // is read right; zerofill stays saturating (48-bit), efault/smiss/clkerr are
-  // sticky flags, and both keep the plain rule.
+  // is read right; zerofill is saturating (48-bit) and efault/smiss/clkerr are
+  // sticky flags, so those difference plainly within an epoch.
   return field == "drops" || field == "late" || field == "under" || field == "seqerr" || field == "aclose" ||
          field == "malformed" || field == "gated" || field == "acked" || field == "played";
 }
@@ -233,26 +183,36 @@ inline const std::vector<std::string>& rxAlarmFields() {
   return f;
 }
 inline const std::vector<std::string>& hostAlarmFields() {
-  static const std::vector<std::string> f = {"rxq_ovfl", "ring_ovfl", "eob_recloses"};
+  static const std::vector<std::string> f = {"rxq_ovfl", "ring_ovfl", "eob_recloses", "tdd_straddle"};
   return f;
 }
-constexpr long long kEgressSaturated = 0xFF;
+
+/// Which host statuses answered a pass. An answer always carries its totals
+/// (`eob_recloses=`, `rxq_ovfl=`, ..), also with no stream of its direction
+/// open, so a status with no counts at all returned nothing.
+struct HostRead {
+  bool rx = false;
+  bool tx = false;
+};
 
 /// The alarm counters from one pass over the status keys, flattened to
-/// {'tx0.late', 'rx0.gated', 'host.rxq_ovfl', 'egress.drop_p0', ..}.
-inline Counters collectCounters(const Read& read) {
+/// {'tx0.late', 'rx0.gated', 'host.rxq_ovfl_ch0', 'egress.drop_p0', ..}.
+inline Counters collectCounters(const Read& read, HostRead* host_read = nullptr) {
   Counters out;
   auto bank = [&out](const std::string& raw, const std::string& pre, const std::vector<std::string>& fields) {
     for (const auto& ch : parseBankStatus(raw)) {
       const std::string key = pre + std::to_string(ch.first) + ".";
-      // HS-220 (txWrapsMod16): the usable epoch rides along as "<key>epoch";
-      // an unusable poll drops its wrapping counters, so the previous
-      // baseline stands until a usable one (the interval just widens).
-      const auto ep = ch.second.find("epoch");
-      const long long epoch = (pre == "tx" && ep != ch.second.end()) ? txUsableEpoch(ep->second) : -2;
-      if (epoch >= 0) out[key + "epoch"] = epoch;
+      // HS-220: a TX bank counts only from a usable poll, whose epoch rides
+      // along as "<key>epoch"; an unusable one (torn, mid-clear, or malformed)
+      // is not used, so the previous baseline stands until a usable one (the
+      // interval just widens).
+      if (pre == "tx") {
+        const auto ep = ch.second.find("epoch");
+        const long long epoch = ep == ch.second.end() ? -1 : txUsableEpoch(ep->second);
+        if (epoch < 0) continue;
+        out[key + "epoch"] = epoch;
+      }
       for (const auto& f : fields) {
-        if (epoch == -1 && txWrapsMod16(f)) continue;
         const auto it = ch.second.find(f);
         if (it != ch.second.end() && detail::isInt(it->second)) out[key + f] = std::stoll(it->second);
       }
@@ -260,33 +220,27 @@ inline Counters collectCounters(const Read& read) {
   };
   bank(read("TX_BANK_STATUS"), "tx", txAlarmFields());
   bank(read("RX_BANK_STATUS"), "rx", rxAlarmFields());
-  Counters host = parseFlatCounts(read("TX_HOST_STATUS"));
-  for (const auto& kv : parseFlatCounts(read("RX_HOST_STATUS"))) host[kv.first] = kv.second;
-  for (const auto& f : hostAlarmFields()) {
-    const auto it = host.find(f);
-    if (it != host.end()) out["host." + f] = it->second;
+  // The per-stream keys only: a closing stream takes its counts out of the total.
+  for (const char* key : {"TX_HOST_STATUS", "RX_HOST_STATUS"}) {
+    const Counters flat = parseFlatCounts(read(key));
+    if (host_read != nullptr && !flat.empty()) (key[0] == 'T' ? host_read->tx : host_read->rx) = true;
+    for (const auto& kv : flat) {
+      const auto at = kv.first.rfind("_ch");
+      if (at == std::string::npos || !detail::isDigits(kv.first.substr(at + 3))) continue;
+      const std::string field = kv.first.substr(0, at);
+      if (std::find(hostAlarmFields().begin(), hostAlarmFields().end(), field) != hostAlarmFields().end())
+        out["host." + kv.first] = kv.second;
+    }
   }
   for (const auto& kv : parseEgressStatus(read("EGRESS_STATUS"))) out["egress." + kv.first] = kv.second;
   return out;
 }
 
-/// Egress counters that can no longer show a rise (saturated, or sticky stall).
-inline std::vector<std::string> blindCounters(const Counters& cur) {
-  std::vector<std::string> out;
-  for (const auto& kv : cur) {
-    const std::string& k = kv.first;
-    if (k.rfind("egress.", 0) != 0) continue;
-    if (k == "egress.stall_seen" && kv.second != 0) {
-      out.push_back(k + "=1 (sticky: a stall happened; stall_evt no longer proves a new one)");
-    } else if ((k.rfind("egress.drop_", 0) == 0 || k.rfind("egress.marked", 0) == 0) && kv.second >= kEgressSaturated) {
-      out.push_back(k + "=" + std::to_string(kv.second) + " (saturated: further drops cannot be counted)");
-    }
-  }
-  return out;
-}
-
-/// {name: increase} for every counter that rose; a fall is a clear, and a
-/// counter new since `prev` counts from zero.
+/// {name: increase} for every counter that changed. A counter new since `prev`
+/// counts from zero. A TX bank counter is differenced only within one epoch
+/// (mod 2^16 if it wraps); after an epoch change its value IS the count since
+/// the clear, and with no usable baseline epoch the poll is the baseline. Any
+/// other counter that fell was cleared, so its current value is the rise.
 inline Counters counterIncreases(const Counters& prev, const Counters& cur) {
   Counters out;
   for (const auto& kv : cur) {
@@ -296,29 +250,47 @@ inline Counters counterIncreases(const Counters& prev, const Counters& cur) {
     if (field == "epoch") continue;  // the clear count, not an event
     const auto it = prev.find(k);
     const long long p = it == prev.end() ? 0 : it->second;
-    const auto ec = cur.find(k.substr(0, dot + 1) + "epoch");
-    if (k.rfind("tx", 0) == 0 && txWrapsMod16(field) && ec != cur.end()) {
+    if (k.rfind("tx", 0) == 0) {
+      const auto ec = cur.find(k.substr(0, dot + 1) + "epoch");
       const auto ep = prev.find(k.substr(0, dot + 1) + "epoch");
-      if (ep == prev.end()) continue;  // no usable baseline yet: this poll becomes it
-      const long long d = ep->second == ec->second ? ((kv.second - p) % 65536 + 65536) % 65536 : kv.second;
+      if (ec == cur.end() || ep == prev.end()) continue;  // no usable baseline yet: this poll becomes it
+      long long d = kv.second;                            // after a clear: the count since it
+      if (ep->second == ec->second) d = txWrapsMod16(field) ? ((kv.second - p) % 65536 + 65536) % 65536
+                                                           : (kv.second >= p ? kv.second - p : kv.second);
       if (d > 0) out[k] = d;
       continue;
     }
-    if (kv.second > p) out[k] = kv.second - p;
+    const long long d = kv.second >= p ? kv.second - p : kv.second;  // a fall is a clear
+    if (d > 0) out[k] = d;
   }
   return out;
 }
+
+/// Whether a host per-stream key belongs to TX_HOST_STATUS (else RX_HOST_STATUS).
+inline bool txHostKey(const std::string& k) { return k.rfind("host.eob_recloses_", 0) == 0; }
 
 /// The previous-check state after this check: every counter read now, plus
 /// the last known value of any counter this read did not return. Do not
 /// replace the state with the read: an empty or partial read would erase the
 /// baseline, and the next full read would then report every counter's whole
-/// running total as new.
-inline Counters carryCounters(const Counters& prev, const Counters& cur) {
-  Counters out = prev;
+/// running total as new. The exception is a per-stream host key missing from
+/// a host status that answered (`host_read`, also when its last stream closed):
+/// its stream closed, and a key that appears again counts from zero
+/// (HOUDINI_PROTOCOL 2.7), so it is not carried.
+inline Counters carryCounters(const Counters& prev, const Counters& cur, const HostRead& host_read) {
+  Counters out;
+  for (const auto& kv : prev) {
+    const bool closed = kv.first.rfind("host.", 0) == 0 && (txHostKey(kv.first) ? host_read.tx : host_read.rx) &&
+                        cur.count(kv.first) == 0;
+    if (!closed) out.insert(kv);
+  }
   for (const auto& kv : cur) out[kv.first] = kv.second;
   return out;
 }
+
+/// A preflight item's key: its text before the first '=', so TX0:late=3 and
+/// TX0:late=4 are one standing item.
+inline std::string preflightKey(const std::string& item) { return item.substr(0, item.find('=')); }
 
 struct Report {
   std::string label;
@@ -326,14 +298,12 @@ struct Report {
   double irq_per_s = 0.0;
   std::string preflight;
   Counters increases;
-  std::vector<std::string> new_failures, blind, drift;
+  std::vector<std::string> new_failures;
 
   std::vector<std::string> alarms() const {
     std::vector<std::string> out;
     for (const auto& kv : increases) out.push_back(kv.first + " +" + std::to_string(kv.second));
-    out.insert(out.end(), blind.begin(), blind.end());
     for (const auto& i : new_failures) out.push_back("preflight new FAIL " + i);
-    for (const auto& d : drift) out.push_back("config " + d);
     return out;
   }
   std::string line() const {
@@ -348,8 +318,10 @@ struct Report {
 
 class LinkHealth {
  public:
-  /// Baseline at construction: call it once the session is configured AND
-  /// streaming. `now_s` is injectable for the test; the default is a steady clock.
+  /// The baseline is read at construction: call it once the session is
+  /// configured, streaming, and its caller has cleared RFDC_PREFLIGHT after its
+  /// activations. `now_s` is injectable for the test; the default is a steady
+  /// clock.
   LinkHealth(Read read, std::string label, std::function<double()> now_s = {})
       : read_(std::move(read)), label_(std::move(label)), now_(std::move(now_s)) {
     if (!now_) {
@@ -357,22 +329,20 @@ class LinkHealth {
         return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
       };
     }
-    rebaseline();
-  }
-
-  void rebaseline() {
-    baseline_ = snapshotConfig(read_("RFDC_SNAPSHOT"));
-    baseline_failures_ = preflightItems(preflight());
-    standing_ = baseline_failures_;
+    // A FAIL item standing at the start alarms on the first check, even if it
+    // is gone by then: it appeared in this read.
+    start_failures_ = preflightItems(preflight());
     prev_ = collectCounters(read_);
     prev_irq_ = irq();
     prev_t_ = now_();
   }
 
-  const std::set<std::string>& baselineFailures() const { return baseline_failures_; }
+  /// The FAIL items the construction read found (all alarmed on the first check).
+  const std::set<std::string>& startFailures() const { return start_failures_; }
 
   Report check() {
-    const Counters cur = collectCounters(read_);
+    HostRead host_read;
+    const Counters cur = collectCounters(read_, &host_read);
     const long long ir = irq();
     const double t = now_();
     const double dt = std::max(t - prev_t_, 1e-9);
@@ -381,15 +351,19 @@ class LinkHealth {
     r.seconds = dt;
     r.irq_per_s = static_cast<double>(ir - prev_irq_) / dt;
     r.preflight = preflight();
-    const auto items = preflightItems(r.preflight);
-    for (const auto& i : items)
-      if (standing_.count(i) == 0) r.new_failures.push_back(i);
-    standing_ = items;
-    standing_.insert(baseline_failures_.begin(), baseline_failures_.end());
+    // The current read's items first, so an item standing since the start is
+    // reported by its current text; one alarm per key.
+    const std::set<std::string> now_items = preflightItems(r.preflight);
+    std::vector<std::string> cands(now_items.begin(), now_items.end());
+    if (first_) cands.insert(cands.end(), start_failures_.begin(), start_failures_.end());
+    std::set<std::string> keys;
+    for (const auto& i : cands)
+      if (standing_.count(preflightKey(i)) == 0 && keys.insert(preflightKey(i)).second) r.new_failures.push_back(i);
+    standing_.clear();
+    for (const auto& i : now_items) standing_.insert(preflightKey(i));
+    first_ = false;
     r.increases = counterIncreases(prev_, cur);
-    r.blind = blindCounters(cur);
-    r.drift = configDrift(baseline_, snapshotConfig(read_("RFDC_SNAPSHOT")));
-    prev_ = carryCounters(prev_, cur);
+    prev_ = carryCounters(prev_, cur, host_read);
     prev_irq_ = ir;
     prev_t_ = t;
     return r;
@@ -408,8 +382,8 @@ class LinkHealth {
   Read read_;
   std::string label_;
   std::function<double()> now_;
-  std::map<std::string, std::string> baseline_;
-  std::set<std::string> baseline_failures_, standing_;
+  std::set<std::string> start_failures_, standing_;
+  bool first_ = true;
   Counters prev_;
   long long prev_irq_ = 0;
   double prev_t_ = 0.0;

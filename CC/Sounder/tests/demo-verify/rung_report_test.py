@@ -59,7 +59,7 @@ H = ["57:000001 WARNG: BS 192.168.10.22 link health: [BS 192.168.10.22] 5.0 s: i
      "57:000003 INFOR: BS 192.168.10.22 link health: [BS 192.168.10.22] 60.0 s: irq 12/s, preflight ok: clean"
      " | app: rx_err +0, rx_short +0, rx_pad +0, tx_short +0, tx_sat +0"]
 o2 = report(H)
-check("health alarm lines 2 " in o2 and "'rx_pad +N': 1" in o2 and "'tx_sat +N': 1" in o2 and "'rx0.gated +N': 1" in o2,
+check("health alarm lines 2;" in o2 and "'rx_pad +N': 1" in o2 and "'tx_sat +N': 1" in o2 and "'rx0.gated +N': 1" in o2,
       "an app-only alarm and an rx bank alarm both count, the periodic clean line does not (mutation: drop lines "
       "reading 'clean |', or no rx bank pattern): " + o2[o2.find("health alarm"):].split("\n")[0])
 print("%d failure(s)" % fails); sys.exit(1 if fails else 0)

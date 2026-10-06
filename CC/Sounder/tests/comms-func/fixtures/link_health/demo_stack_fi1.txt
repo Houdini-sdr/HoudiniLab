@@ -1,0 +1,16 @@
+# Real readSetting captures of a streaming demo session, for houdini/link_health.h,
+# taken on SoapyHoudiniSDR 0.3.1 (its RX_HOST_STATUS still carries tdd_refused,
+# which 0.4.0 retired and link_health does not read): AP-109's final
+# verification replaces them with a 0.4.0 capture.
+# DEMO_VERIFICATION 9.83's FI1 run (fpga 1.34 4a19b2f2; .21 device 8b3fd476,
+# .22 device 096afad0; the demo config, mode V), each line copied from that
+# run's log, the node and the time named here. The TX banks carry HS-220's
+# epoch; the host status carries the per-stream keys.
+# TX_BANK_STATUS: BS .22, 17:54:33Z (the beacon's replay bank, ch0 acked 784).
+# TX_HOST_STATUS: UE .21, 17:54:32Z. RX_HOST_STATUS: BS .22, end of run.
+# RFDC_PREFLIGHT: UE .21 before its post-activate clear. RFDC_INTR_FIRE_COUNT: BS .22 at bring-up.
+TX_BANK_STATUS=ch0:acked=784,late=0,under=0,seqerr=0,zerofill=0,fill=0,hwm=0,drops=0,last_seq=0,active=0,clkerr=0,free=64,cap=64,afull=0,aempty=1,gated=0,smiss=0,aclose=0,parked=0,late_seen=0,efault=0,played=784,clear_drops=0,clear_busy=0,tick=1073089169:1073089328,malformed=0,epoch=587:587;ch1:acked=0,late=0,under=0,seqerr=0,zerofill=0,fill=0,hwm=0,drops=0,last_seq=0,active=0,clkerr=0,free=64,cap=64,afull=0,aempty=1,gated=0,smiss=0,aclose=0,parked=0,late_seen=0,efault=0,played=0,clear_drops=0,clear_busy=0,tick=1073091445:1073091586,malformed=0,epoch=521:521
+TX_HOST_STATUS=eob_recloses=0 eob_recloses_ch0=0 eob_recloses_ch1=0 offset_us_ch0=-100.0 offset_samples_ch0=0 offset_implausible_ch0=0 anchor_rejects_ch0=30 rate_ppm_ch0=-31.34 late_refusals_ch0=0 write_min_margin_us_ch0=inf release_min_margin_us_ch0=inf release_late_ch0=0 burst_refusals_ch0=0 cold_releases_ch0=0 cold_window_ms_ch0=inf offset_us_ch1=-100.0 offset_samples_ch1=0 offset_implausible_ch1=0 anchor_rejects_ch1=30 rate_ppm_ch1=-31.34 late_refusals_ch1=0 write_min_margin_us_ch1=inf release_min_margin_us_ch1=inf release_late_ch1=0 burst_refusals_ch1=0 cold_releases_ch1=0 cold_window_ms_ch1=inf
+RX_HOST_STATUS=rxq_ovfl=0 rxq_ovfl_ch0=0 rxq_ovfl_ch2=0 ring_ovfl=0 ring_ovfl_ch0=0 ring_ovfl_ch2=0 tdd_drop=0 tdd_drop_ch0=0 tdd_drop_ch2=0 tdd_straddle=0 tdd_straddle_ch0=0 tdd_straddle_ch2=0 tdd_refused=0 tdd_refused_ch0=0 tdd_refused_ch2=0
+RFDC_PREFLIGHT=FAIL ADC0.1:SUBADC_DCDR
+RFDC_INTR_FIRE_COUNT=4

@@ -89,8 +89,8 @@ target_link_libraries(comm-testbench
 target_compile_definitions(comm-testbench PRIVATE TEST_BENCH)
 
 # Correlator sample-rate benchmark. The beacon correlator path
-# (CommsLib::find_beacon_avx) uses no FFT, so this links only comms-lib-avx +
-# utils and builds without muFFT -- deliberately, so it can run anywhere,
+# (CommsLib::find_beacon_avx) uses no FFT, so this links only comms-lib-avx,
+# comms-lib-portable and utils and builds without muFFT -- deliberately, so it can run anywhere,
 # including the DGX Spark once the ARM/NEON port lands.
 add_executable(correlator-rate-bench bench-correlator-rate.cc
 	${SOURCE_DIR}/comms-lib-avx.cc

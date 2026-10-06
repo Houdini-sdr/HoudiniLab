@@ -1,5 +1,5 @@
 """The downlink at the UE's ADC, per run, from the re-sync windows the run dumps
-(HOUDINI_DUMP_RESYNC_WIN, set by fstage_run.sh): the beacon's power and the
+(--dump_resync_win, set by fstage_run.sh): the beacon's power and the
 beacon-free floor in each window (dBFS re a full-scale int16 complex tone), the
 beacon-to-floor ratio, the floor's in-band (+-23 MHz) minus out-of-band (beyond
 +-30 MHz) split at 122.88 MSPS, and the largest sample. Compare a run against a

@@ -23,24 +23,8 @@ const char* const kThresholdNames[] = {"auto", "power", "xcorr", "coherence", nu
 const char* const kPickNames[] = {"first_crossing", "cluster_refined", "argmax", "first_path",
                                   nullptr};
 const char* const kTrackerNames[] = {"alpha_beta", "kalman", nullptr};
-const char* const kSourceNames[] = {"default", "json", "env", "derived"};
+const char* const kSourceNames[] = {"default", "json", "derived"};
 const char* const kPlatformNames[] = {"houdini", "iris_uhd"};
-
-// Environment spellings accepted as aliases of the table's enum names.
-struct EnvAlias {
-  const char* env;
-  const char* value;  // env spelling
-  const char* canon;  // table spelling
-};
-const EnvAlias kEnumAliases[] = {
-    {"HOUDINI_BEACON_THRESH", "nolag", "coherence"},
-    {"HOUDINI_BEACON_PICK", "first", "first_crossing"},
-    {"HOUDINI_BEACON_PICK", "firstpath", "first_path"},
-    {"HOUDINI_BEACON_PICK", "first-path", "first_path"},
-    {"HOUDINI_TRACKER", "ab", "alpha_beta"},
-    {"HOUDINI_TRACKER", "kf", "kalman"},
-    {"HOUDINI_TRACKER", "1", "kalman"},
-};
 
 int enumIndex(const char* const* names, const std::string& v) {
   for (int i = 0; names[i] != nullptr; ++i)
@@ -108,26 +92,17 @@ void setEnum(SyncConfig& c, const SyncConfig::Spec& s, int i) {
   }
 }
 
-// Assign a parsed value into a knob. Returns an error string, empty on success.
-// `clamp` (an environment override with policy kClamp) pulls an out-of-range
-// number into the range and reports it through `note` instead of failing.
-std::string assign(SyncConfig& c, const SyncConfig::Spec& s, const nlohmann::json& v,
-                   bool from_env, bool clamp, std::string* note) {
+// Assign a parsed value into a knob, strictly. Returns an error string, empty
+// on success.
+std::string assign(SyncConfig& c, const SyncConfig::Spec& s, const nlohmann::json& v) {
   if (auto ad = std::get_if<SyncConfig::Access<double>>(&s.access)) {
     if (!v.is_number()) return "expects a number";
     double d = v.get<double>();
     if (!std::isfinite(d)) return "is not finite";
     if (d < s.lo || d > s.hi) {
-      if (!clamp) {
-        std::ostringstream o;
-        o << "value " << d << " outside [" << s.lo << ", " << s.hi << "]";
-        return o.str();
-      }
-      const double cl = d < s.lo ? s.lo : s.hi;
       std::ostringstream o;
-      o << "clamped " << d << " to " << cl;
-      *note = o.str();
-      d = cl;
+      o << "value " << d << " outside [" << s.lo << ", " << s.hi << "]";
+      return o.str();
     }
     ad->ref(c) = d;
     return "";
@@ -136,24 +111,11 @@ std::string assign(SyncConfig& c, const SyncConfig::Spec& s, const nlohmann::jso
     if (!v.is_number()) return "expects an integer";
     double d = v.get<double>();
     if (!std::isfinite(d)) return "is not finite";
-    if (d != std::floor(d)) {
-      if (!clamp) return "expects a whole number";
-      std::ostringstream o;
-      o << "floored " << d << " to " << std::floor(d);
-      *note = o.str();
-      d = std::floor(d);
-    }
+    if (d != std::floor(d)) return "expects a whole number";
     if (d < s.lo || d > s.hi) {
-      if (!clamp) {
-        std::ostringstream o;
-        o << "value " << d << " outside [" << s.lo << ", " << s.hi << "]";
-        return o.str();
-      }
-      const double cl = d < s.lo ? s.lo : s.hi;
       std::ostringstream o;
-      o << (note->empty() ? "" : *note + "; ") << "clamped " << d << " to " << cl;
-      *note = o.str();
-      d = cl;
+      o << "value " << d << " outside [" << s.lo << ", " << s.hi << "]";
+      return o.str();
     }
     ai->ref(c) = static_cast<int>(d);
     return "";
@@ -175,11 +137,7 @@ std::string assign(SyncConfig& c, const SyncConfig::Spec& s, const nlohmann::jso
   }
   // enum
   if (!v.is_string()) return "expects a name";
-  std::string t = lower(v.get<std::string>());
-  if (from_env && s.env != nullptr) {
-    for (const auto& a : kEnumAliases)
-      if (std::strcmp(a.env, s.env) == 0 && t == a.value) t = a.canon;
-  }
+  const std::string t = lower(v.get<std::string>());
   const int i = enumIndex(s.enum_names, t);
   if (i < 0) {
     std::string names;
@@ -198,8 +156,6 @@ std::string assign(SyncConfig& c, const SyncConfig::Spec& s, const nlohmann::jso
         [](const SyncConfig& c) -> const T& { return c.member; }                        \
   }
 
-using EP = SyncConfig::EnvPolicy;
-
 }  // namespace
 
 const char* name(Source s) { return kSourceNames[static_cast<int>(s)]; }
@@ -211,141 +167,137 @@ const char* name(TrackerType t) { return kTrackerNames[static_cast<int>(t)]; }
 const std::vector<SyncConfig::Spec>& SyncConfig::schema() {
   static const std::vector<Spec> kSchema = {
       // beacon
-      {"beacon.type", nullptr, 0, 0,
+      {"beacon.type", 0, 0,
        "Which beacon waveform the base station transmits (legacy, legacy_guard, dot11, nr, nr_pss, nr_pss_bl; nr_pss_bl is the band-limited mode-V beacon, AP-79).",
-       KNOB_ACCESS(std::string, beacon.type), nullptr, EP::kClamp},
-      {"beacon.tx_full_scale", "HOUDINI_BEACON_FS", 1e-3, 1.0,
+       KNOB_ACCESS(std::string, beacon.type), nullptr},
+      {"beacon.tx_full_scale", 1e-3, 1.0,
        "Transmit peak of the beacon as a fraction of DAC full scale. 0.6 shipped; lower it to stand in for path loss on a cable.",
-       KNOB_ACCESS(double, beacon.tx_full_scale), nullptr, EP::kIgnoreOutOfRange},
+       KNOB_ACCESS(double, beacon.tx_full_scale), nullptr},
       // detector
-      {"detector.threshold", "HOUDINI_BEACON_THRESH", 0, 0,
+      {"detector.threshold", 0, 0,
        "Decision statistic: auto picks coherence for a single-copy replica and the normalised cross-correlation otherwise; power is the original level-dependent form (4th order in amplitude against 2nd) and the Iris/UHD default.",
-       KNOB_ACCESS(ThresholdForm, detector.threshold), kThresholdNames, EP::kClamp},
-      {"detector.pfa_per_window", nullptr, 1e-9, 0.5,
+       KNOB_ACCESS(ThresholdForm, detector.threshold), kThresholdNames},
+      {"detector.pfa_per_window", 1e-9, 0.5,
        "The coherence form's bar when set: the false-alarm probability per search window, turned into a bar by the replica and window lengths (8.163). Unset, corr_scale applies; ignored for the repeated-field forms.",
-       KNOB_ACCESS(double, detector.pfa_per_window), nullptr, EP::kClamp},
-      {"detector.pick", "HOUDINI_BEACON_PICK", 0, 0,
+       KNOB_ACCESS(double, detector.pfa_per_window), nullptr},
+      {"detector.pick", 0, 0,
        "Which crossing is returned: first_path (the Houdini default), argmax, cluster_refined, or first_crossing (the Iris/UHD default; unsafe on a strong link).",
-       KNOB_ACCESS(PickRule, detector.pick), kPickNames, EP::kClamp},
-      {"detector.first_path_window", "HOUDINI_FIRST_PATH_WIN", -1, 4095,
+       KNOB_ACCESS(PickRule, detector.pick), kPickNames},
+      {"detector.first_path_window", -1, 4095,
        "Samples the first-path search looks back from the peak; -1 (default) means half the replica length. Must stay inside the preamble's self-coherent plateau. A correlator quantity: samples, not scaled with the rate.",
-       KNOB_ACCESS(int, detector.first_path_window), nullptr, EP::kIgnoreOutOfRange},
-      {"detector.first_path_floor_db", "HOUDINI_FIRST_PATH_DB", -30.0, 0.0,
+       KNOB_ACCESS(int, detector.first_path_window), nullptr},
+      {"detector.first_path_floor_db", -30.0, 0.0,
        "How much weaker, in dB of path power, an earlier arrival may be and still be taken as the first path.",
-       KNOB_ACCESS(double, detector.first_path_floor_db), nullptr, EP::kIgnoreOutOfRange},
-      {"detector.first_path_guard", "HOUDINI_FIRST_PATH_GUARD", 0, 1,
+       KNOB_ACCESS(double, detector.first_path_floor_db), nullptr},
+      {"detector.first_path_guard", 0, 1,
        "Samples immediately before the peak the first-path search skips. A beacon between samples splits its peak over two adjacent taps and the earlier one is the SAME arrival, not an earlier one; 1 skips it. Only 0 and 1: 2 loses a genuine two-sample-earlier arrival and 3 a three-sample one (measured). 0 is the default (DEMO_VERIFICATION.md 8ak).",
-       KNOB_ACCESS(int, detector.first_path_guard), nullptr, EP::kClamp},
-      {"detector.corr_scale", nullptr, 1e-4, 1e7,
+       KNOB_ACCESS(int, detector.first_path_guard), nullptr},
+      {"detector.corr_scale", 1e-4, 1e7,
        "Resync detection threshold: the bar is 1 / corr_scale, relaxed by one per retry. Read from the legacy per-client top-level array when absent.",
-       KNOB_ACCESS(double, detector.bar.corr_scale), nullptr, EP::kClamp},
-      {"detector.corr_scale_init", nullptr, 1e-4, 1e7,
+       KNOB_ACCESS(double, detector.bar.corr_scale), nullptr},
+      {"detector.corr_scale_init", 1e-4, 1e7,
        "Acquisition detection threshold (bar 1 / corr_scale_init); defaults to corr_scale.",
-       KNOB_ACCESS(double, detector.bar.corr_scale_init), nullptr, EP::kClamp},
-      {"detector.min_bar", nullptr, 0.0, 1.0,
+       KNOB_ACCESS(double, detector.bar.corr_scale_init), nullptr},
+      {"detector.min_bar", 0.0, 1.0,
        "The lowest bar the resync retry relaxation (+1 on corr_scale per retry) may reach; 0 = no limit. Set it with a small corr_scale, where +1 per retry would walk the bar into the noise.",
-       KNOB_ACCESS(double, detector.bar.min_bar), nullptr, EP::kClamp},
-      {"detector.corr_threads", "SOUNDER_CORR_THREADS", 1, 256,
+       KNOB_ACCESS(double, detector.bar.min_bar), nullptr},
+      {"detector.corr_threads", 1, 256,
        "Threads for the correlator's matched filter. 1 shipped; measured a net loss below ~4 on the rig host.",
-       KNOB_ACCESS(int, detector.corr_threads), nullptr, EP::kClamp},
+       KNOB_ACCESS(int, detector.corr_threads), nullptr},
       // confirm
-      {"confirm.snr_floor_db", "HOUDINI_SYNC_SNR_DB", -10.0, 80.0,
+      {"confirm.snr_floor_db", -10.0, 80.0,
        "In-window SNR a detection must clear. A property of the link and the waveform: re-derive it when either changes.",
-       KNOB_ACCESS(double, confirm.snr_floor_db), nullptr, EP::kClamp},
+       KNOB_ACCESS(double, confirm.snr_floor_db), nullptr},
       // cfo
-      {"cfo.index_guard", "HOUDINI_CFO_INDEX_GUARD", 0, 64,
+      {"cfo.index_guard", 0, 64,
        "Samples the carrier estimator's windows slide later than the detected end (AP-39). A correlator quantity: samples, not scaled with the rate.",
-       KNOB_ACCESS(int, cfo.index_guard), nullptr, EP::kClamp},
-      {"cfo.window_margin", nullptr, 0, 32,
+       KNOB_ACCESS(int, cfo.index_guard), nullptr},
+      {"cfo.window_margin", 0, 32,
        "Samples shrunk from both ends of each estimator window so neither touches the burst's edge (8.164). A correlator quantity: samples, not scaled with the rate.",
-       KNOB_ACCESS(int, cfo.window_margin), nullptr, EP::kClamp},
-      {"cfo.log_every", "HOUDINI_CFO_LOG_EVERY", 1, 1000000,
-       "Print one beacon-CFO log line in this many.", KNOB_ACCESS(int, cfo.log_every), nullptr,
-       EP::kClamp},
+       KNOB_ACCESS(int, cfo.window_margin), nullptr},
+      {"cfo.log_every", 1, 1000000,
+       "Print one beacon-CFO log line in this many.", KNOB_ACCESS(int, cfo.log_every), nullptr},
       // tracker
-      {"tracker.type", "HOUDINI_TRACKER", 0, 0,
+      {"tracker.type", 0, 0,
        "Which estimator tracks the base station frame grid: alpha_beta (shipped) or kalman.",
-       KNOB_ACCESS(TrackerType, tracker.type), kTrackerNames, EP::kClamp},
-      {"tracker.alpha", "HOUDINI_GRID_ALPHA", 0.0, 1.0,
+       KNOB_ACCESS(TrackerType, tracker.type), kTrackerNames},
+      {"tracker.alpha", 0.0, 1.0,
        "Fraction of each accepted residual applied to the schedule.", KNOB_ACCESS(double, tracker.alpha),
-       nullptr, EP::kClamp},
-      {"tracker.beta", "HOUDINI_GRID_BETA", 0.0, 1.0,
+       nullptr},
+      {"tracker.beta", 0.0, 1.0,
        "Fraction of the residual applied to the frame period estimate.", KNOB_ACCESS(double, tracker.beta),
-       nullptr, EP::kClamp},
-      {"tracker.step_ppm", "HOUDINI_GRID_STEP_PPM", 0.0, 1000.0,
+       nullptr},
+      {"tracker.step_ppm", 0.0, 1000.0,
        "Most one detection may move the period estimate, ppm. 0 disables the limit.",
-       KNOB_ACCESS(double, tracker.step_ppm), nullptr, EP::kClamp},
-      {"tracker.max_ppm", "HOUDINI_GRID_MAX_PPM", 0.1, 10000.0,
+       KNOB_ACCESS(double, tracker.step_ppm), nullptr},
+      {"tracker.max_ppm", 0.1, 10000.0,
        "Absolute band the period estimate may occupy either side of nominal, ppm.",
-       KNOB_ACCESS(double, tracker.max_ppm), nullptr, EP::kClamp},
-      {"tracker.trust_ppm", "HOUDINI_GRID_TRUST_PPM", 0.0, 1000.0,
+       KNOB_ACCESS(double, tracker.max_ppm), nullptr},
+      {"tracker.trust_ppm", 0.0, 1000.0,
        "How far the tracked period and a fresh acquisition confirm may disagree before the confirm is preferred, ppm.",
-       KNOB_ACCESS(double, tracker.trust_ppm), nullptr, EP::kClamp},
-      {"tracker.kalman.meas_var", "HOUDINI_KF_MEAS_VAR", 1e-6, 1e6,
+       KNOB_ACCESS(double, tracker.trust_ppm), nullptr},
+      {"tracker.kalman.meas_var", 1e-6, 1e6,
        "Kalman only: assumed detector scatter variance, samples squared.",
-       KNOB_ACCESS(double, tracker.kf_meas_var), nullptr, EP::kClamp},
-      {"tracker.kalman.rate_rw", "HOUDINI_KF_RATE_RW", 0.0, 1.0,
+       KNOB_ACCESS(double, tracker.kf_meas_var), nullptr},
+      {"tracker.kalman.rate_rw", 0.0, 1.0,
        "Kalman only: how fast the frame period wanders, samples squared per frame cubed.",
-       KNOB_ACCESS(double, tracker.kf_rate_rw), nullptr, EP::kClamp},
-      {"tracker.kalman.innov_gate", "HOUDINI_KF_INNOV_GATE", 0.0, 100.0,
+       KNOB_ACCESS(double, tracker.kf_rate_rw), nullptr},
+      {"tracker.kalman.innov_gate", 0.0, 100.0,
        "Kalman only: sigmas an observation may sit from the prediction before it is ignored. 0 disables.",
-       KNOB_ACCESS(double, tracker.kf_innov_gate), nullptr, EP::kClamp},
+       KNOB_ACCESS(double, tracker.kf_innov_gate), nullptr},
       // steer (AP-79)
-      {"steer.enable", "HOUDINI_CLOCK_STEER", 0, 0,
+      {"steer.enable", 0, 0,
        "Steer the UE's clock onto the beacon's with CLOCK_ADJ, from the tracked grid rate, inside the sounder. Needs the UE's clock_ref to be calibrated. Off by default; keep it off for A/B and regression runs of the TX path (SH-427): each CLOCK_ADJ RPC holds the device's stream lock about 200 ms, and each push is a rate step the host pacer re-learns.",
-       KNOB_ACCESS(bool, steer.enable), nullptr, EP::kClamp},
-      {"steer.period_s", "HOUDINI_CLOCK_STEER_PERIOD_S", 2.0, 3600.0,
+       KNOB_ACCESS(bool, steer.enable), nullptr},
+      {"steer.period_s", 2.0, 3600.0,
        "Seconds between steering decisions; the tracked rate is averaged over each. A held oscillator drifts slowly, so this need not be short.",
-       KNOB_ACCESS(double, steer.period_s), nullptr, EP::kClamp},
-      {"steer.gain", nullptr, 0.05, 1.0,
+       KNOB_ACCESS(double, steer.period_s), nullptr},
+      {"steer.gain", 0.05, 1.0,
        "Fraction of the averaged offset removed at each push.",
-       KNOB_ACCESS(double, steer.gain), nullptr, EP::kClamp},
-      {"steer.deadband_ppm", nullptr, 0.0, 10.0,
+       KNOB_ACCESS(double, steer.gain), nullptr},
+      {"steer.deadband_ppm", 0.0, 10.0,
        "Offsets smaller than this are left alone: half the actuator quantum is the floor of what a push can fix.",
-       KNOB_ACCESS(double, steer.deadband_ppm), nullptr, EP::kClamp},
-      {"steer.max_offset", nullptr, 0, 400,
+       KNOB_ACCESS(double, steer.deadband_ppm), nullptr},
+      {"steer.max_offset", 0, 400,
        "Bounded authority: never steer further than this many counts from the calibration point.",
-       KNOB_ACCESS(int, steer.max_offset), nullptr, EP::kClamp},
-      {"steer.max_push", nullptr, 1, 4,
+       KNOB_ACCESS(int, steer.max_offset), nullptr},
+      {"steer.max_push", 1, 4,
        "Most counts one push may move, so no single frequency step is large. At most 4: the step is fed forward when the push lands, about 0.2 s after the DAC moves (up to 0.4 s when a failed write is read back), so 4 counts (0.5 ppm) leave 12 to 25 samples of grid error, well inside the 246-sample re-sync gate; 50 would leave 150 to 300.",
-       KNOB_ACCESS(int, steer.max_push), nullptr, EP::kClamp},
-      {"steer.ppm_per_count", nullptr, 0.001, 10.0,
+       KNOB_ACCESS(int, steer.max_push), nullptr},
+      {"steer.ppm_per_count", 0.001, 10.0,
        "Actuator gain, ppm per CLOCK_ADJ count (magnitude; +1 count raises the UE clock). Measured 0.1251 (AP-48).",
-       KNOB_ACCESS(double, steer.ppm_per_count), nullptr, EP::kClamp},
-      {"steer.keep", nullptr, 0, 0,
+       KNOB_ACCESS(double, steer.ppm_per_count), nullptr},
+      {"steer.keep", 0, 0,
        "Leave the steered code in place when the sounder exits instead of releasing to the calibrated hold.",
-       KNOB_ACCESS(bool, steer.keep), nullptr, EP::kClamp},
+       KNOB_ACCESS(bool, steer.keep), nullptr},
       // resync
-      {"resync.residual_ppm", "HOUDINI_SYNC_RESIDUAL_PPM", 1e-4, 1000.0,
+      {"resync.residual_ppm", 1e-4, 1000.0,
        "Assumed worst-case clock error after tracking; with sync_tol_samples it sets how often the beacon is looked at.",
-       KNOB_ACCESS(double, resync.residual_ppm), nullptr, EP::kClamp},
-      {"resync.scatter_tol_us", "HOUDINI_SCATTER_TOL_US", 0.01, 1000.0,
+       KNOB_ACCESS(double, resync.residual_ppm), nullptr},
+      {"resync.scatter_tol_us", 0.01, 1000.0,
        "How far a detection may land from the tracked grid and still count as the same beacon, microseconds.",
-       KNOB_ACCESS(double, resync.scatter_tol_us), nullptr, EP::kClamp},
-      {"resync.confirm_tol_us", "HOUDINI_CONFIRM_TOL_US", 0.01, 1000.0,
+       KNOB_ACCESS(double, resync.scatter_tol_us), nullptr},
+      {"resync.confirm_tol_us", 0.01, 1000.0,
        "The same tolerance during acquisition. Never applied looser than the tracking gate.",
-       KNOB_ACCESS(double, resync.confirm_tol_us), nullptr, EP::kClamp},
-      {"resync.sync_tol_samples", "HOUDINI_SYNC_TOL_SAMPLES", 0.5, 1e6,
+       KNOB_ACCESS(double, resync.confirm_tol_us), nullptr},
+      {"resync.sync_tol_samples", 0.5, 1e6,
        "Timing slack budgeted to drift between looks, samples. Default: a quarter of the OFDM zero prefix.",
-       KNOB_ACCESS(double, resync.sync_tol_samples), nullptr, EP::kClamp},
-      {"resync.retry_max", "HOUDINI_RESYNC_RETRY_MAX", 1, 100000,
+       KNOB_ACCESS(double, resync.sync_tol_samples), nullptr},
+      {"resync.retry_max", 1, 100000,
        "Misses in one resync period before the client logs an exhausted episode.",
-       KNOB_ACCESS(int, resync.retry_max), nullptr, EP::kClamp},
-      {"resync.escalate_episodes", "HOUDINI_ESCALATE_EPISODES", 1, 1000,
+       KNOB_ACCESS(int, resync.retry_max), nullptr},
+      {"resync.escalate_episodes", 1, 1000,
        "Consecutive exhausted episodes before the client abandons tracking and re-acquires.",
-       KNOB_ACCESS(int, resync.escalate_episodes), nullptr, EP::kClamp},
-      {"resync.hold_offgrid", "HOUDINI_HOLD_OFFGRID", 1, 1000,
+       KNOB_ACCESS(int, resync.escalate_episodes), nullptr},
+      {"resync.hold_offgrid", 1, 1000,
        "Consecutive off-grid detections before the beacon counts as moved.",
-       KNOB_ACCESS(int, resync.hold_offgrid), nullptr, EP::kClamp},
-      {"resync.acq_refine_span", "HOUDINI_ACQ_REFINE_SPAN", 2, 100000,
+       KNOB_ACCESS(int, resync.hold_offgrid), nullptr},
+      {"resync.acq_refine_span", 2, 100000,
        "Frames of baseline acquisition wants before it trusts its rate estimate.",
-       KNOB_ACCESS(int, resync.acq_refine_span), nullptr, EP::kClamp},
-      {"resync.acq_max_ppm", "HOUDINI_ACQ_MAX_PPM", 0.1, 10000.0,
+       KNOB_ACCESS(int, resync.acq_refine_span), nullptr},
+      {"resync.acq_max_ppm", 0.1, 10000.0,
        "Plausibility band applied to a rate that acquisition hands back, ppm.",
-       KNOB_ACCESS(double, resync.acq_max_ppm), nullptr, EP::kClamp},
-      {"allow_env_overrides", nullptr, 0, 0,
-       "Whether HOUDINI_* environment variables may override these values (each override is logged; see the policy column). Off by default: sweep through the JSON overlay instead.",
-       KNOB_ACCESS(bool, allow_env_overrides), nullptr, EP::kClamp},
+       KNOB_ACCESS(double, resync.acq_max_ppm), nullptr},
   };
   return kSchema;
 }
@@ -411,9 +363,7 @@ void SyncConfig::adoptLegacyThreshold(double corr_scale, double corr_scale_init,
                                       bool corr_scale_in_file, bool corr_scale_init_in_file) {
   auto adopt = [this](const char* path, double v, bool in_file, const char* what) {
     if (provenanceOf(path) == Source::kJson) return;  // the sync block wins
-    std::string note;
-    const std::string err =
-        assign(*this, schema()[indexOf(path)], nlohmann::json(v), false, false, &note);
+    const std::string err = assign(*this, schema()[indexOf(path)], nlohmann::json(v));
     if (!err.empty()) throw std::invalid_argument(std::string(what) + ": " + err);
     setProvenance(path, in_file ? Source::kJson : Source::kDerived);
   };
@@ -449,8 +399,7 @@ SyncConfig SyncConfig::load(const std::optional<std::string>& sync_block_json,
   for (size_t i = 0; i < sc.size(); ++i) {
     const nlohmann::json* v = at(blk, sc[i].path);
     if (v == nullptr) continue;
-    std::string note;
-    const std::string err = assign(c, sc[i], *v, false, false, &note);
+    const std::string err = assign(c, sc[i], *v);
     if (!err.empty()) throw std::invalid_argument("sync." + std::string(sc[i].path) + ": " + err);
     c.setProvenance(i, Source::kJson);
   }
@@ -461,9 +410,7 @@ SyncConfig SyncConfig::load(const std::optional<std::string>& sync_block_json,
                                   "\" and sync.beacon.type \"" + c.beacon.type + "\" disagree");
     }
     if (c.provenanceOf("beacon.type") != Source::kJson) {
-      std::string note;
-      const std::string err = assign(c, schema()[indexOf("beacon.type")],
-                                     nlohmann::json(*legacy_beacon_type), false, false, &note);
+      const std::string err = assign(c, schema()[indexOf("beacon.type")], nlohmann::json(*legacy_beacon_type));
       if (!err.empty()) throw std::invalid_argument("beacon_type: " + err);
       c.setProvenance("beacon.type", Source::kJson);
     }
@@ -478,46 +425,6 @@ SyncConfig SyncConfig::load(const std::optional<std::string>& sync_block_json,
       c.provenanceOf("detector.corr_scale") != Source::kDefault) {
     c.detector.bar.corr_scale_init = c.detector.bar.corr_scale;
     c.setProvenance("detector.corr_scale_init", Source::kDerived);
-  }
-  // Environment overrides, when allowed: range-checked like JSON, then the
-  // knob's policy decides what an out-of-range number does (clamp, or keep
-  // the value already in place, each with a note); garbage is refused and
-  // reported; every override is recorded.
-  for (size_t i = 0; i < sc.size(); ++i) {
-    const auto& s = sc[i];
-    if (s.env == nullptr) continue;
-    const char* e = std::getenv(s.env);
-    if (e == nullptr) continue;
-    if (!c.allow_env_overrides) {
-      c.warnings_.push_back(std::string(s.env) + "=\"" + e +
-                            "\" IGNORED: sync.allow_env_overrides is false");
-      continue;
-    }
-    nlohmann::json v;
-    if (s.isNumeric()) {
-      char* end = nullptr;
-      const double d = std::strtod(e, &end);
-      if (end == e || *end != '\0') {
-        c.warnings_.push_back(std::string(s.env) + "=\"" + e + "\" is not a number -- ignored");
-        continue;
-      }
-      v = d;
-    } else {
-      v = std::string(e);
-    }
-    std::string note;
-    const bool clamp = s.env_policy == EnvPolicy::kClamp;
-    const std::string err = assign(c, s, v, true, clamp, &note);
-    if (!err.empty()) {
-      c.warnings_.push_back(std::string(s.env) + "=\"" + e + "\": " + err +
-                            (clamp ? " -- ignored"
-                                   : " -- ignored, the value already in place (" + c.valueText(s) +
-                                         ") kept, as the old reader did"));
-      continue;
-    }
-    c.setProvenance(i, Source::kEnv);
-    c.warnings_.push_back(std::string(s.env) + " overrides sync." + s.path + " (" + e + ")" +
-                          (note.empty() ? "" : " [" + note + "]"));
   }
   c.validate();
   return c;
@@ -667,22 +574,17 @@ std::string SyncConfig::describe() const {
 std::string SyncConfig::schemaMarkdown() {
   const SyncConfig c = defaults();
   std::ostringstream o;
-  o << "| key | default | was | range | env out of range | what it does |\n"
-       "| --- | --- | --- | --- | --- | --- |\n";
+  o << "| key | default | range | what it does |\n"
+       "| --- | --- | --- | --- |\n";
   for (const auto& s : schema()) {
     o << "| `sync." << s.path << "` | ";
     const std::string v = c.valueText(s);
     if (std::holds_alternative<Access<std::string>>(s.access) || s.isEnum()) o << "`" << v << "`";
     else o << v;
-    o << " | " << (s.env ? std::string("`") + s.env + "`" : "") << " | ";
+    o << " | ";
     if (s.isNumeric()) o << s.lo << " to " << s.hi;
     else if (s.isEnum()) {
       for (int j = 0; s.enum_names[j]; ++j) o << (j ? ", " : "") << s.enum_names[j];
-    }
-    o << " | ";
-    if (s.env != nullptr) {
-      if (!s.isNumeric()) o << "refused";
-      else o << (s.env_policy == EnvPolicy::kClamp ? "clamped" : "ignored, value kept");
     }
     o << " | " << s.doc << " |\n";
   }

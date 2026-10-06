@@ -18,8 +18,8 @@ ANSI = re.compile(r"\x1b\[[0-9;]*m")
 LINK_HEALTH = re.compile(r"\b(UE|BS) \S+ link health: .*")
 TX_INCREMENT = re.compile(r"(tx\d\.\w+) \+(\d+)")
 CNS_SUMMARY = re.compile(r"\((\d+) datagrams, (\d+) low\)")
-ALARM_ITEM = re.compile(r"((?:tx|rx)\d\.\w+ \+\d+|(?:egress|host)\.\w+ \+\d+|egress\.\w+=\d+ \((?:sticky|saturated)"
-                        r"|preflight new FAIL [^|;]+|config [^:|;]+:|(?:rx|tx)_\w+ \+[1-9]\d*)")
+ALARM_ITEM = re.compile(r"((?:tx|rx)\d\.\w+ \+\d+|(?:egress|host)\.\w+ \+\d+|preflight new FAIL [^|;]+"
+                        r"|(?:rx|tx)_\w+ \+[1-9]\d*)")
 
 
 def read_lines(path):
@@ -55,13 +55,10 @@ def cns_total(lines):
 
 def alarm_kinds(lines):
     """Counter of the alarm kinds in link-health lines, one entry per item, in
-    the forms link_health.h writes them: a counter rise '<name> +N', a blind
-    egress counter '<name>=N (sticky' or '(saturated', a new preflight FAIL, a
-    config drift 'config <section>: old -> new', and the app counters."""
+    the forms link_health.h writes them: a counter rise '<name> +N', a new
+    preflight FAIL, and the app counters."""
     out = Counter()
     for l in lines:
         for m in ALARM_ITEM.finditer(l):
-            k = re.sub(r"\+\d+", "+N", m.group(1)).strip()  # an item before ' |' keeps no trailing space
-            k = re.sub(r"=\d+ \((sticky|saturated)$", r" \1", k)
-            out[k.rstrip(":") + (" drift" if k.startswith("config ") else "")] += 1
+            out[re.sub(r"\+\d+", "+N", m.group(1)).strip()] += 1  # an item before ' |' keeps no trailing space
     return out

@@ -25,29 +25,22 @@
 #include <thread>
 #include <vector>
 
+#include "include/run_options.h"
 #include "comms-lib.h"
 
 namespace {
 // Thread count for correlate_mt: an explicit request wins; else the value
-// set through CommsLib::setCorrelatorThreads (sync.detector.corr_threads,
-// SOUNDER_CORR_THREADS as its logged env alias); else 1. Capped at the pool
-// size (hardware concurrency) at dispatch.
-// 0 = nothing set through the API yet: the environment is then read ONCE,
-// which is how the bench tools that link this library without a Config
-// (bench-correlator-rate, beacon_geometry_test, houdini_loopback) take it.
+// set through CommsLib::setCorrelatorThreads (the config's
+// sync.detector.corr_threads, or correlator-rate-bench's threads argument);
+// else 1, which is what a program that links this library without a Config
+// and sets nothing gets (beacon_geometry_test). Capped at the pool size
+// (hardware concurrency) at dispatch.
 std::atomic<unsigned> g_corr_threads{0u};
 unsigned ResolveThreads(unsigned requested) {
   if (requested > 0) return requested;
   const unsigned set = g_corr_threads.load(std::memory_order_relaxed);
   if (set > 0) return set;
-  static const unsigned from_env = [] {
-    if (const char* e = std::getenv("SOUNDER_CORR_THREADS")) {
-      const int v = std::atoi(e);
-      if (v > 0) return static_cast<unsigned>(v);
-    }
-    return 1u;
-  }();
-  return from_env;
+  return 1u;
 }
 
 // Persistent fork-join pool: worker threads are created once and reused, so
@@ -310,7 +303,7 @@ static double firstPathFloorFrac(CommsLib::BeaconThresh form, double db) {
 // case (weak direct, echo +40, stronger) flips from correct to +39 between
 // -8.8 dB and -8.0 dB. So the shipped default clears it by under 1 dB, which is
 // thin -- an earlier comment here claimed it "admits a direct path well under
-// half the echo's power" and that was wishful. Widen with HOUDINI_FIRST_PATH_DB
+// half the echo's power" and that was wishful. Widen with sync.detector.first_path_floor_db
 // if a channel needs it, and re-run beacon_geometry_test when you do.
 
 int CommsLib::find_beacon_avx(
@@ -430,8 +423,7 @@ CommsLib::BeaconResult CommsLib::find_beacon_ex(
       valid_peaks.push(static_cast<int>(i));
     }
   }
-  static const bool kDebug = std::getenv("FIND_BEACON_DEBUG") != nullptr;  // read once
-  if (kDebug) {
+  if (Sounder::runOptions().find_beacon_debug) {
     double best_ratio = 0.0;
     size_t best_i = 0, best_pm_i = 0;
     float best_pm = 0.0f;

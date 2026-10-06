@@ -150,8 +150,9 @@ int main() {
       std::remove(tmp);
     }
     check(refused, "bs_rx_slots without bs_hw_framer is refused at load [mutation: the check removed]");
-    // 13 symbols make a 57056-sample slot, which no packet of at least 3/4
-    // of the default size divides: the device would cut packets mid-slot.
+    // 13 symbols make a 57056-sample slot, which no packet of at least 128
+    // samples divides (its largest dividing packet is 32): the device would
+    // cut packets mid-slot.
     std::ifstream in2("files/houdini-dualband-xw-steer-slots.json");
     std::string txt2((std::istreambuf_iterator<char>(in2)), std::istreambuf_iterator<char>());
     const std::string sym_key = "\"ofdm_symbol_per_slot\": 14,";
@@ -167,6 +168,48 @@ int main() {
     check(why.find("tile the slot") != std::string::npos,
           "bs_rx_slots with a slot no packet tiles is refused at load, for that reason [mutation: the tiling check "
           "removed]");
+    // SH-488: the device refuses an untiled packet in EVERY TDD RX mode, so a
+    // framer config without bs_rx_slots is refused the same way.
+    std::ifstream in3("files/houdini-dualband-xw-steer.json");
+    std::string txt3((std::istreambuf_iterator<char>(in3)), std::istreambuf_iterator<char>());
+    const size_t sat3 = txt3.find(sym_key);
+    std::string why3;
+    bool ue_only_loaded = false;
+    if (sat3 != std::string::npos) {
+      txt3.replace(sat3, sym_key.size(), "\"ofdm_symbol_per_slot\": 13,");
+      const char* tmp3 = "files/.sh488_untiled_tmp.json";
+      std::ofstream(tmp3) << txt3;
+      try { Config bad(tmp3, "/tmp", false, false, false); } catch (const std::invalid_argument& e) { why3 = e.what(); }
+      // A client-only run opens no BS, so no BS framer: the same config loads.
+      try { Config ue(tmp3, "/tmp", false, true, false); ue_only_loaded = true; } catch (const std::exception& e) {
+        std::printf("client-only config: %s\n", e.what());
+      }
+      std::remove(tmp3);
+    }
+    check(why3.find("tile the slot") != std::string::npos,
+          "a framer config without bs_rx_slots and with a slot no packet tiles is refused at load [mutation: the "
+          "check gated on bs_rx_slots]");
+    check(ue_only_loaded, "the same config loads for a client-only run, which arms no BS framer [mutation: the "
+                          "check not gated on a present BS]");
+    // The rule is the Houdini device's: the same config read as Iris, with an
+    // odd slot no packet divides, loads.
+    std::ifstream in4("files/houdini-r0.json");
+    std::string txt4((std::istreambuf_iterator<char>(in4)), std::istreambuf_iterator<char>());
+    const std::string type_key = "\"radio_type\": \"houdini\",";
+    const std::string pre_key = "\"ofdm_tx_zero_prefix\": 128,";
+    const size_t tat = txt4.find(type_key);
+    bool iris_loaded = false;
+    if (tat != std::string::npos && txt4.find(pre_key) != std::string::npos) {
+      txt4.replace(tat, type_key.size(), "\"radio_type\": \"iris\",");
+      txt4.replace(txt4.find(pre_key), pre_key.size(), "\"ofdm_tx_zero_prefix\": 129,");
+      const char* tmp4 = "files/.sh488_iris_tmp.json";
+      std::ofstream(tmp4) << txt4;
+      try { Config ok(tmp4, "/tmp", false, false, false); iris_loaded = true; } catch (const std::exception& e) {
+        std::printf("iris config: %s\n", e.what());
+      }
+      std::remove(tmp4);
+    }
+    check(iris_loaded, "an Iris config whose slot no packet tiles still loads [mutation: the is_houdini gate dropped]");
   }
   {  // AP-86: the X-band front-end switch
     try {

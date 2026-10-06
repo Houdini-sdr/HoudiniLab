@@ -8,6 +8,7 @@
   * RENEW OPEN SOURCE LICENSE: http://renew-wireless.org/license
 */
 #include "include/HoudiniFramer.h"
+#include "include/run_options.h"
 
 #include <algorithm>
 #include <atomic>
@@ -131,8 +132,7 @@ void HoudiniFramer::buildBeacon(std::vector<int16_t>& iq) {
   }
   float peak = 1e-30f;
   for (const auto& v : loop) peak = std::max(peak, std::abs(v));
-  // TRANSMIT AMPLITUDE, AS A FRACTION OF FULL SCALE: sync.beacon.tx_full_scale
-  // (HOUDINI_BEACON_FS as a logged override while allow_env_overrides holds),
+  // TRANSMIT AMPLITUDE, AS A FRACTION OF FULL SCALE: sync.beacon.tx_full_scale,
   // range-checked by SyncConfig to (0.001, 1], default 0.6. It makes the
   // received level an axis the bench can vary, so a detector claim that
   // depends on level (AP-34: the power-ratio threshold is 4th order in
@@ -164,16 +164,16 @@ void HoudiniFramer::buildBeacon(std::vector<int16_t>& iq) {
     iq[2 * k] = clamp16(loop[k].real() / peak * fs_frac * 32767);
     iq[2 * k + 1] = clamp16(loop[k].imag() / peak * fs_frac * 32767);
   }
-  if (std::getenv("HOUDINI_DUMP_BEACON")) {
+  if (Sounder::runOptions().dump_beacon) {
     const std::string path = Utils::dumpPath("beacon_ram.bin");
     FILE* f = std::fopen(path.c_str(), "wb");
     if (f == nullptr) {
-      MLPD_WARN("HOUDINI_DUMP_BEACON: cannot open %s (%s)\n", path.c_str(), std::strerror(errno));
+      MLPD_WARN("--dump_beacon: cannot open %s (%s)\n", path.c_str(), std::strerror(errno));
     }
     if (f) {
       std::fwrite(iq.data(), sizeof(int16_t), iq.size(), f);
       std::fclose(f);
-      MLPD_INFO("HOUDINI_DUMP_BEACON: wrote %zu int16 to %s\n",
+      MLPD_INFO("--dump_beacon: wrote %zu int16 to %s\n",
                 iq.size(), path.c_str());
     }
   }
@@ -231,7 +231,7 @@ void HoudiniFramer::start(void) {
   }
   for (size_t c = 0; c < radios_.size(); ++c)
     for (size_t i = 0; i < radios_.at(c).size(); ++i)
-      radios_.at(c).at(i)->activateRecv();
+      radios_.at(c).at(i)->activateRecvOrThrow();
 }
 
 // ---- Houdini native-TDD framer (bs_hw_framer + radio_type=houdini) ----------
@@ -410,8 +410,7 @@ void HoudiniFramer::armTdd(void) {
         std::string mode = dev->readSetting("TDD_RX_MODE");
         mode.erase(mode.find_last_not_of(" \t\r\n") + 1);
         if (mode != "slots")
-          throw std::runtime_error("bs_rx_slots: TDD_RX_MODE reads '" + mode +
-                                   "' (a device without SH-347 slots mode ignores the key)");
+          throw std::runtime_error("bs_rx_slots: TDD_RX_MODE reads '" + mode + "' after writing slots");
       }
       htdd_frame_ticks_ = static_cast<long long>(spf_tdd) * htdd_symbol_ticks_;
 
@@ -483,7 +482,17 @@ void HoudiniFramer::armTdd(void) {
                               ",loops=1,offs=" + std::to_string(offs));
       };
       setup_framer();
-      htdd_epoch_ = armTddOnce(dev, setup_framer, htdd_symbol_ticks_,
+      // A retry re-runs the setup after the ladder's raw TX_CLEAR_ALL, which
+      // rewinds the device's replay fill but not the host stream's: the reload
+      // would append at the pre-clear fill and be refused (past the RAM depth,
+      // and from F6b2 an append at a stale fill). Deactivating the replay
+      // stream rewinds the host's fill, so the reload is a fresh load at 0.
+      // The first setup needs none: nothing was loaded before its ladder.
+      const auto reload = [&]() {
+        r->deactivateXmit();
+        setup_framer();
+      };
+      htdd_epoch_ = armTddOnce(dev, reload, htdd_symbol_ticks_,
                                   static_cast<long long>(spf_tdd));
       if (cfg_->bs_rx_slots()) {
         // The device's own record of the rx slots it cuts to, against ours.
@@ -889,22 +898,16 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
       }
     }
   }
-  if (getenv("HOUDINI_BS_RX_DEBUG") != nullptr) {
-    // Throttle is its OWN knob. HOUDINI_BS_RX_DEBUG=1 means "on" in the
-    // runbook, the walkthrough, the configs' notes, ap15_correlate.py and
-    // run_pad_campaign.sh; redefining it as a period would turn every one of
-    // those into a 1 kHz flood and invalidate DEMO_VERIFICATION 4.60's measured
-    // line rate. So: DEBUG stays on/off, EVERY sets the period.
+  if (Sounder::runOptions().bs_rx_debug) {
+    // The throttle is its own option: --bs_rx_debug is on/off and
+    // --bs_rx_every sets the period (one line per 20 frames by default; a
+    // period of 1 is a 1 kHz flood, DEMO_VERIFICATION 4.60's line rate).
     //
     // AP-51 needs every frame for a while: `pilot_grid_off` is one of the two
     // observables in the two-way transfer, and a slope fit over 1-in-20 at a
     // 260 ms cadence has too few points to separate the clock term from the
     // range-rate term.
-    static const int bs_rx_every = [] {
-      const char* e = getenv("HOUDINI_BS_RX_EVERY");
-      const int v = (e != nullptr) ? atoi(e) : 0;
-      return (v > 0) ? v : 20;
-    }();
+    const int bs_rx_every = Sounder::runOptions().bs_rx_every;
     static std::atomic<int> dc{0};
     if ((dc.fetch_add(1) % bs_rx_every) == 0) {
       // Rederive the UE's realized schedule on the BS grid: the read stamp
@@ -934,7 +937,8 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
   // place every burst on the ABSOLUTE slot grid. Ground truth for zero
   // prefix/postfix sizing -- the CSI dump stores the placed slots and cannot
   // serve here.
-  const char* lm_dir = getenv("HOUDINI_BS_DUMP_FRAME");
+  const std::string& lm_dir_s = Sounder::runOptions().bs_dump_frame;
+  const char* lm_dir = lm_dir_s.empty() ? nullptr : lm_dir_s.c_str();
   if (lm_dir != nullptr) {
     static std::atomic<int> lm_dumped{0};
     static std::atomic<long long> lm_next{200};

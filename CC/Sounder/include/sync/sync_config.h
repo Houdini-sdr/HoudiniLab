@@ -20,20 +20,10 @@
  * the documentation. Do not store pointers into `*this` in a spec: a const
  * reference would then hand out writable storage.
  *
- * ENVIRONMENT OVERRIDES ARE OFF BY DEFAULT (docs/RADIO_PLATFORM_SEAM.md
- * section 1). The JSON is the configuration; the bench scripts sweep through
- * a JSON overlay (tests/demo-verify/run_shape_campaign.sh, SYNC_OVERLAY). A
- * config that sets `allow_env_overrides` true enables the HOUDINI_* readers,
- * every override logged; an environment variable seen while they are off is
- * reported as IGNORED so a stale export cannot pass silently. The
- * environment path is deprecated and will be removed.
- *
- * WHAT AN OUT-OF-RANGE ENVIRONMENT VALUE DOES, per knob (Spec::env_policy):
- * EnvPolicy::kClamp pulls the value to the nearest bound with a note;
- * EnvPolicy::kIgnoreOutOfRange keeps the value already in place with a note
- * (`beacon.tx_full_scale`, `detector.first_path_floor_db`,
- * `detector.first_path_window`, whose readers always behaved so). A value
- * that does not parse is always refused. JSON is always strict.
+ * THE JSON IS THE CONFIGURATION, and nothing else sets a knob (houdini-agents
+ * conventions/no-env-knobs.md): the bench scripts sweep through a JSON
+ * overlay (tests/demo-verify/run_shape_campaign.sh, SYNC_OVERLAY). A value
+ * out of its range, of the wrong type, or under an unknown key is refused.
  *
  * The value struct has no JSON dependency; the loader in sync_config.cc does.
  */
@@ -74,7 +64,7 @@ enum class Platform { kHoudini, kIrisUhd };
 const char* name(Platform p);
 
 /// Where a value came from.
-enum class Source { kDefault, kJson, kEnv, kDerived };
+enum class Source { kDefault, kJson, kDerived };
 const char* name(Source s);
 const char* name(ThresholdForm f);
 const char* name(PickRule p);
@@ -220,10 +210,6 @@ struct SyncConfig {
   GridTrackerConfig tracker;
   ResyncConfig resync;
   ClockSteerConfig steer;
-  bool allow_env_overrides = false;
-
-  /// What an out-of-range ENVIRONMENT value does (JSON is always strict).
-  enum class EnvPolicy { kClamp, kIgnoreOutOfRange };
 
   /// Typed accessors: a pair of plain functions of a SyncConfig, one per
   /// constness. No object is captured.
@@ -238,12 +224,10 @@ struct SyncConfig {
   /// One row of the schema.
   struct Spec {
     const char* path;   ///< JSON path under "sync", dotted
-    const char* env;    ///< the environment name it replaces, or nullptr
     double lo, hi;      ///< inclusive range for numeric kinds
     const char* doc;    ///< one sentence, for the generated table
     Accessor access;
     const char* const* enum_names;  ///< enum kinds: nullptr-terminated names
-    EnvPolicy env_policy;
     bool isNumeric() const {
       return std::holds_alternative<Access<double>>(access) ||
              std::holds_alternative<Access<int>>(access);

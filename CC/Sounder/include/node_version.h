@@ -2,11 +2,12 @@
   * @brief Cross-node version skew check for a multi-node run.
   *
   * Every participating radio reports its whole stack through
-  * getHardwareInfo(): gateware (fpga_*), device firmware (device_*), host
-  * plugin (host_*) and the wire protocol (proto_version). A run with two nodes
-  * on different builds can fail in ways that look like RF or timing problems,
-  * so the versions are collected at bring-up, printed once, and any difference
-  * is WARNed about before the run starts.
+  * getHardwareInfo(): gateware (fpga_*), device firmware (device_*) and host
+  * plugin (host_*). A run with two nodes on different builds can fail in ways
+  * that look like RF or timing problems, so the versions are collected at
+  * bring-up, printed once, and any difference is WARNed about before the run
+  * starts. A node's own host and device releases need no check here: the host
+  * plugin's setupStream refuses another release's device.
   *
   * Process-wide registry rather than a parameter threaded through the radio
   * sets: the BS and the UE are built by different classes (and there are UHD
@@ -43,8 +44,8 @@ class NodeVersions {
     nodes_.emplace_back(who, info);
   }
 
-  /// Print each node's stack and warn on any disagreement. Returns the number
-  /// of keys that differ. Safe to call with 0 or 1 node (nothing to compare).
+  /// Print each node's stack and warn on any key the nodes differ in. Returns
+  /// the number of such keys. Safe to call with 0 or 1 node.
   size_t checkAndWarn(void) {
     std::lock_guard<std::mutex> lock(mtx_);
     if (nodes_.empty()) return 0;
@@ -53,8 +54,8 @@ class NodeVersions {
     // that SHOULD differ per node (serial, label, ip_address, data_iface,
     // hostname), so a normal two-node bench is quiet.
     static const std::vector<std::string> kMustMatch = {
-        "fpga_version",   "fpga_commit",  "fpga_board", "device_version",
-        "device_build",   "host_version", "host_build", "proto_version"};
+        "fpga_version", "fpga_commit", "fpga_board", "device_version",
+        "device_build", "host_version", "host_build"};
 
     for (const auto& n : nodes_) {
       std::string line;

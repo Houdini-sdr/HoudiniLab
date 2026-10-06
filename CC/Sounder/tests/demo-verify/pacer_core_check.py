@@ -14,7 +14,7 @@ interrupts a pinned core mean a flow sits there.
 usage: pacer_core_check.py --cores 15,18,19 --ports <data port>[,<data port>] [--secs 3]
 (the data ports: the interfaces the radios stream to, `ip -br link`).
 Exit 0: no RX on those cores' queues. Exit 1: a flow on one (move the pacers to
-free isolated cores with HOUDINI_TX_CPU_AFFINITY and restart). Exit 2: a port
+free isolated cores with --tx_cpu_affinity and restart). Exit 2: a port
 whose queue counters cannot be read (a wrong name would otherwise read as no
 flow). Read-only (ethtool -S, /proc)."""
 import argparse, os, re, subprocess, sys, time

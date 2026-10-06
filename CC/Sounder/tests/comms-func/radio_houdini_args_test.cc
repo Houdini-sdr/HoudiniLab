@@ -22,6 +22,7 @@
 #include <stdexcept>
 #include <string>
 
+#include "include/run_options.h"
 #include "include/RadioHoudini.h"
 #include "include/config.h"
 #include "include/houdini/rx_packet.h"
@@ -42,7 +43,6 @@ std::string show(const SoapySDR::Kwargs& k) {
 
 int main() {
   const char* kConf = "files/houdini-dualband-xw-steer-slots.json";
-  unsetenv("HOUDINI_TX_STREAM_ARGS");  // an operator's export must not leak into the known answers
   try {
     Config cfg(kConf, "/tmp", false, false, false);
 
@@ -54,7 +54,7 @@ int main() {
     bs.remote_port = cfg.remote_port();
     bs.tx_channels = Utils::strToChannels(cfg.bs_tx_channel());
     bs.rx_channels = Utils::strToChannels(cfg.bs_rx_channel());
-    bs.packet_samples = houdini::rxpkt::tiledPacketOrDefault(cfg.samps_per_slot());
+    bs.packet_samples = houdini::rxpkt::bsPacket(cfg.samps_per_slot(), cfg.bs_hw_framer(), cfg.rate());
     bs.tx_mode = "replay";
     // ...and as ClientRadioSet::init describes the UE.
     RadioParams ue = bs;
@@ -68,7 +68,7 @@ int main() {
     // Packets that tile the 61440-tick slot: 1920 samples, 32 per RX slot, and
     // HOUDINI_MTU 1920 x 4 + 58 = 7738 (the config's _status names 7738).
     check(cfg.samps_per_slot() == 61440 && bs.packet_samples == 1920,
-          "the demo slot is 61440 samples and its tiled packet 1920 (mutation: tiledPacketOrDefault falling back to 0)");
+          "the demo slot is 61440 samples and its tiled packet 1920 (mutation: bsPacket falling back to 0)");
     const auto da = RadioHoudini::deviceArgs(bs);
     const SoapySDR::Kwargs want_da = {{"driver", "houdinisdr"},
                                       {"remote", "tcp://192.0.2.1:55132"},
@@ -85,9 +85,8 @@ int main() {
           "no tiled packet: no HOUDINI_MTU, the device's default (mutation: the packet_samples > 0 guard dropped, "
           "asking for a 58-byte MTU)");
 
-    // RX: the BS opens A and C as one combined stream (the driver assigns the
-    // ports and rejects local_port there); the UE opens A alone on the FPGA's
-    // fixed port for channel 0, 10001.
+    // RX: the BS opens A and C as one combined stream, the UE opens A alone;
+    // neither names a port, the driver binds each channel's fixed one (SH-425).
     check(bs.rx_channels == std::vector<size_t>{0, 2} && ue.rx_channels == std::vector<size_t>{0},
           "the demo config opens BS RX A and C, UE RX A (mutation: rx_channel ignored, the BS on its common channel A)");
     const auto brx = RadioHoudini::rxStreamArgs(bs);
@@ -96,14 +95,16 @@ int main() {
               ": break-at-gap and MTS, no local_port on the combined stream (mutation: local_port set for a combined "
               "stream, or rx_gap_break left to the driver's default)");
     const auto urx = RadioHoudini::rxStreamArgs(ue);
-    check(urx == SoapySDR::Kwargs{{"local_port", "10001"}, {"rx_gap_break", "1"}, {"mts", "true"}},
-          "UE rxStreamArgs " + show(urx) + ": channel A binds 10001 (mutation: a fixed port, or 10000 + channel)");
+    check(urx == SoapySDR::Kwargs{{"rx_gap_break", "1"}, {"mts", "true"}},
+          "UE rxStreamArgs " + show(urx) +
+              ": break-at-gap and MTS, no local_port on a single-channel stream either (mutation: local_port set "
+              "for a single channel)");
     RadioParams c_only = ue;
     c_only.rx_channels = {2};
     c_only.mts = false;
-    check(RadioHoudini::rxStreamArgs(c_only) == SoapySDR::Kwargs{{"local_port", "10003"}, {"rx_gap_break", "1"}},
-          "channel C alone binds 10003, and no MTS asked when it is off (mutation: the port not following the "
-          "channel, or mts written regardless)");
+    check(RadioHoudini::rxStreamArgs(c_only) == SoapySDR::Kwargs{{"rx_gap_break", "1"}},
+          "channel C alone, and no MTS asked when it is off (mutation: mts written regardless, or local_port set for "
+          "a single channel)");
 
     // TX: the BS plays its beacon from the replay RAM; the UE streams on the TDD
     // tick anchor (ue_tdd_pilot is on in the demo config).
@@ -113,22 +114,22 @@ int main() {
     const auto utx = RadioHoudini::txStreamArgs(ue);
     check(ue.tdd && utx == SoapySDR::Kwargs{{"tx_mode", "stream"}, {"tdd", "1"}, {"mts", "true"}},
           "UE txStreamArgs " + show(utx) + " (mutation: the TDD anchor not asked for)");
-    setenv("HOUDINI_TX_STREAM_ARGS", "tx_target_frac=0.75", 1);
+    Sounder::runOptions().tx_stream_args = "tx_target_frac=0.75";
     const auto utx2 = RadioHoudini::txStreamArgs(ue);
     const auto btx2 = RadioHoudini::txStreamArgs(bs);
     check(utx2.count("tx_target_frac") == 1 && utx2.at("tx_target_frac") == "0.75" && utx2.at("tdd") == "1" &&
               btx2.count("tx_target_frac") == 0,
-          "HOUDINI_TX_STREAM_ARGS reaches the UE's stream and not the BS's replay (mutation: the passthrough "
+          "--tx_stream_args reaches the UE's stream and not the BS's replay (mutation: the passthrough "
           "dropped, or applied to the replay stream too)");
-    setenv("HOUDINI_TX_STREAM_ARGS", "tdd=0", 1);
+    Sounder::runOptions().tx_stream_args = "tdd=0";
     bool refused = false;
     try {
       RadioHoudini::txStreamArgs(ue);
     } catch (const std::invalid_argument&) {
       refused = true;
     }
-    unsetenv("HOUDINI_TX_STREAM_ARGS");
-    check(refused, "HOUDINI_TX_STREAM_ARGS overriding a key the sounder sets (tdd) is refused (mutation: the parse "
+    Sounder::runOptions().tx_stream_args.clear();
+    check(refused, "--tx_stream_args overriding a key the sounder sets (tdd) is refused (mutation: the parse "
                    "error ignored)");
 
     // The mode-V plan's inputs: the common NCO on the sub-6 channels and the

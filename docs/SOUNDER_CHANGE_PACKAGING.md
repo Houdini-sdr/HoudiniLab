@@ -84,14 +84,13 @@ own. They are the candidate `fix/legacy-sounder` series.
 | Beacon shapes | `beacon_type` / `sync.beacon.type` | `legacy` | five shapes |
 | Detector pick and threshold forms | `sync.detector.pick`, `sync.detector.threshold` | Houdini: first_path + xcorr; Iris/UHD: first_crossing + power | platform defaults derived, overridable |
 | GPU correlator | `HOUDINI_USE_CUDA` (CMake) | OFF | |
-| CSI dashboard / view mode | `HOUDINI_CSI_UDP` (`--view`) | off | warns loudly that no HDF5 is written |
+| CSI dashboard / view mode | `--csi_udp` (`--view`) | off | warns loudly that no HDF5 is written |
 | UE UL data slot, fine-grid TX | `ue_tdd_pilot`, `ue_tx_advance_ticks`, `ue_pilot_horizon` | off | |
 | Gap ledger / rx-recorder | `is_houdini()` | | |
 | Acquisition threshold | `corr_scale_init` / `sync.detector.corr_scale_init` | = corr_scale | |
-| Environment overrides of the sync knobs | `sync.allow_env_overrides` | false (S0, 2026-09-03) | the bench scripts use the JSON overlay |
-| Correlator threads | `sync.detector.corr_threads` | 1 | `SOUNDER_CORR_THREADS` as the logged alias |
+| Correlator threads | `sync.detector.corr_threads` | 1 | |
 | Radio-free tests and bench tools | `SOUNDER_BUILD_TESTS` | ON | |
-| Diagnostic dumps | `HOUDINI_DUMP_*`, under `HOUDINI_DUMP_DIR` | off, `/tmp` | |
+| Diagnostic dumps | the sounder's `--dump_*` flags, under `--dump_dir` | off, `/tmp` | |
 
 ## 4. Recommended packaging
 
@@ -109,7 +108,7 @@ own. They are the candidate `fix/legacy-sounder` series.
 
 DECIDED 2026-09-03 (recorded in `RADIO_PLATFORM_SEAM.md` section 1): the
 environment-override default flips to off with the bench scripts moved to
-the JSON overlay; the ledger and walkthrough stay and the raw captures and
+the JSON overlay (since removed outright, AP-111); the ledger and walkthrough stay and the raw captures and
 superseded probes move out at branch landing; Iris and UHD remain
 inspection-only with a build matrix; the packet width and the portable
 correlator are accepted; Agora's radio abstraction is adopted in shape, not
@@ -125,9 +124,8 @@ need its own verification against `master`'s tree. Order of operations: push
 the PR; the raw captures leave the tip before the PR (section 4, item 3,
 folded into the landing).
 
+Still open:
 
-- Whether to flip `sync.allow_env_overrides` to false now (the bench scripts
-  still sweep through the environment) or next release as planned.
 - Whether the evidence captures (`tests/demo-verify/evidence`, 3.9 MB), the
   ledgers (`DEMO_VERIFICATION.md`, `DEMO_BENCH_RUNBOOK.md`, `BACKLOG.md`,
   `tools/tracker_lint.py`) and the bench probes (57 scripts, several

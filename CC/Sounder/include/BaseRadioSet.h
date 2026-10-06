@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "BeaconFramer.h"
@@ -42,6 +43,7 @@ class BaseRadioSet : public IBaseRadioSet {
     std::atomic_ulong* thread_count;
     size_t tid;
     size_t cell;
+    std::string* failure = nullptr;  ///< configure: where its thread leaves the reason a setup threw
   };
   void init(BaseRadioContext* context);
   void configure(BaseRadioContext* context);

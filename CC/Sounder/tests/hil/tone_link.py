@@ -41,12 +41,7 @@ from sigqual import tone_spectrum, tone_metrics, dominant_tone  # noqa: E402
 
 def to_complex(lanes):
     """cs16 lanes -> complex baseband via houdini_setup's layout-aware helper."""
-    try:
-        return np.asarray(hs.iq_from_lanes(lanes, "interleaved"), dtype=np.complex64)
-    except Exception:  # noqa: BLE001
-        L = lanes.astype(np.float32)
-        q = L[:, 1] if lanes.shape[1] < 3 else L[:, 2]
-        return (L[:, 0] + 1j * q).astype(np.complex64)
+    return np.asarray(hs.iq_from_lanes(lanes, "interleaved"), dtype=np.complex64)
 
 
 def main():
@@ -77,8 +72,7 @@ def main():
     rx_ctx = (tx_ctx if args.rx_ip == args.tx_ip      # single-board loopback: 1 handle
               else hs.open_device(node=args.rx_ip, ch=args.rx_ch, verbose=False))
     txd, rxd = tx_ctx["sdr"], rx_ctx["sdr"]
-    dac_rate = float(dict(txd.getChannelInfo(SOAPY_SDR_TX, args.tx_ch)).get(
-        "rfdc_effective_rate_hz", 983.04e6))
+    dac_rate = float(dict(txd.getChannelInfo(SOAPY_SDR_TX, args.tx_ch))["rfdc_effective_rate_hz"])
     f_bb = (args.tone_mhz * 1e6 if args.tone_mhz is not None
             else float(os.environ.get("HOUDINI_HIL_TXFREQ", "") or 0.02035) * dac_rate)
     # Matched fine NCO: both boards share the converter rate, so one value is
@@ -103,7 +97,9 @@ def main():
                 txd.writeSetting("RFDC_TX_COARSE_MIX", "fs4")
             cs16 = np.ascontiguousarray(iq_a, dtype=np.int16).view(np.int32)
             txd.writeStream(tx, [cs16], cs16.size, 0, 0)
-            txd.activateStream(tx)
+            if txd.activateStream(tx) != 0:
+                raise RuntimeError("activateStream(TX replay) refused (DS-19: a load must be a whole "
+                                   "number of 16-sample beats)")
 
         try:
             rxd.setSampleRate(SOAPY_SDR_RX, args.rx_ch, args.rate_mhz * 1e6)

@@ -7,6 +7,7 @@
 #include "houdini/bs_slots.h"
 #include "houdini/rx_packet.h"
 #include "include/RadioHoudini.h"
+#include "include/run_options.h"
 
 #include <algorithm>
 #include <atomic>
@@ -33,6 +34,7 @@
 #include "include/rx_recorder_grid.h"  // TimeGridTracker
 #include "include/utils.h"
 #include "include/houdini/stream_args.h"
+#include "include/houdini/stream_result.h"
 
 SoapySDR::Kwargs RadioHoudini::deviceArgs(const RadioParams& p) {
   // SoapyHoudiniSDR node: the id is the board IP. Address the remote node
@@ -56,17 +58,10 @@ SoapySDR::Kwargs RadioHoudini::deviceArgs(const RadioParams& p) {
 
 SoapySDR::Kwargs RadioHoudini::rxStreamArgs(const RadioParams& p) {
   SoapySDR::Kwargs rx;
-  // The host UDP port a single-channel RX stream binds. The FPGA sends each
-  // RX channel to a FIXED destination port, 10001 + channel (the RX stream
-  // contract, SH-142/SH-159), whatever the host binds; the driver accepts any
-  // local_port and a mismatched one delivers NOTHING (every datagram lands on
-  // NoPorts). So derive it from the channel: a port fixed at 10002 (ch1's)
-  // receives nothing on channel A (AP-79 R0). On a COMBINED (>1 channel)
-  // stream the driver rejects local_port and assigns the per-channel ports
-  // itself, so leave it unset.
-  if (p.rx_channels.size() == 1) {
-    rx["local_port"] = std::to_string(10001 + p.rx_channels.front());
-  }
+  // No local_port: the FPGA sends each RX channel to a FIXED host port,
+  // 10001 + channel (the RX stream contract), and the driver binds exactly
+  // that port itself on a single and a combined stream alike (SH-425).
+
   // Break-at-gap (SH-253). The driver defaults this ON, but the whole gap
   // account depends on it: recv only compares timestamps BETWEEN reads, so a
   // splice INSIDE one returned buffer would be invisible. Asked for explicitly
@@ -85,15 +80,16 @@ SoapySDR::Kwargs RadioHoudini::txStreamArgs(const RadioParams& p) {
   // window grid (SH-248/SH-301) instead of whole milliseconds.
   if (p.tdd) tx["tdd"] = "1";
   if (p.mts) tx["mts"] = "true";
-  // HOUDINI_TX_STREAM_ARGS: the host plugin's own TX knobs on the live
-  // streams, passed through without a rebuild (houdini/stream_args.h).
+  // --tx_stream_args: the host plugin's own TX knobs on the live streams,
+  // passed through without a rebuild (houdini/stream_args.h).
   if (p.tx_mode == "stream") {
     std::string err;
-    const auto extra = houdini::extraStreamArgs(std::getenv("HOUDINI_TX_STREAM_ARGS"), &err);
-    if (!err.empty()) throw std::invalid_argument("HOUDINI_TX_STREAM_ARGS: " + err);
+    const std::string& extra_s = Sounder::runOptions().tx_stream_args;
+    const auto extra = houdini::extraStreamArgs(extra_s.empty() ? nullptr : extra_s.c_str(), &err);
+    if (!err.empty()) throw std::invalid_argument("--tx_stream_args: " + err);
     for (const auto& kv : extra) {
       tx[kv.first] = kv.second;
-      MLPD_WARN("%s: TX stream arg %s=%s from HOUDINI_TX_STREAM_ARGS\n", p.label.c_str(), kv.first.c_str(),
+      MLPD_WARN("%s: TX stream arg %s=%s from --tx_stream_args\n", p.label.c_str(), kv.first.c_str(),
                 kv.second.c_str());
     }
   }
@@ -115,7 +111,7 @@ namespace {
 // node does not answer (writeStateRecord).
 const char* const kEndOfRunStage = "end";
 
-// A per-node record file under HOUDINI_DUMP_DIR (Utils::dumpPath), named
+// A per-node record file under --dump_dir (Utils::dumpPath), named
 // <kind>_<label>_<stamp>.txt with the label made file-safe; f is empty when it
 // cannot be opened, and closes itself on every exit.
 struct RecordFile {
@@ -276,9 +272,11 @@ RadioHoudini::RadioHoudini(const RadioParams& params,
                      : [mv, plan = modeVPlan(params), label = params.label,
                         pkt = params.packet_samples](SoapySDR::Device& dev) {
                          if (pkt > 0) {
-                           // A kwarg the device did not take is silent: the readback is the evidence.
+                           // The readback cross-checks the packet the device derived from the
+                           // HOUDINI_MTU kwarg (rxpkt::mtuFor).
                            const std::string fw = dev.readSetting("HOUDINI_RX_FRAME_WORDS");
-                           const size_t got = fw.empty() ? 0 : 2 * std::stoul(fw);
+                           const bool num = !fw.empty() && fw.find_first_not_of("0123456789") == std::string::npos;
+                           const size_t got = num ? 2 * std::stoul(fw) : 0;  // else the error below names it
                            if (got != pkt)
                              throw std::runtime_error(label + ": RX packet " + std::to_string(got) +
                                                       " samples (HOUDINI_RX_FRAME_WORDS '" + fw + "'), asked " +
@@ -403,13 +401,13 @@ RadioHoudini::~RadioHoudini() {
 
 void RadioHoudini::maybeStartHealth() {
   // AP-79: the software lane's link-health checks (houdini/link_health.h) on
-  // THIS radio's own device handle, once streaming. HOUDINI_LINK_HEALTH_S
-  // sets the period (default 5 s in mode V, off otherwise; 0 turns it off).
+  // THIS radio's own device handle, once streaming. --link_health_s sets
+  // the period (default 5 s in mode V, off otherwise; 0 turns it off).
   if (health_started_.exchange(true)) return;
   // On by default in mode V only; the one-rate path adds no control-plane
   // reads unless asked.
   double period = mode_v_ != nullptr ? 5.0 : 0.0;
-  if (const char* e = std::getenv("HOUDINI_LINK_HEALTH_S")) period = std::atof(e);
+  if (Sounder::runOptions().link_health_s >= 0.0) period = Sounder::runOptions().link_health_s;
   if (!(period > 0.0)) return;
   health_thread_ = std::thread([this, period] { healthLoop(period); });
 }
@@ -446,10 +444,9 @@ void RadioHoudini::healthLoop(double period_s) {
     }
     houdini::health::LinkHealth h([this](const std::string& k) { return dev_->readSetting(k); }, label);
     std::string at_start;
-    for (const auto& f : h.baselineFailures()) at_start += (at_start.empty() ? "" : "; ") + f;
-    MLPD_INFO("%s link health: baseline taken; preflight FAILs standing at start: %s\n", label.c_str(),
-              at_start.empty() ? "none" : at_start.c_str());
-    std::set<std::string> reported;  // blind/drift alarms already warned about
+    for (const auto& f : h.startFailures()) at_start += (at_start.empty() ? "" : "; ") + f;
+    MLPD_INFO("%s link health: baseline taken; preflight FAILs standing at start (they alarm on the first check): %s\n",
+              label.c_str(), at_start.empty() ? "none" : at_start.c_str());
     unsigned long long p_err = app_rx_err_, p_short = app_rx_short_, p_pad = app_rx_pad_,
                        p_txs = app_tx_short_, p_sat = app_tx_sat_;
     for (unsigned n = 1; wait(period_s); ++n) {
@@ -461,28 +458,17 @@ void RadioHoudini::healthLoop(double period_s) {
                     c_err - p_err, c_short - p_short, c_pad - p_pad, c_txs - p_txs, c_sat - p_sat);
       const bool app_bad = c_err != p_err || c_pad != p_pad || c_txs != p_txs || c_sat != p_sat;
       p_err = c_err; p_short = c_short; p_pad = c_pad; p_txs = c_txs; p_sat = c_sat;
-      // Unattended, a condition that cannot clear within a session (a sticky
-      // or saturated egress counter, a drifted config section) would WARN
-      // every period and bury the new alarms: warn when one first appears or
-      // changes; the periodic line still carries it. Counter rises and new
-      // preflight items are new by construction and always warn.
-      bool fresh = !rep.increases.empty() || !rep.new_failures.empty();
-      std::set<std::string> standing;
-      for (const auto* v : {&rep.blind, &rep.drift})
-        for (const auto& s : *v) {
-          standing.insert(s);
-          if (reported.count(s) == 0) fresh = true;
-        }
-      reported = standing;
-      if (fresh || app_bad) {
+      // Every alarm is new by construction (a rise, or a preflight item's
+      // first appearance), so each one warns; a clean check logs every 12th time.
+      if (!rep.alarms().empty() || app_bad) {
         MLPD_WARN("%s link health: %s%s\n", label.c_str(), rep.line().c_str(), app);
       } else if (n % 12 == 0) {
         MLPD_INFO("%s link health: %s%s\n", label.c_str(), rep.line().c_str(), app);
       }
-      // SH-427 diagnostic (HOUDINI_TX_HOST_STATUS): the host pacer's per-channel
-      // state and the bank counters, every period, stamped. Its own try: a plugin
-      // without the key throws, and that must not stop the health thread.
-      if (std::getenv("HOUDINI_TX_HOST_STATUS") != nullptr) {
+      // SH-427 diagnostic (--tx_host_status): the host pacer's per-channel
+      // state and the bank counters, every period, stamped. Its own try: a
+      // failed diagnostic read must not stop the health thread.
+      if (Sounder::runOptions().tx_host_status) {
         try {
           MLPD_INFO("%s TX_HOST_STATUS: %s\n", label.c_str(), dev_->readSetting("TX_HOST_STATUS").c_str());
           MLPD_INFO("%s TX_BANK_STATUS: %s\n", label.c_str(), dev_->readSetting("TX_BANK_STATUS").c_str());
@@ -492,7 +478,7 @@ void RadioHoudini::healthLoop(double period_s) {
       }
     }
   } catch (const std::exception& e) {
-    MLPD_WARN("%s link health stopped: %s (a key this device does not report?)\n", label.c_str(), e.what());
+    MLPD_WARN("%s link health stopped: %s\n", label.c_str(), e.what());
   }
 }
 
@@ -502,10 +488,17 @@ int RadioHoudini::xmit(const void* const* buffs, int samples, int flags,
   // interpolated here as a whole and padded to a whole 8-sample TX beat. The
   // time is in ns and does not change; the caller counts in ticks, so a full
   // write reports its own sample count back.
+  // A live TX stream (a host stream) that ended throws (houdini/stream_result.h);
+  // a replay load writes through to the device and keeps its return code.
+  const auto endedThrows = [this](int r) {
+    if (params_.tx_mode == "stream")
+      houdini::stream::throwIfEnded(r, params_.label + ": the TX stream ended (writeStream STREAM_ERROR)");
+  };
   if (tx_interp_.empty() || samples <= 0) {
     const int r0 = RadioSoapy::xmit(buffs, samples, flags, frameTime);
     // RadioSoapy::xmit returns 0 on a radio with no TX stream: not a short write.
     if (!params_.tx_channels.empty() && r0 < samples) app_tx_short_.fetch_add(1, std::memory_order_relaxed);
+    endedThrows(r0);
     return r0;
   }
   // Each lane through its own interpolator; every lane's output is the same
@@ -529,6 +522,7 @@ int RadioHoudini::xmit(const void* const* buffs, int samples, int flags,
   const int r = RadioSoapy::xmit(o.buffs.data(), static_cast<int>(o.samples), flags, frameTime);
   if (!params_.tx_channels.empty() && r < static_cast<int>(o.samples))
     app_tx_short_.fetch_add(1, std::memory_order_relaxed);
+  endedThrows(r);
   if (r < 0) return r;
   return houdini::boundary::inputSamplesWritten(r, samples);
 }
@@ -549,6 +543,57 @@ long long RadioHoudini::txTimeNs(long long frame_ticks, double rate_hz, bool tdd
   return ((ns + q / 2) / q) * q;  // snap to the accepted grid
 }
 
+// Every read of the RX stream. An ended stream (houdini/stream_result.h)
+// throws instead of returning, so no caller loop can retry it. The plugin
+// stamps every packet and ends the stream on one without HAS_TIME, so an
+// unstamped read is a broken contract and throws too: every caller may rely on
+// the stamp.
+int RadioHoudini::readRx(void* const* buffs, size_t n, int& flags, long long& t, long timeout_us) {
+  const int r = dev_->readStream(rxs_, buffs, n, flags, t, timeout_us);
+  if (houdini::stream::ended(r)) {
+    app_rx_err_.fetch_add(1, std::memory_order_relaxed);  // the callers count the others
+    reportRxStreamEnd();
+    throw houdini::stream::Ended(params_.label + ": the RX stream ended (readStream STREAM_ERROR)");
+  }
+  if (houdini::stream::unstamped(r, flags))
+    throw std::runtime_error(params_.label + ": an RX read of " + std::to_string(r) +
+                             " samples carries no HAS_TIME; the plugin stamps every packet");
+  return r;
+}
+
+// The plugin queues exactly one STREAM_ERROR status event for a stream fault
+// and none for a caller error (a null lane buffer, a read while direct buffers
+// are held), so the log says which it was instead of inferring it from the
+// return alone; the plugin's own ERROR line names where and why. Bounded: other
+// events may be queued ahead of it.
+void RadioHoudini::reportRxStreamEnd() {
+  constexpr int kMaxEvents = 32;
+  int st = SOAPY_SDR_TIMEOUT;
+  int read = 0;
+  while (read < kMaxEvents) {
+    size_t mask = 0;
+    int fl = 0;
+    long long t = 0;
+    st = dev_->readStreamStatus(rxs_, mask, fl, t, 0);
+    ++read;
+    // The RX worker also queues OVERFLOW and TIME_ERROR events: skip those. Any
+    // other return is the fault event, an empty queue, or the read failing.
+    if (st != SOAPY_SDR_OVERFLOW && st != SOAPY_SDR_TIME_ERROR) break;
+  }
+  const char* what;
+  if (st == SOAPY_SDR_STREAM_ERROR)
+    what = "the stream's status event confirms a stream fault; the plugin's ERROR line names the cause";
+  else if (st == SOAPY_SDR_TIMEOUT)
+    what = "the stream's status queue holds no fault event: a caller error (a null lane buffer, or a read while "
+           "direct buffers are held), not a stream fault";
+  else if (st != SOAPY_SDR_OVERFLOW && st != SOAPY_SDR_TIME_ERROR)
+    what = "the status read itself failed, so the cause is unconfirmed";
+  else
+    what = "no fault event among the first queued status events, so the cause is unconfirmed";
+  MLPD_ERROR("%s: readStream returned STREAM_ERROR, the run stops (%s; status read %d time(s), last %d %s)\n",
+             params_.label.c_str(), what, read, st, SoapySDR::errToStr(st));
+}
+
 // SoapyHoudiniSDR delivers about one packet (2032 samples at the default MTU,
 // 1920 with the slot-tiling packet) per readStream and lets the
 // host socket buffer a backlog while the caller is busy (e.g. running
@@ -567,16 +612,14 @@ int RadioHoudini::recv(void* const* buffs, int samples, long long& frameTime) {
     jb[c] = junk.data() + c * drain_samps * kBytesPerSamp;
   int jf = 0;
   long long jt = 0;
-  // HOUDINI_RX_PROFILE splits a radioRx call's cost into the drain and the
+  // --rx_profile splits a radioRx call's cost into the drain and the
   // read (the RX PROFILE line), every N calls. Its OWN knob, not
-  // HOUDINI_LOOP_PROFILE: that one counts loop ITERATIONS while this counts
+  // --loop_profile: that one counts loop ITERATIONS while this counts
   // radioRx CALLS, and coalescing changes the ratio between them (about 30:1
   // uncoalesced, 2:1 coalesced), so one shared setting would silently report
   // two different scales.
-  static const size_t rx_profile_every = [] {
-    const char* e = getenv("HOUDINI_RX_PROFILE");
-    return e != nullptr ? static_cast<size_t>(atol(e)) : 0;
-  }();
+  const size_t rx_profile_every =
+      Sounder::runOptions().rx_profile > 0 ? static_cast<size_t>(Sounder::runOptions().rx_profile) : 0;
   static thread_local double p_drain = 0, p_read = 0;
   static thread_local size_t p_calls = 0, p_chunks = 0, p_drained = 0;
   // Gated, not unconditional: this is the RX hot path (~30 calls per frame) and
@@ -587,7 +630,7 @@ int RadioHoudini::recv(void* const* buffs, int samples, long long& frameTime) {
                         : std::chrono::steady_clock::time_point{};
   int drained_chunks = 0, drained_samps = 0;
   int dr = 0;
-  while ((dr = dev_->readStream(rxs_, jb.data(), drain_samps, jf, jt, 0)) > 0) {
+  while ((dr = readRx(jb.data(), drain_samps, jf, jt, 0)) > 0) {
     ++drained_chunks;
     drained_samps += dr;
   }
@@ -613,9 +656,9 @@ int RadioHoudini::recv(void* const* buffs, int samples, long long& frameTime) {
     placer_ = nullptr;
     int pf = 0;
     long long pt = 0;
-    int pr = dev_->readStream(rxs_, jb.data(), drain_samps, pf, pt, 1000000);
+    int pr = readRx(jb.data(), drain_samps, pf, pt, 1000000);
     if (pr < 0) app_rx_err_.fetch_add(1, std::memory_order_relaxed);
-    if (pr > 0 && (pf & SOAPY_SDR_HAS_TIME) != 0 && rx_rate_ > 0.0) {
+    if (pr > 0) {
       long long head_ns = pt + Sounder::sampleToNs(pr, rx_rate_);
       const long long start_ns = place(head_ns);
       // More than 50 ms still to skip is wrong, not slow: a bad placer, or the
@@ -628,10 +671,10 @@ int RadioHoudini::recv(void* const* buffs, int samples, long long& frameTime) {
           MLPD_WARN("placed RX window %lld samples ahead (limit %lld): read unplaced\n", left, kMaxSkip);
           break;
         }
-        pr = dev_->readStream(rxs_, jb.data(), static_cast<size_t>(std::min<long long>(left, drain_samps)), pf,
+        pr = readRx(jb.data(), static_cast<size_t>(std::min<long long>(left, drain_samps)), pf,
                               pt, 1000000);
         if (pr < 0) app_rx_err_.fetch_add(1, std::memory_order_relaxed);
-        if (pr <= 0 || (pf & SOAPY_SDR_HAS_TIME) == 0) break;
+        if (pr <= 0) break;
         head_ns = pt + Sounder::sampleToNs(pr, rx_rate_);
         left = std::llround(static_cast<double>(start_ns - head_ns) * 1e-9 * rx_rate_);
       }
@@ -650,13 +693,12 @@ int RadioHoudini::recv(void* const* buffs, int samples, long long& frameTime) {
   int got = 0;
   size_t padded = 0;  // zeros inserted into THIS window (see lastPadSamples)
   last_pad_samples_ = 0;  // cleared up front so an early return can't leave a stale count
-  bool first_stamped = false;  // the window's first read carried a time (frameTime is its start)
   while (got < samples) {
     // AP-87: in slots mode nothing is delivered outside the rx slots, so once
     // the rest of the window lies wholly in guards or the beacon slot, a read
     // would block until the next frame's pilot and keep none of it (about 8 ms
     // per framer read). The rest is the schedule's own gap: zero it.
-    if (first_stamped &&
+    if (got > 0 &&
         houdini::bsslots::restIsCut(std::llround(static_cast<double>(frameTime) * rx_rate_ / 1e9), got, samples,
                                     slot_epoch_, slot_n_, slot_fr_, slot_rx_)) {
       for (size_t c = 0; c < num_rx_ch_; c++)
@@ -672,7 +714,7 @@ int RadioHoudini::recv(void* const* buffs, int samples, long long& frameTime) {
     int flags = 0;
     long long t = 0;
     int r =
-        dev_->readStream(rxs_, cur.data(), samples - got, flags, t, 1000000);
+        readRx(cur.data(), samples - got, flags, t, 1000000);
     if (r <= 0) {
       if (r < 0) app_rx_err_.fetch_add(1, std::memory_order_relaxed);
       if (got > 0) app_rx_short_.fetch_add(1, std::memory_order_relaxed);
@@ -685,15 +727,12 @@ int RadioHoudini::recv(void* const* buffs, int samples, long long& frameTime) {
       }
       break;
     }
-    if (got == 0) {  // first (grid-anchoring) read stamps the window
-      frameTime = t;
-      first_stamped = rx_rate_ > 0.0 && (flags & SOAPY_SDR_HAS_TIME) != 0;
-    }
+    if (got == 0) frameTime = t;  // the first (grid-anchoring) read stamps the window
     // AP-87: with the device's slots mode every delivered sample must be stamped
     // inside an rx slot; the host cut guarantees it, and this checks it on every
     // read rather than trusting it (stray samples would land in the timeline
     // where the guards should be zero, unflagged by anything else).
-    if (!slot_rx_.empty() && rx_rate_ > 0.0 && (flags & SOAPY_SDR_HAS_TIME) != 0) {
+    if (!slot_rx_.empty()) {
       const long long tick = std::llround(static_cast<double>(t) * rx_rate_ / 1e9);
       const long long stray =
           r - houdini::bsslots::rxOverlap(tick, r, slot_epoch_, slot_n_, slot_fr_, slot_rx_);
@@ -710,47 +749,28 @@ int RadioHoudini::recv(void* const* buffs, int samples, long long& frameTime) {
         }
       }
     }
-    size_t pad = 0;
-    if (rx_rate_ > 0.0 && (flags & SOAPY_SDR_HAS_TIME) != 0) {
-      const Sounder::GridCheck gc = grid.onStamp(t, got);
-      pad = std::min(gc.pad_samples, static_cast<size_t>(samples - got));
-      ++rd_reads_;
-      if (gc.backward || gc.resync) {
-        // The read is NOT where the count puts it: earlier than the samples
-        // already placed (out of order or overlapping) or a jump beyond the
-        // gap cap. Splicing it in would put its samples at the wrong times, so
-        // the whole window is marked untrusted (counted as padded, which the
-        // consumers refuse) instead of used.
-        long long& n_bad = gc.backward ? rd_backward_ : rd_resync_;
-        const long long k = ++n_bad;
-        if ((k & (k - 1)) == 0) {
-          MLPD_WARN("%s: a read of %d samples stamped %lld samples %s the stream's count (%s, occurrence %lld): "
-                    "this window is marked untrusted\n",
-                    params_.label.c_str(), r, static_cast<long long>(gc.delta < 0 ? -gc.delta : gc.delta),
-                    gc.delta < 0 ? "BEFORE" : "after", gc.backward ? "out of order" : "a time jump", k);
-        }
-        padded += static_cast<size_t>(r);
-      } else if (gc.pad_samples == 0) {
-        ++rd_on_count_;
-      } else {
-        ++rd_gap_reads_;
-      }
-    } else {
-      // No usable stamp, so this read is spliced onto the previous one with no
-      // continuity check: precisely the corruption the grid tracker exists to
-      // prevent. HOUDINI_PROTOCOL stamps every packet, so on a conformant device
-      // this cannot fire; if it does, the guarantee is gone and the window is a
-      // guess. Say so rather than degrading silently (AP-10).
-      static std::atomic<int> unstamped{0};
-      const int n_unstamped = unstamped.fetch_add(1);
-      if ((n_unstamped % 200) == 0) {
-        MLPD_WARN(
-            "RX read without a usable timestamp (rate=%.0f, flags=0x%x), count "
-            "%d: splicing with NO gap check, so this window's timing is not "
-            "guaranteed; the window is marked untrusted.\n",
-            rx_rate_, flags, n_unstamped + 1);
+    const Sounder::GridCheck gc = grid.onStamp(t, got);
+    const size_t pad = std::min(gc.pad_samples, static_cast<size_t>(samples - got));
+    ++rd_reads_;
+    if (gc.backward || gc.resync) {
+      // The read is NOT where the count puts it: earlier than the samples
+      // already placed (out of order or overlapping) or a jump beyond the
+      // gap cap. Splicing it in would put its samples at the wrong times, so
+      // the whole window is marked untrusted (counted as padded, which the
+      // consumers refuse) instead of used.
+      long long& n_bad = gc.backward ? rd_backward_ : rd_resync_;
+      const long long k = ++n_bad;
+      if ((k & (k - 1)) == 0) {
+        MLPD_WARN("%s: a read of %d samples stamped %lld samples %s the stream's count (%s, occurrence %lld): "
+                  "this window is marked untrusted\n",
+                  params_.label.c_str(), r, static_cast<long long>(gc.delta < 0 ? -gc.delta : gc.delta),
+                  gc.delta < 0 ? "BEFORE" : "after", gc.backward ? "out of order" : "a time jump", k);
       }
       padded += static_cast<size_t>(r);
+    } else if (gc.pad_samples == 0) {
+      ++rd_on_count_;
+    } else {
+      ++rd_gap_reads_;
     }
     if (pad > 0) {
       // The r samples just read belong at got+pad: shift them forward and zero-fill
@@ -766,7 +786,7 @@ int RadioHoudini::recv(void* const* buffs, int samples, long long& frameTime) {
       // AP-87: in slots mode the part of the gap in a guard or the beacon slot is
       // the schedule's (cut by the device); only the part in an rx slot is lost.
       size_t loss = pad;
-      if (!slot_rx_.empty() && rx_rate_ > 0.0) {
+      if (!slot_rx_.empty()) {
         const long long win_tick = std::llround(static_cast<double>(frameTime) * rx_rate_ / 1e9);
         loss = static_cast<size_t>(houdini::bsslots::rxOverlap(win_tick + got, static_cast<long long>(pad),
                                                                slot_epoch_, slot_n_, slot_fr_, slot_rx_));
@@ -797,8 +817,7 @@ int RadioHoudini::recv(void* const* buffs, int samples, long long& frameTime) {
   last_pad_samples_ = padded;
   if (padded > 0) app_rx_pad_.fetch_add(1, std::memory_order_relaxed);
   if (got > 0) maybeStartHealth();
-  if ((getenv("HOUDINI_CL_RX_DEBUG") != nullptr ||
-       getenv("HOUDINI_DUMP_WIN") != nullptr) &&
+  if ((Sounder::runOptions().cl_rx_debug || Sounder::runOptions().dump_win) &&
       got > 0 && buffs[0] != nullptr) {
     const int16_t* p = static_cast<const int16_t*>(buffs[0]);
     double s = 0;
@@ -808,7 +827,7 @@ int RadioHoudini::recv(void* const* buffs, int samples, long long& frameTime) {
       amax = std::max(amax, std::abs((int)p[k]));
     }
     const double rms = std::sqrt(s / (got * 2));
-    if (getenv("HOUDINI_CL_RX_DEBUG") != nullptr) {
+    if (Sounder::runOptions().cl_rx_debug) {
       static std::atomic<int> cnt{0};
       if ((cnt.fetch_add(1) % 40) == 0) {
         MLPD_INFO("Houdini client RX dbg: got=%d rms=%.2f absmax=%d\n", got,
@@ -816,14 +835,14 @@ int RadioHoudini::recv(void* const* buffs, int samples, long long& frameTime) {
       }
     }
     // Dump the first strong (beacon-present) window for offline correlation.
-    if (getenv("HOUDINI_DUMP_WIN") != nullptr && rms > 100.0) {
+    if (Sounder::runOptions().dump_win && rms > 100.0) {
       static std::atomic<bool> done{false};
       bool expected = false;
       if (done.compare_exchange_strong(expected, true)) {
         const std::string path = Utils::dumpPath("cl_win.bin");
         FILE* f = std::fopen(path.c_str(), "wb");
         if (f == nullptr) {
-          MLPD_WARN("HOUDINI_DUMP_WIN: cannot open %s (%s)\n", path.c_str(), std::strerror(errno));
+          MLPD_WARN("--dump_win: cannot open %s (%s)\n", path.c_str(), std::strerror(errno));
         }
         if (f) {
           std::fwrite(p, sizeof(int16_t), static_cast<size_t>(got) * 2, f);

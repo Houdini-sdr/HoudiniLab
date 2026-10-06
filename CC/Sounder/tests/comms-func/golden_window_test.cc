@@ -3,7 +3,7 @@
  * @brief The library against resync windows recorded on silicon.
  *
  * The sync library's byte-identity guard. Each fixture is one targeted resync
- * window the sounder dumped (HOUDINI_DUMP_RESYNC_WIN) together with the index
+ * window the sounder dumped (--dump_resync_win) together with the index
  * and in-window SNR the sounder computed for it on the rig (stack fpga
  * c88e0b5f / device+host 3a0aa361, 0.6 FS). The library's Detector and
  * SnrWindowGuard must return the same index and the same SNR (to 0.01 dB) for
@@ -86,11 +86,6 @@ bool readWindow(const std::string& path, std::vector<std::complex<int16_t>>* out
 }  // namespace
 
 int main(int argc, char** argv) {
-  // Nothing from the operator's shell may change what this test builds.
-  {
-    for (const auto& k : houdini::sync::SyncConfig::schema())
-      if (k.env != nullptr) unsetenv(k.env);
-  }
   const std::string dir = argc > 1 ? argv[1] : "tests/comms-func/fixtures/golden";
   using houdini::sync::BeaconShape;
   using houdini::sync::Numerology;

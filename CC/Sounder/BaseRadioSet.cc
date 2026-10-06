@@ -130,6 +130,7 @@ BaseRadioSet::BaseRadioSet(Config* cfg, const bool calibrate_proc) : _cfg(cfg) {
       return;
     }
 
+    std::vector<std::string> setup_failed(num_radios);
     thread_count.store(num_radios);
     for (size_t i = 0; i < num_radios; i++) {
       BaseRadioContext* context = new BaseRadioContext;
@@ -137,6 +138,7 @@ BaseRadioSet::BaseRadioSet(Config* cfg, const bool calibrate_proc) : _cfg(cfg) {
       context->thread_count = &thread_count;
       context->tid = i;
       context->cell = c;
+      context->failure = &setup_failed.at(i);
 #ifdef THREADED_INIT
       pthread_t configure_thread_;
       if (pthread_create(&configure_thread_, NULL,
@@ -152,6 +154,17 @@ BaseRadioSet::BaseRadioSet(Config* cfg, const bool calibrate_proc) : _cfg(cfg) {
 
     while (thread_count.load() > 0) {
     }
+
+    // A radio whose channel setup threw is not one to run on: list it as an
+    // unopened one is (no radio was stripped to get here, so the indices are
+    // the topology's) and stop, so the framer is never armed.
+    for (size_t i = 0; i < num_radios; i++) {
+      if (setup_failed.at(i).empty()) continue;
+      radioNotFound = true;
+      radio_serial_not_found.push_back(_cfg->bs_sdr_ids().at(c).at(i) +
+                                       " (opened; its channel setup failed: " + setup_failed.at(i) + ")");
+    }
+    if (radioNotFound == true) break;
 
     for (size_t i = 0; i < bsRadios.at(c).size(); i++) {
       bsRadios.at(c).at(i)->printSettings();
@@ -258,8 +271,9 @@ void BaseRadioSet::init(BaseRadioContext* context) {
   p.half_bw_by_channel = _cfg->channel_half_bw_hz();
   p.tx_gain_db = _cfg->houdini_tx_gain_db();
   p.rx_gain_db = _cfg->houdini_rx_gain_db();
-  // Packets that tile the slot exactly (1920 x 32 at the demo's 61440).
-  p.packet_samples = houdini::rxpkt::tiledPacketOrDefault(_cfg->samps_per_slot());
+  // Packets that tile the slot exactly (1920 x 32 at the demo's 61440); under
+  // the TDD framer whatever their size, since the device refuses any other.
+  p.packet_samples = houdini::rxpkt::bsPacket(_cfg->samps_per_slot(), _cfg->bs_hw_framer(), _cfg->rate());
   if (_cfg->xband_frontend_static()) p.xband_fe_state = "rx";  // AP-86: the BS's board receives
   // Houdini BS: the beacon is device BRAM replay (tx_mode=replay). The RX
   // host port follows the channel (RadioHoudini::rxStreamArgs).
@@ -294,6 +308,7 @@ void BaseRadioSet::configure(BaseRadioContext* context) {
   int i = context->tid;
   int c = context->cell;
   std::atomic_ulong* thread_count = context->thread_count;
+  std::string* failure = context->failure;
   delete context;
 
   //load channels (Iris per-channel analog gain; a no-op on Houdini). The RX
@@ -301,11 +316,21 @@ void BaseRadioSet::configure(BaseRadioContext* context) {
   // The gain vectors carry only the configured (A/B) channels, so a higher RX
   // channel (C/D on an RX-only converter) has no gain entry; default it to 0 --
   // Houdini has no analog gain stage and ignores it anyway.
-  auto channels = Utils::strToChannels(_cfg->bs_rx_channel());
-  for (auto ch : channels) {
-    double rxgain = ch < _cfg->rx_gain().size() ? _cfg->rx_gain().at(ch) : 0.0;
-    double txgain = ch < _cfg->tx_gain().size() ? _cfg->tx_gain().at(ch) : 0.0;
-    bsRadios.at(c).at(i)->setup(ch, rxgain, txgain);
+  // setup() reads the device back (Houdini: getFrequency, which the plugin
+  // throws on when the PLL reads 0 or the zone is unreadable). An exception
+  // escaping this thread is std::terminate with no teardown, so the reason is
+  // left for the constructor, which fails the set with it.
+  try {
+    auto channels = Utils::strToChannels(_cfg->bs_rx_channel());
+    for (auto ch : channels) {
+      double rxgain = ch < _cfg->rx_gain().size() ? _cfg->rx_gain().at(ch) : 0.0;
+      double txgain = ch < _cfg->tx_gain().size() ? _cfg->tx_gain().at(ch) : 0.0;
+      bsRadios.at(c).at(i)->setup(ch, rxgain, txgain);
+    }
+  } catch (const std::exception& err) {
+    MLPD_ERROR("BaseRadioSet radio %s channel setup failed: %s\n", _cfg->bs_sdr_ids().at(c).at(i).c_str(),
+               err.what());
+    *failure = err.what();
   }
 
   assert(thread_count->load() != 0);

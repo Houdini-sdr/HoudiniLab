@@ -15,11 +15,15 @@ GOOD = [
     "57:004621 INFOR: BS 192.168.10.22: AP-87 slot check: 507470 reads, 25763909760 samples, 0 of them outside the rx "
     "slots (0 reads)",
     "57:004972 INFOR: BS 192.168.10.22: RX_HOST_STATUS rxq_ovfl=0 rxq_ovfl_ch0=0 ring_ovfl=0 tdd_drop=0 tdd_drop_ch0=0 "
-    "tdd_straddle=0 tdd_refused=0",
+    "tdd_straddle=0",
     "57:368354 INFOR: UE 192.168.10.21: RX read check: 2411956 stamped reads, 2411956 on the count, 0 after a gap "
     "(0 samples lost in rx slots, 0 the schedule's gaps), 0 out of order, 0 time jumps",
     "57:000200 INFOR: BS 192.168.10.22 link health: [BS 192.168.10.22] 60.0 s: irq 12/s, preflight ok: clean"
     " | app: rx_err +0, rx_short +0, rx_pad +0, tx_short +0, tx_sat +0",
+    "3:176656 INFOR: houdiniAcquireAnchor [0]: lock CONFIRMED (resid -1 over 206 frames, confirm 21) -> frame "
+    "anchor 140786886, bootstrap period 122879.9613 (-0.0387 samp/frame)",
+    "42:198592 INFOR: CNS score 0.995 rot -0.0 deg at frame 553 (512 datagrams, 0 low); P->U 500.0 us, so +180.0 deg "
+    "per kHz of uncorrected CFO",
 ]
 def levels(L):
     return [lv for lv, _ in rs.verdict(L)]
@@ -27,6 +31,29 @@ def swap(L, old, new):
     return [l.replace(old, new) for l in L]
 
 check("FAIL" not in levels(GOOD) and "WARN" not in levels(GOOD), "a clean slots-mode run passes with no warnings: %s" % rs.verdict(GOOD))
+# AP-112, DEMO_VERIFICATION 9.83: clean read checks and counters on a link that
+# carried nothing. Each signal on its own, then both gone.
+nolock = [l for l in GOOD if "lock CONFIRMED" not in l]
+check(any(lv == "FAIL" and "never locked on the beacon" in t for lv, t in rs.verdict(nolock)),
+      "a UE that never locked on the beacon fails (mutation: the beacon rule removed)")
+# Detections are not a lock: the detector logs a crossing before the SNR floor
+# judges it, and a rejected one is a clientSyncBeacon line (the rejection is
+# from a real capture, the detection from receiver.cc's format).
+hunted = nolock + [
+    "2:694464 INFOR: clientSyncBeacon [0]: rejected low-SNR detection (idx 18311, 0.5 dB < 30.0 dB floor), count 1",
+    "2:694470 INFOR: syncSearch: detection #1 statistic 0.3121 vs bar 0.3000 (xcorr), idx 18311 in 122880",
+    "2:701000 INFOR: clientSyncBeacon [0]: idx 18311 snr 31.2 dB"]
+check(any(lv == "FAIL" and "never locked on the beacon" in t for lv, t in rs.verdict(hunted)),
+      "detections without a confirmed lock fail (mutation: any detection or clientSyncBeacon line taken as a lock)")
+nocns = [l for l in GOOD if "datagrams" not in l]
+check(any(lv == "FAIL" and "no constellation record" in t for lv, t in rs.verdict(nocns)),
+      "a run whose BS scored no constellation fails (mutation: the constellation rule removed)")
+zero = swap(GOOD, "(512 datagrams, 0 low)", "(0 datagrams, 0 low)")
+check(any(lv == "FAIL" and "no constellation record" in t for lv, t in rs.verdict(zero)),
+      "a CNS summary of zero datagrams is no data (mutation: any summary line taken as data)")
+idle = [l for l in GOOD if "lock CONFIRMED" not in l and "datagrams" not in l]
+check(sum(lv == "FAIL" for lv in levels(idle)) == 2,
+      "the 9.83 shape, clean checks and no data, fails on both counts (mutation: PASS on clean counters alone)")
 check("FAIL" in levels(swap(GOOD, "(0 samples lost in rx slots, 128820113280", "(1920 samples lost in rx slots, 128820113280")),
       "samples lost in the rx slots fail (mutation: the lost count not read)")
 check("FAIL" in levels([l.replace("0 time jumps", "2 time jumps") if "UE 192" in l else l for l in GOOD]),
@@ -57,26 +84,26 @@ check([t for lv, t in v if lv == "WARN"] == ["late releases (host pacer): ch0 0,
       "late releases are the cumulative counter's peak per channel, not its line count (mutation: count lines)")
 # With a readable status beside it (a second radio, or a read that worked once),
 # only the explicit rule can fail the unreadable one.
-v = rs.verdict(GOOD + ["57:1 WARNG: BS 192.168.10.22: RX_HOST_STATUS unreadable: RemoteError: unknown key"])
+v = rs.verdict(GOOD + ["57:1 WARNG: BS 192.168.10.22: RX_HOST_STATUS unreadable: RX_HOST_STATUS: rxq_ovfl_ch0 is unreadable"])
 check(any(lv == "FAIL" and "unreadable" in t for lv, t in v),
       "an unreadable RX_HOST_STATUS fails even beside a readable one (mutation: drop the unreadable rule)")
 v = rs.verdict([l for l in GOOD if "RX_HOST_STATUS" not in l]
-               + ["57:1 WARNG: BS 192.168.10.22: RX_HOST_STATUS unreadable: RemoteError: unknown key"])
+               + ["57:1 WARNG: BS 192.168.10.22: RX_HOST_STATUS unreadable: RX_HOST_STATUS: rxq_ovfl_ch0 is unreadable"])
 check("FAIL" in [lv for lv, _ in v] and not any("counters 0" in t for _, t in v),
       "an unreadable RX_HOST_STATUS alone fails instead of passing with no counters (mutation: match any line naming the key)")
-check("FAIL" in levels([l.replace(" tdd_refused=0", "") for l in GOOD]),
+check("FAIL" in levels([l.replace(" tdd_straddle=0", "") for l in GOOD]),
       "an RX_HOST_STATUS without a judged counter fails (mutation: a missing key read as 0)")
 rnf = ["57:1 WARNG: Radios Not Found. Will attempt a retry"] + GOOD
 check("FAIL" not in levels(rnf) and any("retried" in t for lv, t in rs.verdict(rnf) if lv == "WARN"),
       "a radio open that was retried and recovered is a warning, not a failure (mutation: Radios Not Found as an error)")
 K = rs.alarm_kinds([
-    "57:2 WARNG: BS x link health: [BS x] 5.0 s: irq 1/s, preflight ok: egress.stall_seen=1 (sticky: a stall happened;"
-    " stall_evt no longer proves a new one); config blocks: a -> b | app: rx_err +0, rx_short +0, rx_pad +0, tx_short +0, tx_sat +0",
+    "57:2 WARNG: BS x link health: [BS x] 5.0 s: irq 1/s, preflight ok: egress.drop_p0 +3; host.rxq_ovfl_ch2 +7"
+    " | app: rx_err +0, rx_short +0, rx_pad +0, tx_short +0, tx_sat +0",
     "57:3 WARNG: BS x link health: [BS x] 5.0 s: irq 1/s, preflight ok: egress.drop_p0=255 (saturated: further drops"
-    " cannot be counted) | app: rx_err +0, rx_short +0, rx_pad +0, tx_short +0, tx_sat +0"])
-check(dict(K) == {"egress.stall_seen sticky": 1, "config blocks drift": 1, "egress.drop_p0 saturated": 1},
-      "blind and drift items get their kinds in link_health.h's own forms (mutation: the old 'drift ...' and "
-      "'blind ...' patterns, which match nothing): %s" % dict(K))
+    " cannot be counted); config blocks: a -> b | app: rx_err +0, rx_short +0, rx_pad +0, tx_short +0, tx_sat +0"])
+check(dict(K) == {"egress.drop_p0 +N": 1, "host.rxq_ovfl_ch2 +N": 1},
+      "an egress rise and a per-stream host rise get their kinds, and the retired blind and drift forms none "
+      "(mutation: the old 'saturated' or 'config' pattern kept): %s" % dict(K))
 lr2 = GOOD + ["57:%d INFOR: UE 192.168.10.21 TX_HOST_STATUS: late_refusals_ch0=%d late_refusals_ch1=0 release_late_ch0=0" % (i, i)
                for i in range(3)] + ["57:9 WARNG: Write rejected: HAS_TIME stamp 123 behind by 50 ms"]
 w = [t for lv, t in rs.verdict(lr2) if lv == "WARN"]
@@ -103,10 +130,11 @@ check(rs.pilot_frames(PB) == (14, 2), "a schedule line counts its N frames (muta
 C31 = ["57:1 INFOR: UE 192.168.10.21 TX_HOST_STATUS: eob_recloses=0 eob_recloses_ch0=0 eob_recloses_ch1=0 offset_us_ch0=-25.8 "
        "offset_samples_ch0=4 offset_implausible_ch0=0 anchor_rejects_ch0=0 rate_ppm_ch0=-0.00 late_refusals_ch0=0 "
        "write_min_margin_us_ch0=29753.6 release_min_margin_us_ch0=-64417.1 release_late_ch0=24691 burst_refusals_ch0=0 "
-       "cold_releases_ch0=12710 cold_window_ms_ch0=249.6"]
+       "cold_releases_ch0=12710 cold_window_ms_ch0=249.6 ring_bytes_ch0=268435456 ring_slots_ch0=32768"]
 w31 = [t for lv, t in rs.verdict(GOOD + C31) if lv == "WARN"]
 check(any("late releases" in t and "ch0 24691" in t for t in w31) and not any("12710" in t for t in w31),
-      "0.3.1's TX_HOST_STATUS: release_late read as before, the cold keys not taken for it (mutation: a looser key "
+      "0.4.0's TX_HOST_STATUS (its key order, the ring keys last): release_late read, the cold and ring keys not "
+      "taken for it (mutation: a looser key "
       "pattern): %s" % w31)
 # main: the exit status is the verdict's, read from a run directory's largest log
 d = tempfile.mkdtemp(prefix="run_summary_")

@@ -38,6 +38,7 @@
 #include <string>
 #include <vector>
 
+#include "include/run_options.h"
 #include "include/comms-lib.h"
 #include "include/config.h"
 #include "include/houdini/tx_rx_boundary.h"
@@ -393,7 +394,7 @@ int main() {
   {
     // Recording mode refuses two bands at startup (the recorder's init runs
     // on the main thread, in the RecorderThread constructor).
-    ::unsetenv("HOUDINI_CSI_UDP");
+    Sounder::runOptions().csi_udp.clear();
     bool threw = false;
     try {
       Sounder::RecorderWorker w(&xw, 0, 2);
@@ -418,7 +419,7 @@ int main() {
       check(false, "recorder: a loopback UDP socket");
     } else {
       const std::string dst = "127.0.0.1:" + std::to_string(ntohs(a.sin_port));
-      ::setenv("HOUDINI_CSI_UDP", dst.c_str(), 1);
+      Sounder::runOptions().csi_udp = dst;
       Sounder::RecorderWorker w(&xw, 0, 2);
       w.init();
       const uint32_t kFrame = 7, kP = 2, kU = 3;  // the schedule's P and U slots
@@ -488,7 +489,7 @@ int main() {
                   want_db);
       check(std::fabs(ratio_db - want_db) < 0.02,
             "recorder: the X-band antenna's |H| sits at its per-tone amplitude ratio to the sub-6's (P5's instrument)");
-      ::unsetenv("HOUDINI_CSI_UDP");
+      Sounder::runOptions().csi_udp.clear();
     }
     if (rx >= 0) ::close(rx);
   }

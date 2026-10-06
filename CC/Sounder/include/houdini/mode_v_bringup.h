@@ -4,8 +4,7 @@
  *        device requires (AP-79), between make() and the first setupStream.
  *
  * THE ORDER, and why each step sits where it does. It is the software lane's
- * recipe (its reference driver host/examples/dualband_link.py) and the HS-202
- * plan section 3.2, which the device enforces:
+ * recipe and the HS-202 plan section 3.2, which the device enforces:
  *   1. FORCE_IDLE: a known-idle device, leaks from an earlier session reported.
  *   1b. AP-86, only with the X-band RF front end attached (Plan::xband_fe_state):
  *      the board's STATIC state for this run. After FORCE_IDLE, which
@@ -268,8 +267,7 @@ inline Result bringUp(SoapySDR::Device& dev, const Plan& p) {
     dev.writeSetting("TDD_EXTPIN_CTRL", "txsel=1,trsw=1,ilock=1");
     dev.writeSetting("TDD_EXTPIN_SRC", "src=static,state=" + p.xband_fe_state);
     // The walk takes up to about 82 us and the adoption about 1 ms; 200 ms is
-    // far past both, so a timeout means the write did not take (an unknown
-    // key no-ops silently: this readback is the evidence, standing trap 1).
+    // far past both, so a timeout means the board never adopted the static.
     std::vector<size_t> tx_chs;
     for (const auto& t : res.tx) tx_chs.push_back(t.channel);
     std::string stat, why;
@@ -280,9 +278,8 @@ inline Result bringUp(SoapySDR::Device& dev, const Plan& p) {
       if (std::chrono::steady_clock::now() - t0 > std::chrono::milliseconds(200))
         throw std::runtime_error("mode V bring-up: the X-band front end's static " + p.xband_fe_state +
                                  " did not take (" + why + "; TDD_EXTPIN_STAT '" + stat +
-                                 "'): a plugin that ignores the keys, or the board not ready (pa_ready: its "
-                                 "power board or the ADTR1107 init); a node without houdini-role refuses the "
-                                 "SRC write itself, with its reason");
+                                 "'): the board not ready (pa_ready: its power board or the ADTR1107 init); a "
+                                 "node without houdini-role refuses the SRC write itself, with its reason");
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     logLine("TDD_EXTPIN_CTRL txsel=1,trsw=1,ilock=1 -> " + dev.readSetting("TDD_EXTPIN_CTRL"));
@@ -426,8 +423,8 @@ inline PostSetup postSetupCheck(SoapySDR::Device& dev, const Result& r) {
     return info;
   };
   for (const auto& t : r.tx) chan(SOAPY_SDR_TX, t.channel, "TX");
-  // The driver re-applies the zones and the inverse sinc at each tile's
-  // StartUp (inside the setups): read them again now that the tiles are up.
+  // The zones and the inverse sinc persist through each tile's StartUp
+  // (inside the setups): read them again now that the tiles are up, to prove it.
   {
     const auto tz = detail::chanList(dev.readSetting("RFDC_TX_NYQUIST_ZONE"));
     const auto ti = detail::chanList(dev.readSetting("RFDC_TX_INVSINC"));
@@ -452,11 +449,13 @@ inline PostSetup postSetupCheck(SoapySDR::Device& dev, const Result& r) {
   for (const auto& x : r.rx) {
     const auto info = chan(SOAPY_SDR_RX, x.channel, "RX");
     const auto ti = info.find("rfdc_tile_index"), bl = info.find("rfdc_block");
-    if (ti == info.end() || bl == info.end()) continue;
+    if (ti == info.end() || bl == info.end())
+      throw std::runtime_error("mode V: RX ch" + std::to_string(x.channel) + " reports no rfdc_tile_index or rfdc_block");
     const std::string addr = ti->second + "." + bl->second;
     const std::string mode = detail::blockField(cal, addr, "cal");
     if (mode.empty()) {
-      ps.log.push_back("WARNING: RFDC_ADC_CAL has no entry for " + addr + " (RX ch" + std::to_string(x.channel) + "); calibration mode not verified");
+      throw std::runtime_error("mode V: RFDC_ADC_CAL has no cal= entry for ADC " + addr + " (RX ch" +
+                               std::to_string(x.channel) + "), so its calibration mode cannot be verified");
     } else if (mode != "mode" + std::to_string(x.cal_mode)) {
       throw std::runtime_error("mode V: RX ch" + std::to_string(x.channel) + " (ADC " + addr + ") runs cal=" + mode +
                                ", wanted mode" + std::to_string(x.cal_mode));
