@@ -243,18 +243,18 @@ RadioSoapy::RadioSoapy(const RadioParams& params, Type type, const SoapySDR::Kwa
       // The ADC half of the MTS rule (the software lane's): the group needs an
       // RX member on ADC tile 0. The planned nodes have one (RX ch0); a node
       // that omits it is refused here, naming the fix, rather than left to a
-      // sync that fails or lands unsynced. Skipped when the driver does not
-      // report tiles.
+      // sync that fails or lands unsynced. Only a Houdini radio asks for MTS,
+      // and it reports every channel's tile.
       if (want_mts && !rx_channels.empty()) {
-        bool tile0 = false, reported = false;
+        bool tile0 = false;
         for (auto ch : rx_channels) {
           const auto info = dev_->getChannelInfo(SOAPY_SDR_RX, ch);
           const auto it = info.find("rfdc_tile_index");
-          if (it == info.end()) continue;
-          reported = true;
+          if (it == info.end())
+            throw std::runtime_error("getChannelInfo(RX, " + std::to_string(ch) + ") reports no rfdc_tile_index");
           tile0 = tile0 || it->second == "0";
         }
-        if (reported && !tile0) {
+        if (!tile0) {
           throw std::invalid_argument(
               "MTS needs an RX channel on ADC tile 0 (channel A or B); add one "
               "to rx_channel / ue_rx_channel");

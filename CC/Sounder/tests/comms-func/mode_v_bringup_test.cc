@@ -53,12 +53,13 @@ class FakeDevice : public SoapySDR::Device {
   bool unsynced = false;         ///< channels report rfdc_mts_synced=0
   bool wrong_cal = false;        ///< every ADC block reads cal=mode2
   std::string preflight = "ok known DAC0.0:FIFO_OVR(HS-207)";
-  // AP-86: the X-band front end, as the software lane's 329e23d plugin behaves.
+  // AP-86: the X-band front end, as the SoapyHoudiniSDR 0.4.0 plugin behaves.
   bool extpin_not_adopted = false;   ///< the board never adopts the static: STAT never shows it
-  bool extpin_unknown = false;       ///< a plugin without the front-end keys: their writes throw
+  bool extpin_refused = false;       ///< the plugin refuses the front-end writes (they throw)
   int drive_allow_off = -1;          ///< this TX channel reads drive_allow_chK=0 (guarded, no pa_ready)
   bool extpin_lost_on_setup = false; ///< setupStream resets CTRL/SRC
   bool seq_busy_stuck = false;       ///< the source walk never settles (seq_busy=1)
+  bool rx_no_block = false;          ///< RX channel info without rfdc_block (a broken report)
 
   size_t getNumChannels(const int dir) const override { return dir == SOAPY_SDR_TX ? 2 : 4; }
   void setSampleRate(const int dir, const size_t ch, const double rate) override {
@@ -80,7 +81,7 @@ class FakeDevice : public SoapySDR::Device {
     return it == gain_.end() ? (dir == SOAPY_SDR_TX ? -6.13 : 0.0) : it->second;
   }
   void writeSetting(const std::string& key, const std::string& value) override {
-    if (extpin_unknown && key.rfind("TDD_EXTPIN_", 0) == 0) throw std::runtime_error(key + ": unknown setting");
+    if (extpin_refused && key.rfind("TDD_EXTPIN_", 0) == 0) throw std::runtime_error(key + ": the register did not take the write");
     calls.push_back(value.empty() ? key : key + "=" + value);
     set_[key] = value;
     if (key == "FORCE_IDLE") set_.erase("TDD_EXTPIN_SRC"), set_.erase("TDD_EXTPIN_CTRL");  // the plugin resets both
@@ -159,6 +160,7 @@ class FakeDevice : public SoapySDR::Device {
     kw["rfdc_label"] = std::string(rx ? "ADC" : "DAC") + kw["rfdc_tile_index"] + "." + kw["rfdc_block"];
     kw["rfdc_mts_synced"] = unsynced ? "0" : "1";
     if (!unsynced) kw["rfdc_mts_latency"] = rx ? "310" : "512";
+    if (rx && rx_no_block) kw.erase("rfdc_block");
     return kw;
   }
   SoapySDR::Stream* setupStream(const int, const std::string&, const std::vector<size_t>&,
@@ -452,13 +454,23 @@ int main() {
   }
   {
     FakeDevice f;
-    f.extpin_unknown = true;
+    const auto r = houdini::modev::bringUp(f, bsPlan());
+    f.rx_no_block = true;
+    std::string why_b;
+    try { houdini::modev::postSetupCheck(f, r); } catch (const std::runtime_error& e) { why_b = e.what(); }
+    check(why_b.find("reports no rfdc_tile_index or rfdc_block") != std::string::npos,
+          "an RX channel reported without its ADC block after the setups refuses activation, naming the keys "
+          "[mutation: the channel skipped, its calibration mode unchecked]");
+  }
+  {
+    FakeDevice f;
+    f.extpin_refused = true;
     auto p = uePlan();
     p.xband_fe_state = "tx";
     std::string why_x;
     try { houdini::modev::bringUp(f, p); } catch (const std::runtime_error& e) { why_x = e.what(); }
-    check(why_x.find("TDD_EXTPIN_CTRL: unknown setting") != std::string::npos && idx(f.calls, "rate TX ") < 0,
-          "AP-86: a plugin without the front-end keys stops the bring-up at the write, before any converter write "
+    check(why_x.find("TDD_EXTPIN_CTRL: the register did not take the write") != std::string::npos && idx(f.calls, "rate TX ") < 0,
+          "AP-86: a front-end write the plugin refuses stops the bring-up at the write, before any converter write "
           "[mutation: the write's error caught and the bring-up continued]");
   }
   {

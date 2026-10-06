@@ -391,7 +391,6 @@ endif()
 add_executable(link_health_test tests/comms-func/link_health_test.cc)
 target_include_directories(link_health_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 add_test(NAME link_health COMMAND link_health_test
-         ${CMAKE_CURRENT_SOURCE_DIR}/tests/comms-func/fixtures/link_health/mode_v_streaming_21.txt
          ${CMAKE_CURRENT_SOURCE_DIR}/tests/comms-func/fixtures/link_health/demo_stack_fi1.txt)
 
 # AP-79: the replay strobe offs/len in the driver's units.
@@ -413,9 +412,6 @@ add_test(NAME pre_cfo COMMAND pre_cfo_test)
 add_executable(bs_slots_test tests/comms-func/bs_slots_test.cc)
 target_include_directories(bs_slots_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 add_test(NAME bs_slots COMMAND bs_slots_test)
-add_executable(node_version_test tests/comms-func/node_version_test.cc)
-target_include_directories(node_version_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-add_test(NAME node_version COMMAND node_version_test)
 add_executable(logger_macro_test tests/comms-func/logger_macro_test.cc)
 target_include_directories(logger_macro_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 add_test(NAME logger_macro COMMAND logger_macro_test)

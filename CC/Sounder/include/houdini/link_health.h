@@ -146,7 +146,7 @@ inline std::set<std::string> preflightItems(const std::string& line) {
 
 // The alarm fields (HOUDINI_PROTOCOL 2.7): the TX bank's event counters, the RX
 // bank's gated windows and timed-start aborts, the host's per-stream drops,
-// re-closes and TDD refusals. tdd_drop is the slot cut itself, not a fault.
+// re-closes and slot straddles. tdd_drop is the slot cut itself, not a fault.
 inline const std::vector<std::string>& txAlarmFields() {
   static const std::vector<std::string> f = {"drops", "late",  "under",  "seqerr", "zerofill",
                                              "efault", "smiss", "clkerr", "aclose", "malformed"};
@@ -183,8 +183,6 @@ inline const std::vector<std::string>& rxAlarmFields() {
   return f;
 }
 inline const std::vector<std::string>& hostAlarmFields() {
-  // tdd_refused left RX_HOST_STATUS with HOUDINI_PROTOCOL 6: a map the packets do
-  // not tile now ends the stream (STREAM_ERROR) instead of counting.
   static const std::vector<std::string> f = {"rxq_ovfl", "ring_ovfl", "eob_recloses", "tdd_straddle"};
   return f;
 }
@@ -205,9 +203,9 @@ inline Counters collectCounters(const Read& read, HostRead* host_read = nullptr)
     for (const auto& ch : parseBankStatus(raw)) {
       const std::string key = pre + std::to_string(ch.first) + ".";
       // HS-220: a TX bank counts only from a usable poll, whose epoch rides
-      // along as "<key>epoch"; an unusable one (torn, mid-clear, or no epoch
-      // field) is not used, so the previous baseline stands until a usable
-      // one (the interval just widens).
+      // along as "<key>epoch"; an unusable one (torn, mid-clear, or malformed)
+      // is not used, so the previous baseline stands until a usable one (the
+      // interval just widens).
       if (pre == "tx") {
         const auto ep = ch.second.find("epoch");
         const long long epoch = ep == ch.second.end() ? -1 : txUsableEpoch(ep->second);
@@ -265,15 +263,6 @@ inline Counters counterIncreases(const Counters& prev, const Counters& cur) {
     const long long d = kv.second >= p ? kv.second - p : kv.second;  // a fall is a clear
     if (d > 0) out[k] = d;
   }
-  return out;
-}
-
-/// The TX channels whose bank reports no HS-220 clear epoch: their counters are
-/// never used (collectCounters), so the caller says so once.
-inline std::vector<int> txBanksWithoutEpoch(const std::string& raw) {
-  std::vector<int> out;
-  for (const auto& ch : parseBankStatus(raw))
-    if (ch.second.count("epoch") == 0) out.push_back(ch.first);
   return out;
 }
 
@@ -343,7 +332,6 @@ class LinkHealth {
     // A FAIL item standing at the start alarms on the first check, even if it
     // is gone by then: it appeared in this read.
     start_failures_ = preflightItems(preflight());
-    tx_unjudged_ = txBanksWithoutEpoch(read_("TX_BANK_STATUS"));
     prev_ = collectCounters(read_);
     prev_irq_ = irq();
     prev_t_ = now_();
@@ -351,8 +339,6 @@ class LinkHealth {
 
   /// The FAIL items the construction read found (all alarmed on the first check).
   const std::set<std::string>& startFailures() const { return start_failures_; }
-  /// The TX channels whose bank has no clear epoch at the start (never judged).
-  const std::vector<int>& txUnjudged() const { return tx_unjudged_; }
 
   Report check() {
     HostRead host_read;
@@ -397,7 +383,6 @@ class LinkHealth {
   std::string label_;
   std::function<double()> now_;
   std::set<std::string> start_failures_, standing_;
-  std::vector<int> tx_unjudged_;
   bool first_ = true;
   Counters prev_;
   long long prev_irq_ = 0;

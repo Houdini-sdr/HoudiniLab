@@ -1,4 +1,7 @@
-# Real readSetting captures on the current stack, for houdini/link_health.h:
+# Real readSetting captures of a streaming demo session, for houdini/link_health.h,
+# taken on SoapyHoudiniSDR 0.3.1 (its RX_HOST_STATUS still carries tdd_refused,
+# which 0.4.0 retired and link_health does not read): AP-109's final
+# verification replaces them with a 0.4.0 capture.
 # DEMO_VERIFICATION 9.83's FI1 run (fpga 1.34 4a19b2f2; .21 device 8b3fd476,
 # .22 device 096afad0; the demo config, mode V), each line copied from that
 # run's log, the node and the time named here. The TX banks carry HS-220's

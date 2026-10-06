@@ -423,8 +423,8 @@ inline PostSetup postSetupCheck(SoapySDR::Device& dev, const Result& r) {
     return info;
   };
   for (const auto& t : r.tx) chan(SOAPY_SDR_TX, t.channel, "TX");
-  // The driver re-applies the zones and the inverse sinc at each tile's
-  // StartUp (inside the setups): read them again now that the tiles are up.
+  // The zones and the inverse sinc persist through each tile's StartUp
+  // (inside the setups): read them again now that the tiles are up, to prove it.
   {
     const auto tz = detail::chanList(dev.readSetting("RFDC_TX_NYQUIST_ZONE"));
     const auto ti = detail::chanList(dev.readSetting("RFDC_TX_INVSINC"));
@@ -449,7 +449,8 @@ inline PostSetup postSetupCheck(SoapySDR::Device& dev, const Result& r) {
   for (const auto& x : r.rx) {
     const auto info = chan(SOAPY_SDR_RX, x.channel, "RX");
     const auto ti = info.find("rfdc_tile_index"), bl = info.find("rfdc_block");
-    if (ti == info.end() || bl == info.end()) continue;
+    if (ti == info.end() || bl == info.end())
+      throw std::runtime_error("mode V: RX ch" + std::to_string(x.channel) + " reports no rfdc_tile_index or rfdc_block");
     const std::string addr = ti->second + "." + bl->second;
     const std::string mode = detail::blockField(cal, addr, "cal");
     if (mode.empty()) {

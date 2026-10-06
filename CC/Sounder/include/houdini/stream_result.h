@@ -2,8 +2,7 @@
  * @file houdini/stream_result.h
  * @brief What a host-plugin stream call's return means to the loop that made it.
  *
- * The SoapyHoudiniSDR contract (HOUDINI_PROTOCOL 6, the host plugin from its
- * arc tip d6c1e27 on): a stream fault (a worker exception, a failed socket
+ * The SoapyHoudiniSDR 0.4.0 contract (HOUDINI_PROTOCOL 6): a stream fault (a worker exception, a failed socket
  * setup, an unstamped RX packet, an xsk out-of-order completion) ENDS the
  * stream. readStream first delivers what the worker published before the
  * fault, then returns SOAPY_SDR_STREAM_ERROR at once, without waiting out its
@@ -13,8 +12,7 @@
  *
  * The plugin's other STREAM_ERROR returns are caller errors (a null buffer for
  * any lane, a read while direct buffers are held, a write racing a deactivate),
- * which the sounder's loops do not make; an older plugin returns it for those
- * alone. So on a Houdini host stream STREAM_ERROR always means the stream is
+ * which the sounder's loops do not make. So on a Houdini host stream STREAM_ERROR always means the stream is
  * over, and a loop that retried on it would spin at full speed for the rest of
  * the run, logging, and record nothing.
  *
@@ -27,6 +25,7 @@
  */
 #pragma once
 
+#include <SoapySDR/Constants.h>
 #include <SoapySDR/Errors.h>
 
 #include <stdexcept>
@@ -37,6 +36,11 @@ namespace stream {
 
 /// Whether a readStream / writeStream return says the stream has ended.
 inline bool ended(int r) { return r == SOAPY_SDR_STREAM_ERROR; }
+
+/// A read that delivered samples without HAS_TIME. The plugin stamps every
+/// packet and ends the stream on one without the stamp, so this is a broken
+/// contract, not a read to splice untimed.
+inline bool unstamped(int r, int flags) { return r > 0 && (flags & SOAPY_SDR_HAS_TIME) == 0; }
 
 /// The Houdini radio's report of an ended stream: thrown, not returned.
 class Ended : public std::runtime_error {

@@ -27,6 +27,12 @@ int main() {
   check(!ended(SOAPY_SDR_OVERFLOW) && !ended(SOAPY_SDR_TIME_ERROR) && !ended(SOAPY_SDR_CORRUPTION),
         "the other error codes are not (ended() taking any negative breaks this)");
   check(!ended(0) && !ended(2032), "a count is not");
+  using houdini::stream::unstamped;
+  check(unstamped(2032, 0) && unstamped(1, SOAPY_SDR_END_BURST),
+        "samples without HAS_TIME are an unstamped read, other flags or not (mutation: any flag taken as a stamp)");
+  check(!unstamped(2032, SOAPY_SDR_HAS_TIME) && !unstamped(0, 0) && !unstamped(SOAPY_SDR_TIMEOUT, 0),
+        "a stamped read, an empty one and an error return are not (mutation: the r > 0 test dropped, so every "
+        "timeout throws)");
 
   // RadioHoudini's conversion: an ended stream throws, anything else returns.
   {

@@ -2,12 +2,11 @@
  * @file link_health_test.cc
  * @brief houdini/link_health.h against the software lane's link-alarm contract
  *        (SoapyHoudiniSDR shared/HOUDINI_PROTOCOL.md section 2.7), clause by
- *        clause, and against real captures: a pre-HS-220 streaming mode-V node
- *        (fixtures/link_health/mode_v_streaming_21.txt) and the current stack
+ *        clause, and against a real capture of a streaming demo session
  *        (fixtures/link_health/demo_stack_fi1.txt). NO hardware. Each check
  *        names the mutation that breaks it.
  *
- * Build: CMake target link_health_test. Run: ./link_health_test <old fixture> <current fixture> (or ctest).
+ * Build: CMake target link_health_test. Run: ./link_health_test <fixture> (or ctest).
  */
 #include <cstdio>
 #include <fstream>
@@ -248,7 +247,7 @@ int main(int argc, char** argv) {
           "HS-220: a poll caught in a clear (torn, or clear_busy set) is not used, zerofill included (mutation: only "
           "the wrapping counters dropped)");
     check(noepoch.empty(),
-          "a TX bank without the epoch field is not used (mutation: the pre-HS-220 plain rule restored)");
+          "a malformed TX bank status with no epoch field is not used (mutation: a missing epoch read as usable)");
     double t = 0.0;
     k["TX_BANK_STATUS"] = "ch0:late=65530,zerofill=0,epoch=7:7";
     LinkHealth h(rd, "ue", [&t] { return t += 5.0; });
@@ -278,48 +277,18 @@ int main(int argc, char** argv) {
     check(ok, "clean, then a counter rise, a quiet period, a new FAIL (mutation: an alarm class dropped)");
   }
   {  // the real captures
-    if (argc > 1) {  // pre-HS-220, device d72ee358
+    if (argc > 1) {  // a demo session's capture, DEMO_VERIFICATION 9.83 FI1
       auto keys = loadFixture(argv[1]);
-      check(keys.size() == 7, "the pre-HS-220 fixture has its 7 keys");
-      if (keys.size() == 7) {
-        Read rd = [&keys](const std::string& k) { return keys.at(k); };
-        const auto g = collectCounters(rd);
-        check(g.count("tx0.late") == 0 && g.count("tx1.aclose") == 0,
-              "pre-HS-220 capture: its TX banks carry no epoch and are not used (mutation: the plain rule restored)");
-        check(txBanksWithoutEpoch(keys.at("TX_BANK_STATUS")) == std::vector<int>{0, 1},
-              "pre-HS-220 capture: both TX banks are named as unjudged (mutation: the epoch-less banks not listed)");
-        check(g.at("host.ring_ovfl_ch0") == 22718 && g.at("egress.marked_p0") == 7 && g.at("rx3.aborts") == 0 &&
-                  g.count("host.ring_ovfl") == 0,
-              "pre-HS-220 capture: the per-stream host keys, four RX banks and the per-port groups parse");
-        double t = 0.0;
-        LinkHealth h(rd, "bs", [&t] { return t += 5.0; });
-        check(eq(h.check().alarms(), {"preflight new FAIL ADC0.1:FIFOUSRDAT_OF,FIFOUSRDAT_UF"}),
-              "pre-HS-220 capture: SH-421's standing FAIL alarms on the first check; the HS-207 known item does not");
-        keys["RFDC_INTR_FIRE_COUNT"] = std::to_string(14032361 + 5 * 46600);
-        keys["RX_HOST_STATUS"] = "rxq_ovfl=0 rxq_ovfl_ch0=0 ring_ovfl=22800 ring_ovfl_ch0=22800";
-        const auto r = h.check();
-        std::printf("  %s\n", r.line().c_str());
-        check(eq(r.alarms(), {"host.ring_ovfl_ch0 +82"}) && r.irq_per_s > 46000 && r.irq_per_s < 47000,
-              "pre-HS-220 capture: a ring drop rise alarms by its stream, and the HS-207 IRQ rate reads 46.6k/s");
-      }
-    }
-    if (argc > 2) {  // the current stack, DEMO_VERIFICATION 9.83 FI1
-      auto keys = loadFixture(argv[2]);
-      check(keys.size() == 5, "the current-stack fixture has its 5 keys");
+      check(keys.size() == 5, "the fixture has its 5 keys");
       Read rd = [&keys](const std::string& k) { return keys.count(k) != 0u ? keys.at(k) : std::string(); };
       const auto g = collectCounters(rd);
-      check(txBanksWithoutEpoch(keys["TX_BANK_STATUS"]).empty(),
-            "current capture: no TX bank is unjudged (mutation: every bank listed)");
       check(g.at("tx0.epoch") == 587 && g.at("tx1.epoch") == 521 && g.at("tx0.late") == 0 && g.count("tx0.acked") == 0,
-            "current capture: the TX banks carry their epochs (587, 521) and are used (mutation: the epoch parse "
+            "the capture: the TX banks carry their epochs (587, 521) and are used (mutation: the epoch parse "
             "broken)");
       check(g.count("host.tdd_straddle_ch0") == 1 && g.count("host.eob_recloses_ch1") == 1 &&
                 g.count("host.tdd_drop_ch0") == 0 && g.count("host.rxq_ovfl") == 0 &&
                 g.count("host.anchor_rejects_ch0") == 0,
-            "current capture: the host alarm fields per stream, not tdd_drop, the totals or the pacer's state");
-      check(g.count("host.tdd_refused_ch2") == 0,
-            "current capture: its tdd_refused, a key HOUDINI_PROTOCOL 6 retired, is not judged (mutation: the "
-            "retired key left in the host field list)");
+            "the capture: the host alarm fields per stream, not tdd_drop, the totals or the pacer's state");
       double t = 0.0;
       LinkHealth h(rd, "ue", [&t] { return t += 5.0; });
       const auto first = h.check().alarms();
@@ -327,7 +296,7 @@ int main(int argc, char** argv) {
       keys["TX_BANK_STATUS"] = replaceAll(keys["TX_BANK_STATUS"], "acked=784,late=0", "acked=1284,late=2");
       check(eq(first, {"preflight new FAIL ADC0.1:SUBADC_DCDR"}) && settled &&
                 eq(h.check().alarms(), {"tx0.late +2"}),
-            "current capture: the bring-up's ADC latch alarms once if not cleared, the beacon's acked rise is not "
+            "the capture: the bring-up's ADC latch alarms once if not cleared, the beacon's acked rise is not "
             "an alarm, a late rise within epoch 587 is");
     }
   }
