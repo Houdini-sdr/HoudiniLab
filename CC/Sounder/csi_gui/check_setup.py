@@ -315,11 +315,15 @@ def hwinfo(ip, port):
         info = dict(sdr.getHardwareInfo())
         # A failed EGRESS_STATUS or CLOCK_ADJ read FAILs that check with its own
         # error (the CLOCK_ADJ read goes to the clock chip and can fail on a
-        # healthy node); the stack read stands.
+        # healthy node); the stack read stands. A TIMEOUT is re-raised instead:
+        # check_versions retries the whole read (a slow first open), and a late
+        # reply must not be read as the next key's answer on this connection.
         for key, field in (("EGRESS_STATUS", "egress_status"), ("CLOCK_ADJ", "_clock_adj")):
             try:
                 info[field] = str(sdr.readSetting(key))
             except Exception as e:  # noqa: BLE001
+                if "TIMEOUT" in str(e):
+                    raise
                 info[field + "_error"] = str(e)
         return info
     finally:

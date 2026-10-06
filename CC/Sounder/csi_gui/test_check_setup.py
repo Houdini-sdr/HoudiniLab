@@ -55,6 +55,13 @@ open(os.path.join(fake, "SoapySDR.py"), "w").write(
     "                raise RuntimeError('SoapyRPCUnpacker::recv() TIMEOUT')\n"
     "    def getHardwareInfo(self): return json.load(open(%r))[self.ip]\n"
     "    def readSetting(self, k):\n"
+    "        import os\n"
+    "        se = os.path.join(%r, 'slowegress_' + self.ip)\n"
+    "        if k == 'EGRESS_STATUS' and os.path.exists(se):\n"
+    "            n = int(open(se).read())\n"
+    "            if n > 0:\n"
+    "                open(se, 'w').write(str(n - 1))\n"
+    "                raise RuntimeError('SoapyRPCUnpacker::recv() TIMEOUT')\n"
     "        if k == 'CLOCK_ADJ': return json.load(open(%r))[self.ip]\n"
     "        assert k == 'EGRESS_STATUS', k\n"
     "        v = json.load(open(%r)).get(self.ip)\n"
@@ -69,7 +76,7 @@ open(os.path.join(fake, "SoapySDR.py"), "w").write(
     "        except AttributeError: Device.unmake(self)\n"
     "        setattr(self, '__closed__', True)\n"
     "    def __del__(self): self.close()\n"
-    % (root, info_file, os.path.join(root, "clock.json"), egress_file, os.path.join(root, "unmade")))
+    % (root, info_file, root, os.path.join(root, "clock.json"), egress_file, os.path.join(root, "unmade")))
 HEALTHY = "drop=p0:0,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marked=0"
 json.dump({"127.0.0.1": HEALTHY, "127.0.0.2": HEALTHY}, open(egress_file, "w"))
 clock_file = os.path.join(root, "clock.json")
@@ -236,6 +243,14 @@ check(rc == 1 and lv.get("egress 127.0.0.2") == "FAIL" and det and "unknown key"
       and lv.get("stack 127.0.0.2") == "INFO" and lv.get("stack match") == "PASS" and lv.get("egress 127.0.0.1") == "PASS",
       "an EGRESS_STATUS read that throws FAILs the egress check with its error, and the stack read stands "
       "(mutations: the old WARN fallback; the read failing the whole stack): %s" % lv)
+json.dump({"127.0.0.1": HEALTHY, "127.0.0.2": HEALTHY}, open(egress_file, "w"))
+se = os.path.join(root, "slowegress_127.0.0.2")
+open(se, "w").write("1"); rc, rep, lv = run()
+check(rc == 0 and lv.get("egress 127.0.0.2") == "PASS" and lv.get("clock 127.0.0.2") == "INFO"
+      and lv.get("stack match") == "PASS",
+      "an EGRESS_STATUS read that times out once is retried with the whole read and passes (mutation: a timeout "
+      "taken as the egress check's FAIL): %s" % lv)
+os.remove(se)
 json.dump({"127.0.0.1": HEALTHY, "127.0.0.2": "drop=p0:0,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0"}, open(egress_file, "w"))
 rc, rep, lv = run()
 det = [r["detail"] for r in rep["results"] if r["what"] == "egress 127.0.0.2"]

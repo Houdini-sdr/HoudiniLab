@@ -576,7 +576,9 @@ void RadioHoudini::reportRxStreamEnd() {
     long long t = 0;
     st = dev_->readStreamStatus(rxs_, mask, fl, t, 0);
     ++read;
-    if (st == SOAPY_SDR_STREAM_ERROR || st == SOAPY_SDR_TIMEOUT) break;  // other events (OVERFLOW) are skipped
+    // The RX worker also queues OVERFLOW and TIME_ERROR events: skip those. Any
+    // other return is the fault event, an empty queue, or the read failing.
+    if (st != SOAPY_SDR_OVERFLOW && st != SOAPY_SDR_TIME_ERROR) break;
   }
   const char* what;
   if (st == SOAPY_SDR_STREAM_ERROR)
@@ -584,6 +586,8 @@ void RadioHoudini::reportRxStreamEnd() {
   else if (st == SOAPY_SDR_TIMEOUT)
     what = "the stream's status queue holds no fault event: a caller error (a null lane buffer, or a read while "
            "direct buffers are held), not a stream fault";
+  else if (st != SOAPY_SDR_OVERFLOW && st != SOAPY_SDR_TIME_ERROR)
+    what = "the status read itself failed, so the cause is unconfirmed";
   else
     what = "no fault event among the first queued status events, so the cause is unconfirmed";
   MLPD_ERROR("%s: readStream returned STREAM_ERROR, the run stops (%s; status read %d time(s), last %d %s)\n",
