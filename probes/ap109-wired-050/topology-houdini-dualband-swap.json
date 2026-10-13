@@ -1,0 +1,15 @@
+{
+    "_comment": "Roles swapped for the as-wired bench of 2026-10-13 (W5A1 and loopback_map): .21 = BS, .22 = UE. Not in the repo.",
+    "BaseStations": {
+        "BS0": {
+            "sdr": [
+                "168.6.244.21"
+            ]
+        }
+    },
+    "Clients": {
+        "sdr": [
+            "168.6.244.22"
+        ]
+    }
+}
