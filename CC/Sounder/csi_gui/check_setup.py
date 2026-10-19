@@ -50,6 +50,17 @@ from teardown_framer import DEFAULT_EXAMPLES, roles_from_topology  # noqa: E402 
 # (include/node_version.h, kMustMatch), so the two cannot disagree about a bench.
 MUST_MATCH = ("fpga_version", "fpga_commit", "fpga_board", "device_version",
               "device_build", "host_version", "host_build")
+# The oldest SoapyHoudiniSDR release this code runs on (CSI_DEMO_WALKTHROUGH
+# 2.1): the egress check reads its 32-bit counts, which saturate at 255 before it.
+MIN_RELEASE = (0, 6, 0)
+
+
+def release_tuple(v):
+    """'0.6.0' -> (0, 6, 0); None for a string that is not a dotted release."""
+    try:
+        return tuple(int(x) for x in v.split("."))
+    except (AttributeError, ValueError):
+        return None
 
 
 class Report:
@@ -356,19 +367,17 @@ def check_egress(rep, ip, raw, err=None):
         rep.add("FAIL", "egress %s" % ip, "the radio's data egress has stalled (%s); it will send no samples although its link is up" % raw,
                 "Reload the radio's gateware (PL) or reboot the radio. A bounce of this host's data port (a host reboot, a cable pull) causes it.")
     else:
-        # The per-port drop counters and the one marked-frame counter saturate
-        # at 255 and only a node boot or a PL reload clears them: saturated,
-        # the run's link health cannot see a new egress drop.
-        full = ["drop %s" % port for port, v in re.findall(r"(p\d+):(\d+)", drop.group(1)) if int(v) >= 255]
-        if int(marked.group(1)) >= 255:
-            full.append("marked")
-        if full:
-            rep.add("WARN", "egress %s" % ip, "no data-path stall recorded, but the egress counters %s are saturated "
-                    "at 255, so a new egress drop in the run goes unseen" % ", ".join(full),
-                    "The run is not blocked. A reboot of the radio, or a reload of its gateware (PL), clears them; ask "
-                    "whoever maintains the boards, and say which run or test drove the drops.")
-        else:
-            rep.add("PASS", "egress %s" % ip, "no data-path stall recorded")
+        # The per-port drop counts and the one marked-frame count are 32 bits
+        # and wrap from SoapyHoudiniSDR 0.6.0 on (its HOUDINI_PROTOCOL section
+        # 2.7; MIN_RELEASE fails an older radio), and only an egress reset (a
+        # PL load, a long data-link loss) clears them. A count standing at any
+        # value is history, not a fault: the run's link health alarms on a
+        # change between its reads. Nonzero ones are named.
+        seen = ["drop %s %s" % (port, v) for port, v in re.findall(r"(p\d+):(\d+)", drop.group(1)) if int(v)]
+        if int(marked.group(1)):
+            seen.append("marked %s" % marked.group(1))
+        rep.add("PASS", "egress %s" % ip, "no data-path stall recorded" +
+                ("; counts since the last egress reset: %s" % ", ".join(seen) if seen else ""))
 
 
 def release_cmd(ip, port, root=None):
@@ -444,7 +453,7 @@ def check_versions(rep, sd, nodes, port, env, root=None):
     for ip in list(infos):
         missing = [k for k in MUST_MATCH if k not in infos[ip]]
         if missing:
-            rep.add("FAIL", "stack %s" % ip, "the radio's hardware info lacks %s: not a SoapyHoudiniSDR 0.4.0 stack"
+            rep.add("FAIL", "stack %s" % ip, "the radio's hardware info lacks %s: not a SoapyHoudiniSDR 0.4.0 or later stack"
                     % ", ".join(missing), "Run with the release's host prefix (--soapy-root) against radios on "
                     "that release (ask whoever maintains the boards).")
             del infos[ip]
@@ -459,6 +468,12 @@ def check_versions(rep, sd, nodes, port, env, root=None):
             rep.add("FAIL", "lockstep %s" % ip, "the host plugin is release %s and the radio's device module %s"
                     % (hv, dv), "Run with the host prefix of the radio's release, or deploy the plugin's release "
                     "to the radio (ask whoever maintains the boards).")
+        rel = release_tuple(dv)
+        if rel is None or rel < MIN_RELEASE:
+            need = ".".join(map(str, MIN_RELEASE))
+            rep.add("FAIL", "release %s" % ip, "the radio runs SoapyHoudiniSDR %s; this code needs %s or later"
+                    % (dv, need), "Deploy release %s or later to both radios and run with its host prefix "
+                    "(ask whoever maintains the boards)." % need)
         check_egress(rep, ip, info.get("egress_status", ""), info.get("egress_status_error"))
         check_clock(rep, ip, port, info.get("_clock_adj", ""), root, info.get("_clock_adj_error"))
     if len(infos) < 2:
