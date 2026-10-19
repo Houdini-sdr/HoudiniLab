@@ -10,16 +10,20 @@
 #   <filters>    the filter state, noted in the run's stage.txt
 # Options:
 #   --core-map M, --tx-cpu-affinity L  the sounder's thread placement and
-#                pacer cpus, as DEMO_BENCH_RUNBOOK.md A4 (defaults main=15 and
-#                18,19, the reference rig's isolated cores; pacer_core_check.py
-#                confirms or corrects them for yours)
+#                pacer cpus (defaults main=15 and 18,19, isolated cores of the
+#                reference rig; DEMO_BENCH_RUNBOOK.md A4 names the bench's as
+#                cabled, and pacer_core_check.py confirms or corrects them for
+#                each boot of yours)
 #   --stage S    the ap79_runs subdirectory (default DEMO)
 #   --record F   record the dashboard stream to this new file (a fallback)
 #   --ue-ssh U   user@<ue-address>: count the UE's RFDC interrupts over the
 #                run (the DAC FIFO storm watch); unset skips it
 #   --venv DIR   the SoapySDR venv (default ~/houdini_test)
+#   --topology F the topology file the sounder uses instead of the config's
+#                serial_file (the bench as cabled, when it differs; relative
+#                to CC/Sounder, as the config is)
 set -u
-CM=main=15; TA=18,19; STAGE=DEMO; REC=; UE_SSH=; VENV=$HOME/houdini_test
+CM=main=15; TA=18,19; STAGE=DEMO; REC=; UE_SSH=; VENV=$HOME/houdini_test; TOPO=
 while [ $# -gt 0 ]; do
   case $1 in
     --core-map) CM=$2; shift 2;;
@@ -28,6 +32,7 @@ while [ $# -gt 0 ]; do
     --record) REC=$2; shift 2;;
     --ue-ssh) UE_SSH=$2; shift 2;;
     --venv) VENV=$2; shift 2;;
+    --topology) TOPO=$2; shift 2;;
     -*) echo "demo_run.sh: unknown option $1 (the options are at the head of this file)" >&2; exit 2;;
     *) break;;
   esac
@@ -41,6 +46,7 @@ source "$VENV/bin/activate" || exit 1
 pgrep -x sounder >/dev/null && { echo "a sounder is running on this host; stop it first"; exit 1; }
 ls "$PLUG"/lib/SoapySDR/modules*/libHoudiniSDRSupport.so >/dev/null 2>&1 || { echo "no Houdini host plugin under $PLUG"; exit 1; }
 [ -f "$CONF" ] || { echo "no config $CONF (relative to $D)"; exit 1; }
+[ -z "$TOPO" ] || [ -f "$TOPO" ] || { echo "no topology $TOPO (relative to $D)"; exit 1; }
 [ "$SECS" -gt 90 ] || { echo "secs must be over 90 (the samplers start 40 s in)"; exit 1; }
 S=$(mktemp -d /tmp/demo_run_XXXX)
 setsid nohup python3 "$HERE/freeze_watch.py" --run-dir "$D/ap79_runs" --tag "$TAG" > "$S/freeze.txt" 2>&1 < /dev/null &
@@ -53,6 +59,7 @@ SAMPLERS="$SAMPLERS $!"
 RUN=(--sounder-dir "$D" --health-s 5 --filters "$FILT" --soapy-root "$PLUG" --venv "$VENV"
      --sounder-arg=--tx_host_status "--sounder-arg=--core_map=$CM" "--sounder-arg=--tx_cpu_affinity=$TA")
 [ -n "$REC" ] && RUN+=(--record "$REC")
+[ -n "$TOPO" ] && RUN+=("--sounder-arg=--topology=$TOPO")
 irq() {
   [ -n "$UE_SSH" ] || return 0
   ssh -o ConnectTimeout=5 -o BatchMode=yes "$UE_SSH" 'grep -iE "rfdc|rf_data|usp_rf|xrfdc" /proc/interrupts' 2>/dev/null |
