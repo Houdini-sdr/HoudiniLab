@@ -390,8 +390,9 @@ fpga 1.33, 9.70 to 9.73 on fpga 1.34, 9.85 on fpga 1.44 and SoapyHoudiniSDR
   (`dgx-dashboard-admin`) checks for updates every hour at hh:26:39: `apt
   update`, `apt list --upgradable`, `apt dist-upgrade -s`, then about fifteen
   `mstflint` queries of the ConnectX data NIC and `nvidia-smi` over the next
-  minute. Every late-TX burst of 9.85 fell inside that minute, while the
-  queries ran, and none outside it; so did two of 9.84's three. A link-health
+  minute. Every late-TX burst of 9.85 and 9.86 fell inside that minute, while
+  the queries ran, and none outside it (in 9.86's hour run each late window
+  held an `mstflint` start); so did two of 9.84's three. A link-health
   WARN on the UE's TX at hh:27 is this, not the radios. Stopping the service
   for a demo (`sudo systemctl stop dgx-dashboard-admin`, the owner's call)
   should remove it; that is not measured yet.

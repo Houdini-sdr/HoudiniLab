@@ -414,11 +414,13 @@ and 3.
 Pilot and data placement is sample exact: the client pads each burst so its
 start escapes the driver's 3125 ns scheduling grid, and `tx_advance` in the
 config is a bench calibration that seats the burst at its nominal in-slot
-position (247 on the legacy one-rate path, 169 on the dual-band converter
-path). If you change cabling or the RF path, re-derive it: run the sounder with
-`--bs_rx_debug` across a few restarts and shift `tx_advance` by the
-mean `pilot_grid_off` the base station prints (the `_tx_advance_note` of
-`houdini-ul.json` and of each dual-band config gives the details).
+position (247 on the legacy one-rate path, 198 on the dual-band converter
+path with SoapyHoudiniSDR 0.6.0). If you change cabling, the RF path or the
+radio release, re-derive it: run the sounder with `--bs_rx_debug` across a few
+restarts and add the mean `pilot_grid_off` the base station prints to
+`tx_advance` (a positive seat, a late burst, needs a larger value; the
+`_tx_advance_note` of `houdini-ul.json` and of each dual-band config gives the
+details).
 
 ## 4. Run the demo
 
