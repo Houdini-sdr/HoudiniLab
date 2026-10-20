@@ -315,7 +315,7 @@ fpga 1.33, 9.70 to 9.73 on fpga 1.34, 9.85 on fpga 1.44 and SoapyHoudiniSDR
 | MER (15 s samples) | sub-6 35.4-38.8 dB, X-IF 30.7-33.2 dB | 9.85's 53 min run on 0.6.0: means 37.2 and 31.8 dB. A cold start (just after a node power cycle) swings for the first few minutes while the steering converges |
 | Constellation low | 0.0 % in every 300 s window | from the run report's CNS lines |
 | Beacon SNR at the UE | about 37-47 dB wired, fixed per bring-up | the sync card's `beacon SNR`; over the air the detector floor is 25 dB |
-| Pilot seat at the BS (`pilot_grid_off`) | near 0, steady within a run | the margin is the burst's 32-sample zero pad on each side (`ofdm_tx_zero_prefix`, `ofdm_tx_zero_postfix`). On fpga 1.44 and 0.6.0 it reads +26 to +31 (means +28.8 and +28.3 in two bring-ups, 9.85), so `tx_advance` needs re-deriving (A7) |
+| Pilot seat at the BS (`pilot_grid_off`) | -3 to +2, means near 0 | `tx_advance` 198 on fpga 1.44 and 0.6.0: means -0.1 to -0.4 in three bring-ups and -0.9 over an hour (9.86). The margin is the burst's 32-sample zero pad on each side (`ofdm_tx_zero_prefix`, `ofdm_tx_zero_postfix`); A7 says what happens past it |
 | BS frames per second | about 50 (slots config), about 57 (all-rx config) | from the HOUDINI_BS_RX lines |
 | End-of-run lines | `RX read check`: 0 lost in rx slots, 0 out of order, 0 time jumps; `AP-87 slot check`: 0 outside the rx slots; `RX_HOST_STATUS`: tdd_straddle 0, and on fpga 1.34 tdd_drop 0 (a TDD map the packets do not tile ends the stream, and the run with it) | anything nonzero is a finding, not noise |
 
@@ -372,15 +372,20 @@ fpga 1.33, 9.70 to 9.73 on fpga 1.34, 9.85 on fpga 1.44 and SoapyHoudiniSDR
   node boot loads the bitstream again) or a data-link loss over 750 ms. With
   an XUD1A attached, a boot follows A2b step 1: its 12 V off through the boot,
   on only after the PL has loaded, then the role.
-- **The pilot seat sits at +26 to +31 on fpga 1.44 and 0.6.0** (9.85), against
-  +18 to +23 on 0.5.0 (9.84) and within a few samples of 0 on 1.34 (9.73). The
-  margin is the UE burst's 32-sample zero pad: later than +32, the device's
-  slot cut reaches the uplink slot's last samples; earlier than -30, the BS
-  warns "the UE burst starts at the pilot slot's edge". MER is unchanged so
-  far. 0.6.0 syncs the converters at fixed targets, and two bring-ups read
-  +28.8 and +28.3, so a re-derived `tx_advance` should hold: the configs'
-  `_tx_advance_note` gives the procedure (shift `tx_advance` by the mean seat
-  over a few restarts).
+- **The pilot seat and `tx_advance`.** `tx_advance` 198 seats the UE's
+  burst at -0.1 to -0.9 samples on fpga 1.44 and 0.6.0, and the BS frame
+  dumps show its pilot and uplink slots centred, the 32-sample zero pad intact
+  on each side (9.86). The value moves the seat one sample per sample (a sweep
+  from 158 to 218 read +39.4 to -20.0). It was 169 until 0.6.0, whose
+  converters land the burst about 29 samples later (+26 to +31 at 169, 9.85;
+  +18 to +23 on 0.5.0, 9.84). Past the pad the two sides differ: at -30 and
+  earlier the BS warns "the UE burst starts at the pilot slot's edge" and its
+  seat pins at about -31, the device's cut taking the head; later than +32
+  nothing warns and the seat reads true, while the pilot's tail runs into the
+  uplink slot and the cut takes the uplink slot's last samples (MER was
+  unchanged at +39). Re-derive after any cabling,
+  converter or stack change: the configs' `_tx_advance_note` gives the
+  procedure.
 - **Late UE TX in the minute after hh:26:39.** The rig host's DGX Dashboard
   (`dgx-dashboard-admin`) checks for updates every hour at hh:26:39: `apt
   update`, `apt list --upgradable`, `apt dist-upgrade -s`, then about fifteen
