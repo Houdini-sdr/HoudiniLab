@@ -259,6 +259,9 @@ void Scheduler::do_it() {
 
       // if kEventRxSymbol, dispatch to proper worker
       if (event.event_type == kEventRxSymbol) {
+        if (event.frame_id >= 0 &&
+            static_cast<size_t>(event.frame_id) >= this->max_frame_number_)
+          this->max_frame_number_ = static_cast<size_t>(event.frame_id) + 1;
         if (cfg_->internal_measurement() == false && event.slot_id == 0 &&
             cfg_->sync_model() == Config::SyncModel::kTriggerFramed) {
           // Beacon event: schedule the file read (the trigger-framed model
