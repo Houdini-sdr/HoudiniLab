@@ -418,9 +418,11 @@ position (247 on the legacy one-rate path, 198 on the dual-band converter
 path with SoapyHoudiniSDR 0.6.0). If you change cabling, the RF path or the
 radio release, re-derive it: run the sounder with `--bs_rx_debug` across a few
 restarts and add the mean `pilot_grid_off` the base station prints to
-`tx_advance` (a positive seat, a late burst, needs a larger value; the
-`_tx_advance_note` of `houdini-ul.json` and of each dual-band config gives the
-details).
+`tx_advance` (a positive seat, a late burst, needs a larger value). Take the
+mean from each run's settled part: for the first minute or two the seat also
+follows the carrier offset between the radios, until the clock steering pulls
+it in. The `_tx_advance_note` of `houdini-ul.json` and of each dual-band
+config gives the details.
 
 ## 4. Run the demo
 

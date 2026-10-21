@@ -383,9 +383,14 @@ fpga 1.33, 9.70 to 9.73 on fpga 1.34, 9.85 on fpga 1.44 and SoapyHoudiniSDR
   seat pins at about -31, the device's cut taking the head; later than +32
   nothing warns and the seat reads true, while the pilot's tail runs into the
   uplink slot and the cut takes the uplink slot's last samples (MER was
-  unchanged at +39). Re-derive after any cabling,
-  converter or stack change: the configs' `_tx_advance_note` gives the
-  procedure.
+  unchanged at +39). In a bring-up's first minute or two the seat also
+  follows the carrier offset between the nodes, about +2.2 samples per kHz
+  of the BS's pre-FFT reading, until the clock steering pulls it in: a
+  bring-up from 4.6 kHz read +8 to +10 for its first 10 s and settled near
+  -1 (9.87, fpga 1.45, where the seat at a matched offset equals 1.44's).
+  That is not a `tx_advance` error; read the seat once the offset has
+  settled. Re-derive after any cabling, converter or stack change: the
+  configs' `_tx_advance_note` gives the procedure.
 - **Late UE TX in the minute after hh:26:39.** The rig host's DGX Dashboard
   (`dgx-dashboard-admin`) checks for updates every hour at hh:26:39: `apt
   update`, `apt list --upgradable`, `apt dist-upgrade -s`, then about fifteen
