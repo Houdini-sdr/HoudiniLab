@@ -352,6 +352,13 @@ steered, cabled):
   retry ran out (SH-227; `.22` needed its fourth and last attempt once). Stop,
   then Start: a fresh open reruns the tile bring-up (every retry so far came up
   healthy within four attempts; the recovery itself is inferred, not tested).
+- A bring-up that stops with `the TDD ladder's TX_CLEAR_ALL (RFCORE 0x...) did
+  not land`, or a teardown that prints `TX_CLEAR_ALL ... did not land` and
+  FAILs: this checkout and the node's bitstream disagree on the register map
+  (map v3 moved TX_CLEAR_ALL from 0x24 to 0x084), so the TX banks were never
+  cleared. Do not run past it. Read the node's `fpga_commit` from the setup
+  check (the version string does not tell the maps apart) and run the HoudiniLab
+  build that matches that bitstream's map.
 - After a rig-host reboot, run the setup check before anything else: a bounce of
   the host's data ports can wedge a node's FPGA egress (HS-225), which fails the
   check's `egress` line; recover by reloading that node's PL or rebooting it.
