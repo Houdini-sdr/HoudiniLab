@@ -72,6 +72,10 @@ int main(int argc, char** argv) {
     const auto f = parseFlatCounts("rxq_ovfl=2 rxq_ovfl_ch0=2 junk x=y z=-1");
     check(f.size() == 2 && f.at("rxq_ovfl") == 2 && f.at("rxq_ovfl_ch0") == 2,
           "flat counts skip malformed tokens (mutation: a non-digit value accepted)");
+    const auto e = txClearEpochs("ch0:acked=1,epoch=3:3;ch1:late=0,epoch=3:4;ch2:acked=1;ch3:epoch=65536:65536");
+    check(e == std::map<int, long long>{{0, 3}, {1, -1}, {3, -1}},
+          "clear epochs: a matched pair is the epoch, a torn pair or one past 16 bits is -1, a bank with no epoch "
+          "is left out (mutation: the before half taken alone, which reads the torn ch1 as 3)");
   }
   {  // 2.7 "A fall": a counter without an epoch that fell was cleared; its current value is the rise
     check(counterIncreases({{"rx0.gated", 1}, {"host.rxq_ovfl_ch0", 5}, {"egress.drop_p0", 9}},
@@ -285,6 +289,9 @@ int main(int argc, char** argv) {
       check(g.at("tx0.epoch") == 587 && g.at("tx1.epoch") == 521 && g.at("tx0.late") == 0 && g.count("tx0.acked") == 0,
             "the capture: the TX banks carry their epochs (587, 521) and are used (mutation: the epoch parse "
             "broken)");
+      check(txClearEpochs(keys.at("TX_BANK_STATUS")) == std::map<int, long long>{{0, 587}, {1, 521}},
+            "the capture: the TDD ladder's clear-epoch read gives both banks' epochs from the device's own text "
+            "(mutation: a field split that misses the epoch)");
       check(g.count("host.tdd_straddle_ch0") == 1 && g.count("host.eob_recloses_ch1") == 1 &&
                 g.count("host.tdd_drop_ch0") == 0 && g.count("host.rxq_ovfl") == 0 &&
                 g.count("host.anchor_rejects_ch0") == 0,

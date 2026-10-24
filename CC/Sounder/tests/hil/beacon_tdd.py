@@ -53,6 +53,8 @@ GRID_TICKS = 384
 QUANTUM_NS = 3125
 SYM = 61440                 # symbol_ticks: 0.5 ms = 160*GRID_TICKS
 ARM_MARGIN = 36_864_000     # ~300 ms of ticks: armed + pump lead
+# RFCORE TX_CLEAR_ALL (Houdini-Streaming docs/REGISTERS.md): 0x24 in the map
+# of fpga 1.45 and SoapyHoudiniSDR 0.6.0; register map v3 moves it to 0x084.
 REG_TX_CLEAR_ALL = 0x24
 ZC_U = 25
 
@@ -80,14 +82,58 @@ def _cmd(sdr, c):
     sdr.writeSetting("TDD_CMD", c)
 
 
+def _clear_epochs(sdr):
+    """{ch: clear epoch} of every TX bank, through the driver's setting_reports
+    (TX_BANK_STATUS and its read protocol, HS-220), read again while a clear is
+    in flight; never raises, and gives a string saying why when no read has a
+    usable epoch for every bank."""
+    try:
+        import setting_reports as sr  # beside houdini_setup in the host examples
+    except ImportError as e:
+        return f"setting_reports not importable ({e})"
+    why = ""
+    for i in range(5):
+        if i:
+            time.sleep(0.001)
+        try:
+            banks = sr.parse_tx_bank(sdr.readSetting("TX_BANK_STATUS"))
+            ep = {ch: sr.tx_epoch(f) for ch, f in banks.items()}
+        except Exception as e:  # noqa: BLE001
+            return f"TX_BANK_STATUS unreadable ({e})"
+        if ep and None not in ep.values():
+            return ep
+        why = f"no usable clear epoch on every TX bank in 5 reads ({ep})"
+    return why
+
+
 def _teardown(sdr):
+    """Abort, TX_CLEAR_ALL, gate release. Every exception is caught and printed;
+    False when a write raised or the clear did not land, True otherwise (a
+    clear that cannot be checked warns and counts as done)."""
     try:
         _cmd(sdr, "abort")
+        before = _clear_epochs(sdr)
         sdr.writeRegister("RFCORE", REG_TX_CLEAR_ALL, 1)
         sdr.writeRegister("RFCORE", REG_TX_CLEAR_ALL, 0)
+        after = _clear_epochs(sdr)
         _cmd(sdr, "gate_release")
     except Exception as e:  # noqa: BLE001
         print(f"  [tdd] teardown warn: {e}")
+        return False
+    # A write to an offset the bitstream does not map is ignored with no error,
+    # so the clear is judged by the epoch it must move on every bank.
+    unchecked = next((r for r in (before, after) if isinstance(r, str)), None)
+    if unchecked is None and not any(before.values()) and not any(after.values()):
+        unchecked = "the TX banks report no clear epoch (a bitstream before HS-220)"
+    if unchecked is not None:
+        print(f"  [tdd] teardown warn: TX_CLEAR_ALL not checked: {unchecked}")
+        return True
+    stuck = [f"ch{c}" for c, e in before.items() if after.get(c, e) == e]
+    if stuck:
+        print(f"  [tdd] teardown warn: TX_CLEAR_ALL at RFCORE 0x{REG_TX_CLEAR_ALL:03X} did not land on "
+              f"{','.join(stuck)} (clear epoch unmoved): the bitstream's register map does not match")
+        return False
+    return True
 
 
 def _next_window_tick(sdr, tick_rate, epoch, frame, sym_off=0, lead_frames=2):

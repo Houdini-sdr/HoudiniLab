@@ -43,7 +43,12 @@ class HoudiniFramer : public BeaconFramer {
   /// The replay RAM payload: the conjugated beacon core at the head of the
   /// 4096-deep RAM, peak-scaled to sync.beacon.tx_full_scale.
   void buildBeacon(std::vector<int16_t>& iq);
-  /// The teardown ladder for one device.
+  /// RFCORE TX_CLEAR_ALL (Houdini-Streaming docs/REGISTERS.md): 0x24 in the
+  /// map of fpga 1.45 and SoapyHoudiniSDR 0.6.0. Register map v3 (HS-329)
+  /// moves it to 0x084, where the older map has RX_SNOOPER_CTRL (AP-123).
+  static constexpr unsigned kTxClearAllOffset = 0x24;
+  /// The teardown ladder for one device. Throws when its TX_CLEAR_ALL does
+  /// not land, which a bitstream with another register map gives silently.
   static void tddLadder(SoapySDR::Device* dev, bool skip_tx_clear);
 
  private:

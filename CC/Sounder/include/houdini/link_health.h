@@ -178,6 +178,17 @@ inline long long txUsableEpoch(const std::string& v) {
   const long long eb = std::stoll(b), ea = std::stoll(a);
   return (eb == ea && eb >= 0 && eb <= 0xFFFF) ? eb : -1;
 }
+/// {chan: usable clear epoch} of one TX_BANK_STATUS read: -1 for a bank whose
+/// epoch fails the read protocol (txUsableEpoch), and a bank with no epoch
+/// field left out.
+inline std::map<int, long long> txClearEpochs(const std::string& raw) {
+  std::map<int, long long> out;
+  for (const auto& ch : parseBankStatus(raw)) {
+    const auto ep = ch.second.find("epoch");
+    if (ep != ch.second.end()) out[ch.first] = txUsableEpoch(ep->second);
+  }
+  return out;
+}
 inline const std::vector<std::string>& rxAlarmFields() {
   static const std::vector<std::string> f = {"gated", "aborts"};
   return f;

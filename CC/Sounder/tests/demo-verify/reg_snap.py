@@ -5,8 +5,11 @@ reg_snap.py <label> <node address> [<node address> ...] [--port 55132] [--soapy-
 
 RFCORE (0xA007_0000): RX bank k at 0x1000 + 0x80*k, ABORT_COUNT +0x18 (must
 not move; survives RX_CLEAR), FIFO_HWM +0x14, GATED_DROPS +0x38 (stays 0 for a
-continuous arm); TDD_STAT 0xAC ([1:0] state, [2] epoch_late, [5] gates_held,
-[7] edge_late). The egress stall watchdog (FHCORE +0x28) is outside the
+continuous arm); the bank offsets are the same in register map v3. TDD_STAT
+(state, epoch_late, gates_held, edge_late) is read through its setting, which
+the device plugin resolves on its own register map (v3 moved the register from
+0xAC to 0x31C, and the old offset on a v3 bitstream reads 0, which decodes as
+idle). The egress stall watchdog (FHCORE +0x28) is outside the
 driver's FHCORE register window; check_setup's EGRESS_STATUS covers it. Opened
 as check_setup opens a node, and closed cleanly. DEMO_VERIFICATION.md 9.70
 (SM1) is this tool's before/after reading of fpga 1.34.
@@ -37,8 +40,9 @@ for ip in args.nodes:
             b = 0x1000 + 0x80 * k
             banks.append("rx%d abort=%d hwm=%d gated=%d" % (k, r("RFCORE", b + 0x18), r("RFCORE", b + 0x14),
                                                           r("RFCORE", b + 0x38)))
-        st = r("RFCORE", 0xAC)
-        print("%s %s: %s | TDD_STAT 0x%x (state %d, epoch_late %d, gates_held %d, edge_late %d)"
-              % (args.label, ip, "; ".join(banks), st, st & 3, (st >> 2) & 1, (st >> 5) & 1, (st >> 7) & 1))
+        st = dict(t.split("=", 1) for t in sdr.readSetting("TDD_STAT").split() if "=" in t)
+        print("%s %s: %s | TDD_STAT state %s, epoch_late %s, gates_held %s, edge_late %s"
+              % (args.label, ip, "; ".join(banks), st.get("state"), st.get("epoch_late"), st.get("gates_held"),
+                 st.get("edge_late")))
     finally:
         sdr.close()

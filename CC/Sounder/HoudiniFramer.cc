@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -32,6 +33,7 @@
 #include "include/macros.h"
 #include "include/rx_gap_sink.h"
 #include "include/utils.h"
+#include "houdini/link_health.h"
 #include "houdini/replay_strobe.h"
 #include "houdini/bs_slots.h"
 #include "houdini/slot_align.h"
@@ -242,6 +244,70 @@ namespace {
 // RadioHoudini::txTimeNs: both must move together if the driver grid changes.
 constexpr long long kTddGridTicks = houdini::sync::kHoudiniStrobeOffsetTicks;
 constexpr long long kTddArmMargin = 36864000;  // ~300 ms of ticks
+constexpr int kClearEpochReads = 5;
+
+// Every TX bank's clear epoch into `epochs` (HS-220: the bank's CLEAR_EPOCH,
+// +1 per clear envelope, in TX_BANK_STATUS as "epoch=<before>:<after>"). A read
+// that a clear lands in fails the read protocol, so it is read again, up to
+// kClearEpochReads times. Returns "" or, when no read gives a usable epoch for
+// every bank (or a read throws), why not; never throws, so the ladder's pulse
+// and gate release still run.
+std::string readClearEpochs(SoapySDR::Device* dev, std::map<int, long long>& epochs) {
+  std::string raw;
+  for (int i = 0; i < kClearEpochReads; ++i) {
+    if (i > 0) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    try {
+      raw = dev->readSetting("TX_BANK_STATUS");
+    } catch (const std::exception& e) {
+      return std::string("the TDD ladder cannot check its TX_CLEAR_ALL: the TX_BANK_STATUS read threw (") + e.what() +
+             ")";
+    }
+    epochs = houdini::health::txClearEpochs(raw);
+    if (!epochs.empty() &&
+        std::all_of(epochs.begin(), epochs.end(), [](const auto& e) { return e.second >= 0; }))
+      return "";
+  }
+  return "the TDD ladder cannot check its TX_CLEAR_ALL: TX_BANK_STATUS gave no usable clear epoch for every TX "
+         "bank in " + std::to_string(kClearEpochReads) + " reads ('" + raw + "')";
+}
+
+// The ladder's TX_CLEAR_ALL pulse, judged by its effect, since a write to an
+// offset the bitstream does not map completes and is ignored: one more clear
+// envelope on every TX bank. Register map v3 moved TX_CLEAR_ALL, and the old
+// offset on a v3 bitstream left the banks uncleared with no error (AP-123).
+// Another envelope in the same window (a GT reset) can pass one check; a map
+// mismatch misses on every ladder. Returns "" when the pulse landed, else why
+// it did not or cannot be judged.
+std::string pulseTxClearAll(SoapySDR::Device* dev) {
+  std::map<int, long long> before, after;
+  const std::string unread = readClearEpochs(dev, before);
+  dev->writeRegister("RFCORE", HoudiniFramer::kTxClearAllOffset, 1);
+  dev->writeRegister("RFCORE", HoudiniFramer::kTxClearAllOffset, 0);
+  if (!unread.empty()) return unread;
+  if (const std::string why = readClearEpochs(dev, after); !why.empty()) return why;
+  // CLEAR_EPOCH counts the power-up envelope, so a bitstream that has it reads
+  // at least 1; 0 on every bank both times is a bitstream without it (before
+  // HS-220, fpga 1.31), where the pulse cannot be judged and is trusted.
+  const auto zero = [](const auto& e) { return e.second == 0; };
+  if (std::all_of(before.begin(), before.end(), zero) && std::all_of(after.begin(), after.end(), zero)) {
+    MLPD_WARN("TDD ladder: the TX banks report no clear epoch (a bitstream before HS-220), so its TX_CLEAR_ALL is "
+              "not checked\n");
+    return "";
+  }
+  std::string stuck;
+  for (const auto& b : before) {
+    const auto a = after.find(b.first);
+    if (a == after.end() || a->second == b.second)
+      stuck += " ch" + std::to_string(b.first) + "=" + std::to_string(b.second);
+  }
+  if (stuck.empty()) return "";
+  char off[16];
+  std::snprintf(off, sizeof(off), "0x%03X", HoudiniFramer::kTxClearAllOffset);
+  return std::string("the TDD ladder's TX_CLEAR_ALL (RFCORE ") + off +
+         ") did not land: the clear epoch did not move on" + stuck +
+         ". A bitstream ignores a write to an offset its register map does not have, so this sounder and the node's "
+         "bitstream disagree on the map (register map v3 moved TX_CLEAR_ALL from 0x24 to 0x084, AP-123)";
+}
 }  // namespace
 
 // The full teardown ladder. Abort alone is NOT enough, twice over (measured,
@@ -252,15 +318,18 @@ constexpr long long kTddArmMargin = 36864000;  // ~300 ms of ticks
 // the arm clears or TX_CLEAR").
 void HoudiniFramer::tddLadder(SoapySDR::Device* dev, bool skip_tx_clear) {
   dev->writeSetting("TDD_CMD", "abort");
+  std::string not_cleared;
   if (skip_tx_clear) {
     // AP-73 / SH-348: the measurement that asks whether the reload after an
     // abort lands without this pulse. A diagnostic, never a shipped setting.
     MLPD_WARN("DIAGNOSTIC houdini_diag_skip_tx_clear: TX_CLEAR skipped in the ladder\n");
   } else {
-    dev->writeRegister("RFCORE", 0x24, 1);  // TX_CLEAR_ALL pulse
-    dev->writeRegister("RFCORE", 0x24, 0);
+    not_cleared = pulseTxClearAll(dev);
   }
+  // Released even when the clear failed, so a teardown that throws leaves the
+  // gates as the ladder always has.
   dev->writeSetting("TDD_CMD", "gate_release");
+  if (!not_cleared.empty()) throw std::runtime_error(not_cleared);
 }
 
 long long HoudiniFramer::armTddOnce(SoapySDR::Device* dev,
@@ -1021,7 +1090,8 @@ void HoudiniFramer::stop() {
         try {
           tddLadder(dev, cfg_->diag_skip_tx_clear());
         } catch (const std::exception& e) {
-          MLPD_WARN("BS: the TDD teardown of radio %zu failed (%s); the next run's arm may find the gates held\n",
+          MLPD_WARN("BS: the TDD teardown of radio %zu failed (%s); the next run's arm may find the gates held or "
+                    "the TX banks uncleared\n",
                     i, e.what());
         } catch (...) {
           MLPD_WARN("BS: the TDD teardown of radio %zu failed; the next run's arm may find the gates held\n", i);
