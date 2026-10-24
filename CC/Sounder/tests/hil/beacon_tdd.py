@@ -53,9 +53,6 @@ GRID_TICKS = 384
 QUANTUM_NS = 3125
 SYM = 61440                 # symbol_ticks: 0.5 ms = 160*GRID_TICKS
 ARM_MARGIN = 36_864_000     # ~300 ms of ticks: armed + pump lead
-# RFCORE TX_CLEAR_ALL (Houdini-Streaming docs/REGISTERS.md): 0x24 in the map
-# of fpga 1.45 and SoapyHoudiniSDR 0.6.0; register map v3 moves it to 0x084.
-REG_TX_CLEAR_ALL = 0x24
 ZC_U = 25
 
 
@@ -107,31 +104,37 @@ def _clear_epochs(sdr):
 
 
 def _teardown(sdr):
-    """Abort, TX_CLEAR_ALL, gate release. Every exception is caught and printed;
-    False when a write raised or the clear did not land, True otherwise (a
-    clear that cannot be checked warns and counts as done)."""
+    """Abort, TDD_CMD tx_clear (the device's TX_CLEAR_ALL on its own register
+    map, SoapyHoudiniSDR 0.7.0), gate release. Every exception is caught and
+    printed; False when a write raised or the clear was refused or did not
+    land, True otherwise (a clear that cannot be checked here warns and counts
+    as done: the device judged it already)."""
+    refused = None
     try:
         _cmd(sdr, "abort")
         before = _clear_epochs(sdr)
-        sdr.writeRegister("RFCORE", REG_TX_CLEAR_ALL, 1)
-        sdr.writeRegister("RFCORE", REG_TX_CLEAR_ALL, 0)
+        try:
+            _cmd(sdr, "tx_clear")
+        except Exception as e:  # noqa: BLE001  the gates are released regardless
+            refused = e
         after = _clear_epochs(sdr)
         _cmd(sdr, "gate_release")
     except Exception as e:  # noqa: BLE001
         print(f"  [tdd] teardown warn: {e}")
         return False
-    # A write to an offset the bitstream does not map is ignored with no error,
-    # so the clear is judged by the epoch it must move on every bank.
+    if refused is not None:
+        print(f"  [tdd] teardown warn: TDD_CMD tx_clear: {refused}")
+        return False
+    # A second check on the device's own: the clear must have moved every
+    # bank's epoch.
     unchecked = next((r for r in (before, after) if isinstance(r, str)), None)
-    if unchecked is None and not any(before.values()) and not any(after.values()):
-        unchecked = "the TX banks report no clear epoch (a bitstream before HS-220)"
     if unchecked is not None:
-        print(f"  [tdd] teardown warn: TX_CLEAR_ALL not checked: {unchecked}")
+        print(f"  [tdd] teardown warn: TX clear not checked here: {unchecked}")
         return True
     stuck = [f"ch{c}" for c, e in before.items() if after.get(c, e) == e]
     if stuck:
-        print(f"  [tdd] teardown warn: TX_CLEAR_ALL at RFCORE 0x{REG_TX_CLEAR_ALL:03X} did not land on "
-              f"{','.join(stuck)} (clear epoch unmoved): the bitstream's register map does not match")
+        print(f"  [tdd] teardown warn: TDD_CMD tx_clear was accepted but did not land on {','.join(stuck)} "
+              f"(clear epoch unmoved)")
         return False
     return True
 

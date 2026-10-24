@@ -1,6 +1,6 @@
 # The dashboard's teardown (teardown_framer.teardown_node over beacon_tdd's
-# _teardown) judges its TX_CLEAR_ALL by the clear epoch it must move on every
-# TX bank: a fake device answers with a captured TX_BANK_STATUS, parsed by the
+# _teardown) runs TDD_CMD tx_clear and checks the clear epoch it must move on
+# every TX bank: a fake device answers with a captured TX_BANK_STATUS, parsed by the
 # driver's own setting_reports from the SoapyHoudiniSDR host examples. Skipped
 # (77) where those examples are not checked out. Run from csi_gui/ (ctest does).
 import os, re, sys, types
@@ -34,11 +34,13 @@ def check(ok, what):
     global fails; print(("PASS " if ok else "FAIL ") + what, flush=True); fails += (not ok)
 
 class Fake:
-    """A device that takes TX_CLEAR_ALL at `at` only (a write anywhere else is
-    ignored, as the fabric ignores an unmapped offset), counting it in both
-    banks' clear epoch; `torn` reads after each clear are torn."""
-    def __init__(self, at, epoch=587, counts=True, torn=0, throws=False):
-        self.at, self.e, self.counts, self.tear, self.torn, self.throws, self.log = at, epoch, counts, torn, 0, throws, []
+    """A device whose TDD_CMD tx_clear counts in both banks' clear epoch, unless
+    it is refused (raises, nothing cleared) or returns without clearing (a
+    device-side judge that passed a clear that never landed); `torn` reads
+    after each clear are torn."""
+    def __init__(self, lands=True, refused=False, torn=0, throws=False):
+        self.lands, self.refused, self.tear, self.torn, self.throws = lands, refused, torn, 0, throws
+        self.e, self.log = 587, []
     def readSetting(self, k):
         if k != "TX_BANK_STATUS":
             return "accepted=1"
@@ -47,49 +49,49 @@ class Fake:
         pair = "%d:%d" % (self.e - 1, self.e) if self.torn else "%d:%d" % (self.e, self.e)
         self.torn = max(0, self.torn - 1)
         return re.sub(r"epoch=\d+:\d+", "epoch=" + pair, CAPTURED)
-    def writeSetting(self, k, v): self.log.append("%s=%s" % (k, v))
-    def writeRegister(self, core, off, v):
-        self.log.append("reg %#x=%d" % (off, v))
-        if core == "RFCORE" and off == self.at and v == 1:
-            if self.counts:
+    def writeSetting(self, k, v):
+        self.log.append("%s=%s" % (k, v))
+        if (k, v) == ("TDD_CMD", "tx_clear"):
+            if self.refused:
+                raise RuntimeError("TDD_CMD tx_clear: refused: the TDD framer is still engaged")
+            if self.lands:
                 self.e += 1
-            self.torn = self.tear
+                self.torn = self.tear
     def getSampleRate(self, d, c): return 1.0
     def setSampleRate(self, d, c, r): pass
 
-R = bt.REG_TX_CLEAR_ALL
-other = 0x084 if R == 0x24 else 0x24  # the other register map's offset (v3 moved it)
 def ran_all(f):
-    return "TDD_CMD=abort" in f.log and "reg %#x=1" % R in f.log and "TDD_CMD=gate_release" in f.log
+    return all(x in f.log for x in ("TDD_CMD=abort", "TDD_CMD=tx_clear", "TDD_CMD=gate_release"))
 
-f = Fake(R)
+f = Fake()
 check(bt._clear_epochs(f) == {0: 587, 1: 587},
       "the capture parses to both banks' epochs through setting_reports (mutation: a parse that drops a bank or "
       "misreads the pair: %r)" % bt._clear_epochs(f))
-f = Fake(other); before = f.readSetting("TX_BANK_STATUS"); f.writeRegister("RFCORE", R, 1)
+f = Fake(lands=False); before = f.readSetting("TX_BANK_STATUS"); f.writeSetting("TDD_CMD", "tx_clear")
 check(f.readSetting("TX_BANK_STATUS") == before,
-      "the fake ignores a clear at an offset it does not map (an epoch that moves on any write proves nothing below)")
-f = Fake(R)
+      "the fake: a tx_clear that does not land leaves the epoch (an epoch that moves on any tx_clear proves nothing below)")
+f = Fake()
 check(bt._teardown(f) is True and ran_all(f), "a clear that lands: True, every step written")
-f = Fake(other)
+f = Fake(lands=False)
 check(bt._teardown(f) is False and ran_all(f),
-      "a bitstream that maps TX_CLEAR_ALL elsewhere: False, after the gate release (mutation: the epoch check "
-      "removed, which returns True over uncleared banks)")
-f = Fake(R, torn=1)
+      "a tx_clear accepted without clearing: False, after the gate release (mutation: the epoch check removed, "
+      "which returns True over uncleared banks)")
+f = Fake(refused=True)
+check(bt._teardown(f) is False and ran_all(f),
+      "a refused tx_clear: False, and the gate release is still written (mutation: the refusal inside the writes' "
+      "try, which skips the gate release)")
+f = Fake(torn=1)
 check(bt._teardown(f) is True, "a read torn by the clear is read again (mutation: one read, which leaves it unchecked)")
-f = Fake(R, torn=9)
+f = Fake(torn=9)
 check(bt._teardown(f) is True and ran_all(f),
-      "every read torn: unchecked, a warning and True (mutation: a torn read taken as an epoch)")
-f = Fake(R, throws=True)
+      "every read torn: unchecked here, a warning and True (mutation: a torn read taken as an epoch)")
+f = Fake(throws=True)
 check(bt._teardown(f) is True and ran_all(f),
       "a TX_BANK_STATUS read that raises: the clear and the gate release are still written (mutation: the read "
       "inside the writes' try, which skips both)")
-f = Fake(R, epoch=0, counts=False)
-check(bt._teardown(f) is True, "a bitstream without CLEAR_EPOCH (every bank 0): unchecked, not failed (mutation: a "
-      "zero epoch judged as a miss, which fails every teardown on fpga 1.30)")
-hs = types.SimpleNamespace(open_device=lambda **kw: {"sdr": Fake(other)})
+hs = types.SimpleNamespace(open_device=lambda **kw: {"sdr": Fake(lands=False)})
 check(tf.teardown_node(hs, bt._teardown, "192.0.2.1", 1, 2) is False,
       "teardown_node reports a clear that did not land as FAILED (mutation: _teardown's result ignored)")
-hs = types.SimpleNamespace(open_device=lambda **kw: {"sdr": Fake(R)})
+hs = types.SimpleNamespace(open_device=lambda **kw: {"sdr": Fake()})
 check(tf.teardown_node(hs, bt._teardown, "192.0.2.1", 1, 2) is True, "teardown_node: a clean teardown is torn down")
 print("%d failure(s)" % fails); sys.exit(1 if fails else 0)

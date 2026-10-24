@@ -4,7 +4,7 @@
  *        load, with NO hardware: the real HoudiniFramer over a fake radio and
  *        device.
  *
- * A refused TDD_ARM runs the teardown ladder, whose raw TX_CLEAR_ALL rewinds
+ * A refused TDD_ARM runs the teardown ladder, whose TDD_CMD tx_clear rewinds
  * the device's replay fill to 0, then re-runs the load/schedule/strobe setup.
  * The host's replay stream keeps its own fill (the next writeStream's address)
  * until a deactivateStream rewinds it, so a reload without one appends at the
@@ -13,7 +13,7 @@
  * on the first refused arm instead of retrying.
  *
  * The fake radio models the host side (its fill, rewound by deactivateXmit)
- * and the fake device the device side (its fill, rewound by TX_CLEAR_ALL),
+ * and the fake device the device side (its fill, rewound by the TX clear),
  * with F6b2's rule: a load lands at 0 or at the device's fill, nowhere else.
  * Each check names the mutation that breaks it.
  *
@@ -42,18 +42,18 @@ void check(bool ok, const std::string& what) {
 }
 
 // The device side: the settings the framer writes, TDD_ARM refused the first
-// `refuse_arms` times, and the replay fill a TX clear rewinds. The clear lands
-// only at the offset this bitstream maps TX_CLEAR_ALL to (a write anywhere
-// else is ignored, as the fabric ignores an unmapped offset), and counts in
-// both TX banks' clear epoch, read through TX_BANK_STATUS.
+// `refuse_arms` times, and the replay fill a TX clear rewinds. TDD_CMD tx_clear
+// clears and counts in both TX banks' clear epoch, read through
+// TX_BANK_STATUS, unless the device refuses it (it throws) or returns without
+// clearing (a device-side judge that passed a clear that never landed).
 class FakeDevice : public SoapySDR::Device {
  public:
   int refuse_arms = 0;
   int arm_writes = 0;
   size_t level = 0;  // the device's replay fill
-  unsigned clear_at = HoudiniFramer::kTxClearAllOffset;
+  bool clear_lands = true;    // false: tx_clear returns without clearing
+  bool clear_refused = false; // tx_clear throws, nothing written
   int epoch = 1;              // the power-up envelope
-  bool epoch_counts = true;   // false: a bitstream without CLEAR_EPOCH (reads 0)
   bool status_throws = false; // the TX_BANK_STATUS read fails
   int tear_reads = 0;         // TX_BANK_STATUS reads torn after each clear
   mutable int torn = 0;       // torn reads still to come
@@ -63,6 +63,15 @@ class FakeDevice : public SoapySDR::Device {
     log->push_back("set " + key + "=" + value);
     if (key == "TDD_ARM" && ++arm_writes <= refuse_arms)
       throw std::runtime_error("TDD_ARM: framer busy (state=running): abort first");
+    if (key == "TDD_CMD" && value == "tx_clear") {
+      if (clear_refused) throw std::runtime_error("TDD_CMD tx_clear: refused: the TDD framer is still engaged");
+      if (clear_lands) {
+        log->push_back("TX_CLEAR_ALL");
+        level = 0;
+        ++epoch;
+        torn = tear_reads;
+      }
+    }
   }
   std::string readSetting(const std::string& key) const override {
     if (key == "TX_BANK_STATUS") {
@@ -74,14 +83,6 @@ class FakeDevice : public SoapySDR::Device {
       return "ch0:acked=0,late=0,epoch=" + e + ";ch1:acked=0,late=0,epoch=" + e;
     }
     return key == "TDD_ARM" ? "accepted=1 epoch=5000" : "";
-  }
-  void writeRegister(const std::string& name, const unsigned addr, const unsigned value) override {
-    if (name == "RFCORE" && addr == clear_at && value == 1) {
-      log->push_back("TX_CLEAR_ALL");
-      level = 0;
-      if (epoch_counts) ++epoch;
-      torn = tear_reads;
-    }
   }
 };
 
@@ -182,7 +183,7 @@ int main() {
       FakeRadio r(RadioParams{});
       long long t = 0;
       const int first = r.xmit(nullptr, 2048, 0, t);
-      r.dev.writeRegister("RFCORE", HoudiniFramer::kTxClearAllOffset, 1);
+      r.dev.writeSetting("TDD_CMD", "tx_clear");
       const int stale = r.xmit(nullptr, 2048, 0, t);
       r.deactivateXmit();
       const int fresh = r.xmit(nullptr, 2048, 0, t);
@@ -190,19 +191,18 @@ int main() {
             "the fake: a load after a TX clear is refused at the stale fill and lands after a deactivate (an "
             "instrument that accepts both proves nothing below)");
     }
-    // The other register map's TX_CLEAR_ALL offset (v3 moved it from 0x24 to
-    // 0x084), where a bitstream of that map takes the clear.
-    const unsigned other_map = HoudiniFramer::kTxClearAllOffset == 0x24 ? 0x084 : 0x24;
-    {  // the instrument: the epoch counts a clear at the mapped offset only
+    {  // the instrument: the epoch counts a clear that lands, and only that
       FakeRadio r(RadioParams{});
       const std::string at_start = r.dev.readSetting("TX_BANK_STATUS");
-      r.dev.writeRegister("RFCORE", other_map, 1);
-      const std::string after_other = r.dev.readSetting("TX_BANK_STATUS");
-      r.dev.writeRegister("RFCORE", HoudiniFramer::kTxClearAllOffset, 1);
-      const std::string after_mapped = r.dev.readSetting("TX_BANK_STATUS");
-      check(after_other == at_start && after_mapped != at_start,
-            "the fake: a write at an unmapped offset leaves the clear epoch, a clear at the mapped one moves it "
-            "(an epoch that moves on any write lets the ladder's check pass a clear that never landed)");
+      r.dev.clear_lands = false;
+      r.dev.writeSetting("TDD_CMD", "tx_clear");
+      const std::string after_lost = r.dev.readSetting("TX_BANK_STATUS");
+      r.dev.clear_lands = true;
+      r.dev.writeSetting("TDD_CMD", "tx_clear");
+      const std::string after_landed = r.dev.readSetting("TX_BANK_STATUS");
+      check(after_lost == at_start && after_landed != at_start,
+            "the fake: a tx_clear that does not land leaves the clear epoch, one that lands moves it (an epoch "
+            "that moves on any tx_clear lets the ladder's check pass a clear that never landed)");
     }
     {
       const Armed a = armWith(0);
@@ -221,15 +221,22 @@ int main() {
             "the retry's reload is a fresh load at 0, after one deactivate (" + joined(a.log) + ")");
     }
     {
-      const Armed a = armWith(0, [&](FakeDevice& d) { d.clear_at = other_map; });
-      check(a.why.find("TX_CLEAR_ALL") != std::string::npos && a.why.find("did not land") != std::string::npos &&
-                a.arm_writes == 0,
-            "a bitstream that takes TX_CLEAR_ALL at the other map's offset: the bring-up throws naming the clear "
-            "and writes no TDD_ARM (mutation: the ladder's epoch check removed, which arms over uncleared banks: " +
+      const Armed a = armWith(0, [](FakeDevice& d) { d.clear_lands = false; });
+      check(a.why.find("did not land") != std::string::npos && a.arm_writes == 0,
+            "a tx_clear the device accepts without clearing: the bring-up throws naming the clear and writes no "
+            "TDD_ARM (mutation: the ladder's epoch check removed, which arms over uncleared banks: " +
                 (a.why.empty() ? std::string("armed") : "threw '" + a.why.substr(0, 120) + "'") + ")");
       check(count(a.log, "set TDD_CMD=gate_release") == 1,
             "the failed clear still releases the gates before the throw (mutation: the throw before gate_release, "
             "which leaves a teardown's gates held for the next run: " + joined(a.log) + ")");
+    }
+    {
+      const Armed a = armWith(0, [](FakeDevice& d) { d.clear_refused = true; });
+      check(a.why.find("TX clear failed") != std::string::npos && a.why.find("still engaged") != std::string::npos &&
+                a.arm_writes == 0 && count(a.log, "set TDD_CMD=gate_release") == 1,
+            "a refused tx_clear: the gates are still released, then the bring-up throws with the device's reason "
+            "(mutation: the refusal left to escape the ladder, which skips the gate release: " + joined(a.log) +
+                ")");
     }
     {
       const Armed a = armWith(0, [](FakeDevice& d) { d.tear_reads = 1; });
@@ -251,16 +258,6 @@ int main() {
             "a TX_BANK_STATUS read that throws: the pulse and the gate release still run, then the bring-up throws "
             "that the clear cannot be checked (mutation: the read's throw left to escape, which skips both: " +
                 joined(a.log) + ")");
-    }
-    {
-      const Armed a = armWith(0, [](FakeDevice& d) {
-        d.epoch = 0;
-        d.epoch_counts = false;
-      });
-      check(a.why.empty() && a.arm_writes == 1,
-            "a bitstream without CLEAR_EPOCH (every bank reads 0, before HS-220): the clear is trusted and the "
-            "bring-up arms (mutation: a zero epoch judged as a miss, which refuses every bring-up on fpga 1.30: " +
-                (a.why.empty() ? std::string("armed") : "threw '" + a.why.substr(0, 120) + "'") + ")");
     }
   } catch (const std::exception& e) {
     check(false, std::string("unexpected exception: ") + e.what());

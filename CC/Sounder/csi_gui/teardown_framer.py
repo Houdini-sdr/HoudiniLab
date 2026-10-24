@@ -150,9 +150,8 @@ def teardown_node(hs, teardown, ip, ch, passes):
     """Tear down one radio. Returns True on success.
 
     `_teardown` swallows its own exceptions by design and prints each one; it
-    returns False when a write raised or its TX clear did not land (the clear
-    epoch did not move: the bitstream's register map does not match this
-    checkout's offset). Repeating the sequence is the cheap guard against a
+    returns False when a write raised or its TX clear (TDD_CMD tx_clear) was
+    refused or did not land. Repeating the sequence is the cheap guard against a
     partially applied first pass; the operations are idempotent, so an extra
     pass costs nothing on a clean board.
     """
