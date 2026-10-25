@@ -63,11 +63,19 @@ def bs_bands(L):
 
 
 def mer_samples(M):
-    """{antenna: [MER dB]} from mer_sampler.py's lines ('/ant/<i>/cns MER <x> dB')."""
+    """{antenna: ([fresh MER dB], stale count)} from mer_sampler.py's lines
+    ('/ant/<i>/cns MER <x> dB', or 'cns STALE MER' when the antenna's
+    constellation did not advance since the last sample or is past the stale
+    age: its value is an old frame's)."""
     out = {}
     for l in M:
-        for a, v in re.findall(r"/ant/(\d+)/cns MER (-?[0-9.]+) dB", l):
-            out.setdefault(int(a), []).append(float(v))
+        for a, stale, v in re.findall(r"/ant/(\d+)/cns (STALE )?MER (-?[0-9.]+) dB", l):
+            fresh, n_stale = out.get(int(a), ([], 0))
+            if stale:
+                n_stale += 1
+            else:
+                fresh.append(float(v))
+            out[int(a)] = (fresh, n_stale)
     return out
 
 
@@ -90,6 +98,9 @@ def verdict(L, mer=None):
     for l in L:
         if re.search(ERRORS, l):
             out.append(("FAIL", "error: " + l.strip()[:200]))
+        elif "no retry left" in l and "Radio open failed" in l:
+            m = re.search(r"\): (?:the radios did not come up: )?(.*?)(?:; no retry left.*)?$", l)
+            out.append(("FAIL", "the radio open failed on every attempt: " + (m.group(1) if m else l).strip()[:200]))
     # Data flowed (AP-112): every other check below reads clean on an idle
     # link, so a run that carried nothing passed them (DEMO_VERIFICATION 9.83,
     # the nodes cabled in loopback). The UE locks on the beacon first, and the
@@ -104,8 +115,8 @@ def verdict(L, mer=None):
         out.append(("FAIL", "BS: no constellation record (no CNS summary with datagrams): no UE uplink reached the "
                             "CSI view"))
     elif cns[1] >= CNS_LOW_FAIL * cns[0]:
-        out.append(("FAIL", "BS: %d of %d constellation records low (%.1f %%): an antenna carries no usable data "
-                            "(AP-117)" % (cns[1], cns[0], 100.0 * cns[1] / cns[0])))
+        out.append(("FAIL", "BS: %d of %d constellation records low (%.1f %%): an antenna carries no usable data"
+                            % (cns[1], cns[0], 100.0 * cns[1] / cns[0])))
     # Per antenna (AP-117): the dashboard's MER samples, each antenna against
     # its band's floor. The median rides out a cold start's first minutes.
     if mer is not None:
@@ -114,14 +125,21 @@ def verdict(L, mer=None):
             out.append(("WARN", "MER samples beside the log, but no 'BS ... mode V: RX ch' line names the antennas' "
                                 "bands, so no per-antenna MER floor was judged"))
         for ant, (ch, band) in enumerate(bands):
-            v = got.get(ant, [])
-            if not v:
-                out.append(("FAIL", "BS antenna %d (%s, RX ch%d): no MER sample in mer.txt: it carried nothing the "
-                                    "dashboard could score" % (ant, band, ch)))
+            v, n_stale = got.get(ant, ([], 0))
+            name = "BS antenna %d (%s, RX ch%d)" % (ant, band, ch)
+            if not v and not n_stale:
+                out.append(("FAIL", name + ": no MER sample in mer.txt: it carried nothing the dashboard could score"))
+                continue
+            # A stale sample repeats an old frame's MER: an antenna that stopped
+            # mid-run reads its last good value until the end, so the stale
+            # ones are counted, not averaged in.
+            if len(v) < n_stale:
+                out.append(("FAIL", name + ": %d of %d MER samples stale: its constellation stopped advancing for "
+                                    "most of the run" % (n_stale, n_stale + len(v))))
                 continue
             med = st.median(v)
-            what = "BS antenna %d (%s, RX ch%d): MER median %.1f dB over %d samples (%.1f..%.1f)" % (
-                ant, band, ch, med, len(v), min(v), max(v))
+            what = name + ": MER median %.1f dB over %d samples (%.1f..%.1f)%s" % (
+                med, len(v), min(v), max(v), ", %d more stale" % n_stale if n_stale else "")
             out.append(("FAIL", what + ", under its demo floor %.0f dB" % MER_FLOOR[band]) if med < MER_FLOOR[band]
                        else ("PASS", what))
     slots = any("receives only its rx slots" in l for l in L)
@@ -176,7 +194,7 @@ def verdict(L, mer=None):
                       ("window marked untrusted", r"marked untrusted"),
                       ("UE burst head at the slot cut", r"starts at the pilot slot's edge"),
                       ("UE burst tail at the slot cut", r"runs to the pilot slot's far edge"),
-                      ("a radio open failed and was retried", r"Radio open failed \(attempt|Radios Not Found")]:
+                      ("a radio open failed and was retried", r"Radio open failed \(attempt.*; retrying|Radios Not Found")]:
         n = sum(bool(re.search(pat, l)) for l in L)
         if n:
             out.append(("WARN", "%s: %d lines" % (name, n)))

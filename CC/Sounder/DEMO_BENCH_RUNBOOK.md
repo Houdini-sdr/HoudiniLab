@@ -226,9 +226,9 @@ judges a finished run again, and `run_summary.py ~/demo_logs/sounder_<UTC>.log`
 a dashboard session (A8c step 4). In a run directory the verdict also judges
 each antenna's MER samples (`mer.txt`) against its band's floor, 33 dB on
 sub-6 and 28 dB on the X-IF, by the median, and fails an antenna with no
-sample; a dashboard session log has no samples, so there a tenth or more of
-the constellation records low is what fails a dead antenna. Underneath, `run_rung.sh` and `fstage_run.sh`
-(each taking `--soapy-root`, and `--sounder-arg=<flag>` for any further sounder
+sample or with stale samples for most of the run; a dashboard session log has
+no samples, so there a tenth or more of the constellation records low is what
+fails a dead antenna. Underneath, `run_rung.sh` and `fstage_run.sh` (each taking `--soapy-root`, and `--sounder-arg=<flag>` for any further sounder
 flag) launch one sounder run with the logs and dumps that `rung_report.py` and
 `fstage_report.py` read; `reg_snap.py` reads the fpga 1.34 gate's fault
 registers before and after a run, and `gate_runs.py` the BS landing dumps

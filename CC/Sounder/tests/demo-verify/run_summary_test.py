@@ -108,6 +108,13 @@ old = ["Exception: Radios Not Found. Will attempt a retry... Re-Try Now!"] + GOO
 check(all("FAIL" not in levels(x) and any("retried" in t for lv, t in rs.verdict(x) if lv == "WARN") for x in (rnf, old)),
       "a radio open that was retried and recovered is a warning, not a failure, in the banner's new form and its old "
       "(mutation: the open failure as an error, or the old form not read)")
+last = GOOD + ["Radio open failed (attempt 2 of 2): the radios did not come up: the TDD ladder's TX_CLEAR_ALL (RFCORE "
+               "0x024) did not land; no retry left, the run did not start"]
+v = rs.verdict(last)
+check(any(lv == "FAIL" and t == "the radio open failed on every attempt: the TDD ladder's TX_CLEAR_ALL (RFCORE 0x024) did not land" for lv, t in v)
+      and not any("retried" in t for lv, t in v),
+      "the last attempt's line fails naming its cause, and is not counted as a retry (mutation: the no-retry line "
+      "read as a retried open): %s" % v)
 K = rs.alarm_kinds([
     "57:2 WARNG: BS x link health: [BS x] 5.0 s: irq 1/s, preflight ok: egress.drop_p0 +3; host.rxq_ovfl_ch2 +7"
     " | app: rx_err +0, rx_short +0, rx_pad +0, tx_short +0, tx_sat +0",
@@ -191,9 +198,29 @@ check("FAIL" in [lv for lv, _ in mv(mer([32.0, 32.4, 32.1, 32.6], [30.0, 30.2, 2
       "for both bands, or the floors swapped)")
 check("FAIL" not in [lv for lv, _ in mv(mer([24.5, 35.0, 36.1, 36.0, 35.8], [20.1, 31.0, 31.5, 31.2, 31.4]))],
       "a cold start's low first sample passes on the median (mutation: the minimum judged)")
-check(any(lv == "WARN" and "no per-antenna MER floor" in t for lv, t in rs.verdict(GOOD, mer([36.0], [31.0])))
-      and "FAIL" not in levels(GOOD),
-      "MER samples with no band line warn that the floors were not judged (mutation: antennas assumed sub-6)")
+nb = rs.verdict(GOOD, mer([36.0], [31.0]))
+check(any(lv == "WARN" and "no per-antenna MER floor" in t for lv, t in nb) and "FAIL" not in [lv for lv, _ in nb],
+      "MER samples with no band line warn that the floors were not judged, and the X-IF's 31 dB fails no sub-6 "
+      "floor (mutation: antennas assumed sub-6): %s" % nb)
+def stale_mer(n_fresh, n_stale):
+    """mer_sampler lines: the sub-6 fresh throughout, the X-IF fresh n_fresh times, then STALE at its last value."""
+    return ["18:%02d:00 UTC /ant/0/cns MER 36.0 dB, EVM 1.58 %%, 14064 pts, frame %d, age 9 ms; /ant/1/cns %sMER 31.0 dB, "
+            "EVM 2.80 %%, 14040 pts, frame %d, age %d ms" % (i, 750 * i, "STALE " if i >= n_fresh else "",
+                                                             750 * min(i, n_fresh - 1), 3 if i < n_fresh else 15000 * i)
+            for i in range(n_fresh + n_stale)]
+st29 = mv(stale_mer(1, 29))
+check(any(lv == "FAIL" and "antenna 1" in t and "29 of 30 MER samples stale" in t for lv, t in st29),
+      "an X-IF that stopped after its first sample fails on its stale samples, not passes on its one fresh one "
+      "(mutation: STALE samples not read): %s" % [t for lv, t in st29 if "antenna 1" in t])
+st_all = mv(stale_mer(0, 4))
+check(any(lv == "FAIL" and "4 of 4 MER samples stale" in t for lv, t in st_all)
+      and not any("no MER sample" in t for lv, t in st_all),
+      "an antenna stale throughout fails as stale, not as never sampled (mutation: stale samples dropped)")
+st_end = mv(stale_mer(4, 1))
+check(not any(lv == "FAIL" and "antenna 1" in t for lv, t in st_end)
+      and any(lv == "PASS" and "antenna 1" in t and "1 more stale" in t for lv, t in st_end),
+      "a stale sample at a run's end is counted and named, the fresh ones judged (mutation: any stale sample fails, "
+      "or the stale value averaged in): %s" % [t for lv, t in st_end if "antenna 1" in t])
 # main: the exit status is the verdict's, read from a run directory's largest log
 d = tempfile.mkdtemp(prefix="run_summary_")
 open(os.path.join(d, "small_cpu.log"), "w").write("x\n")
