@@ -93,6 +93,16 @@ check("FAIL" in [lv for lv, _ in v] and not any("counters 0" in t for _, t in v)
       "an unreadable RX_HOST_STATUS alone fails instead of passing with no counters (mutation: match any line naming the key)")
 check("FAIL" in levels([l.replace(" tdd_straddle=0", "") for l in GOOD]),
       "an RX_HOST_STATUS without a judged counter fails (mutation: a missing key read as 0)")
+edges = GOOD + [  # HoudiniFramer.cc's two slot-edge warnings (S238's and S158's sides, DEMO_VERIFICATION 9.86)
+    "0:1 WARNG: BS: the UE burst starts at the pilot slot's edge (pilot_grid_off -31, prefix 32, occurrence 1): the "
+    "slot cut takes its head if it is any earlier; recalibrate tx_advance with bs_rx_slots off",
+    "0:2 WARNG: BS: the UE burst runs to the pilot slot's far edge (pilot_grid_off 39, postfix 32, occurrence 1): the "
+    "slot cut takes its tail if it is any later; raise tx_advance by the settled pilot_grid_off",
+    "0:3 WARNG: BS: the UE burst runs to the pilot slot's far edge (pilot_grid_off 40, postfix 32, occurrence 2): the "
+    "slot cut takes its tail if it is any later; raise tx_advance by the settled pilot_grid_off"]
+w = [t for lv, t in rs.verdict(edges) if lv == "WARN"]
+check("FAIL" not in levels(edges) and any("head at the slot cut: 1 lines" in t for t in w) and any("tail at the slot cut: 2 lines" in t for t in w),
+      "a burst at either slot edge is a warning to read, each side counted (mutation: the edge lines not read): %s" % w)
 rnf = ["57:1 WARNG: Radios Not Found. Will attempt a retry"] + GOOD
 check("FAIL" not in levels(rnf) and any("retried" in t for lv, t in rs.verdict(rnf) if lv == "WARN"),
       "a radio open that was retried and recovered is a warning, not a failure (mutation: Radios Not Found as an error)")

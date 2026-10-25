@@ -173,6 +173,8 @@ def verdict(L, mer=None):
         out.append(("WARN", "%d link-health alarm lines: %s" % (len(alarms), dict(alarm_kinds(alarms)))))
     for name, pat in [("UE PILOT LOST", r"UE PILOT LOST"), ("pilot failed the LTS check", r"failed the LTS check"),
                       ("window marked untrusted", r"marked untrusted"),
+                      ("UE burst head at the slot cut", r"starts at the pilot slot's edge"),
+                      ("UE burst tail at the slot cut", r"runs to the pilot slot's far edge"),
                       ("a radio open retried (Radios Not Found)", r"Radios Not Found")]:
         n = sum(bool(re.search(pat, l)) for l in L)
         if n:
@@ -221,6 +223,7 @@ def summary(L):
     for name, pat in [("no UE burst", r"no UE burst in frame read"), ("UE PILOT LOST", r"UE PILOT LOST"),
                       ("pilot failed the LTS check", r"failed the LTS check"),
                       ("head at slot edge", r"starts at the pilot slot's edge"),
+                      ("tail at slot edge", r"runs to the pilot slot's far edge"),
                       ("stray outside rx slots", r"outside the rx slots \(occurrence"),
                       ("window untrusted (order/jump)", r"marked untrusted"),
                       ("CSI view dropped", r"CSI view: dropped"), ("rotation clamped", r"carrier rotation clamped"),

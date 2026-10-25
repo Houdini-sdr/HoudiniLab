@@ -871,6 +871,17 @@ int HoudiniFramer::rx(size_t radio_id, void* const* buffs,
                   off, static_cast<int>(cfg_->prefix()), ec);
       }
     }
+    // AP-94: the late side. The seat reads true there, so raising tx_advance
+    // by it re-centres the burst.
+    if (houdini::slotalign::tailAtSlotEdge(off, cfg_->postfix())) {
+      static std::atomic<unsigned> tail_count{0};
+      const unsigned tc = tail_count.fetch_add(1) + 1;
+      if ((tc & (tc - 1)) == 0) {
+        MLPD_WARN("BS: the UE burst runs to the pilot slot's far edge (pilot_grid_off %lld, postfix %d, occurrence %u): "
+                  "the slot cut takes its tail if it is any later; raise tx_advance by the settled pilot_grid_off\n",
+                  off, static_cast<int>(cfg_->postfix()), tc);
+      }
+    }
   }
   htdd_slot_cache_.resize(K * C * static_cast<size_t>(n) * 2);
   // Slots whose placed start fell outside the capture and were clamped into

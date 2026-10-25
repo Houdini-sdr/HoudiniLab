@@ -164,6 +164,14 @@ inline long long pilotGridOff(long long stamp_ticks, long long p_start, long lon
 /// placed start pins at -prefix; nothing else says so.
 inline bool headAtSlotEdge(long long grid_off, int prefix) { return grid_off <= -(prefix - 2); }
 
+/// Slots mode, the late side: whether the burst's content runs to (or within
+/// 2 samples of) the pilot slot's far edge. The device cuts there too, so a
+/// burst more than its postfix late loses its tail to the next slot, which
+/// counts it as the schedule's own gap. Unlike the early side the placed start
+/// does not pin: it reads true (DEMO_VERIFICATION 9.86, one sample of seat per
+/// sample of tx_advance from 158 to 218), so the seat alone says so.
+inline bool tailAtSlotEdge(long long grid_off, int postfix) { return grid_off >= postfix - 2; }
+
 /// Whether a candidate lane takes the slot cut from the current reference.
 /// Lane 0 starts as the reference. A lane that fails the presence gate never
 /// takes it; a passing lane takes it from a failing reference, or from a
