@@ -38,7 +38,7 @@ DUMPS=("--sounder-arg=--csi_dump=$CSID" --sounder-arg=--bs_rx_debug --sounder-ar
        "--sounder-arg=--dump_resync_win=$RW")
 # SYN retransmits on this host around the run: an open that stalls about 1 s
 # before connecting (cause unmeasured; a lost SYN is one candidate) races the
-# A/B build's 1 s device timeout and reads as "Radios Not Found".
+# A/B build's 1 s device timeout and reads as "Radio open failed".
 SYN0=$(nstat -az TcpExtTCPSynRetrans 2>/dev/null | awk '/SynRetrans/{print $2}')
 # A launch that failed wrote no record: stop here rather than file into the
 # previous run's directory. The checkout is passed as the absolute path

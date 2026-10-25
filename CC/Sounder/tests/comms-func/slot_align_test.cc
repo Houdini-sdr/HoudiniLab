@@ -209,6 +209,10 @@ int main() {
               !sa::headAtSlotEdge(-4, 32),
           "a start pinned at -prefix (the cut edge) flags, the wired -4 does not (mutation: compared against 0, "
           "or the sign flipped)");
+    check(sa::tailAtSlotEdge(39, 32) && sa::tailAtSlotEdge(30, 32) && !sa::tailAtSlotEdge(29, 32) &&
+              !sa::tailAtSlotEdge(28, 32) && !sa::tailAtSlotEdge(0, 32) && !sa::tailAtSlotEdge(-31, 32),
+          "the late side: S158's +39 (DEMO_VERIFICATION 9.86) and +30 flag, 169's +28 and a centred 0 do not, nor "
+          "the early side's pin (mutation: the head check's sign, or compared against 0)");
     check(!sa::laneTakesCut(false, 0.99, true, 0.50),
           "a lane that fails the gate never takes the cut, however clean (mutation: the rule on "
           "self-similarity alone, where a weak clean X-band won and then skipped a frame the sub-6 carried)");

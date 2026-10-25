@@ -122,6 +122,16 @@ BaseRadioSet::BaseRadioSet(Config* cfg, const bool calibrate_proc) : _cfg(cfg) {
 
     // Perform DC Offset & IQ Imbalance Calibration
     if (calibrate_proc && _cfg->imbalance_cal_en() == true) {
+      // The procedure is the Iris (LMS7) one: it drives each channel's test
+      // signal through channel-scoped settings (TSP_TSG_CONST,
+      // TX_ENB_OVERRIDE), which the Houdini driver refuses, and reads the RX
+      // snooper, which on Houdini taps RX ch0 alone (SoapyHoudiniSDR 0.7.0
+      // refuses another channel, HS-90). So on Houdini it would throw at its
+      // first test-signal setting; it is refused here by name instead (AP-125).
+      if (_cfg->is_houdini())
+        throw std::runtime_error(
+            "calibrate_analog: the analog calibration is the Iris procedure, and a Houdini radio has neither its "
+            "per-channel test-signal settings nor an RX snooper beyond ch0; set calibrate_analog to false");
       if (_cfg->bs_channel().find('A') != std::string::npos)
         dciqCalibrationProc(0);
       if (_cfg->bs_channel().find('B') != std::string::npos)

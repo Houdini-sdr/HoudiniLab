@@ -264,8 +264,12 @@ houdini@<the UE's address in A1>` counts the UE's RFDC interrupts over the run
 
 The run lands in `ap79_runs/DEMO/<TAG>_<HHMMSS>/`. `run_summary.py <run dir>`
 judges a finished run again, and `run_summary.py ~/demo_logs/sounder_<UTC>.log`
-a dashboard session (A8c step 4). Underneath, `run_rung.sh` and `fstage_run.sh`
-(each taking `--soapy-root`, and `--sounder-arg=<flag>` for any further sounder
+a dashboard session (A8c step 4). In a run directory the verdict also judges
+each antenna's MER samples (`mer.txt`) against its band's floor, 33 dB on
+sub-6 and 28 dB on the X-IF, by the median, and fails an antenna with no
+sample or with stale samples for most of the run; a dashboard session log has
+no samples, so there a tenth or more of the constellation records low is what
+fails a dead antenna. Underneath, `run_rung.sh` and `fstage_run.sh` (each taking `--soapy-root`, and `--sounder-arg=<flag>` for any further sounder
 flag) launch one sounder run with the logs and dumps that `rung_report.py` and
 `fstage_report.py` read; `reg_snap.py` reads the fpga 1.34 gate's fault
 registers before and after a run, and `gate_runs.py` the BS landing dumps
@@ -348,8 +352,10 @@ fpga 1.33, 9.70 to 9.73 on fpga 1.34, 9.85 on fpga 1.44 and SoapyHoudiniSDR
   large files off the host during a run.
 - **Radio opens that time out (SH-442).** A launch sometimes cannot open the BS
   within the device timeout (`SoapyRPCUnpacker::recv() TIMEOUT` in the log).
-  The sounder retries the open itself ("Radios Not Found. Will attempt a
-  retry..."); if every try fails, press Start again.
+  The sounder retries the open itself ("Radio open failed (attempt 1 of 2):
+  ...; retrying", the cause after the colon); if every try fails ("no retry
+  left"), read that cause before pressing Start again: a timeout is worth a
+  retry, a refused setup or a named TDD stop is not.
 - **Clock steering** is in the demo build and ON through the config
   (`sync.steer.enable` in its `sync` block, the only place it is set).
   Without it MER depends on the day: the two boards' offset reached 0.6-0.9 ppm

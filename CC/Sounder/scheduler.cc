@@ -112,9 +112,11 @@ Scheduler::Scheduler(Config* in_cfg, unsigned int core_start)
                                  tx_ptoks_ptr_, cl_tx_queue_,
                                  cl_tx_ptoks_ptr_));
   } catch (ReceiverException& re) {
-    std::cout << re.what() << '\n';
     gc();
-    throw ReceiverException("Radios Not Found. Will attempt a retry...");
+    // The cause, not a guess at it: every failure to bring the radio sets up
+    // lands here, a node that did not answer, a refused setup and the TDD
+    // ladder's named stops alike (AP-63, AP-126).
+    throw ReceiverException(std::string("the radios did not come up: ") + re.what());
   }
 }
 

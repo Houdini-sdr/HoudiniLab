@@ -67,7 +67,7 @@ irq() {
 }
 IRQ0=$(irq)
 date -u +"start %H:%M:%S"
-bash "$HERE/fstage_run.sh" "${RUN[@]}" "$STAGE" "$TAG" "$CONF" "$SECS" 2>&1 | grep -E "launched|done|failed|Radios Not Found|TIMEOUT"
+bash "$HERE/fstage_run.sh" "${RUN[@]}" "$STAGE" "$TAG" "$CONF" "$SECS" 2>&1 | grep -E "launched|done|failed|Radio open failed|TIMEOUT"
 sleep 5
 IRQ1=$(irq)
 R=$(cat "ap79_runs/$TAG.current" 2>/dev/null); O=$D/ap79_runs/$STAGE/$R
