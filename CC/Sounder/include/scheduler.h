@@ -43,6 +43,9 @@ class Scheduler {
 
   //RecorderWorker worker_;
   std::vector<Sounder::RecorderThread*> recorders_;
+  // Set when a recorder could not be told to stop: it may still read the rx
+  // buffers, so gc() leaves them allocated (AP-82).
+  bool recorders_stuck_ = false;
   std::vector<Sounder::Hdf5Reader*> readers_;
   // One past the highest frame id of the RX events handled: the exit line's
   // frames_seen.
