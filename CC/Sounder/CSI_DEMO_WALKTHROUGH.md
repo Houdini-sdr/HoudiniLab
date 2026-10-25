@@ -139,9 +139,12 @@ fails.
   Houdini server, on a firmware stack your team has blessed. Board bring up is
   owned by the SoapyHoudiniSDR and Houdini-Streaming projects and is not
   covered here. If you did not set the boards up yourself, ask whoever did.
-  This code needs SoapyHoudiniSDR 0.4.0: its device module on both nodes and
-  its host plugin's prefix on `<host>` (each host plugin refuses another
-  release's radios). The setup check's `stack` lines show the release.
+  This code needs SoapyHoudiniSDR 0.6.0, one release throughout: its device
+  module on both nodes and its host plugin's prefix on `<host>`. A host plugin
+  of another release than the radios' draws a warning at best and a refusal
+  at worst (a 0.5.0 radio refuses a 0.4.0 host's receive setup), so the setup
+  check FAILs that pair on its `lockstep` line, and a radio older than 0.6.0
+  on its `release` line; its `stack` lines show the release each side runs.
 - **A clock plan for the two boards.** Each board's reference is a device
   setting (`clock_ref`) that whoever provisions the boards sets; the full
   setup check (section 2.2) prints it on its `clock` line for each radio. One
@@ -411,11 +414,15 @@ and 3.
 Pilot and data placement is sample exact: the client pads each burst so its
 start escapes the driver's 3125 ns scheduling grid, and `tx_advance` in the
 config is a bench calibration that seats the burst at its nominal in-slot
-position (247 on the legacy one-rate path, 169 on the dual-band converter
-path). If you change cabling or the RF path, re-derive it: run the sounder with
-`--bs_rx_debug` across a few restarts and shift `tx_advance` by the
-mean `pilot_grid_off` the base station prints (the `_tx_advance_note` of
-`houdini-ul.json` and of each dual-band config gives the details).
+position (247 on the legacy one-rate path, 198 on the dual-band converter
+path with SoapyHoudiniSDR 0.6.0). If you change cabling, the RF path or the
+radio release, re-derive it: run the sounder with `--bs_rx_debug` across a few
+restarts and add the mean `pilot_grid_off` the base station prints to
+`tx_advance` (a positive seat, a late burst, needs a larger value). Take the
+mean from each run's settled part: for the first minute or two the seat also
+follows the carrier offset between the radios, until the clock steering pulls
+it in. The `_tx_advance_note` of `houdini-ul.json` and of each dual-band
+config gives the details.
 
 ## 4. Run the demo
 

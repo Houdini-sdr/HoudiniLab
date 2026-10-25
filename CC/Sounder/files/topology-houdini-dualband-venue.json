@@ -1,0 +1,15 @@
+{
+    "_comment": "THE DEMO VENUE's addresses (HS-202 mode-V roles: .22 = BS, .21 = UE, the XUD1A on .22): the boards on the venue's control network 192.168.10.x, reached only through the rig host. The lab topology is topology-houdini-dualband.json; this file is for a re-demo at a venue wired the same way.",
+    "BaseStations": {
+        "BS0": {
+            "sdr": [
+                "192.168.10.22"
+            ]
+        }
+    },
+    "Clients": {
+        "sdr": [
+            "192.168.10.21"
+        ]
+    }
+}

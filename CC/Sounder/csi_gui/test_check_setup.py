@@ -83,8 +83,8 @@ clock_file = os.path.join(root, "clock.json")
 def clock_adj(dac, cal=408):
     return "holdover=1 man_dac=%d rb_dac=%d pll1_locked=1 ref=calibrated cal_dac=%d offset=%d" % (dac, dac, cal, dac - cal)
 json.dump({"127.0.0.1": clock_adj(404, 404), "127.0.0.2": clock_adj(408)}, open(clock_file, "w"))
-same = {k: "v1" for k in ("fpga_version", "fpga_commit", "fpga_board", "device_version",
-                          "device_build", "host_version", "host_build")}
+same = dict({k: "v1" for k in ("fpga_version", "fpga_commit", "fpga_board", "device_build", "host_build")},
+            device_version="0.6.0", host_version="0.6.0")
 json.dump({"127.0.0.1": same, "127.0.0.2": same}, open(info_file, "w"))
 
 env = dict(os.environ, PYTHONPATH=fake)
@@ -160,15 +160,17 @@ check(rc == 1 and lv["egress 127.0.0.2"] == "FAIL" and lv["egress 127.0.0.1"] ==
 json.dump({"127.0.0.1": HEALTHY, "127.0.0.2": "drop=p0:17,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marked=0"},
           open(egress_file, "w"))
 rc, rep, lv = run()
-check(rc == 0 and lv["egress 127.0.0.2"] == "PASS", "drops without the stall bit pass (breaks if any nonzero count fails)")
-# Saturated at 255 (only an egress reset clears them): a WARN naming the port,
-# since the run's link health is then blind to new drops; not a FAIL.
-json.dump({"127.0.0.1": HEALTHY, "127.0.0.2": "drop=p0:255,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marked=0"},
-          open(egress_file, "w"))
-rc, rep, lv = run()
 det = [r["detail"] for r in rep["results"] if r["what"] == "egress 127.0.0.2"]
-check(rc == 0 and lv["egress 127.0.0.2"] == "WARN" and det and "drop p0" in det[0] and lv["egress 127.0.0.1"] == "PASS",
-      "saturated egress drop counters are a WARN naming the port (mutation: only the stall bit read)")
+check(rc == 0 and lv["egress 127.0.0.2"] == "PASS" and det and "drop p0 17" in det[0],
+      "drops without the stall bit pass and are named (breaks if any nonzero count fails, or the counts go unnamed)")
+# The counts are 32 bits and wrap (0.6.0): 255 is no ceiling, and neither is
+# the largest value, so neither warns.
+for v in ("255", "4294967295"):
+    json.dump({"127.0.0.1": HEALTHY, "127.0.0.2": "drop=p0:%s,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marked=0" % v},
+              open(egress_file, "w"))
+    rc, rep, lv = run()
+    check(rc == 0 and lv["egress 127.0.0.2"] == "PASS" and lv["egress 127.0.0.1"] == "PASS",
+          "a drop count of %s passes (mutation: the 8-bit saturation WARN kept): %s" % (v, lv))
 # The plugin from the --soapy-root prefix: the venv without a Houdini module
 # (the demo rig's, since the release prefixes carry it) and the prefix with one.
 vmod = os.path.join(venv, "lib", "SoapySDR", "modules0.8-3", "libHoudiniSDRSupport.so")
@@ -210,6 +212,26 @@ check(rc == 1 and lv.get("stack match") == "PASS" and lv.get("lockstep 127.0.0.1
       "a host release that is not the radio's device release FAILs each node (mutation: the lockstep check "
       "removed, the nodes agreeing passes): %s" % lv)
 json.dump({"127.0.0.1": same, "127.0.0.2": same}, open(info_file, "w"))
+# The release floor (0.6.0, the walkthrough's 2.1): a matched older pair
+# passes the lockstep and FAILs each node; a later release passes.
+old = dict(same, device_version="0.5.0", host_version="0.5.0")
+json.dump({"127.0.0.1": old, "127.0.0.2": old}, open(info_file, "w"))
+rc, rep, lv = run()
+det = [r["detail"] for r in rep["results"] if r["what"] == "release 127.0.0.2"]
+check(rc == 1 and lv.get("stack match") == "PASS" and "lockstep 127.0.0.1" not in lv
+      and lv.get("release 127.0.0.1") == "FAIL" and lv.get("release 127.0.0.2") == "FAIL" and det and "0.6.0" in det[0],
+      "a matched 0.5.0 pair FAILs the release floor on each node, naming 0.6.0 (mutation: no release floor): %s" % lv)
+new = dict(same, device_version="0.10.0", host_version="0.10.0")
+json.dump({"127.0.0.1": new, "127.0.0.2": new}, open(info_file, "w"))
+rc, rep, lv = run()
+check(rc == 0 and "release 127.0.0.1" not in lv and "release 127.0.0.2" not in lv,
+      "release 0.10.0 passes the floor (mutation: the releases compared as strings): %s" % lv)
+odd = dict(same, device_version="v1", host_version="v1")
+json.dump({"127.0.0.1": odd, "127.0.0.2": odd}, open(info_file, "w"))
+rc, rep, lv = run()
+check(rc == 1 and lv.get("release 127.0.0.1") == "FAIL",
+      "a release that is not a dotted number FAILs (mutation: an unreadable release let through): %s" % lv)
+json.dump({"127.0.0.1": same, "127.0.0.2": same}, open(info_file, "w"))
 # A slow first open (DEMO_VERIFICATION 9.83: 3.34 s against the 3 s timeout):
 # one timeout is tried again and passes; one that persists names the slow
 # open, not the venv.
@@ -228,14 +250,35 @@ json.dump({"127.0.0.1": "drop=p0:0,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marke
            "127.0.0.2": "drop=p0:0,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marked=255"}, open(egress_file, "w"))
 rc, rep, lv = run()
 det = [r["detail"] for r in rep["results"] if r["what"] == "egress 127.0.0.2"]
-check(rc == 0 and lv["egress 127.0.0.1"] == "PASS" and lv["egress 127.0.0.2"] == "WARN" and det and "marked" in det[0],
-      "a saturated single marked=N counter is a WARN, an unsaturated one passes (mutation: only per-port items read)")
+check(rc == 0 and lv["egress 127.0.0.1"] == "PASS" and lv["egress 127.0.0.2"] == "PASS" and det
+      and "marked 255" in det[0],
+      "the single marked=N count passes at any value and is named (mutation: only per-port items read, or the "
+      "8-bit saturation WARN kept): %s" % det)
+# Build 2's own string (fpga 1.46, SH-571's device): from HS-329 F1c the
+# radio appends the count of frames drained while the link was down, named
+# when nonzero like the others.
+json.dump({"127.0.0.1": "drop=p0:0,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marked=7;link_down=0",
+           "127.0.0.2": "drop=p0:0,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marked=0;link_down=12"}, open(egress_file, "w"))
+rc, rep, lv = run()
+det = {r["what"]: r["detail"] for r in rep["results"] if r["what"].startswith("egress")}
+check(rc == 0 and lv["egress 127.0.0.1"] == "PASS" and lv["egress 127.0.0.2"] == "PASS"
+      and "link_down" not in det["egress 127.0.0.1"] and "link_down 12" in det["egress 127.0.0.2"],
+      "a link_down count passes, named when nonzero (mutation: link_down not read, or read as a fault): %s" % det)
+json.dump({"127.0.0.1": "drop=p0:0,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marked=0",
+           "127.0.0.2": "drop=p0:0,p1:0,p2:0,p3:0;stall_seen=1,stall_evt=1;marked=0;link_down=3"}, open(egress_file, "w"))
+rc, rep, lv = run()
+fix = [r.get("fix", "") for r in rep["results"] if r["what"] == "egress 127.0.0.2"]
+check(rc == 1 and lv["egress 127.0.0.2"] == "FAIL" and fix and "link's return clears" in fix[0] and "bounce" not in fix[0],
+      "a stall on a radio that reports link_down (gateware whose link's return clears it) fails without the host-bounce "
+      "advice (mutation: one advice for both gateware): %s" % fix)
 json.dump({"127.0.0.1": "drop=p0:0,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marked=0",
            "127.0.0.2": "drop=p0:3,p1:2,p2:0,p3:255;stall_seen=1,stall_evt=7;marked=5"}, open(egress_file, "w"))
 rc, rep, lv = run()
-check(rc == 1 and lv["egress 127.0.0.1"] == "PASS" and lv["egress 127.0.0.2"] == "FAIL",
-      "the device's own strings (its lifecycle test's golden lines): clean passes, a recorded stall fails (mutation: "
-      "stall_seen not read)")
+fix = [r.get("fix", "") for r in rep["results"] if r["what"] == "egress 127.0.0.2"]
+check(rc == 1 and lv["egress 127.0.0.1"] == "PASS" and lv["egress 127.0.0.2"] == "FAIL"
+      and fix and "bounce of this host's data port" in fix[0],
+      "the device's own strings (its lifecycle test's golden lines): clean passes, a recorded stall fails, with the "
+      "host-bounce advice on gateware without link_down (mutation: stall_seen not read, or one advice for both)")
 json.dump({"127.0.0.1": HEALTHY}, open(egress_file, "w"))
 rc, rep, lv = run()
 det = [r["detail"] for r in rep["results"] if r["what"] == "egress 127.0.0.2"]

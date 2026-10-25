@@ -1,0 +1,15 @@
+{
+    "_comment": "The lab bench as cabled, with the roles exchanged against topology-houdini-dualband.json: .21 = BS, .22 = UE (DEMO_BENCH_RUNBOOK.md A2). The demo configs name topology-houdini-dualband.json; run them on this bench with --topology files/topology-houdini-dualband-swap.json (the dashboard, check_setup.py, demo_run.sh).",
+    "BaseStations": {
+        "BS0": {
+            "sdr": [
+                "168.6.244.21"
+            ]
+        }
+    },
+    "Clients": {
+        "sdr": [
+            "168.6.244.22"
+        ]
+    }
+}
