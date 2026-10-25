@@ -124,8 +124,17 @@ BaseRadioSet::BaseRadioSet(Config* cfg, const bool calibrate_proc) : _cfg(cfg) {
     if (calibrate_proc && _cfg->imbalance_cal_en() == true) {
       if (_cfg->bs_channel().find('A') != std::string::npos)
         dciqCalibrationProc(0);
-      if (_cfg->bs_channel().find('B') != std::string::npos)
-        dciqCalibrationProc(1);
+      if (_cfg->bs_channel().find('B') != std::string::npos) {
+        // A Houdini radio's RX snooper taps RX ch0 alone (no channel select in
+        // the bitstream): before SoapyHoudiniSDR 0.7.0 a ch1 read returned
+        // ch0's samples, so ch1 was calibrated from ch0, and from 0.7.0 it is
+        // refused by name (AP-125, HS-90).
+        if (_cfg->is_houdini())
+          MLPD_WARN("calibrate_analog: channel B not calibrated: a Houdini radio's RX snooper reads RX ch0 "
+                    "only, so ch1's DC offset and IQ imbalance cannot be measured through it\n");
+        else
+          dciqCalibrationProc(1);
+      }
       MLPD_INFO("%s done!\n", __func__);
       return;
     }
