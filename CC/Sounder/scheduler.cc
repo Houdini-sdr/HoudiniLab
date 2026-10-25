@@ -139,6 +139,30 @@ void Scheduler::do_it() {
   size_t thread_antennas = 0;
   std::vector<pthread_t> recv_threads;
   std::vector<pthread_t> client_threads;
+  // Every exit stops the recorders, which drain what is queued and close their
+  // files, before ~Scheduler's gc() frees the rx buffers their queued tasks
+  // point into (AP-82: a throw out of the dispatch loop, the backlog case
+  // among them, left them running over freed memory). Declared before the
+  // join below, so on a throw it runs after the BS and UE threads are joined,
+  // as on the normal exit.
+  struct StopRecordersOnExit {
+    Scheduler* s;
+    bool done = false;
+    void operator()() {
+      if (done) return;
+      done = true;
+      for (auto recorder : s->recorders_) recorder->Stop();
+      for (auto recorder : s->recorders_) delete recorder;
+      s->recorders_.clear();
+    }
+    ~StopRecordersOnExit() {
+      try {
+        (*this)();
+      } catch (const std::exception& e) {
+        MLPD_ERROR("stopping the recorders after a failed run threw: %s\n", e.what());
+      }
+    }
+  } stop_recorders{this};
   // Every exit stops and joins the BS and UE threads before the receiver can
   // go: a throw out of the dispatch loop otherwise unwinds into ~Scheduler,
   // which unmakes the radios under live threads. The normal exit calls it
@@ -342,13 +366,7 @@ void Scheduler::do_it() {
 
   /* Force the recorders to process all of the data they have left and exit cleanly
          * Send a stop to all the recorders to allow the finalization to be done in parrallel */
-  for (auto recorder : this->recorders_) {
-    recorder->Stop();
-  }
-  for (auto recorder : this->recorders_) {
-    delete recorder;
-  }
-  this->recorders_.clear();
+  stop_recorders();
 }
 
 int Scheduler::getRecordedFrameNum() { return this->max_frame_number_; }
