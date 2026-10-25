@@ -43,8 +43,13 @@ class Scheduler {
 
   //RecorderWorker worker_;
   std::vector<Sounder::RecorderThread*> recorders_;
+  // Set when a recorder could not be told to stop: it may still read the rx
+  // buffers, so gc() leaves them allocated (AP-82).
+  bool recorders_stuck_ = false;
   std::vector<Sounder::Hdf5Reader*> readers_;
-  size_t max_frame_number_;
+  // One past the highest frame id of the RX events handled: the exit line's
+  // frames_seen.
+  size_t max_frame_number_ = 0;
 
   moodycamel::ConcurrentQueue<Event_data> message_queue_;
   std::vector<moodycamel::ConcurrentQueue<Event_data>*> tx_queue_;
