@@ -254,8 +254,9 @@ check(rc == 0 and lv["egress 127.0.0.1"] == "PASS" and lv["egress 127.0.0.2"] ==
       and "marked 255" in det[0],
       "the single marked=N count passes at any value and is named (mutation: only per-port items read, or the "
       "8-bit saturation WARN kept): %s" % det)
-# Build 2's own string (fpga 1.46, SH-571's device): it appends the count of
-# frames drained while the link was down, named when nonzero like the others.
+# Build 2's own string (fpga 1.46, SH-571's device): from HS-329 F1c the
+# radio appends the count of frames drained while the link was down, named
+# when nonzero like the others.
 json.dump({"127.0.0.1": "drop=p0:0,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marked=7;link_down=0",
            "127.0.0.2": "drop=p0:0,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marked=0;link_down=12"}, open(egress_file, "w"))
 rc, rep, lv = run()
@@ -267,15 +268,17 @@ json.dump({"127.0.0.1": "drop=p0:0,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marke
            "127.0.0.2": "drop=p0:0,p1:0,p2:0,p3:0;stall_seen=1,stall_evt=1;marked=0;link_down=3"}, open(egress_file, "w"))
 rc, rep, lv = run()
 fix = [r.get("fix", "") for r in rep["results"] if r["what"] == "egress 127.0.0.2"]
-check(rc == 1 and lv["egress 127.0.0.2"] == "FAIL" and fix and "before 1.47" in fix[0] and "from 1.47" in fix[0],
-      "a stall on a radio that reports link_down still fails, and the advice holds on gateware before 1.47 and from "
-      "it (mutation: the old advice, true before 1.47 only): %s" % fix)
+check(rc == 1 and lv["egress 127.0.0.2"] == "FAIL" and fix and "link's return clears" in fix[0] and "bounce" not in fix[0],
+      "a stall on a radio that reports link_down (gateware whose link's return clears it) fails without the host-bounce "
+      "advice (mutation: one advice for both gateware): %s" % fix)
 json.dump({"127.0.0.1": "drop=p0:0,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marked=0",
            "127.0.0.2": "drop=p0:3,p1:2,p2:0,p3:255;stall_seen=1,stall_evt=7;marked=5"}, open(egress_file, "w"))
 rc, rep, lv = run()
-check(rc == 1 and lv["egress 127.0.0.1"] == "PASS" and lv["egress 127.0.0.2"] == "FAIL",
-      "the device's own strings (its lifecycle test's golden lines): clean passes, a recorded stall fails (mutation: "
-      "stall_seen not read)")
+fix = [r.get("fix", "") for r in rep["results"] if r["what"] == "egress 127.0.0.2"]
+check(rc == 1 and lv["egress 127.0.0.1"] == "PASS" and lv["egress 127.0.0.2"] == "FAIL"
+      and fix and "bounce of this host's data port" in fix[0],
+      "the device's own strings (its lifecycle test's golden lines): clean passes, a recorded stall fails, with the "
+      "host-bounce advice on gateware without link_down (mutation: stall_seen not read, or one advice for both)")
 json.dump({"127.0.0.1": HEALTHY}, open(egress_file, "w"))
 rc, rep, lv = run()
 det = [r["detail"] for r in rep["results"] if r["what"] == "egress 127.0.0.2"]

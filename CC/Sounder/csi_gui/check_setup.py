@@ -349,11 +349,14 @@ def hwinfo(ip, port):
 def check_egress(rep, ip, raw, err=None):
     # stall_seen (REGISTERS.md, EGRESS_STALL_WD) records that the egress merge
     # sat in a frame without progress, after which the radio sends nothing
-    # over a link that reads up. Before fpga 1.47 the bit stays until the
-    # gateware is reloaded, and a bounce of this host's data port (a host
-    # reboot, a cable pull) sets it; from 1.47 the link's return clears it, so
-    # a set bit there is a stall since the link last came up. A PL reload or a
-    # reboot recovers it on either. The per-port drop counts alone are not that.
+    # over a link that reads up; a PL reload or a reboot recovers it. On
+    # gateware before HS-329 F1c the bit stays until a reload, and a bounce of
+    # this host's data port (a host reboot, a cable pull) sets it. From F1c
+    # (in every map v3 build) the link's return clears it, so a set bit is a
+    # stall since the link last came up. The same change added LINK_DOWN_DROPS,
+    # which the radio reports as link_down, so that field tells the two apart;
+    # a version string cannot (1.45 names both). The per-port drop counts
+    # alone are not a stall.
     if err is not None:
         rep.add("FAIL", "egress %s" % ip, "the EGRESS_STATUS read failed (%s)" % err[:160],
                 "Run the check again; if it persists, ask whoever maintains the boards.")
@@ -361,6 +364,7 @@ def check_egress(rep, ip, raw, err=None):
     m = re.search(r"stall_seen=(\d+)", raw)
     drop = re.search(r"drop=([^;]*)", raw)
     marked = re.search(r"marked=(\d+)", raw)
+    link_down = re.search(r"link_down=(\d+)", raw)
     lacks = [f for f, g in (("stall_seen", m), ("drop", drop), ("marked", marked)) if g is None]
     if lacks:
         rep.add("FAIL", "egress %s" % ip, "EGRESS_STATUS lacks %s (%s)" % (", ".join(lacks), (raw or "empty")[:120]),
@@ -368,23 +372,25 @@ def check_egress(rep, ip, raw, err=None):
                 "maintains the boards).")
     elif int(m.group(1)):
         rep.add("FAIL", "egress %s" % ip, "the radio's data egress has stalled (%s); it will send no samples although its link is up" % raw,
-                "Reload the radio's gateware (PL) or reboot the radio. On gateware before 1.47 a bounce of this host's "
-                "data port (a host reboot, a cable pull) leaves this; from 1.47 the link's return clears it, so a "
-                "stall read now happened since the link last came up: tell whoever maintains the boards.")
+                "Reload the radio's gateware (PL) or reboot the radio, and tell whoever maintains the boards: on "
+                "this gateware the link's return clears a stall, so this one happened since the link last came up."
+                if link_down else
+                "Reload the radio's gateware (PL) or reboot the radio. On this gateware a bounce of this host's data "
+                "port (a host reboot, a cable pull) causes it, and it stays until then.")
     else:
         # The per-port drop counts and the one marked-frame count are 32 bits
         # and wrap from SoapyHoudiniSDR 0.6.0 on (its HOUDINI_PROTOCOL section
         # 2.7; MIN_RELEASE fails an older radio), and only an egress reset
-        # clears them: a PL load or a core reset (a GT_RESET from fpga 1.47;
-        # before it a long data-link loss reset the core too). So does the
-        # link_down count of frames drained while the link was down, where the
-        # radio reports it. A count standing at any value is history, not a
+        # clears them: a PL load, or the core's reset, which from HS-329 F1c a
+        # GT_RESET reaches and a link loss does not (before F1c a long data-link
+        # loss reset it too). So does the link_down count of frames drained
+        # while the link was down, where the radio reports it (from F1c). A
+        # count standing at any value is history, not a
         # fault: the run's link health alarms on a change between its reads.
         # Nonzero ones are named.
         seen = ["drop %s %s" % (port, v) for port, v in re.findall(r"(p\d+):(\d+)", drop.group(1)) if int(v)]
         if int(marked.group(1)):
             seen.append("marked %s" % marked.group(1))
-        link_down = re.search(r"link_down=(\d+)", raw)
         if link_down and int(link_down.group(1)):
             seen.append("link_down %s" % link_down.group(1))
         rep.add("PASS", "egress %s" % ip, "no data-path stall recorded" +
