@@ -20,7 +20,15 @@ for k in ("run_burst", "rx_framing", "iq_from_cs16", "tx_iq_tone", "tx_lfm_chirp
 sys.path[:0] = [examples, os.path.join(here, "..", "tests", "hil"), here]
 import beacon_tdd as bt
 import teardown_framer as tf
+import setting_reports as sr
 tf.SOAPY_SDR_RX = 0
+# The capture is fpga 1.45's 27 keys; SoapyHoudiniSDR 0.7.0's parser takes
+# exactly 1.47's 28, which add cancels (REPLAY_CANCELS), and refuses the rest.
+# Until a 1.47 capture replaces it, that one key is added at 0 for a parser
+# that wants it (AP-125); any other difference still fails the parse below.
+if "cancels" in sr.TX_BANK_KEYS and ",cancels=" not in CAPTURED:
+    CAPTURED = ";".join(bank + ",cancels=0" for bank in CAPTURED.split(";"))
+    print("NOTE the 1.45 capture is given cancels=0 for this 0.7.0 parser (%s)" % examples)
 fails = 0
 def check(ok, what):
     global fails; print(("PASS " if ok else "FAIL ") + what, flush=True); fails += (not ok)
