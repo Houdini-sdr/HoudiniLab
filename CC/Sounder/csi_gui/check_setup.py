@@ -347,10 +347,13 @@ def hwinfo(ip, port):
 
 
 def check_egress(rep, ip, raw, err=None):
-    # The stall bit is sticky (REGISTERS.md, EGRESS_STALL_WD): once the egress
-    # merge sat in a frame without progress, as when the host's data port went
-    # down under it, the radio sends nothing more over a link that is up, until
-    # its gateware is reloaded. The per-port drop counts alone are not that.
+    # stall_seen (REGISTERS.md, EGRESS_STALL_WD) records that the egress merge
+    # sat in a frame without progress, after which the radio sends nothing
+    # over a link that reads up. Before fpga 1.47 the bit stays until the
+    # gateware is reloaded, and a bounce of this host's data port (a host
+    # reboot, a cable pull) sets it; from 1.47 the link's return clears it, so
+    # a set bit there is a stall since the link last came up. A PL reload or a
+    # reboot recovers it on either. The per-port drop counts alone are not that.
     if err is not None:
         rep.add("FAIL", "egress %s" % ip, "the EGRESS_STATUS read failed (%s)" % err[:160],
                 "Run the check again; if it persists, ask whoever maintains the boards.")
@@ -365,17 +368,25 @@ def check_egress(rep, ip, raw, err=None):
                 "maintains the boards).")
     elif int(m.group(1)):
         rep.add("FAIL", "egress %s" % ip, "the radio's data egress has stalled (%s); it will send no samples although its link is up" % raw,
-                "Reload the radio's gateware (PL) or reboot the radio. A bounce of this host's data port (a host reboot, a cable pull) causes it.")
+                "Reload the radio's gateware (PL) or reboot the radio. On gateware before 1.47 a bounce of this host's "
+                "data port (a host reboot, a cable pull) leaves this; from 1.47 the link's return clears it, so a "
+                "stall read now happened since the link last came up: tell whoever maintains the boards.")
     else:
         # The per-port drop counts and the one marked-frame count are 32 bits
         # and wrap from SoapyHoudiniSDR 0.6.0 on (its HOUDINI_PROTOCOL section
-        # 2.7; MIN_RELEASE fails an older radio), and only an egress reset (a
-        # PL load, a long data-link loss) clears them. A count standing at any
-        # value is history, not a fault: the run's link health alarms on a
-        # change between its reads. Nonzero ones are named.
+        # 2.7; MIN_RELEASE fails an older radio), and only an egress reset
+        # clears them: a PL load or a core reset (a GT_RESET from fpga 1.47;
+        # before it a long data-link loss reset the core too). So does the
+        # link_down count of frames drained while the link was down, where the
+        # radio reports it. A count standing at any value is history, not a
+        # fault: the run's link health alarms on a change between its reads.
+        # Nonzero ones are named.
         seen = ["drop %s %s" % (port, v) for port, v in re.findall(r"(p\d+):(\d+)", drop.group(1)) if int(v)]
         if int(marked.group(1)):
             seen.append("marked %s" % marked.group(1))
+        link_down = re.search(r"link_down=(\d+)", raw)
+        if link_down and int(link_down.group(1)):
+            seen.append("link_down %s" % link_down.group(1))
         rep.add("PASS", "egress %s" % ip, "no data-path stall recorded" +
                 ("; counts since the last egress reset: %s" % ", ".join(seen) if seen else ""))
 
