@@ -10,10 +10,13 @@ front end, slots mode, errors, the end-of-run checks, warning counts, UE
 acquisition, the BS framer (with --bs_rx_debug) and the carrier. The
 verdict, last, is FAIL on an error, on a nonzero end-of-run count, on a
 missing end-of-run line (they are printed as the radios close, so a run that
-did not close cleanly has none), or when no data flowed (the UE never locked
-on the beacon, or the BS produced no constellation); link-health alarms, lost
-pilots, untrusted windows and late releases are warnings to read. Exits 1 on
-FAIL.
+did not close cleanly has none), when no data flowed (the UE never locked
+on the beacon, or the BS produced no constellation), or when an antenna
+carried no usable data: a tenth or more of the constellation records low, or,
+in a run directory with the dashboard's MER samples (mer.txt, demo_run.sh's),
+an antenna with no sample or with its median under its band's demo floor;
+link-health alarms, lost pilots, untrusted windows and late releases are
+warnings to read. Exits 1 on FAIL.
 """
 import glob, os, re, statistics as st, sys
 from collections import Counter
@@ -28,11 +31,43 @@ ERRORS = r"what\(\)|terminate called|bs_rx_slots: TDD_RX_SLOTS|mode V bring-up:"
 
 HOST_COUNTERS = ("tdd_straddle", "rxq_ovfl", "ring_ovfl")
 
+# An antenna that carries nothing scores every record low, so with two
+# antennas half the run's records are (DEMO_VERIFICATION 9.84, W5A1: 2,560 of
+# 5,120); healthy runs read 0 to 0.07 %, and older stacks up to 1.76 % (AP-58),
+# which no fixed floor this low tells apart. A tenth is a gross failure only.
+CNS_LOW_FAIL = 0.10
+# Each band's demo floor, in dB of MER (no 15 s sample of a demo-length run
+# under it, 9.84 to 9.86); the band is the BS receive channel's NCO, the
+# sub-6 carrier (2425 MHz) or the X-band chain's IF (4380 MHz).
+MER_FLOOR = {"sub-6": 33.0, "X-IF": 28.0}
+XIF_MIN_MHZ = 3000.0
+
 
 def fpga_version(L):
     """The lowest fpga_version the log's stack lines name, as (major, minor), or None."""
     v = [tuple(int(x) for x in m.group(1).split(".")) for l in L for m in [re.search(r"fpga_version=(\d+\.\d+)", l)] if m]
     return min(v) if v else None
+
+
+def bs_bands(L):
+    """[(rx channel, band)] of the BS's receive channels in their antenna order,
+    from the mode V bring-up's 'BS <id> mode V: RX ch<k>: NCO <f> MHz' lines (a
+    retried open prints them again)."""
+    out = []
+    for l in L:
+        m = re.search(r"\bBS \S+ mode V: RX ch(\d+): NCO ([0-9.]+) MHz", l)
+        if m and int(m.group(1)) not in [ch for ch, _ in out]:
+            out.append((int(m.group(1)), "X-IF" if float(m.group(2)) >= XIF_MIN_MHZ else "sub-6"))
+    return out
+
+
+def mer_samples(M):
+    """{antenna: [MER dB]} from mer_sampler.py's lines ('/ant/<i>/cns MER <x> dB')."""
+    out = {}
+    for l in M:
+        for a, v in re.findall(r"/ant/(\d+)/cns MER (-?[0-9.]+) dB", l):
+            out.setdefault(int(a), []).append(float(v))
+    return out
 
 
 def read_log(path):
@@ -47,8 +82,9 @@ def read_log(path):
         return [ANSI.sub("", l.rstrip("\n")) for l in f if "Config: {" not in l]
 
 
-def verdict(L):
-    """[(level, text)]: FAIL, WARN or PASS items against A6."""
+def verdict(L, mer=None):
+    """[(level, text)]: FAIL, WARN or PASS items against A6. `mer` is the run's
+    mer.txt lines, or None when there is none to judge."""
     out = []
     for l in L:
         if re.search(ERRORS, l):
@@ -66,6 +102,27 @@ def verdict(L):
     if not cns or cns[0] == 0:
         out.append(("FAIL", "BS: no constellation record (no CNS summary with datagrams): no UE uplink reached the "
                             "CSI view"))
+    elif cns[1] >= CNS_LOW_FAIL * cns[0]:
+        out.append(("FAIL", "BS: %d of %d constellation records low (%.1f %%): an antenna carries no usable data "
+                            "(AP-117)" % (cns[1], cns[0], 100.0 * cns[1] / cns[0])))
+    # Per antenna (AP-117): the dashboard's MER samples, each antenna against
+    # its band's floor. The median rides out a cold start's first minutes.
+    if mer is not None:
+        bands, got = bs_bands(L), mer_samples(mer)
+        if not bands:
+            out.append(("WARN", "MER samples beside the log, but no 'BS ... mode V: RX ch' line names the antennas' "
+                                "bands, so no per-antenna MER floor was judged"))
+        for ant, (ch, band) in enumerate(bands):
+            v = got.get(ant, [])
+            if not v:
+                out.append(("FAIL", "BS antenna %d (%s, RX ch%d): no MER sample in mer.txt: it carried nothing the "
+                                    "dashboard could score" % (ant, band, ch)))
+                continue
+            med = st.median(v)
+            what = "BS antenna %d (%s, RX ch%d): MER median %.1f dB over %d samples (%.1f..%.1f)" % (
+                ant, band, ch, med, len(v), min(v), max(v))
+            out.append(("FAIL", what + ", under its demo floor %.0f dB" % MER_FLOOR[band]) if med < MER_FLOOR[band]
+                       else ("PASS", what))
     slots = any("receives only its rx slots" in l for l in L)
     # Up to fpga 1.33 the host plugin drops the non-rx symbols itself, so
     # tdd_drop counts them by design (9.69: 51.7 M a channel); from 1.34 the
@@ -212,10 +269,19 @@ def steering_pushes(L):
     return sum(bool(re.search(r"Clock steering \[\d+\]: .*-> push [-+]\d", l)) for l in L)
 
 
+def read_mer(path):
+    """A run directory's mer.txt lines, or None (a log file, or a run without the sampler)."""
+    f = os.path.join(path, "mer.txt")
+    if not (os.path.isdir(path) and os.path.isfile(f)):
+        return None
+    with open(f, errors="ignore") as fh:
+        return fh.read().splitlines()
+
+
 def main(path):
     L = read_log(path)
     summary(L)
-    v = verdict(L)
+    v = verdict(L, read_mer(path))
     print("== verdict (DEMO_BENCH_RUNBOOK.md A6)")
     for level, text in v:
         print("  %-4s %s" % (level, text))

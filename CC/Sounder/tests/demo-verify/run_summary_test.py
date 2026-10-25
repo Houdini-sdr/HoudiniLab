@@ -136,6 +136,52 @@ check(any("late releases" in t and "ch0 24691" in t for t in w31) and not any("1
       "0.4.0's TX_HOST_STATUS (its key order, the ring keys last): release_late read, the cold and ring keys not "
       "taken for it (mutation: a looser key "
       "pattern): %s" % w31)
+# AP-117, W5A1 (DEMO_VERIFICATION 9.84): the X-IF reached no ADC, half the
+# records scored low and ant 1's MER read 2.6 dB, and the verdict was PASS.
+half = swap(GOOD, "(512 datagrams, 0 low)", "(5120 datagrams, 2560 low)")
+check(any(lv == "FAIL" and "2560 of 5120 constellation records low" in t for lv, t in rs.verdict(half)),
+      "half the constellation records low fails (mutation: the low fraction not judged)")
+check("FAIL" not in levels(swap(GOOD, "(512 datagrams, 0 low)", "(160256 datagrams, 2 low)"))
+      and "FAIL" not in levels(swap(GOOD, "(512 datagrams, 0 low)", "(5120 datagrams, 511 low)"))
+      and "FAIL" in levels(swap(GOOD, "(512 datagrams, 0 low)", "(5120 datagrams, 512 low)")),
+      "the low fraction fails from a tenth: L198's 2 of 160,256 and 511 of 5,120 pass, 512 fails (mutation: any "
+      "low record fails, or a floor other than 10 %)")
+MODEV = [  # W5S2's lines, the UE's first as there, moved to a channel the BS does not use so its role filter shows
+    "9:167121 INFOR: UE 168.6.244.22 mode V: RX ch1: NCO 4380.000 MHz, occupied +-48.600 MHz, zone 2, cal Mode 2, "
+    "no channel filter",
+    "10:013783 INFOR: BS 168.6.244.21 mode V: RX ch0: NCO 2425.000 MHz, occupied +-23.940 MHz, zone 1, cal Mode 1, "
+    "+-24 MHz channel filter ON",
+    "10:013783 INFOR: BS 168.6.244.21 mode V: RX ch2: NCO 4380.000 MHz, occupied +-48.600 MHz, zone 2, cal Mode 2, "
+    "no channel filter"]
+check(rs.bs_bands(GOOD + MODEV + MODEV) == [(0, "sub-6"), (2, "X-IF")],
+      "the BS's bands in antenna order, once each, the UE's channel not among them (mutation: the role not read, "
+      "or a retried open's lines counted again): %s" % rs.bs_bands(GOOD + MODEV + MODEV))
+def mer(a0, a1):
+    """mer_sampler lines, one per (sub-6, X-IF) pair (W5A1's format); None leaves the antenna out."""
+    return ["18:44:%02d UTC " % i + "; ".join(
+        "/ant/%d/cns MER %.1f dB, EVM 1.68 %%, 14064 pts, frame 1675, age 9 ms" % (a, v)
+        for a, v in ((0, x0), (1, x1)) if v is not None) for i, (x0, x1) in enumerate(zip(a0, a1))] + [
+        "4 samples, 0 stale, failed or empty"]
+def mv(m):
+    return rs.verdict(GOOD + MODEV, m)
+ok = mv(mer([35.5, 35.4, 36.0, 36.2], [30.9, 30.6, 31.9, 31.0]))
+check("FAIL" not in [lv for lv, _ in ok] and sum("MER median" in t for lv, t in ok if lv == "PASS") == 2,
+      "both antennas over their floors pass, each named (mutation: the MER rule removed): %s" % ok)
+w5a1 = mv(mer([35.5, 35.4, 36.0, 36.2], [2.6, 2.7, 2.6, 2.6]))
+check(any(lv == "FAIL" and "antenna 1 (X-IF, RX ch2): MER median 2.6" in t for lv, t in w5a1),
+      "W5A1's X-IF at 2.6 dB fails, named by band and channel (mutation: one antenna's MER taken for the run's)")
+gone = mv(mer([35.5, 35.4, 36.0, 36.2], [None] * 4))
+check(any(lv == "FAIL" and "antenna 1" in t and "no MER sample" in t for lv, t in gone),
+      "an antenna with no MER sample fails (mutation: judge only the antennas the samples name)")
+check("FAIL" in [lv for lv, _ in mv(mer([32.0, 32.4, 32.1, 32.6], [30.0, 30.2, 29.9, 30.1]))]
+      and "FAIL" not in [lv for lv, _ in mv(mer([34.0, 34.1, 33.9, 34.2], [28.5, 28.4, 28.9, 28.6]))],
+      "each band against its own floor: sub-6 at 32 fails its 33, X-IF at 28.5 passes its 28 (mutation: one floor "
+      "for both bands, or the floors swapped)")
+check("FAIL" not in [lv for lv, _ in mv(mer([24.5, 35.0, 36.1, 36.0, 35.8], [20.1, 31.0, 31.5, 31.2, 31.4]))],
+      "a cold start's low first sample passes on the median (mutation: the minimum judged)")
+check(any(lv == "WARN" and "no per-antenna MER floor" in t for lv, t in rs.verdict(GOOD, mer([36.0], [31.0])))
+      and "FAIL" not in levels(GOOD),
+      "MER samples with no band line warn that the floors were not judged (mutation: antennas assumed sub-6)")
 # main: the exit status is the verdict's, read from a run directory's largest log
 d = tempfile.mkdtemp(prefix="run_summary_")
 open(os.path.join(d, "small_cpu.log"), "w").write("x\n")
@@ -148,5 +194,12 @@ open(os.path.join(d, "VL1_051734.log"), "a").write(GOOD[1].replace("0 time jumps
 with contextlib.redirect_stdout(io.StringIO()):
     rc = rs.main(d)
 check(rc == 1, "main returns 1 on a FAIL (mutation: always 0)")
+open(os.path.join(d, "VL1_051734.log"), "w").write("\n".join(GOOD + MODEV) + "\n")
+open(os.path.join(d, "mer.txt"), "w").write("\n".join(mer([35.5, 35.4, 36.0], [2.6, 2.7, 2.6])) + "\n")
+out = io.StringIO()
+with contextlib.redirect_stdout(out):
+    rc = rs.main(d)
+check(rc == 1 and "antenna 1 (X-IF" in out.getvalue(),
+      "main judges the run directory's mer.txt (mutation: main passes no MER samples to the verdict)")
 import shutil; shutil.rmtree(d)
 print("%d failure(s)" % fails); sys.exit(1 if fails else 0)
