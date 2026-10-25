@@ -311,8 +311,10 @@ steered, cabled):
   large files off the host during a run.
 - **Radio opens that time out (SH-442).** A launch sometimes cannot open the BS
   within the device timeout (`SoapyRPCUnpacker::recv() TIMEOUT` in the log).
-  The sounder retries the open itself ("Radios Not Found. Will attempt a
-  retry..."); if every try fails, press Start again.
+  The sounder retries the open itself ("Radio open failed (attempt 1 of 2):
+  ...; retrying", the cause after the colon); if every try fails ("no retry
+  left"), read that cause before pressing Start again: a timeout is worth a
+  retry, a refused setup or a named TDD stop is not.
 - **Clock steering** is in the demo build and ON through the config
   (`sync.steer.enable` in its `sync` block, the only place it is set).
   Without it MER depends on the day: the two boards' offset reached 0.6-0.9 ppm

@@ -103,9 +103,11 @@ edges = GOOD + [  # HoudiniFramer.cc's two slot-edge warnings (S238's and S158's
 w = [t for lv, t in rs.verdict(edges) if lv == "WARN"]
 check("FAIL" not in levels(edges) and any("head at the slot cut: 1 lines" in t for t in w) and any("tail at the slot cut: 2 lines" in t for t in w),
       "a burst at either slot edge is a warning to read, each side counted (mutation: the edge lines not read): %s" % w)
-rnf = ["57:1 WARNG: Radios Not Found. Will attempt a retry"] + GOOD
-check("FAIL" not in levels(rnf) and any("retried" in t for lv, t in rs.verdict(rnf) if lv == "WARN"),
-      "a radio open that was retried and recovered is a warning, not a failure (mutation: Radios Not Found as an error)")
+rnf = ["Radio open failed (attempt 1 of 2): the radios did not come up: SoapyRPCUnpacker::recv() TIMEOUT; retrying"] + GOOD
+old = ["Exception: Radios Not Found. Will attempt a retry... Re-Try Now!"] + GOOD  # the banner before it named its cause
+check(all("FAIL" not in levels(x) and any("retried" in t for lv, t in rs.verdict(x) if lv == "WARN") for x in (rnf, old)),
+      "a radio open that was retried and recovered is a warning, not a failure, in the banner's new form and its old "
+      "(mutation: the open failure as an error, or the old form not read)")
 K = rs.alarm_kinds([
     "57:2 WARNG: BS x link health: [BS x] 5.0 s: irq 1/s, preflight ok: egress.drop_p0 +3; host.rxq_ovfl_ch2 +7"
     " | app: rx_err +0, rx_short +0, rx_pad +0, tx_short +0, tx_sat +0",

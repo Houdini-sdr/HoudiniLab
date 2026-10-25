@@ -23,9 +23,10 @@ from collections import Counter
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from sounder_log import ANSI, alarm_kinds, cns_total  # noqa: E402,F401  alarm_kinds: rung_report and the test read it here too
 
-# "Radios Not Found. Will attempt a retry" is the in-process retry of a slow or
-# refused open (8.127, 8.131): a warning when the run then closes cleanly; one
-# that never recovers has no end-of-run lines and fails on those.
+# "Radio open failed (attempt k of n): <cause>" is the in-process retry of a
+# slow or refused open (8.127, 8.131; logs before it read "Radios Not Found"): a
+# warning when the run then closes cleanly; one that never recovers has no
+# end-of-run lines and fails on those.
 ERRORS = r"what\(\)|terminate called|bs_rx_slots: TDD_RX_SLOTS|mode V bring-up:"
 
 
@@ -175,7 +176,7 @@ def verdict(L, mer=None):
                       ("window marked untrusted", r"marked untrusted"),
                       ("UE burst head at the slot cut", r"starts at the pilot slot's edge"),
                       ("UE burst tail at the slot cut", r"runs to the pilot slot's far edge"),
-                      ("a radio open retried (Radios Not Found)", r"Radios Not Found")]:
+                      ("a radio open failed and was retried", r"Radio open failed \(attempt|Radios Not Found")]:
         n = sum(bool(re.search(pat, l)) for l in L)
         if n:
             out.append(("WARN", "%s: %d lines" % (name, n)))
