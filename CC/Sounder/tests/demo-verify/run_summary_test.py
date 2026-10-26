@@ -108,10 +108,12 @@ old = ["Exception: Radios Not Found. Will attempt a retry... Re-Try Now!"] + GOO
 check(all("FAIL" not in levels(x) and any("retried" in t for lv, t in rs.verdict(x) if lv == "WARN") for x in (rnf, old)),
       "a radio open that was retried and recovered is a warning, not a failure, in the banner's new form and its old "
       "(mutation: the open failure as an error, or the old form not read)")
-last = GOOD + ["Radio open failed (attempt 2 of 2): the radios did not come up: the TDD ladder's TX_CLEAR_ALL (RFCORE "
-               "0x024) did not land; no retry left, the run did not start"]
+why = ("the TDD ladder's TX clear did not land: the device accepted TDD_CMD tx_clear, but the clear epoch did not "
+       "move on ch0=5")
+last = GOOD + ["Radio open failed (attempt 2 of 2): the radios did not come up: " + why +
+               "; no retry left, the run did not start"]
 v = rs.verdict(last)
-check(any(lv == "FAIL" and t == "the radio open failed on every attempt: the TDD ladder's TX_CLEAR_ALL (RFCORE 0x024) did not land" for lv, t in v)
+check(any(lv == "FAIL" and t == "the radio open failed on every attempt: " + why for lv, t in v)
       and not any("retried" in t for lv, t in v),
       "the last attempt's line fails naming its cause, and is not counted as a retry (mutation: the no-retry line "
       "read as a retried open): %s" % v)

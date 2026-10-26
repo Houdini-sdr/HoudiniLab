@@ -259,7 +259,7 @@ std::string readClearEpochs(SoapySDR::Device* dev, std::map<int, long long>& epo
     try {
       raw = dev->readSetting("TX_BANK_STATUS");
     } catch (const std::exception& e) {
-      return std::string("the TDD ladder cannot check its TX_CLEAR_ALL: the TX_BANK_STATUS read threw (") + e.what() +
+      return std::string("the TDD ladder cannot check its TX clear: the TX_BANK_STATUS read threw (") + e.what() +
              ")";
     }
     epochs = houdini::health::txClearEpochs(raw);
@@ -267,7 +267,7 @@ std::string readClearEpochs(SoapySDR::Device* dev, std::map<int, long long>& epo
         std::all_of(epochs.begin(), epochs.end(), [](const auto& e) { return e.second >= 0; }))
       return "";
   }
-  return "the TDD ladder cannot check its TX_CLEAR_ALL: TX_BANK_STATUS gave no usable clear epoch for every TX "
+  return "the TDD ladder cannot check its TX clear: TX_BANK_STATUS gave no usable clear epoch for every TX "
          "bank in " + std::to_string(kClearEpochReads) + " reads ('" + raw + "')";
 }
 
@@ -544,12 +544,13 @@ void HoudiniFramer::armTdd(void) {
                               ",loops=1,offs=" + std::to_string(offs));
       };
       setup_framer();
-      // A retry re-runs the setup after the ladder's raw TX_CLEAR_ALL, which
-      // rewinds the device's replay fill but not the host stream's: the reload
-      // would append at the pre-clear fill and be refused (past the RAM depth,
-      // and from F6b2 an append at a stale fill). Deactivating the replay
-      // stream rewinds the host's fill, so the reload is a fresh load at 0.
-      // The first setup needs none: nothing was loaded before its ladder.
+      // A retry re-runs the setup after the ladder's TX clear, which rewinds
+      // the device's replay fill; the reload must start at 0 on the host too,
+      // since the device refuses an append at a stale fill (F6b2). The plugin
+      // rewinds the host stream's fill on TDD_CMD tx_clear (SoapyHoudiniSDR
+      // 0.7.0, SH-573), and the deactivate rewinds it as well, so the reload is
+      // a fresh load at 0 without resting on that rewind alone. The first setup
+      // needs neither: nothing was loaded before its ladder.
       const auto reload = [&]() {
         r->deactivateXmit();
         setup_framer();

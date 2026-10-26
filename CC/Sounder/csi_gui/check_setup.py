@@ -199,14 +199,36 @@ def check_plugin(rep, venv, root=None):
     rep.add("PASS", "plugin", "%s loads (%s)" % (os.path.basename(mods[0]), fac[0].split("...")[-1].strip()))
 
 
+def examples_release(ex):
+    """The SoapyHoudiniSDR release of the checkout whose host/examples `ex` is,
+    from its shared/houdini_version.h; None when that cannot be read."""
+    try:
+        with open(os.path.join(ex, "..", "..", "shared", "houdini_version.h")) as f:
+            m = re.search(r'kReleaseVersion = "([0-9][0-9.]*)"', f.read())
+    except OSError:
+        return None
+    return release_tuple(m.group(1)) if m else None
+
+
 def check_examples(rep, ex):
     # `ex`: where the teardown will look (--examples)
-    if os.path.isfile(os.path.join(ex, "houdini_setup.py")):
-        rep.add("PASS", "teardown", "houdini_setup found in %s" % ex)
-    else:
+    if not os.path.isfile(os.path.join(ex, "houdini_setup.py")):
         rep.add("WARN", "teardown", "houdini_setup.py not in %s" % ex,
                 "The framer teardown before each start needs it: pass --examples "
                 "<path-to-SoapyHoudiniSDR>/host/examples (walkthrough section 2.4).")
+        return
+    # The teardown parses TX_BANK_STATUS with these examples' parser, which
+    # refuses a newer radio's keys: on an older checkout it cannot check the
+    # TX clear's epochs and only warns, the device having judged the clear.
+    rel, need = examples_release(ex), ".".join(map(str, MIN_RELEASE))
+    if rel is None or rel < MIN_RELEASE:
+        rep.add("WARN", "teardown", "the host examples in %s are %s, older than this code's %s, so the teardown "
+                "cannot check its TX clear on the radio" % (ex, "SoapyHoudiniSDR " + ".".join(map(str, rel)) if rel
+                                                             else "of no release this check can read", need),
+                "Pass --examples <a SoapyHoudiniSDR %s or newer checkout>/host/examples (walkthrough section "
+                "2.4)." % need)
+    else:
+        rep.add("PASS", "teardown", "houdini_setup found in %s (SoapyHoudiniSDR %s)" % (ex, ".".join(map(str, rel))))
 
 
 PROC = "/proc"  # the process table read below; --proc-root points the test at its own

@@ -113,9 +113,9 @@ Scheduler::Scheduler(Config* in_cfg, unsigned int core_start)
                                  cl_tx_ptoks_ptr_));
   } catch (ReceiverException& re) {
     gc();
-    // The cause, not a guess at it: every failure to bring the radio sets up
-    // lands here, a node that did not answer, a refused setup and the TDD
-    // ladder's named stops alike (AP-63, AP-126).
+    // Every failure to bring the radio sets up lands here, a node that did
+    // not answer, a refused setup and the TDD ladder's named stops alike
+    // (AP-63, AP-126), so the cause is passed on as it is.
     throw ReceiverException(std::string("the radios did not come up: ") + re.what());
   }
 }
@@ -148,8 +148,8 @@ void Scheduler::do_it() {
   std::vector<pthread_t> client_threads;
   // Every exit stops the recorders, which drain what is queued and close their
   // files, before ~Scheduler's gc() frees the rx buffers their queued tasks
-  // point into (AP-82: a throw out of the dispatch loop, the backlog case
-  // among them, left them running over freed memory). Declared before the
+  // point into (AP-82: on a throw out of the dispatch loop, the backlog case
+  // among them, they would otherwise run over freed memory). Declared before the
   // join below, so on a throw it runs after the BS and UE threads are joined,
   // as on the normal exit.
   struct StopRecordersOnExit {
@@ -380,8 +380,8 @@ void Scheduler::do_it() {
   /* Force the recorders to process all of the data they have left and exit cleanly
          * Send a stop to all the recorders to allow the finalization to be done in parrallel */
   stop_recorders();
-  // A recorder told to stop and failing is a failed run, as it was when the
-  // stop threw out of here: its data may not all be written.
+  // A recorder that could not be told to stop fails the run: its data may not
+  // all be written.
   if (this->recorders_stuck_) throw std::runtime_error("a recorder could not be stopped: the recording may be incomplete");
 }
 

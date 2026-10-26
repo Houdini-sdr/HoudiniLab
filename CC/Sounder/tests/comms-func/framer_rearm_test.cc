@@ -6,15 +6,17 @@
  *
  * A refused TDD_ARM runs the teardown ladder, whose TDD_CMD tx_clear rewinds
  * the device's replay fill to 0, then re-runs the load/schedule/strobe setup.
- * The host's replay stream keeps its own fill (the next writeStream's address)
- * until a deactivateStream rewinds it, so a reload without one appends at the
- * pre-clear fill and the device refuses it (past the RAM depth; from the
- * software lane's F6b2, any append at a stale fill). The bring-up then fails
- * on the first refused arm instead of retrying.
+ * The reload must start at 0 on the host too: the device refuses an append at
+ * a stale fill (past the RAM depth; from the software lane's F6b2, any append
+ * at a stale fill), and the bring-up would then fail on the first refused arm
+ * instead of retrying. SoapyHoudiniSDR 0.7.0's plugin rewinds the host fill on
+ * tx_clear itself; the framer also deactivates the replay stream before the
+ * reload, so the fresh load does not rest on that rewind alone.
  *
- * The fake radio models the host side (its fill, rewound by deactivateXmit)
- * and the fake device the device side (its fill, rewound by the TX clear),
- * with F6b2's rule: a load lands at 0 or at the device's fill, nowhere else.
+ * The fake radio models a host whose fill only deactivateXmit rewinds (the
+ * case the deactivate covers) and the fake device the device side (its fill,
+ * rewound by the TX clear), with F6b2's rule: a load lands at 0 or at the
+ * device's fill, nowhere else.
  * Each check names the mutation that breaks it.
  *
  * Run from CC/Sounder (the config's relative path): ctest sets the working
@@ -23,6 +25,7 @@
 #include <SoapySDR/Device.hpp>
 #include <SoapySDR/Errors.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <functional>
 #include <memory>
@@ -53,6 +56,7 @@ class FakeDevice : public SoapySDR::Device {
   size_t level = 0;  // the device's replay fill
   bool clear_lands = true;    // false: tx_clear returns without clearing
   bool clear_refused = false; // tx_clear throws, nothing written
+  bool clear_unknown = false; // tx_clear is an unknown command (a radio older than 0.7.0)
   int epoch = 1;              // the power-up envelope
   bool status_throws = false; // the TX_BANK_STATUS read fails
   int tear_reads = 0;         // TX_BANK_STATUS reads torn after each clear
@@ -65,6 +69,7 @@ class FakeDevice : public SoapySDR::Device {
       throw std::runtime_error("TDD_ARM: framer busy (state=running): abort first");
     if (key == "TDD_CMD" && value == "tx_clear") {
       if (clear_refused) throw std::runtime_error("TDD_CMD tx_clear: refused: the TDD framer is still engaged");
+      if (clear_unknown) throw std::runtime_error("TDD_CMD: unknown command \"tx_clear\"");
       if (clear_lands) {
         log->push_back("TX_CLEAR_ALL");
         level = 0;
@@ -86,7 +91,9 @@ class FakeDevice : public SoapySDR::Device {
   }
 };
 
-// The host side: the replay stream's fill, which only a deactivate rewinds.
+// The host side: the replay stream's fill, which only a deactivate rewinds here
+// (the case the framer's deactivate covers; 0.7.0's plugin also rewinds it on
+// tx_clear).
 class FakeRadio : public Radio {
  public:
   FakeDevice dev;
@@ -211,10 +218,29 @@ int main() {
                 (a.why.empty() ? "" : "; threw: " + a.why) + ")");
     }
     {
+      const Armed a = armWith(0);
+      const auto at = [&a](const std::string& l) {
+        const auto it = std::find(a.log.begin(), a.log.end(), l);
+        return it == a.log.end() ? -1 : static_cast<int>(it - a.log.begin());
+      };
+      const int ab = at("set TDD_CMD=abort"), cl = at("set TDD_CMD=tx_clear"), gr = at("set TDD_CMD=gate_release");
+      check(ab >= 0 && ab < cl && cl < gr,
+            "the ladder runs abort, then tx_clear, then gate_release (mutation: the gate released before the clear, "
+            "which lets a strobe play the uncleared bank: " + joined(a.log) + ")");
+    }
+    {
+      const Armed a = armWith(0, [](FakeDevice& d) { d.clear_unknown = true; });
+      check(a.why.find("needs the radio's SoapyHoudiniSDR 0.7.0") != std::string::npos && a.arm_writes == 0 &&
+                count(a.log, "set TDD_CMD=gate_release") == 1,
+            "a radio that does not know tx_clear: the gates are released, then the bring-up throws naming the "
+            "release it needs (mutation: the hint dropped, which leaves only the device's 'unknown command': " +
+                (a.why.empty() ? std::string("armed") : "threw '" + a.why.substr(0, 140) + "'") + ")");
+    }
+    {
       const Armed a = armWith(1);
       check(a.why.empty() && a.arm_writes == 2,
             "first TDD_ARM refused: the retry re-arms and the bring-up completes (mutation: no deactivate before "
-            "the retry's reload, which the device refuses: " +
+            "the retry's reload, which the device refuses over a host fill only a deactivate rewinds: " +
                 (a.why.empty() ? std::string("armed") : "threw '" + a.why + "'") + ")");
       check(count(a.log, "load at 0") == 2 && count(a.log, "load at 0 REFUSED") == 0 &&
                 count(a.log, "deactivate") == 1,

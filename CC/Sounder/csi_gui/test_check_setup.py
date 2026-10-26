@@ -16,7 +16,15 @@ sd = os.path.join(root, "Sounder"); venv = os.path.join(root, "venv"); fake = os
 for d in ("files", "build", "include"):
     os.makedirs(os.path.join(sd, d))
 os.makedirs(os.path.join(venv, "bin")); os.makedirs(os.path.join(venv, "lib", "SoapySDR", "modules0.8-3")); os.makedirs(fake)
-ex = os.path.join(root, "examples"); os.makedirs(ex); open(os.path.join(ex, "houdini_setup.py"), "w").close()
+# The host examples as a SoapyHoudiniSDR checkout lays them out, its release
+# in shared/houdini_version.h beside them.
+ex = os.path.join(root, "SoapyHoudiniSDR", "host", "examples"); os.makedirs(ex)
+open(os.path.join(ex, "houdini_setup.py"), "w").close()
+os.makedirs(os.path.join(root, "SoapyHoudiniSDR", "shared"))
+def examples_at(release):
+    open(os.path.join(root, "SoapyHoudiniSDR", "shared", "houdini_version.h"), "w").write(
+        'inline constexpr const char* kReleaseVersion = "%s";\n' % release)
+examples_at("0.7.0")
 
 # Both "radios" on one listening port: 127.0.0.1 and 127.0.0.2 (all of 127/8 is
 # loopback). Accept and close, or the backlog fills and later connects time out.
@@ -418,5 +426,16 @@ check(tf.resolve_nodes(["10.9.9.9"], topo, cfx, sd) == (["10.9.9.9"], None)
       "--node wins over --topology and --conf, and --topology over --conf (mutation: --conf read first)")
 nodes, err = tf.resolve_nodes(None, None, os.path.join(sd, "files", "houdini-bad.json"), sd)
 check(nodes == [] and "cannot read the config" in err, "an unreadable config is refused, not a traceback")
+examples_at("0.6.0")
+rc, rep, lv = run("--quick")
+det = [r["detail"] for r in rep["results"] if r["what"] == "teardown"]
+check(lv.get("teardown") == "WARN" and det and "0.6.0" in det[0] and "0.7.0" in det[0],
+      "host examples older than the floor: the teardown line WARNs, naming both releases (mutation: the examples' "
+      "release not read, or compared with a floor of 0.6.0): %s" % det)
+os.remove(os.path.join(root, "SoapyHoudiniSDR", "shared", "houdini_version.h"))
+rc, rep, lv = run("--quick")
+check(lv.get("teardown") == "WARN",
+      "host examples whose release cannot be read WARN too (mutation: an unreadable release taken as new enough)")
+examples_at("0.7.0")
 import shutil; shutil.rmtree(root, ignore_errors=True)  # no temp dir left per run
 print("%d failure(s)" % fails); sys.exit(1 if fails else 0)

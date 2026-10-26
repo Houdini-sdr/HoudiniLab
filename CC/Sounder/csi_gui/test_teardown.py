@@ -2,7 +2,10 @@
 # _teardown) runs TDD_CMD tx_clear and checks the clear epoch it must move on
 # every TX bank: a fake device answers with a captured TX_BANK_STATUS, parsed by the
 # driver's own setting_reports from the SoapyHoudiniSDR host examples. Skipped
-# (77) where those examples are not checked out. Run from csi_gui/ (ctest does).
+# (77) where those examples are not checked out, or are older than 0.7.0, whose
+# parser refuses fpga 1.47's 28-key read (the teardown then cannot run its
+# epoch check against a real radio either; check_setup warns on such a
+# checkout). Run from csi_gui/ (ctest does).
 import os, re, sys, types
 here = os.path.dirname(os.path.abspath(__file__))
 examples = os.environ.get("HOUDINI_EXAMPLES", os.path.expanduser("~/repos/SoapyHoudiniSDR/host/examples"))
@@ -22,25 +25,22 @@ import beacon_tdd as bt
 import teardown_framer as tf
 import setting_reports as sr
 tf.SOAPY_SDR_RX = 0
-# The capture is fpga 1.47's 28 keys, cancels (REPLAY_CANCELS) the last; a
-# parser from before SoapyHoudiniSDR 0.7.0 takes exactly the 27 before it and
-# refuses the rest, so for one that key is dropped (AP-125; it goes when 0.7.0
-# is the floor); any other difference still fails the parse below.
-if "cancels" not in sr.TX_BANK_KEYS:
-    CAPTURED = re.sub(r",cancels=\d+", "", CAPTURED)
-    print("NOTE the 1.47 capture's cancels is dropped for this pre-0.7.0 parser (%s)" % examples)
+if "cancels" not in sr.TX_BANK_KEYS:  # 1.47's 28th key, which 0.7.0's parser brought
+    print("SKIP setting_reports in %s is older than SoapyHoudiniSDR 0.7.0 (set HOUDINI_EXAMPLES)" % examples)
+    sys.exit(77)
 fails = 0
 def check(ok, what):
     global fails; print(("PASS " if ok else "FAIL ") + what, flush=True); fails += (not ok)
 
 class Fake:
     """A device whose TDD_CMD tx_clear counts in both banks' clear epoch, unless
-    it is refused (raises, nothing cleared) or returns without clearing (a
-    device-side judge that passed a clear that never landed); `torn` reads
-    after each clear are torn."""
-    def __init__(self, lands=True, refused=False, torn=0, throws=False):
+    it is refused (raises, nothing cleared; with `pulsed`, the pulse counted
+    first, as a refusal on an envelope that did not close) or returns without
+    clearing (a device-side judge that passed a clear that never landed);
+    `torn` reads after each clear are torn."""
+    def __init__(self, lands=True, refused=False, torn=0, throws=False, pulsed=False):
         self.lands, self.refused, self.tear, self.torn, self.throws = lands, refused, torn, 0, throws
-        self.e, self.log = 587, []
+        self.pulsed, self.e, self.log = pulsed, 587, []
     def readSetting(self, k):
         if k != "TX_BANK_STATUS":
             return "accepted=1"
@@ -52,16 +52,20 @@ class Fake:
     def writeSetting(self, k, v):
         self.log.append("%s=%s" % (k, v))
         if (k, v) == ("TDD_CMD", "tx_clear"):
+            self.torn = self.tear
             if self.refused:
+                self.e += self.pulsed
                 raise RuntimeError("TDD_CMD tx_clear: refused: the TDD framer is still engaged")
             if self.lands:
                 self.e += 1
-                self.torn = self.tear
     def getSampleRate(self, d, c): return 1.0
     def setSampleRate(self, d, c, r): pass
 
 def ran_all(f):
-    return all(x in f.log for x in ("TDD_CMD=abort", "TDD_CMD=tx_clear", "TDD_CMD=gate_release"))
+    """Every step written, in the ladder's order (a gate released before the
+    clear lets a strobe play the uncleared bank)."""
+    steps = ("TDD_CMD=abort", "TDD_CMD=tx_clear", "TDD_CMD=gate_release")
+    return all(x in f.log for x in steps) and [f.log.index(x) for x in steps] == sorted(f.log.index(x) for x in steps)
 
 f = Fake()
 check(bt._clear_epochs(f) == {0: 587, 1: 587},
@@ -80,11 +84,24 @@ f = Fake(refused=True)
 check(bt._teardown(f) is False and ran_all(f),
       "a refused tx_clear: False, and the gate release is still written (mutation: the refusal inside the writes' "
       "try, which skips the gate release)")
+f = Fake(refused=True, pulsed=True)
+check(bt._teardown(f) is False and ran_all(f),
+      "a tx_clear refused after its pulse counted: False (mutation: the refusal not judged, which the moved epoch "
+      "passes)")
 f = Fake(torn=1)
-check(bt._teardown(f) is True, "a read torn by the clear is read again (mutation: one read, which leaves it unchecked)")
+check(bt._teardown(f) is True, "a read torn by the clear is read again and the landed clear passes")
+f = Fake(lands=False, torn=1)
+check(bt._teardown(f) is False,
+      "a torn read after a clear that did not land is read again and judged: False (mutation: one read, which "
+      "leaves it unchecked and returns True)")
 f = Fake(torn=9)
 check(bt._teardown(f) is True and ran_all(f),
-      "every read torn: unchecked here, a warning and True (mutation: a torn read taken as an epoch)")
+      "every read torn after a landed clear: unchecked here, a warning and True (mutation: a torn read's first "
+      "value taken as the epoch, which reads it unmoved)")
+f = Fake(lands=False, torn=9)
+check(bt._teardown(f) is True,
+      "every read torn after a clear that did not land: unchecked here, True (mutation: a torn read's second value "
+      "taken as the epoch, which reads it unmoved and fails a clear it cannot judge)")
 f = Fake(throws=True)
 check(bt._teardown(f) is True and ran_all(f),
       "a TX_BANK_STATUS read that raises: the clear and the gate release are still written (mutation: the read "

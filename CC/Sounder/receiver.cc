@@ -509,9 +509,8 @@ void Receiver::loopRecv(int tid, int core_id, SampleBuffer* rx_buffer) {
 
   // read rx_offset to align the FPGA time of the BS
   // by performing dummy readStream()
-  // One frame per receive channel (AP-116: it held two, so a third channel's
-  // read ran past it). As before, the first is always there and a
-  // one-channel radio's second entry is null.
+  // One frame per receive channel (AP-116); the pointer array has at least
+  // two entries, the second null on a one-channel radio.
   std::vector<std::vector<std::complex<int16_t>>> samp_buffers(
       std::max<size_t>(1, num_channels), std::vector<std::complex<int16_t>>(config_->samps_per_frame(), 0));
   std::vector<void*> samp_buffer(std::max<size_t>(2, num_channels), nullptr);

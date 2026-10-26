@@ -186,8 +186,9 @@ int main(int argc, char* argv[]) {
         break;
 
       } catch (ReceiverException& rex) {
-        // Discovery usually fails on the first run, re-try. The last attempt
-        // says the run ends here, so a log never closes on a promised retry.
+        // Any failure to bring the radios up lands here (a slow first open is the
+        // usual one); retry. The last attempt says the run ends here, so a log
+        // never closes on a promised retry.
         std::cout << "Radio open failed (attempt " << cnt << " of " << maxTry << "): " << rex.what()
                   << (cnt < maxTry ? "; retrying" : "; no retry left, the run did not start") << std::endl;
         if (cnt < maxTry) std::this_thread::sleep_for(std::chrono::seconds(1));
