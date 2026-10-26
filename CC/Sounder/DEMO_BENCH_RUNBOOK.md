@@ -253,7 +253,7 @@ MHz. The older ladder (walkthrough section 3): `houdini-r0.json` (control),
 `houdini-dualband-r1.json`, `-r2.json`, `-r3a.json`, `houdini-dualband.json`
 (R3, the 48 MHz unsteered baseline of 9.1-9.54) and `houdini-dualband-40.json`;
 on a freshly deployed stack a short run of the demo config (9.70) replaces the
-climb. R0 (NCO 500 MHz) cannot run while the F3b chain is fitted: the VBF-2450+
+climb. R0 (NCO 500 MHz) cannot run while the A2 chain is fitted: the VBF-2450+
 bandpasses on the sub-6 DAC paths block its beacon, so the UE never acquires
 (`DEMO_VERIFICATION.md` 9.40). It is the control only with the filters out.
 

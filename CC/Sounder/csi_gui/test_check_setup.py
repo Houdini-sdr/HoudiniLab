@@ -17,7 +17,7 @@ for d in ("files", "build", "include"):
     os.makedirs(os.path.join(sd, d))
 os.makedirs(os.path.join(venv, "bin")); os.makedirs(os.path.join(venv, "lib", "SoapySDR", "modules0.8-3")); os.makedirs(fake)
 # The host examples as a SoapyHoudiniSDR checkout lays them out, its release
-# in shared/houdini_version.h beside them.
+# in the checkout's shared/houdini_version.h.
 ex = os.path.join(root, "SoapyHoudiniSDR", "host", "examples"); os.makedirs(ex)
 open(os.path.join(ex, "houdini_setup.py"), "w").close()
 os.makedirs(os.path.join(root, "SoapyHoudiniSDR", "shared"))
