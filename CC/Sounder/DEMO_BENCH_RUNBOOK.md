@@ -169,7 +169,7 @@ The XUD1A is the reworked board (RF 9.5 GHz, LO 13.88 GHz). It needs:
   which hands it to its Check, Start and teardown; `demo_run.sh` takes the
   prefix as its fourth argument. Without it no radio opens. The setup check's
   stack line shows which one loaded: `host_version` must equal
-  `device_version` and be 0.6.0 or later (else a FAIL on the `lockstep` or
+  `device_version` and be 0.7.0 or later (else a FAIL on the `lockstep` or
   `release` line), and `host_build` should equal `device_build`
   (else a WARN; the build in that prefix differs from the nodes' only by
   documentation commits, so both nodes WARN on it). Read SoapyHoudiniSDR's

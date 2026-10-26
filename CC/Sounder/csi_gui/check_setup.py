@@ -51,8 +51,10 @@ from teardown_framer import DEFAULT_EXAMPLES, roles_from_topology  # noqa: E402 
 MUST_MATCH = ("fpga_version", "fpga_commit", "fpga_board", "device_version",
               "device_build", "host_version", "host_build")
 # The oldest SoapyHoudiniSDR release this code runs on (CSI_DEMO_WALKTHROUGH
-# 2.1): the egress check reads its 32-bit counts, which saturate at 255 before it.
-MIN_RELEASE = (0, 6, 0)
+# 2.1): the TDD ladder and the teardown clear TX with TDD_CMD tx_clear, which
+# 0.7.0 brought (an older radio refuses it), and the egress check reads 32-bit
+# counts, which saturate at 255 before 0.6.0.
+MIN_RELEASE = (0, 7, 0)
 
 
 def release_tuple(v):

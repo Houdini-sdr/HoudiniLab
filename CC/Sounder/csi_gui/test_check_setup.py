@@ -84,7 +84,7 @@ def clock_adj(dac, cal=408):
     return "holdover=1 man_dac=%d rb_dac=%d pll1_locked=1 ref=calibrated cal_dac=%d offset=%d" % (dac, dac, cal, dac - cal)
 json.dump({"127.0.0.1": clock_adj(404, 404), "127.0.0.2": clock_adj(408)}, open(clock_file, "w"))
 same = dict({k: "v1" for k in ("fpga_version", "fpga_commit", "fpga_board", "device_build", "host_build")},
-            device_version="0.6.0", host_version="0.6.0")
+            device_version="0.7.0", host_version="0.7.0")
 json.dump({"127.0.0.1": same, "127.0.0.2": same}, open(info_file, "w"))
 
 env = dict(os.environ, PYTHONPATH=fake)
@@ -212,15 +212,17 @@ check(rc == 1 and lv.get("stack match") == "PASS" and lv.get("lockstep 127.0.0.1
       "a host release that is not the radio's device release FAILs each node (mutation: the lockstep check "
       "removed, the nodes agreeing passes): %s" % lv)
 json.dump({"127.0.0.1": same, "127.0.0.2": same}, open(info_file, "w"))
-# The release floor (0.6.0, the walkthrough's 2.1): a matched older pair
-# passes the lockstep and FAILs each node; a later release passes.
-old = dict(same, device_version="0.5.0", host_version="0.5.0")
+# The release floor (0.7.0, the walkthrough's 2.1): a matched older pair, the
+# release just before it, passes the lockstep and FAILs each node; a later
+# release passes.
+old = dict(same, device_version="0.6.0", host_version="0.6.0")
 json.dump({"127.0.0.1": old, "127.0.0.2": old}, open(info_file, "w"))
 rc, rep, lv = run()
 det = [r["detail"] for r in rep["results"] if r["what"] == "release 127.0.0.2"]
 check(rc == 1 and lv.get("stack match") == "PASS" and "lockstep 127.0.0.1" not in lv
-      and lv.get("release 127.0.0.1") == "FAIL" and lv.get("release 127.0.0.2") == "FAIL" and det and "0.6.0" in det[0],
-      "a matched 0.5.0 pair FAILs the release floor on each node, naming 0.6.0 (mutation: no release floor): %s" % lv)
+      and lv.get("release 127.0.0.1") == "FAIL" and lv.get("release 127.0.0.2") == "FAIL" and det and "0.7.0" in det[0],
+      "a matched 0.6.0 pair FAILs the release floor on each node, naming 0.7.0 (mutation: no release floor, or "
+      "the floor left at 0.6.0): %s" % lv)
 new = dict(same, device_version="0.10.0", host_version="0.10.0")
 json.dump({"127.0.0.1": new, "127.0.0.2": new}, open(info_file, "w"))
 rc, rep, lv = run()
