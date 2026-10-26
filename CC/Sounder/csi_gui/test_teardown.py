@@ -8,8 +8,8 @@ here = os.path.dirname(os.path.abspath(__file__))
 examples = os.environ.get("HOUDINI_EXAMPLES", os.path.expanduser("~/repos/SoapyHoudiniSDR/host/examples"))
 if not os.path.exists(os.path.join(examples, "setting_reports.py")):
     print("SKIP no setting_reports.py in %s (set HOUDINI_EXAMPLES)" % examples); sys.exit(77)
-fixture = open(os.path.join(here, "..", "tests", "comms-func", "fixtures", "link_health", "demo_stack_fi1.txt")).read()
-CAPTURED = re.search(r"^TX_BANK_STATUS=(.*)$", fixture, re.M).group(1)  # BS .22's two TX banks
+fixture = open(os.path.join(here, "..", "tests", "comms-func", "fixtures", "link_health", "stack21_b3_before.txt")).read()
+CAPTURED = re.search(r"^TX_BANK_STATUS = (.*)$", fixture, re.M).group(1)  # .21's two TX banks, fpga 1.47
 # beacon_tdd's module-level imports, stood in: only its teardown runs here
 for name in ("SoapySDR", "numpy", "houdini_setup"):
     sys.modules[name] = types.ModuleType(name)
@@ -22,13 +22,13 @@ import beacon_tdd as bt
 import teardown_framer as tf
 import setting_reports as sr
 tf.SOAPY_SDR_RX = 0
-# The capture is fpga 1.45's 27 keys; SoapyHoudiniSDR 0.7.0's parser takes
-# exactly 1.47's 28, which add cancels (REPLAY_CANCELS), and refuses the rest.
-# Until a 1.47 capture replaces it, that one key is added at 0 for a parser
-# that wants it (AP-125); any other difference still fails the parse below.
-if "cancels" in sr.TX_BANK_KEYS and ",cancels=" not in CAPTURED:
-    CAPTURED = ";".join(bank + ",cancels=0" for bank in CAPTURED.split(";"))
-    print("NOTE the 1.45 capture is given cancels=0 for this 0.7.0 parser (%s)" % examples)
+# The capture is fpga 1.47's 28 keys, cancels (REPLAY_CANCELS) the last; a
+# parser from before SoapyHoudiniSDR 0.7.0 takes exactly the 27 before it and
+# refuses the rest, so for one that key is dropped (AP-125; it goes when 0.7.0
+# is the floor); any other difference still fails the parse below.
+if "cancels" not in sr.TX_BANK_KEYS:
+    CAPTURED = re.sub(r",cancels=\d+", "", CAPTURED)
+    print("NOTE the 1.47 capture's cancels is dropped for this pre-0.7.0 parser (%s)" % examples)
 fails = 0
 def check(ok, what):
     global fails; print(("PASS " if ok else "FAIL ") + what, flush=True); fails += (not ok)
