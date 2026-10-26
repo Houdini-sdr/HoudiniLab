@@ -509,13 +509,12 @@ void Receiver::loopRecv(int tid, int core_id, SampleBuffer* rx_buffer) {
 
   // read rx_offset to align the FPGA time of the BS
   // by performing dummy readStream()
-  std::vector<std::complex<int16_t>> samp_buffer0(config_->samps_per_frame(),
-                                                  0);
-  std::vector<std::complex<int16_t>> samp_buffer1(config_->samps_per_frame(),
-                                                  0);
-  std::vector<void*> samp_buffer(2);
-  samp_buffer[0] = samp_buffer0.data();
-  if (num_channels == 2) samp_buffer[1] = samp_buffer1.data();
+  // One frame per receive channel (AP-116); the pointer array has at least
+  // two entries, the second null on a one-channel radio.
+  std::vector<std::vector<std::complex<int16_t>>> samp_buffers(
+      std::max<size_t>(1, num_channels), std::vector<std::complex<int16_t>>(config_->samps_per_frame(), 0));
+  std::vector<void*> samp_buffer(std::max<size_t>(2, num_channels), nullptr);
+  for (size_t c = 0; c < samp_buffers.size(); ++c) samp_buffer[c] = samp_buffers[c].data();
   // Scratch for the channel the reference antenna does NOT receive on. It has
   // to outlive the radioRx() call that writes into it: as a temporary,
   // samp[] would hold a dangling pointer and the radio would write into

@@ -1,0 +1,21 @@
+UTC 2026-10-26T01:17:23Z
+hw device_build = 819ee3b7
+hw device_build_date = 2026-10-26T00:20:44Z
+hw device_version = 0.6.0
+hw fpga_board = rfsoc4x2
+hw fpga_build_date = 2026-10-25T19:53:43
+hw fpga_commit = 86c011a5
+hw fpga_version = 1.47
+hw host_build = 819ee3b7
+hw host_build_date = 2026-10-26T00:20:55Z
+hw host_version = 0.6.0
+hw remote:version = 0.6.0-g40c3ef90
+LINK_STATUS = up=1 aligned=1 rx_status=1 rx_local_fault=0 rx_remote_fault=0 received_local_fault=0 hi_ber=0 tx_local_fault=0 core_reset=0 state=up rx_done=1 cdr_lock=0+1+2+3 events=0 settle_ms=500 rsfec_corrected=0 rsfec_uncorrected=3
+EGRESS_STATUS = drop=p0:0,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marked=0;link_down=0
+TX_BANK_STATUS = ch0:acked=0,late=0,under=0,seqerr=0,zerofill=0,fill=0,hwm=0,drops=0,last_seq=0,active=0,clkerr=0,free=64,cap=64,afull=0,aempty=1,gated=0,smiss=0,aclose=0,parked=0,late_seen=0,efault=0,played=0,clear_drops=0,clear_busy=0,tick=669768:669975,malformed=0,epoch=14:14,cancels=0;ch1:acked=0,late=0,under=0,seqerr=0,zerofill=0,fill=0,hwm=0,drops=0,last_seq=0,active=0,clkerr=0,free=64,cap=64,afull=0,aempty=1,gated=0,smiss=0,aclose=0,parked=0,late_seen=0,efault=0,played=0,clear_drops=0,clear_busy=0,tick=671041:671232,malformed=0,epoch=14:14,cancels=0
+CLOCK_ADJ = holdover=1 man_dac=408 rb_dac=408 pll1_locked=0 ref=calibrated cal_dac=408 offset=0
+FHCORE LINK_CAUSE (0x50) = 0x00000000
+FHCORE LINK_OUTAGE (0x54) = 0x0009A31B
+FHCORE LINK_AGE (0x58) = 0x0003FE24
+FHCORE RSFEC_CORRECTED (0xB0) = 0x00000000
+FHCORE RSFEC_UNCORRECTED (0xB4) = 0x00000003

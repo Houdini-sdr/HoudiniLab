@@ -149,10 +149,11 @@ def resolve_nodes(node, topology, conf, sounder_dir=_SOUNDER):
 def teardown_node(hs, teardown, ip, ch, passes):
     """Tear down one radio. Returns True on success.
 
-    `_teardown` swallows its own exceptions by design, so a failed write shows up
-    here only as an exception escaping the open or the settings read. Repeating
-    the sequence is the cheap guard against a partially applied first pass; the
-    operations are idempotent, so an extra pass costs nothing on a clean board.
+    `_teardown` swallows its own exceptions by design and prints each one; it
+    returns False when a write raised or its TX clear (TDD_CMD tx_clear) was
+    refused or did not land. Repeating the sequence is the cheap guard against a
+    partially applied first pass; the operations are idempotent, so an extra
+    pass costs nothing on a clean board.
     """
     try:
         sdr = hs.open_device(node=ip, ch=ch, verbose=False)["sdr"]
@@ -161,11 +162,13 @@ def teardown_node(hs, teardown, ip, ch, passes):
         return False
 
     try:
-        for _ in range(passes):
-            teardown(sdr)
+        passed = [teardown(sdr) is not False for _ in range(passes)]
     except Exception as e:  # noqa: BLE001
         print("  %s: FAILED during teardown (%s: %s)"
               % (ip, type(e).__name__, str(e)[:120]))
+        return False
+    if not all(passed):
+        print("  %s: FAILED: a teardown pass did not complete (its warning above)" % ip)
         return False
 
     # Best effort evidence for the operator. Not a pass/fail gate: the meaning of
