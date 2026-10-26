@@ -33,19 +33,23 @@ network that only the rig host reached (192.168.10.x):
 `files/topology-houdini-dualband-venue.json` keeps those addresses for a
 re-demo wired the same way (pass it as `--topology`).
 
-The bench is cabled with the roles exchanged against the frequency plan's:
-`.21` is the BS and `.22` the UE (A2). The demo configs name
-`files/topology-houdini-dualband.json`, the plan's roles (`.22` the BS), so
-every launch on this bench passes `--topology
-files/topology-houdini-dualband-swap.json` (A4). Both boards run their
+The bench runs the X-band RF chain (A2b) with the frequency plan's roles:
+`.22` is the BS and hosts the XUD1A, `.21` is the UE. That is the demo
+configs' own topology (`files/topology-houdini-dualband.json`), so a launch
+takes `--no-topology` (A4). The sub-6 cables are A2's two, which serve either
+orientation; the X-band runs through the front end, over the air or through
+a 20 dB pad. A2's cabled demo, with `.21` the BS through `--topology
+files/topology-houdini-dualband-swap.json`, needs its X-band IF cable back.
+Both boards run their
 reference in **calibrated hold** (`clock_ref = calibrated`; `.21` DAC code
 408, `.22` 404), with no shared 10 MHz: the UE-BS offset moves between
 sessions and as the boards warm, and a bring-up can start 1 to 2 ppm apart
 (2.2 to 4.6 kHz at 2425 MHz in `DEMO_VERIFICATION.md` 9.87, about 3.2 kHz in
-9.91) until the clock steering pulls it in (8.125, 8.137, 9.28). The X-band front end (the SYZYGY
-DNA adapters, the ADTR1107 power boards and the XUD1A) is off both boards, so
-only the cabled chain runs, with no role on either node (`role = none`, in
-highz). The X-band RF chain (A2b) needs it refitted.
+9.91; about 8 kHz, 3.3 ppm, from both nodes cold in 9.92) until the clock
+steering pulls it in (8.125, 8.137, 9.28). The X-band front end (the
+ADTR1107 power boards on both nodes, the XUD1A on `.22`) is fitted: a demo
+applies the roles (A2b step 1), and a hardware-in-the-loop suite wants them
+back at `role = none`.
 
 `enp1s0f1np1` is shared with the ZCU216 node (`.23`), moved by cable: plugged
 into `.22` for the demo. The port is forced for the ZCU216 (autonegotiation
@@ -87,10 +91,11 @@ second sub-6 filter at each ADC.
 
 ## A2b. The X-band RF chain (F2b: through the XUD1A and both ADTR1107 boards)
 
-Not on the bench as it is: the front end is off both boards (A1). The chain
-below is the plan's, with `.22` the BS, so it runs with the configs' own
-topology (`files/topology-houdini-dualband.json`): `demo_dashboard.sh
---no-topology`, and no `--topology` on the check or `demo_run.sh`.
+The bench as it is (A1). The chain below is the plan's, with `.22` the BS,
+so it runs with the configs' own topology
+(`files/topology-houdini-dualband.json`): `demo_dashboard.sh --no-topology`,
+and no `--topology` on the check or `demo_run.sh`. Over the air, the two
+ADTR1107 antennas replace the 20 dB pad (9.92).
 
 The X-band IF leaves `.21` DAC_A, goes up to RF 9.5 GHz in
 the XUD1A's channel A and out through `.21`'s ADTR1107, crosses a 20 dB pad
@@ -113,6 +118,14 @@ The XUD1A is the reworked board (RF 9.5 GHz, LO 13.88 GHz). It needs:
    filter from the XUD1A datasheet's Table 7; no manual LO tune is needed.
    From the rig host (its key is on both nodes; password login is the
    backup): `ssh houdini@168.6.244.22 'sudo houdini-role apply bs'`.
+   Before that apply, with the 12 V on, `sudo houdini-xud1a status` must read
+   `MISO=0` on its `spi-b pads` line; `MISO=1` means the XUD1A is unpowered or
+   its ribbon is not making contact: its 12 V off, `.22` shut down, re-seat
+   the flying leads first, then the ribbon (the software lane's XUD1A
+   checkout), and boot again. A node's role is set once with `sudo
+   houdini-provision --set-role ue` (`.21`, then `sudo houdini-role boot` to
+   apply it at once) or `bs` (`.22`), and cleared with `--set-role none` and
+   `sudo houdini-xbandpower personality highz --guard all`, no stream open.
 2. The LO check: `ssh houdini@168.6.244.22 'sudo houdini-xud1a pll status'` shows
    `lock_detect=1`, `rf16 ON at 13880000000...` and `doubler tracking table7
    (REG0070 0x23, filter 1 bias 3, ...)`; `houdini-role status` fails on
@@ -202,10 +215,15 @@ source ~/houdini_test/bin/activate
 cd ~/repos/HoudiniLab-rxwin/CC/Sounder
 cat /sys/devices/system/cpu/isolated   # 15-19 when A9 stage 1 is in force
 python3 csi_gui/check_setup.py --soapy-root $HOME/houdini_hil \
-  --topology files/topology-houdini-dualband-swap.json \
-  --conf files/houdini-dualband-xw-steer-slots.json   # must print Ready, egress PASS on both nodes
-tests/demo-verify/demo_dashboard.sh                   # Ctrl+C stops the dashboard and its sounder
+  --conf files/houdini-dualband-xw-steer-slots-fe.json   # must print Ready, egress PASS on both nodes
+tests/demo-verify/demo_dashboard.sh --no-topology        # Ctrl+C stops the dashboard and its sounder
 ```
+
+That is the X-band chain as the bench stands (A1, A2b): pick "Demo, X-band
+chain". On A2's cabled bench, with `.21` the BS, the check takes `--topology
+files/topology-houdini-dualband-swap.json` and `--conf
+files/houdini-dualband-xw-steer-slots.json`, and the dashboard runs with its
+default topology, the swapped one; pick "Demo, cabled".
 
 `demo_dashboard.sh` refuses while a dashboard or a sounder is up, then runs
 `csi_server.py --control` with this bench's arguments (its head lists the
@@ -216,8 +234,8 @@ options that change them):
   the replays in the page's list (A8b);
 - `--soapy-root $HOME/houdini_hil`: the host plugin of the radios' release, for
   every config (A3);
-- `--topology files/topology-houdini-dualband-swap.json`: the bench as cabled
-  (A1, A2);
+- `--topology files/topology-houdini-dualband-swap.json`: A2's cabled bench,
+  the default; `--no-topology` runs the X-band chain (A1, A2b);
 - `--sounder-arg=--core_map=main=16 --sounder-arg=--tx_cpu_affinity=18,19`:
   isolated cores (A9), clear of the BS receive flow as pacer_core_check last
   found it (A8c step 5; `--core-map` and `--tx-cpu-affinity` change them);
