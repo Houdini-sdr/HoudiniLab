@@ -142,8 +142,7 @@ fails.
   This code needs SoapyHoudiniSDR 0.7.0, one release throughout: its device
   module on both nodes and its host plugin's prefix on `<host>`. A host plugin
   of another release than the radios' draws a warning at best and a refusal
-  at worst (a 0.5.0 radio refuses a 0.4.0 host's receive setup), so the setup
-  check FAILs that pair on its `lockstep` line, and a radio older than 0.7.0
+  at worst, so the setup check FAILs that pair on its `lockstep` line, and a radio older than 0.7.0
   on its `release` line; its `stack` lines show the release each side runs.
 - **A clock plan for the two boards.** Each board's reference is a device
   setting (`clock_ref`) that whoever provisions the boards sets; the full
@@ -228,9 +227,12 @@ walkthrough can work without it.
 
 One more thing comes from that repository: the framer teardown in section 8.4
 imports `houdini_setup` from its host examples directory. The default location
-is `~/repos/SoapyHoudiniSDR/host/examples`. If you keep it somewhere else,
-pass the path as `--examples` to the setup check, the teardown, or the
-dashboard (which hands it to both):
+is `~/repos/SoapyHoudiniSDR/host/examples`. The checkout must be at the
+radios' release or newer (0.7.0 or later): the teardown reads each TX channel's
+clear count with its parser, and an older parser cannot read a newer radio's,
+so the teardown then skips that check, and the setup check's `teardown` line
+WARNs. If you keep it somewhere else, pass the path as `--examples` to the
+setup check, the teardown, or the dashboard (which hands it to both):
 
 ```sh
 python3 csi_gui/csi_server.py --control --examples <path-to-SoapyHoudiniSDR>/host/examples --conf files/<config>.json
@@ -415,7 +417,7 @@ Pilot and data placement is sample exact: the client pads each burst so its
 start escapes the driver's 3125 ns scheduling grid, and `tx_advance` in the
 config is a bench calibration that seats the burst at its nominal in-slot
 position (247 on the legacy one-rate path, 198 on the dual-band converter
-path with SoapyHoudiniSDR 0.6.0). If you change cabling, the RF path or the
+path, measured on SoapyHoudiniSDR 0.6.0 and confirmed on 0.7.0). If you change cabling, the RF path or the
 radio release, re-derive it: run the sounder with `--bs_rx_debug` across a few
 restarts and add the mean `pilot_grid_off` the base station prints to
 `tx_advance` (a positive seat, a late burst, needs a larger value). Take the

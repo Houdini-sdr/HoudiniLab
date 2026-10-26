@@ -39,9 +39,10 @@ The bench is cabled with the roles exchanged against the frequency plan's:
 every launch on this bench passes `--topology
 files/topology-houdini-dualband-swap.json` (A4). Both boards run their
 reference in **calibrated hold** (`clock_ref = calibrated`; `.21` DAC code
-408, `.22` 404), with no shared 10 MHz: the UE-BS offset stays under about half
-a ppm, but it moves between sessions and ramps as the boards warm
-(`DEMO_VERIFICATION.md` 8.125, 8.137, 9.28). The X-band front end (the SYZYGY
+408, `.22` 404), with no shared 10 MHz: the UE-BS offset moves between
+sessions and as the boards warm, and a bring-up can start 1 to 2 ppm apart
+(2.2 to 4.6 kHz at 2425 MHz in `DEMO_VERIFICATION.md` 9.87, about 3.2 kHz in
+9.91) until the clock steering pulls it in (8.125, 8.137, 9.28). The X-band front end (the SYZYGY
 DNA adapters, the ADTR1107 power boards and the XUD1A) is off both boards, so
 only the cabled chain runs, with no role on either node (`role = none`, in
 highz). The X-band RF chain (A2b) needs it refitted.
@@ -59,9 +60,9 @@ exchanged, so `.21` is the BS:
 
 | Link | From | Filter(s) | To |
 |---|---|---|---|
-| Sub-6 downlink (the beacon) | `.21` TX ch0 (DAC_B) | VBF-2450+ at the DAC and (since 9.69) at the ADC | `.22` RX ch0 (ADC_D) |
-| Sub-6 uplink | `.22` TX ch0 (DAC_B) | VBF-2450+ at the DAC and (since 9.69) at the ADC | `.21` RX ch0 (ADC_D) |
-| X-band IF uplink | `.22` TX ch1 (DAC_A) | VBFZ-4000-S+ at the DAC, and a second VBFZ-4000-S+ at the ADC | `.21` RX ch2 (ADC_B) |
+| Sub-6 downlink (the beacon) | `.21` TX ch0 (DAC_B) | VBF-2450+ (9.69 to 9.87 also had a second at the ADC) | `.22` RX ch0 (ADC_D) |
+| Sub-6 uplink | `.22` TX ch0 (DAC_B) | VBF-2450+ at the DAC (9.69 to 9.87 also had a second at the ADC) | `.21` RX ch0 (ADC_D) |
+| X-band IF uplink | `.22` TX ch1 (DAC_A) | two VBFZ-4000-S+ at the DAC (9.69 to 9.87: one at each end) | `.21` RX ch2 (ADC_B) |
 | HIL self-loop (unused by the demo) | `.21` TX ch1 (DAC_A) | none | `.21` RX ch1 (ADC_C) |
 
 To check the self-loops after any re-cable or power cycle:
@@ -70,14 +71,19 @@ with `SOAPY_SDR_ROOT=<the A3 prefix> SOAPY_SDR_PLUGIN_PATH=` set (it plays a
 tone on each TX in turn, so run it with no sounder up). On this bench `.21`
 reads `looped pairs (rx:tx): 1:1` and `.22` reads `none`. Its tone sits near
 235 MHz, outside the filters, so it sees only the bare loop; the two-node links
-show in a run, as the UE's beacon lock and the BS's pilot.
+show in a run, as the UE's beacon lock and the BS's pilot. A tool that opens
+the radio without multi-tile sync, as `loopback_map.py` does, draws the ADC's
+calibration state at each start: on `.21` one sub-6 cable read 55 to 90 dB over
+the floor across such starts with nothing moved (9.91). Judge a weak link from
+several starts, or from a run, which always opens with multi-tile sync.
 
 There is no X-band IF downlink and no attenuator in the chain (a 10 dB pad at
 each sub-6 receive end was tried and removed, 9.23 and 9.24). What each filter
 did to the levels, and why the in-channel "tilt" is cable ripple rather than
-the filters, is `DEMO_VERIFICATION.md` 9.15 to 9.24. The second sub-6 filter at each ADC
-costs about 2 dB of level against the recorded wired baseline; compare a new
-cabled run's levels with 9.69 to 9.71, not with 9.60/9.61.
+the filters, is `DEMO_VERIFICATION.md` 9.15 to 9.24. A second sub-6 filter at
+the ADC costs about 2 dB of level, so compare a new cabled run's levels with a
+run on the same filters: 9.91 with them at the DACs, 9.69 to 9.71 with the
+second sub-6 filter at each ADC.
 
 ## A2b. The X-band RF chain (F2b: through the XUD1A and both ADTR1107 boards)
 
@@ -174,6 +180,12 @@ The XUD1A is the reworked board (RF 9.5 GHz, LO 13.88 GHz). It needs:
   (else a WARN; the build in that prefix differs from the nodes' only by
   documentation commits, so both nodes WARN on it). Read SoapyHoudiniSDR's
   `docs/RELEASE_NOTES.md` for the release before a deploy changes it.
+- **Host examples.** The teardown before each Start imports the SoapyHoudiniSDR
+  host examples (`--examples`, default `~/repos/SoapyHoudiniSDR/host/examples`),
+  whose parser must be at the radios' release or newer: an older checkout
+  cannot read a 0.7.0 radio's TX channel status, so the teardown skips its
+  check of the clear and the setup check's `teardown` line WARNs. Point
+  `--examples` at a checkout of the radios' release if the default is older.
 - **Cores.** The sounder's `--core_map` places its threads by role and the
   main thread pins itself only after the radios start, so the plugin's BS
   receive workers run on the housekeeping cores 0-9 (AP-81, 9.44). The launch
@@ -312,14 +324,15 @@ full description).
 
 From the validation runs of the demo head (`DEMO_VERIFICATION.md` 9.69 on
 fpga 1.33, 9.70 to 9.73 on fpga 1.34, 9.85 on fpga 1.44 and SoapyHoudiniSDR
-0.6.0: `houdini-dualband-xw-steer-slots.json`, steered, cabled):
+0.6.0, 9.91 on fpga 1.47 and 0.7.0: `houdini-dualband-xw-steer-slots.json`,
+steered, cabled):
 
 | Where | Healthy | Note |
 |---|---|---|
-| MER (15 s samples) | sub-6 35.4-38.8 dB, X-IF 30.7-33.2 dB | 9.85's 53 min run on 0.6.0: means 37.2 and 31.8 dB. A cold start (just after a node power cycle) swings for the first few minutes while the steering converges |
+| MER (15 s samples) | sub-6 33.8-38.8 dB, X-IF 28.3-33.2 dB | 9.85's 53 min run on 0.6.0: means 37.2 and 31.8 dB; 9.91's 10 min run on fpga 1.47 and 0.7.0: medians 35.2 and 29.8 dB, about 2 dB lower on both bands, not yet traced. The verdict's floors are 33 and 28 dB by the median (A4). A cold start (just after a node power cycle) swings for the first few minutes while the steering converges |
 | Constellation low | 0.0 % in every 300 s window | from the run report's CNS lines |
 | Beacon SNR at the UE | about 37-47 dB wired, fixed per bring-up | the sync card's `beacon SNR`; over the air the detector floor is 25 dB |
-| Pilot seat at the BS (`pilot_grid_off`) | -3 to +2, means near 0 | `tx_advance` 198 on fpga 1.44 and 0.6.0: means -0.1 to -0.4 in three bring-ups and -0.9 over an hour (9.86). The margin is the burst's 32-sample zero pad on each side (`ofdm_tx_zero_prefix`, `ofdm_tx_zero_postfix`); A7 says what happens past it |
+| Pilot seat at the BS (`pilot_grid_off`) | -3 to +2, means near 0 | `tx_advance` 198 on fpga 1.44 and 0.6.0: means -0.1 to -0.4 in three bring-ups and -0.9 over an hour (9.86); -2 to +2 once settled, mean about -0.4, on fpga 1.47 and 0.7.0 (9.91). The margin is the burst's 32-sample zero pad on each side (`ofdm_tx_zero_prefix`, `ofdm_tx_zero_postfix`); A7 says what happens past it |
 | BS frames per second | about 50 (slots config), about 57 (all-rx config) | from the HOUDINI_BS_RX lines |
 | End-of-run lines | `RX read check`: 0 lost in rx slots, 0 out of order, 0 time jumps; `AP-87 slot check`: 0 outside the rx slots; `RX_HOST_STATUS`: tdd_straddle 0, and on fpga 1.34 tdd_drop 0 (a TDD map the packets do not tile ends the stream, and the run with it) | anything nonzero is a finding, not noise |
 
@@ -370,35 +383,39 @@ fpga 1.33, 9.70 to 9.73 on fpga 1.34, 9.85 on fpga 1.44 and SoapyHoudiniSDR
   durable guard is keeping every NIC receive queue off the pacer cores (AP-106).
 - **Egress drop counters.** Each radio's per-port egress drop counts, and
   its one marked-frame count (a single count after the ports merge), are 32
-  bits and wrap from SoapyHoudiniSDR 0.6.0 on, so a throughput test no longer
-  fills them (they stopped at 255 before). Judge a run by each count's change
+  bits and wrap, so a throughput test cannot fill them. Judge a run by each count's change
   over the run, not its value: a marked frame at a stream's teardown is the
   designed cleanup. check_setup names nonzero counts on its egress line and
   fails only the stall bit. They clear only on an egress reset: a PL load (a
-  node boot loads the bitstream again) or a data-link loss over 750 ms. With
+  node boot loads the bitstream again) or a `GT_RESET`; a data-link loss leaves
+  them counting. With
   an XUD1A attached, a boot follows A2b step 1: its 12 V off through the boot,
   on only after the PL has loaded, then the role.
 - **The pilot seat and `tx_advance`.** `tx_advance` 198 seats the UE's
-  burst at -0.1 to -0.9 samples on fpga 1.44 and 0.6.0, and the BS frame
-  dumps show its pilot and uplink slots centred, the 32-sample zero pad intact
-  on each side (9.86). The value moves the seat one sample per sample (a sweep
-  from 158 to 218 read +39.4 to -20.0). It was 169 until 0.6.0, whose
-  converters land the burst about 29 samples later (+26 to +31 at 169, 9.85;
-  +18 to +23 on 0.5.0, 9.84). Past the pad the two sides differ: at -30 and
-  earlier the BS warns "the UE burst starts at the pilot slot's edge" and its
-  seat pins at about -31, the device's cut taking the head; later than +32
-  nothing warns and the seat reads true, while the pilot's tail runs into the
-  uplink slot and the cut takes the uplink slot's last samples (MER was
-  unchanged at +39). In a bring-up's first minute or two the seat also
+  burst at -0.1 to -0.9 samples (9.86) and about -0.4 on fpga 1.47 and 0.7.0
+  (9.91), and the BS frame dumps show its pilot and uplink slots centred, the
+  32-sample zero pad intact on each side (9.86). The value moves the seat one
+  sample per sample (a sweep from 158 to 218 read +39.4 to -20.0), and a
+  converter or release change can move the seat by tens of samples (9.85), so
+  re-derive after one. Past the pad the two sides differ: at -30 and earlier
+  the BS warns "the UE burst starts at the pilot slot's edge" and its seat pins
+  at about -31, the device's cut taking the head; at +30 and later it warns
+  "the UE burst runs to the pilot slot's far edge" and the seat reads true,
+  while the pilot's tail runs into the uplink slot and the cut takes the uplink
+  slot's last samples (MER was unchanged at +39). Either warning means
+  re-derive `tx_advance`; `run_summary.py` lists both. In a bring-up's first minute or two the seat also
   follows the carrier offset between the nodes, about +2.2 samples per kHz
   of the BS's pre-FFT reading, until the clock steering pulls it in: a
   bring-up from 4.6 kHz read +8 to +10 for its first 10 s and settled near
-  -1 (9.87, fpga 1.45, where the seat at a matched offset equals 1.44's).
+  -1 (9.87).
   That is not a `tx_advance` error; read the seat once the offset has
   settled. Re-derive after any cabling, converter or stack change: the
   configs' `_tx_advance_note` gives the procedure.
-- **Late UE TX in the minute after hh:26:39.** The rig host's DGX Dashboard
-  (`dgx-dashboard-admin`) checks for updates every hour at hh:26:39: `apt
+- **Late UE TX in the minute after the hourly update check.** The rig host's
+  DGX Dashboard (`dgx-dashboard-admin`) checks for updates every hour, at the
+  minute and second of the rig host's boot (hh:26:39 on the boot of 9.84 to
+  9.91; `systemctl show -p ActiveEnterTimestamp dgx-dashboard-admin` gives
+  it): `apt
   update`, `apt list --upgradable`, `apt dist-upgrade -s`, then about fifteen
   `mstflint` queries of the ConnectX data NIC and `nvidia-smi` over the next
   minute. Every late-TX burst of 9.85 and 9.86 fell inside that minute, while
@@ -428,9 +445,10 @@ fpga 1.33, 9.70 to 9.73 on fpga 1.34, 9.85 on fpga 1.44 and SoapyHoudiniSDR
   teardown) and Start again. `did not land` means the radio accepted the clear
   but its channels' clear count did not move: stop and report it, since no
   run is valid over uncleared channels.
-- After a rig-host reboot, run the setup check before anything else: a bounce of
-  the host's data ports can wedge a node's FPGA egress (HS-225), which fails the
-  check's `egress` line; recover by reloading that node's PL or rebooting it.
+- After a rig-host reboot, run the setup check before anything else. The
+  link's return clears an egress stall, so an `egress` FAIL is a stall since
+  that node's link last came up: reload that node's PL or reboot it, and report
+  it.
 - A radio still held by an old sounder: the setup check names its pid; stop that
   run or `kill -INT <pid>`, the sounder's own stop (a plain `kill` skips its
   end-of-run checks and leaves the clock steered). Only if it has not exited
@@ -543,8 +561,8 @@ X-band, `files/houdini-dualband-steer.json`, recording `~/demo_rec/FINAL.rec`;
 and the canned recordings replayed with no radio (A8).
 
 Moving the rig means rebooting the rig host, which re-draws the NIC's receive
-hashing (a node's RX flow can land on a pinned core) and can wedge a node's data
-egress (HS-225). Do every step, every power-up.
+hashing (a node's RX flow can land on a pinned core). Do every step, every
+power-up.
 
 On the demo rig, steps 1 to 4 are one command after the power-up: `~/start_demo.sh`
 (the software lane's demo-day card, `docs/DEMO_DAY_CARD.md` section 4 in SoapyHoudiniSDR).
@@ -598,7 +616,7 @@ lacks (A1), so here steps 3 and 4 run by hand.
    - `python3 tests/demo-verify/pacer_core_check.py --cores 16,18,19` prints
      `ok`. If it names a core, Stop, pick isolated cores it did not name
      (`--cores` again to confirm), restart the dashboard with
-     `demo_dashboard.sh --core-map main=<core> --tx-cpu-affinity <two cores>`,
+     `demo_dashboard.sh --core-map main=<core> --tx-cpu-affinity <core>,<core>`,
      Start.
 6. During the demo: a stalled stream, or the BS sub-6 degraded from the start
    with the DCDR line (A8): Stop, then Start. Each card's |H| axis moves in
@@ -638,12 +656,10 @@ arm has a record row yet; the steps stay here for when one is run.
 4. Reboot only when no comparison run still needs the old kernel.
 5. Verify after the reboot: `cat /sys/devices/system/cpu/isolated` prints
    `15-19`; `cat /proc/cmdline` shows the arguments. Then run `check_setup.py`
-   (A4) before anything else: a host reboot bounces the data ports, and a
-   bounce can wedge a node's FPGA egress even with no run active (HS-225; the
-   node's ARP replies and control ACKs share the egress path). A wedged node
-   fails the `egress` line, and its run would get no samples at all. Recover by
-   reloading that node's PL or rebooting it; bouncing the host's data port once
-   more (`ip link set <port> down`, then `up`) cleared it once, not proven.
+   (A4) before anything else: a host reboot bounces the data ports. The
+   link's return clears an egress stall, so a node that fails the `egress`
+   line stalled since its link last came up, and its run would get no samples
+   at all: reload that node's PL or reboot it, and report it.
 6. Before the first run: `grep CONFIG_NO_HZ_FULL /boot/config-$(uname -r)`
    (stage 2 needs it), and `sudo apt install rt-tests` for cyclictest.
 7. Undo: remove the arguments, `sudo update-grub`, reboot.
