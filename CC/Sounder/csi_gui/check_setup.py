@@ -222,9 +222,10 @@ def check_examples(rep, ex):
     # TX clear's epochs and only warns, the device having judged the clear.
     rel, need = examples_release(ex), ".".join(map(str, MIN_RELEASE))
     if rel is None or rel < MIN_RELEASE:
-        rep.add("WARN", "teardown", "the host examples in %s are %s, older than this code's %s, so the teardown "
-                "cannot check its TX clear on the radio" % (ex, "SoapyHoudiniSDR " + ".".join(map(str, rel)) if rel
-                                                             else "of no release this check can read", need),
+        what = ("are SoapyHoudiniSDR %s, older than this code's %s" % (".".join(map(str, rel)), need) if rel
+                else "carry no release this check can read (shared/houdini_version.h beside them)")
+        rep.add("WARN", "teardown", "the host examples in %s %s, so the teardown may not read a %s radio's TX "
+                "channel status to check its TX clear" % (ex, what, need),
                 "Pass --examples <a SoapyHoudiniSDR %s or newer checkout>/host/examples (walkthrough section "
                 "2.4)." % need)
     else:

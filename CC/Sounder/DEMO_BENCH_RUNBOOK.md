@@ -52,7 +52,7 @@ into `.22` for the demo. The port is forced for the ZCU216 (autonegotiation
 off, 100G, RS FEC); `.22` links at those settings too (`ethtool enp1s0f1np1`
 reads `Link detected: yes`).
 
-## A2. The wired RF chain (the final wired state, "F3b")
+## A2. The wired RF chain (the cabled demo)
 
 Every link is a ONE-WAY cable. Channel letters in the configs: A = ch0,
 B = ch1, C = ch2. The bench mirrors the plan's wiring with `.21` and `.22`
@@ -182,10 +182,10 @@ The XUD1A is the reworked board (RF 9.5 GHz, LO 13.88 GHz). It needs:
   `docs/RELEASE_NOTES.md` for the release before a deploy changes it.
 - **Host examples.** The teardown before each Start imports the SoapyHoudiniSDR
   host examples (`--examples`, default `~/repos/SoapyHoudiniSDR/host/examples`),
-  whose parser must be at the radios' release or newer: an older checkout
-  cannot read a 0.7.0 radio's TX channel status, so the teardown skips its
-  check of the clear and the setup check's `teardown` line WARNs. Point
-  `--examples` at a checkout of the radios' release if the default is older.
+  which must be 0.7.0 or newer, the release this code needs (the setup check's
+  `teardown` line WARNs on an older one): an older parser cannot read a 0.7.0
+  radio's TX channel status, so the teardown skips its check of the clear.
+  Keep the checkout at the radios' release as they move past it.
 - **Cores.** The sounder's `--core_map` places its threads by role and the
   main thread pins itself only after the radios start, so the plugin's BS
   receive workers run on the housekeeping cores 0-9 (AP-81, 9.44). The launch
@@ -387,8 +387,8 @@ steered, cabled):
   over the run, not its value: a marked frame at a stream's teardown is the
   designed cleanup. check_setup names nonzero counts on its egress line and
   fails only the stall bit. They clear only on an egress reset: a PL load (a
-  node boot loads the bitstream again) or a `GT_RESET`; a data-link loss leaves
-  them counting. With
+  node boot loads the bitstream again), a `GT_RESET`, or a GT TX reset or
+  power-good drop in the node; a data-link loss leaves them counting. With
   an XUD1A attached, a boot follows A2b step 1: its 12 V off through the boot,
   on only after the PL has loaded, then the role.
 - **The pilot seat and `tx_advance`.** `tx_advance` 198 seats the UE's
@@ -421,7 +421,7 @@ steered, cabled):
   minute. Every late-TX burst of 9.85 and 9.86 fell inside that minute, while
   the queries ran, and none outside it (in 9.86's hour run each late window
   held an `mstflint` start); so did two of 9.84's three. A link-health
-  WARN on the UE's TX at hh:27 is this, not the radios. Stopping the service
+  WARN on the UE's TX in the minute after the firing is this, not the radios. Stopping the service
   for a demo (`sudo systemctl stop dgx-dashboard-admin`, the owner's call)
   should remove it; that is not measured yet.
 
@@ -446,9 +446,9 @@ steered, cabled):
   but its channels' clear count did not move: stop and report it, since no
   run is valid over uncleared channels.
 - After a rig-host reboot, run the setup check before anything else. The
-  link's return clears an egress stall, so an `egress` FAIL is a stall since
-  that node's link last came up: reload that node's PL or reboot it, and report
-  it.
+  link's return clears an egress stall, so an `egress` FAIL that names a stall
+  is one since that node's link last came up: reload that node's PL or reboot
+  it, and report it. A FAIL on the status read itself: run the check again.
 - A radio still held by an old sounder: the setup check names its pid; stop that
   run or `kill -INT <pid>`, the sounder's own stop (a plain `kill` skips its
   end-of-run checks and leaves the clock steered). Only if it has not exited

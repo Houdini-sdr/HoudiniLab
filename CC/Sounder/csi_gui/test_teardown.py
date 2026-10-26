@@ -38,9 +38,9 @@ class Fake:
     first, as a refusal on an envelope that did not close) or returns without
     clearing (a device-side judge that passed a clear that never landed);
     `torn` reads after each clear are torn."""
-    def __init__(self, lands=True, refused=False, torn=0, throws=False, pulsed=False):
+    def __init__(self, lands=True, refused=False, torn=0, throws=False, pulsed=False, drops=False):
         self.lands, self.refused, self.tear, self.torn, self.throws = lands, refused, torn, 0, throws
-        self.pulsed, self.e, self.log = pulsed, 587, []
+        self.pulsed, self.drops, self.cleared, self.e, self.log = pulsed, drops, False, 587, []
     def readSetting(self, k):
         if k != "TX_BANK_STATUS":
             return "accepted=1"
@@ -48,11 +48,12 @@ class Fake:
             raise RuntimeError("SoapyRPCUnpacker type check FAIL")
         pair = "%d:%d" % (self.e - 1, self.e) if self.torn else "%d:%d" % (self.e, self.e)
         self.torn = max(0, self.torn - 1)
-        return re.sub(r"epoch=\d+:\d+", "epoch=" + pair, CAPTURED)
+        out = re.sub(r"epoch=\d+:\d+", "epoch=" + pair, CAPTURED)
+        return out.split(";")[0] if self.drops and self.cleared else out  # `drops`: ch1 gone after the clear
     def writeSetting(self, k, v):
         self.log.append("%s=%s" % (k, v))
         if (k, v) == ("TDD_CMD", "tx_clear"):
-            self.torn = self.tear
+            self.torn, self.cleared = self.tear, True
             if self.refused:
                 self.e += self.pulsed
                 raise RuntimeError("TDD_CMD tx_clear: refused: the TDD framer is still engaged")
@@ -88,6 +89,14 @@ f = Fake(refused=True, pulsed=True)
 check(bt._teardown(f) is False and ran_all(f),
       "a tx_clear refused after its pulse counted: False (mutation: the refusal not judged, which the moved epoch "
       "passes)")
+f = Fake(refused=True, throws=True)
+check(bt._teardown(f) is False,
+      "a refused tx_clear on a radio whose TX_BANK_STATUS read throws: False (mutation: the unchecked verdict "
+      "judged before the refusal, which reports the refused clear as torn down)")
+f = Fake(drops=True)
+check(bt._teardown(f) is False,
+      "a bank missing from the read after the clear counts as not cleared: False (mutation: only the banks read "
+      "after the clear judged, which passes a bank that vanished)")
 f = Fake(torn=1)
 check(bt._teardown(f) is True, "a read torn by the clear is read again and the landed clear passes")
 f = Fake(lands=False, torn=1)

@@ -259,10 +259,12 @@ int main() {
     {
       const Armed a = armWith(0, [](FakeDevice& d) { d.clear_refused = true; });
       check(a.why.find("TX clear failed") != std::string::npos && a.why.find("still engaged") != std::string::npos &&
-                a.arm_writes == 0 && count(a.log, "set TDD_CMD=gate_release") == 1,
+                a.why.find("needs the radio's SoapyHoudiniSDR") == std::string::npos && a.arm_writes == 0 &&
+                count(a.log, "set TDD_CMD=gate_release") == 1,
             "a refused tx_clear: the gates are still released, then the bring-up throws with the device's reason "
-            "(mutation: the refusal left to escape the ladder, which skips the gate release: " + joined(a.log) +
-                ")");
+            "and no release hint (mutations: the refusal left to escape the ladder, which skips the gate release; "
+            "the hint on every refusal, which sends an engaged framer's operator to upgrade the radio: " +
+                joined(a.log) + ")");
     }
     {
       const Armed a = armWith(0, [](FakeDevice& d) { d.tear_reads = 1; });

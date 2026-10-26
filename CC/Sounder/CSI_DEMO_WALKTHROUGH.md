@@ -227,11 +227,11 @@ walkthrough can work without it.
 
 One more thing comes from that repository: the framer teardown in section 8.4
 imports `houdini_setup` from its host examples directory. The default location
-is `~/repos/SoapyHoudiniSDR/host/examples`. The checkout must be at the
-radios' release or newer (0.7.0 or later): the teardown reads each TX channel's
-clear count with its parser, and an older parser cannot read a newer radio's,
-so the teardown then skips that check, and the setup check's `teardown` line
-WARNs. If you keep it somewhere else, pass the path as `--examples` to the
+is `~/repos/SoapyHoudiniSDR/host/examples`. The checkout must be 0.7.0 or
+newer, the release this code needs (the setup check's `teardown` line WARNs on
+an older one), and is best kept at the radios' release: the teardown reads each
+TX channel's clear count with its parser, and an older parser cannot read a
+newer radio's, so the teardown then skips that check. If you keep it somewhere else, pass the path as `--examples` to the
 setup check, the teardown, or the dashboard (which hands it to both):
 
 ```sh
