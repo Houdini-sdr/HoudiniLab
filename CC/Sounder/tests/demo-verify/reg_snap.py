@@ -9,8 +9,9 @@ continuous arm); the bank offsets are the same in register map v3. TDD_STAT
 (state, epoch_late, gates_held, edge_late) is read through its setting, which
 the device plugin resolves on its own register map (v3 moved the register from
 0xAC to 0x31C, and the old offset on a v3 bitstream reads 0, which decodes as
-idle). The egress stall watchdog (FHCORE +0x28) is outside the
-driver's FHCORE register window; check_setup's EGRESS_STATUS covers it. Opened
+idle). The egress stall watchdog is not read here: it moved too (FHCORE
+EGRESS_STALL_WD, +0x28 to +0x80 in map v3), and check_setup's EGRESS_STATUS
+reads it through the driver on either map. Opened
 as check_setup opens a node, and closed cleanly. DEMO_VERIFICATION.md 9.70
 (SM1) is this tool's before/after reading of fpga 1.34.
 """
