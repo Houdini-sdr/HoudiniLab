@@ -28,6 +28,34 @@ Additional reference material lives in `../../docs/archive/UE_TX_FINE_GRID_TIMIN
 reference clock). The record of every measurement behind this walkthrough is
 `DEMO_VERIFICATION.md`.
 
+## How this walkthrough is organized
+
+Section 1 is the big picture and has no commands: why the demo exists, what
+happens in a run, what the system is made of and what the software does.
+Sections 2 to 9 are the run itself, in the order you do it, and each ends
+with something you can check. Section 0 is the whole run on one screen for a
+host that is already set up. On a new bench take the sections in order; on a
+known bench section 0 is enough.
+
+| Section | What you do | What you have when it is done |
+|---|---|---|
+| 0 | The quick start: five commands for a provisioned host | A live page, if the bench and host are known |
+| 1 | Read: why two bands, what happens in a run, the system, the software path | The picture of what you are about to build |
+| 2 | Install the packages, SoapySDR and the plugin, build the sounder, point it at your two radios | `check_setup.py` prints `Ready.` |
+| 3 | Choose a config, climbing the ladder from one band to both at the demo numerology | A config that matches your bench |
+| 4 | Run: the dashboard launches the sounder, or you run both yourself; the page's controls; record and replay | The sounder running and the page connected |
+| 5 | Read the page: each card and panel, the beacon sync card, the Spectrum tab | You can tell a healthy run from a sick one by looking |
+| 6 | Confirm it is real: the log lines and checks of a good run | Evidence behind the numbers |
+| 7 | Tune: the beacon waveform and the sync knobs | A run adjusted to your bench |
+| 8 | When something goes wrong: symptoms, causes, fixes | A way out of each known failure |
+| 9 | Clean up: stop, release the radios, confirm nothing is left | A bench ready for the next run |
+| 10 | The stack and results of the latest full run | What "it works" last meant |
+
+Within the first minute of a good run the sync card reads `LOCKED`, each
+receive antenna's card fills with a steady channel and four tight
+constellation clusters, and the MER settles near the figures in section 10;
+section 5's pictures show what that looks like.
+
 ## 0. Quick start
 
 If `<host>` already has the sounder built and the SoapyHoudiniSDR host plugin
