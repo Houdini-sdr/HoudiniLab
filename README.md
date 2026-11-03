@@ -14,6 +14,9 @@ by side.
 | You want to | Read |
 |---|---|
 | Run the demo on your own bench, from an empty host to a live display | `CC/Sounder/CSI_DEMO_WALKTHROUGH.md` (its section map tells you what to skip) |
+| Read the dashboard, panel by panel | `CC/Sounder/DASHBOARD_GUIDE.md` |
+| Look up an option, a flag or a sync knob | `CC/Sounder/SOUNDER_REFERENCE.md` |
+| Fix a run that fails | `CC/Sounder/TROUBLESHOOTING.md`, through the walkthrough's symptom index |
 | Run it on our lab bench | `CC/Sounder/DEMO_BENCH_RUNBOOK.md` |
 | See what was measured, and on which stack | `CC/Sounder/DEMO_VERIFICATION.md` (the newest row of its last section is the current state) |
 | Pick a configuration | `CC/Sounder/files/houdini-*.json`; each says what it runs in its `_description` |

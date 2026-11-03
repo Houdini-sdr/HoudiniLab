@@ -1,5 +1,13 @@
 # Demo verification ledger: houdini-ul.json, config to device to RF
 
+> [!NOTE]
+> How to read this ledger. Sections 1 to 8 are the single-band campaigns on the
+> earlier stack and rig, in the order they ran; section 9 is the dual-band demo
+> on the current bench, and its newest row is the current state of the system.
+> Rows are evidence: a later row supersedes an earlier one but never deletes
+> it, so read a claim at its latest row. The addresses and the stack named
+> below are those of the time each section was written.
+
 This is the evidence ledger for the full walkthrough of the two node Sounder
 demo (BS 168.6.244.21, UE 168.6.244.22, host rig 168.6.244.64). Every claim
 carried by code comments, docs, or folklore is treated as unverified until a

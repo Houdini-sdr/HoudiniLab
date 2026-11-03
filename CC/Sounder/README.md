@@ -3,11 +3,14 @@
 This directory holds the sounder, its configurations, the live dashboard and
 the tools that run and judge it. The documents come first, then the map.
 
-## The three documents
+## The documents
 
 | Document | Kind | Read it when |
 |---|---|---|
-| `CSI_DEMO_WALKTHROUGH.md` | How-to, for any bench | You are setting the demo up or running it; its section map says what each section gives you and when to skip it |
+| `CSI_DEMO_WALKTHROUGH.md` | How-to, for any bench | You are setting the demo up or running it: the run path at one level of detail; its section map says what each section gives you and when to skip it |
+| `DASHBOARD_GUIDE.md` | Explanation | You are looking at the page and want to know what a panel, a badge or a bar means |
+| `SOUNDER_REFERENCE.md` | Reference | You need an option: the backend's flags, the sounder's run flags, the beacon waveforms, the `sync` block |
+| `TROUBLESHOOTING.md` | How-to, by symptom | A run fails; the walkthrough's section 8 is the index into it |
 | `DEMO_BENCH_RUNBOOK.md` | Operating guide, our lab bench | You are on our rig: the machines, the RF chains, the launch, demo day, recovery |
 | `DEMO_VERIFICATION.md` | Record | You want the evidence behind a number or a claim; the newest row of its last section is the current state |
 

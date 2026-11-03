@@ -8,13 +8,12 @@ change this file in the same commit.
 
 Evidence for everything below lives in `DEMO_VERIFICATION.md`.
 
-Two benches are described. **Part A** is the dual-band demo (AP-79: sub-6 plus
-the X-band IF, HS-202 mode V) on the rig host `.26`, the current one, and the
-part operators follow. **Part B** is the earlier single-band CSI demo on rig B
-(`.64`), kept as a record of that bench; do not follow it for the dual-band
-demo.
+This is the dual-band demo (AP-79: sub-6 plus the X-band IF, HS-202 mode V)
+on the rig host `.26`, the bench as it stands. The earlier single-band CSI
+demo on rig B (`.64`) is a record of that bench, not a procedure to follow:
+`../../docs/archive/RIG_B_SINGLE_BAND_RUNBOOK.md`.
 
-# Part A: the dual-band demo (AP-79)
+## Part A: the dual-band demo (AP-79)
 
 Part A in one table, so you can go straight to the piece you need:
 
@@ -30,7 +29,7 @@ Part A in one table, so you can go straight to the piece you need:
 | A8c | Demo day: the bring-up at a venue, in order |
 | A9 | The CPU isolation experiment, a checklist |
 
-## A1. The machines
+### A1. The machines
 
 | Machine | Address | Role | What runs on it |
 |---|---|---|---|
@@ -70,7 +69,7 @@ into `.22` for the demo. The port is forced for the ZCU216 (autonegotiation
 off, 100G, RS FEC); `.22` links at those settings too (`ethtool enp1s0f1np1`
 reads `Link detected: yes`).
 
-## A2. The wired RF chain (the cabled demo)
+### A2. The wired RF chain (the cabled demo)
 
 Every link is a ONE-WAY cable. Channel letters in the configs: A = ch0,
 B = ch1, C = ch2. The bench mirrors the plan's wiring with `.21` and `.22`
@@ -103,7 +102,7 @@ the ADC costs about 2 dB of level, so compare a new cabled run's levels with a
 run on the same filters: 9.91 with them at the DACs, 9.69 to 9.71 with the
 second sub-6 filter at each ADC.
 
-## A2b. The X-band RF chain (F2b: through the XUD1A and both ADTR1107 boards)
+### A2b. The X-band RF chain (F2b: through the XUD1A and both ADTR1107 boards)
 
 The bench as it is (A1). The chain below is the plan's, with `.22` the BS,
 so it runs with the configs' own topology
@@ -163,7 +162,7 @@ The XUD1A is the reworked board (RF 9.5 GHz, LO 13.88 GHz). It needs:
    With no role these configs are refused at start; the cabled chain (A2)
    uses the configs without `-fe`.
 
-## A3. What runs on the rig host
+### A3. What runs on the rig host
 
 - **Checkouts.** `~/repos/HoudiniLab` belongs to its owner: do not change it.
   The demo runs from `~/repos/HoudiniLab-rxwin` on develop, checked out
@@ -220,7 +219,7 @@ The XUD1A is the reworked board (RF 9.5 GHz, LO 13.88 GHz). It needs:
   isolated 18 and 19 (on the boot of 9.84 and 9.85, `.21`'s BS receive flow
   lands on core 15; A4 says how to check yours).
 
-## A4. The launch
+### A4. The launch
 
 On the rig:
 
@@ -332,7 +331,7 @@ echo $! > /tmp/<TAG>_freeze.pid
 Start it in the same breath as `fstage_run.sh` (it waits up to 90 s for the
 run's pid and record). `--replay <log>` applies the same rule to a finished log.
 
-## A5. Viewing
+### A5. Viewing
 
 From your workstation:
 
@@ -352,7 +351,7 @@ configs, by their short `_label`: "Demo, cabled", "Demo, X-band chain",
 "Fallback 48 MHz, cabled" and "Fallback 48 MHz, X-band chain" (hover for the
 full description).
 
-## A6. What good looks like
+### A6. What good looks like
 
 From the validation runs of the demo head (`DEMO_VERIFICATION.md` 9.69 on
 fpga 1.33, 9.70 to 9.73 on fpga 1.34, 9.85 on fpga 1.44 and SoapyHoudiniSDR
@@ -368,7 +367,7 @@ steered, cabled):
 | BS frames per second | about 50 (slots config), about 57 (all-rx config) | from the HOUDINI_BS_RX lines |
 | End-of-run lines | `RX read check`: 0 lost in rx slots, 0 out of order, 0 time jumps; `AP-87 slot check`: 0 outside the rx slots; `RX_HOST_STATUS`: tdd_straddle 0, and on fpga 1.34 tdd_drop 0 (a TDD map the packets do not tile ends the stream, and the run with it) | anything nonzero is a finding, not noise |
 
-## A7. Known limits
+### A7. Known limits
 
 - **Do not open a node from a second program while a run is live** (a manual
   `check_setup.py`, `SoapySDRUtil --probe`, a Python session). The sounder opens
@@ -457,7 +456,7 @@ steered, cabled):
   for a demo (`sudo systemctl stop dgx-dashboard-admin`, the owner's call)
   should remove it; that is not measured yet.
 
-## A8. Stopping and recovery
+### A8. Stopping and recovery
 
 - Stop from the dashboard, or Ctrl+C on the backend (it stops the sounder's
   whole process group).
@@ -488,7 +487,7 @@ steered, cabled):
   steered clock and how to release it). `tools/rig_release_holders.py` also works but stops EVERY
   sounder and dashboard on the host, including a running `--control` backend.
 
-## A8b. The canned-data fallback
+### A8b. The canned-data fallback
 
 From the dashboard: the demo launch (A4, A8c) offers four replays in the config list, recorded through
 the X-band chain on 0.3.1 and kept under `~/demo_rec/replays/`:
@@ -557,7 +556,7 @@ grow, not from the Start.
    On the rig host itself, never replay while a sounder run is live: the replay
    and the run's dashboard use the same ports (UDP 9999, HTTP 8080).
 
-## A8d. Over the air: antennas and the room (before the first run)
+### A8d. Over the air: antennas and the room (before the first run)
 
 The first sub-6 over-the-air runs lost about 20 dB to antenna placement and a
 quarter of the beacons to nearby emitters (`DEMO_VERIFICATION.md` 9.62 to
@@ -580,7 +579,7 @@ quarter of the beacons to nearby emitters (`DEMO_VERIFICATION.md` 9.62 to
 4. Hold still for a minute and read the numbers again before starting the
    demo run.
 
-## A8c. Demo day: bring-up at the venue (in order)
+### A8c. Demo day: bring-up at the venue (in order)
 
 **The demo build:** develop in
 `~/repos/HoudiniLab-rxwin` (the X-band at 270 RB beside the sub-6 at 133 RB,
@@ -661,7 +660,7 @@ lacks (A1), so here steps 3 and 4 run by hand.
    off, and pauses for each switch you flip (the XUD1A, the nodes, the boards' 12 V);
    last it offers the rig host's own poweroff.
 
-## A9. The CPU isolation experiment (checklist)
+### A9. The CPU isolation experiment (checklist)
 
 Goal: put the timing-critical threads on isolated performance cores and find
 which setting buys the most. Cores 0-4 and 10-14 of this host are efficiency
@@ -756,162 +755,3 @@ arm has a record row yet; the steps stay here for when one is run.
   many.
 
 Record each arm as a `DEMO_VERIFICATION.md` section 9 row with its settings.
-
-# Part B: the single-band CSI demo on rig B
-
-A record of that bench, not a procedure to follow. The boards have since moved
-to the Part A roles and addresses, and two things below no longer hold on the
-current code: the sync knobs are keys of the config's `sync` block now, with
-no environment override (walkthrough section 7.1), and the dashboard's
-datagram counter prints every five seconds. The debug switches B3 exported are
-sounder flags now; B3 shows them in that form.
-
-## B1. The machines
-
-| Machine | Address | Role | What runs on it |
-|---|---|---|---|
-| Build VM | (this repo's checkout at `/space/vmshare/repos/HoudiniLab`) | Development only | Editing, compile checks, offline analysis. NOTHING of the demo executes here. Code ships to the rig as a git bundle over ssh, never as a copied tree. Note the vboxsf trap: `touch` changed sources before a local build or cmake may relink nothing. |
-| Rig host ("rig B") | `168.6.244.64`, user `houdini` | Runs the entire host side | The sounder binary AND the dashboard backend (details in section B2). |
-| Base-station board | `168.6.244.21`, user `houdini`, serial `575524` | BS radio | `SoapySDRServer --bind` (systemd unit) serving the device plugin `libHoudiniSDRDevice.so`; FPGA bitstream v1.30 `c88e0b5f`; device software 0.2.2. |
-| Client board | `168.6.244.22`, user `houdini`, serial `6596d2` | UE radio | Identical stack to the BS board. |
-| Your workstation | anywhere | Viewer | A browser, through an ssh tunnel to the rig (section B4). |
-
-Both boards share one 10 MHz reference (frequency lock; there is no
-cross-board phase lock, so the corrected-phase panel re-anchors per run).
-
-## B2. What runs on the rig host
-
-One sounder process drives BOTH radios. There is no per-board host process:
-`sounder` opens the BS radio (remote to `.21`) and the UE radio (remote to
-`.22`) from the same process over the SoapyRemote control plane, and runs its
-own UDP data planes to each board.
-
-- Checkout: `~/repos/HoudiniLab`. The demo ran from this, the main checkout,
-  on `feat/csi-gui-tabler`. The `~/repos/HoudiniLab-rx`
-  worktree also sits at the same commit and still works, but it is now detached
-  (a branch cannot be checked out in two worktrees) so it does NOT advance on a
-  pull. Whichever you use, `--sounder-dir` (section B3) is what selects the
-  binary, and a wrong value fails silently by running the other tree's build.
-- Binary: `~/repos/HoudiniLab/CC/Sounder/build/sounder`. **Always wipe the build
-  directory** rather than building incrementally: an incremental build over a
-  cache configured on another branch linked stale objects into a binary TWICE
-  the correct size, and that binary still passed a runtime-string check. So the
-  string check alone does NOT certify a build:
-
-  ```sh
-  rm -rf build                                   # not optional
-  /usr/bin/cmake -B build -DCMAKE_BUILD_TYPE=Release
-  /usr/bin/cmake --build build --target sounder -j
-  ls -l build/sounder                            # STEP 1: size, the check that
-                                                 # actually caught the failure
-  strings build/sounder | grep <a-string-only-the-new-code-logs>   # STEP 2
-  ```
-
-  Step 1 is the one that catches stale objects; step 2 catches a stale binary
-  that was never rebuilt. Both are required, in that order. A clean binary is
-  around 0.9 MB on this rig, so a figure near 1.8 MB means stale objects got
-  linked -- treat the size as an order-of-magnitude sanity check rather than an
-  exact constant, since it moves with every code change.
-- Dashboard backend: `~/repos/HoudiniLab/CC/Sounder/csi_gui/csi_server.py`
-  (HTTP on 8080, CSI datagrams in on UDP 9999). Both bind `0.0.0.0`, not
-  localhost (`--http-host` / `--udp-host` defaults), so the dashboard is also
-  reachable directly at `http://168.6.244.64:8080/` if the lab firewall allows
-  it. Prefer the section B4 tunnel anyway: it works regardless of firewall and
-  does not publish the panel on the lab network.
-- SoapySDR host stack: the validated houdini HOST plugin lives ONLY at
-  `/home/houdini/houdini_test/lib/SoapySDR/modules0.8-3/`. The system
-  SoapySDR at `/usr/local` does NOT have it, so every launch must carry
-  `SOAPY_SDR_PLUGIN_PATH=/home/houdini/houdini_test/lib/SoapySDR/modules0.8-3`
-  (the backend's `--venv` default `~/houdini_test` sets this when launching
-  through it). Without it every radio open fails with
-  `SoapySDR::Device::make() no match`.
-- Teardown helper: `csi_gui/teardown_framer.py` runs on the rig (it opens the
-  boards, so it is device-touching).
-- Logs land under `~/repos/HoudiniLab/CC/Sounder/logs/`.
-
-## B3. The exact launch used for the live demo
-
-On the rig, in one shell:
-
-```sh
-cd ~/repos/HoudiniLab/CC/Sounder
-python3 csi_gui/csi_server.py --launch --conf files/houdini-ul.json \
-    --sounder-dir ~/repos/HoudiniLab/CC/Sounder \
-    --mag-top 85 --mag-span 5 \
-    --sounder-arg=--bs_rx_debug --sounder-arg=--ue_tx_debug --sounder-arg=--csi_r_debug \
-    --sounder-arg=--cns_dump_low=logs/cnslow
-```
-
-The backend sets the plugin path from its `--venv` default, runs the framer
-teardown, then starts `sounder --view` and retries the flaky cold start. The
-debug flags are optional but cheap, and they are what every verification in
-`DEMO_VERIFICATION.md` greps for.
-
-Without those three debug flags the run is nearly silent: the teardown, the startup
-banner, and a `[csi]` datagram counter about once a second. That is the walkthrough's
-mode A default and it is normal, not a fault. Set `sync.cfo.log_every` to 1 in the
-config's `sync` block when you want every beacon CFO estimate rather than the default
-one in ten.
-
-Two back to back runs on this bench measured 6,189 lines in 60 s
-with the three debug switches on, 342 lines in 85 s without them, and the `[csi]`
-datagram counter advancing by an identical 443 per reporting interval in both.
-The debug switches change the printing only. Judge run health by the datagram counter
-and by the `Re-sync ... beacon alive` lines, never by how much scrolls past.
-
-## B4. Viewing
-
-From your workstation:
-
-```sh
-ssh -L 8080:localhost:8080 houdini@168.6.244.64
-```
-
-then open `http://localhost:8080/`. After any backend restart, refresh the
-page once: the magnitude axis and page structure are baked in at page load.
-
-## B5. Stopping, and the two recoveries that actually happen
-
-Stop by process group, from a `ps` listing, never by name pattern (wrapper
-shells carry the same names and a pattern kill leaves orphans holding the
-ports):
-
-```sh
-ps -eo pid,pgid,cmd | grep -E "[c]si_server|[s]ounder --view"
-kill -TERM -- -<pgid-of-csi_server> -<pgid-of-the-sounder-wrapper>
-```
-
-- Radio open fails with `SoapyRPCUnpacker::recv() TIMEOUT`: the board server
-  wedged. `ssh houdini@168.6.244.21 'sudo systemctl restart SoapySDRServer'`
-  (same for `.22`), wait a few seconds, relaunch. Tracked as AP-20.
-- Radio open fails with `make() no match`: the plugin path is missing from
-  the environment (see section B2).
-
-A bare `SoapySDRUtil --find` proves nothing about board health (the device
-factory answers only when the filter carries `show=1`). Probe a board with:
-
-```sh
-SoapySDRUtil --find="remote=tcp://168.6.244.21:55132,show=1"
-```
-
-## B6. Stack identity this runbook was written against
-
-fpga 1.30 `c88e0b5f`, device 0.2.2 `71bcbc6b`, host 0.2.2
-`d2861dc1`, protocol 1.0, SoapySDR 0.8.1, SoapyRemote 0.6.0. Both boards
-report `clock_ref: external`. Config: `files/houdini-ul.json`
-(30 slots x 4096 samples = exactly 1 ms per frame, beacon slot 0, pilot slot
-16, uplink data slot 18, `tx_advance` 247).
-
-The host plugin was rebuilt from `d2861dc1`, replacing the
-`c20d7975` build that the DEMO_VERIFICATION.md rows were taken against. The
-two are identical as compiled code: every commit between them touches only
-tracker files, `host/tests/bench/README.md`, and `host/tests/hil/test_tdd.py`,
-which is interpreted rather than linked. So the earlier evidence still stands;
-only the stamped build id moved. Read the id back from the installed module,
-never from the build log, because it is stamped at cmake CONFIGURE time and a
-plain rebuild keeps a stale stamp:
-
-```sh
-strings $VIRTUAL_ENV/lib/SoapySDR/modules0.8-3/libHoudiniSDRSupport.so \
-    | grep -E '^[0-9a-f]{8}$'
-```
