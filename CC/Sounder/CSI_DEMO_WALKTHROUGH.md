@@ -33,12 +33,13 @@ reference clock). The record of every measurement behind this walkthrough is
 This file is the run path, one level of detail: what to do, in order. Three
 companions hold the depth: `DASHBOARD_GUIDE.md` (what each panel shows),
 `SOUNDER_REFERENCE.md` (every option and knob) and `TROUBLESHOOTING.md`
-(each failure and its fix). Section 1 is the big picture and has no commands: why the demo exists, what
-happens in a run, what the system is made of and what the software does.
-Sections 2 to 9 are the run itself, in the order you do it, and each ends
-with something you can check. Section 0 is the whole run on one screen for a
-host that is already set up. On a new bench take the sections in order; on a
-known bench section 0 is enough.
+(each failure and its fix). Section 1 is the big picture and has no
+commands: why the demo exists, what happens in a run, what the system is
+made of and what the software does. Sections 2 to 9 are the run itself, in
+the order you do it, and each opens with what it does, when to skip it and
+the check that says it is done. Section 0 is the whole run on one screen for
+a host that is already set up. On a new bench take the sections in order; on
+a known bench section 0 is enough.
 
 | Section | What you do | What you have when it is done |
 |---|---|---|
@@ -129,7 +130,8 @@ display. Every command runs on `<host>` unless it says otherwise.
    - with an uplink config, the constellation shows tight clusters and the
      quality line shows the MER.
 
-   If the sync card stays at `NOT SYNCED`, go to section 8.6. Section 6 lists
+   If the sync card stays at `NOT SYNCED`, go to `TROUBLESHOOTING.md` section 7.
+   Section 6 lists
    the log lines of a healthy run.
 
 8. Press **Stop** when you are done, or **Restart** to run again, with the same
@@ -758,12 +760,13 @@ run's dashboard use the same ports (UDP 9999 and HTTP 8080 by default).
 
 **In brief.** One card per receive antenna, six panels on its Channel tab
 and a Spectrum tab behind it, with the beacon sync card for the link above
-them; this section says what each shows and what healthy looks like, with
-pictures. **Skip it if** you can already read the page; come back for a
-panel you do not understand: the guide's section 2 for a card that dims,
-its section 3 for the sync card's badges, its section 4 for the converter range. **Done when** you can tell a
-healthy run from a sick one at a glance: `LOCKED`, a steady channel, tight
-clusters, smooth streaks in the waterfall.
+them; `DASHBOARD_GUIDE.md` says what each shows and what healthy looks
+like, with pictures. **Skip it if** you can already read the page; come back
+for a panel you do not understand: the guide's section 2 for a card that
+dims, its section 3 for the sync card's badges, its section 4 for the
+converter range. **Done when** you can tell a healthy run from a sick one at
+a glance: `LOCKED`, a steady channel, tight clusters, smooth streaks in the
+waterfall.
 
 The backend prints the URL as soon as it is listening:
 
@@ -808,7 +811,19 @@ Check each field:
   bring-up steps (128 minus half of 64). `SOUNDER_REFERENCE.md` explains why.
 - `timing_fix=1` and `phase_fix=1`, on by default for Houdini.
 
-Other sounder lines worth recognizing on a healthy run:
+Before the radios open, the sounder prints every `sync` setting it will run
+with and where each value came from, so a knob you meant to set is confirmed
+in the log's first lines rather than inferred from the run:
+
+```
+sync configuration (value  provenance):
+  resync.residual_ppm = 0.1  [default]
+  resync.sync_tol_samples = 8  [derived]
+  steer.enable = true  [json]
+```
+
+A key you set in the config shows `[json]`; anything else is the default or
+derived from one. Other sounder lines worth recognizing on a healthy run:
 
 ```
 UE pilot burst: scheduled 97 frames up to <tick> (pad 148)
