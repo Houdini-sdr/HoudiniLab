@@ -51,6 +51,18 @@ known bench section 0 is enough.
 | 9 | Clean up: stop, release the radios, confirm nothing is left | A bench ready for the next run |
 | 10 | The stack and results of the latest full run | What "it works" last meant |
 
+How long it takes. On a known bench, section 0 is about five minutes: the
+setup check takes up to a minute per radio, the sounder finds the beacon
+within seconds of starting (3 seconds in the latest full run; freshly booted
+nodes add about half a minute of retried radio opens), and the clock steering
+brings the MER to its final figures about three minutes after a cold start.
+On a new bench, from a host with nothing installed, plan on half a day to a
+day: the install (section 2) is an hour or two of it on a host with network
+access, and the rest is the RF, climbing the config ladder (section 3) one
+rung at a time while levels, cabling and antennas are sorted out; the X-band
+chain's own bring-up comes before any of it and is not part of this
+walkthrough. That range is our own bench history, not a timed measurement.
+
 Within the first minute of a good run the sync card reads `LOCKED`, each
 receive antenna's card fills with a steady channel and four tight
 constellation clusters, and the MER settles near the figures in section 10;
