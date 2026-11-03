@@ -98,8 +98,16 @@ fails.
 
 ## 1. What the demo does
 
-The demo runs on two Houdini nodes. The picture below is the base station
-dressed for it.
+The demo runs on two Houdini nodes. This is the whole bench.
+
+![The demo bench: two Houdini-4 nodes with their sub-6 front ends and antennas, a network router between them, the X-band up-down converter beside the right node, and the two X-band front ends in front with their antennas facing each other.](img/bench-two-nodes-dual-band.jpg)
+
+The two nodes, each with its sub-6 front end and antennas on top; the router
+between them carries the control network. The X-band up-down converter sits
+beside the base station on the right, and the two X-band front ends in front
+are cabled to it, their antennas facing each other across the bench.
+
+Below, the base station on its own.
 
 ![One Houdini-4 node set up for the dual-band demo: the sub-6 front end with its two antennas on the right, the X-band up-down converter in the middle with the X-band front end board and its wideband antenna on the left, the GPIO extender below, and the cables between them.](img/node-sub6-xband-front-ends.jpg)
 
