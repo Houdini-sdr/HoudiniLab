@@ -98,6 +98,20 @@ fails.
 
 ## 1. What the demo does
 
+The demo runs on two identical Houdini nodes. Each carries both bands' front
+ends, and the picture below is one of them dressed for it.
+
+![One Houdini-4 node set up for the dual-band demo: the sub-6 front end with its two antennas on the right, the X-band up-down converter in the middle with the X-band front end board and its wideband antenna on the left, the GPIO extender below, and the cables between them.](img/node-sub6-xband-front-ends.jpg)
+
+One node as the demo uses it. On the right, the sub-6 front end with its two
+antennas, cabled to the node's sub-6 channel pair through a band-pass
+filter. In the middle, the X-band up-down converter, fed from the node's
+second channel pair at the X-band IF. On the left, the X-band front end board
+with its power board and a wideband antenna. The ribbon cables from the GPIO
+extender at the bottom carry the control lines to the converter and the
+front end board. The second node is the same, and the two face each other
+across the bench or the room.
+
 - The sounder normally records to HDF5. In **viewing mode** it does not write a
   file. Instead it computes a channel estimate from every received pilot and
   streams the result out as UDP datagrams, one per frame per antenna.
