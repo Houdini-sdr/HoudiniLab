@@ -258,6 +258,12 @@ datagrams can be recorded and played back with no radios (section 4.5).
 
 ## 2. Install everything (from nothing)
 
+**In brief.** Put the system packages, SoapySDR and the Houdini host plugin
+on `<host>`, build the sounder, point its topology file at your two radios,
+and set the levels. **Skip it if** the setup check in 2.2 already prints
+`Ready.`: go to section 3. **Done when** `check_setup.py` prints `Ready.`
+for the config you mean to run.
+
 ### 2.1 What you need before starting
 
 - A compute host `<host>`: a Linux machine (x86_64 or aarch64) with network
@@ -492,6 +498,13 @@ driver's 384-tick grid (the `r1` and `r2` bring-up steps keep the legacy
 
 ## 3. Choose a config
 
+**In brief.** Sixteen configs ship; the demo is the first in the table, and
+the rows below it are the ladder a new bench climbs to reach it. **Skip it
+if** your bench is known and runs the demo config already: the dashboard's
+list offers the four demo entries by label (section 4.4). **Done when** you
+hold a config whose topology file names your two radios and whose rung below
+it has passed on this bench.
+
 Each config carries a one-line `_description`, which the dashboard's config
 list shows. All of them run one client. Each names its own topology file in
 `serial_file` and describes the cabling it expects in `_comment`.
@@ -554,6 +567,14 @@ it in. The `_tx_advance_note` of `houdini-ul.json` and of each dual-band
 config gives the details.
 
 ## 4. Run the demo
+
+**In brief.** Mode A (4.1) is one command: the dashboard launches the
+sounder. Mode B (4.2) runs the two yourself, for debugging. 4.3 lists the
+backend's options, 4.4 the page's Start, Stop and Check, 4.5 recording a run
+and replaying it with no radios. **Skip to 4.1** on a normal day; you need
+4.2 only when you want the sounder's output in its own terminal. **Done
+when** the backend prints its `dashboard at` line and the sounder its `CSI
+view mode` line (section 6), and the page connects.
 
 You have two ways to start it. Mode A is one command and is the normal choice.
 Mode B keeps the sounder in its own terminal, which is better when you are
@@ -761,6 +782,15 @@ Never replay on the host while a sounder run is live: the replay and the
 run's dashboard use the same ports (UDP 9999 and HTTP 8080 by default).
 
 ## 5. View the dashboard
+
+**In brief.** One card per receive antenna, six panels on its Channel tab
+and a Spectrum tab behind it, with the beacon sync card for the link above
+them; this section says what each shows and what healthy looks like, with
+pictures. **Skip it if** you can already read the page; come back for a
+panel you do not understand, 5.1 for a card that dims, 5.2 for the sync
+card's badges, 5.3 for the converter range. **Done when** you can tell a
+healthy run from a sick one at a glance: `LOCKED`, a steady channel, tight
+clusters, smooth streaks in the waterfall.
 
 The backend prints the URL as soon as it is listening:
 
@@ -1011,6 +1041,13 @@ clipping.
 
 ## 6. Confirming it is actually working
 
+**In brief.** The log lines that prove the numbers are real: the sounder's
+viewing-mode line and its fields, the re-sync lines, the backend's datagram
+counter. **Skip it if** the page shows `LOCKED`, a steady channel and tight
+clusters and you do not need the evidence behind them. **Done when** the
+datagram count climbs steadily and the re-sync lines read a residual near
+zero.
+
 The sounder prints one line when viewing mode initializes:
 
 ```
@@ -1056,6 +1093,13 @@ the sounder's `--csi_udp` points where the backend is bound, and that nothing
 between the two is dropping UDP.
 
 ## 7. Tuning knobs
+
+**In brief.** The sounder's run flags, the beacon waveform (7.0) and the
+`sync` block of the config (7.1). The shipped demo configs carry the values
+that ran; nothing here is needed for a first run. **Skip it unless** the
+sync card or the MER says something is off, or you change the beacon, the
+clock plan or the bench. **Done when** the run's `Run options:` line and its
+sync configuration block (section 6) show the values you meant.
 
 All of these are flags of the sounder, its run options
 (`./build/sounder --helpon=main` lists every one). Put them on the sounder's
@@ -1242,6 +1286,20 @@ can trigger on pre symbol leakage and misalign the windows, so prefer a fixed
 integer once you know the right value for your bench.
 
 ## 8. If something goes wrong
+
+Find the symptom, go to its subsection. When in doubt, run the setup check
+first (section 2.2): every FAIL line names its fix.
+
+| You see | Go to |
+|---|---|
+| Almost no output, or "cannot find a radio" | 8.0 |
+| The page says "connecting" and never fills | 8.1 |
+| Panels appear, but the waterfall tears horizontally | 8.2 |
+| A clean channel estimate, but the constellation is a smear | 8.3 |
+| The sounder will not start and discovery looks broken | 8.4 |
+| A radio is discoverable but will not open | 8.5 |
+| The sync card stays at `NOT SYNCED` | 8.6 |
+| Something the bench owes you (roles, the X-band chain, node state) | `DEMO_BENCH_RUNBOOK.md` A7 and A8 |
 
 ### 8.0 The run produces almost no output, or says it cannot find a radio
 
@@ -1449,6 +1507,10 @@ expect the mid 40s dB, and treat much less as an RF level or cabling problem
 rather than a software one.
 
 ## 9. Clean up
+
+**In brief.** Stop the sounder the way it expects, confirm none is left, and
+release the framer after an abnormal end. **Done when** `pgrep -cx sounder`
+reads 0 and the next Start needs no second try.
 
 Press **Stop** on the page, or Ctrl+C in the backend terminal. In mode A the
 backend stops the sounder with SIGINT, the sounder's own stop: it ends its

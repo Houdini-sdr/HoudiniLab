@@ -16,6 +16,20 @@ demo.
 
 # Part A: the dual-band demo (AP-79)
 
+Part A in one table, so you can go straight to the piece you need:
+
+| Section | What it holds |
+|---|---|
+| A1 | The machines: the rig host and the two nodes, their addresses and roles |
+| A2, A2b | The RF chain, cabled (A2) and through the X-band front end (A2b) |
+| A3 | What runs on the rig host: the venv, the plugin prefixes, the checkout |
+| A4 | The launch, command by command, with the cores and the topology |
+| A5, A6 | Viewing the page, and what good looks like on this bench |
+| A7 | Known limits: what the bench will not do and the workarounds in use |
+| A8, A8b, A8d | Stopping and recovery; the canned-data fallback; antennas and the room |
+| A8c | Demo day: the bring-up at a venue, in order |
+| A9 | The CPU isolation experiment, a checklist |
+
 ## A1. The machines
 
 | Machine | Address | Role | What runs on it |
