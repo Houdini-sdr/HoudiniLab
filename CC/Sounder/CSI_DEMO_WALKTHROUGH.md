@@ -374,8 +374,8 @@ setup check, the teardown, or the dashboard (which hands it to both):
 python3 csi_gui/csi_server.py --control --examples <path-to-SoapyHoudiniSDR>/host/examples --conf files/<config>.json
 ```
 
-The HIL tests under `tests/hil/` read the same path from the environment
-variable `HOUDINI_EXAMPLES` instead.
+The teardown's own test (`csi_gui/test_teardown.py`, run by `ctest`) reads the
+same path from the environment variable `HOUDINI_EXAMPLES` instead.
 
 ### 2.5 Get and build the sounder
 
@@ -765,7 +765,20 @@ its section 3 for the sync card's badges, its section 4 for the converter range.
 healthy run from a sick one at a glance: `LOCKED`, a steady channel, tight
 clusters, smooth streaks in the waterfall.
 
-Open `http://localhost:8080/` through the port forward (section 0, step 5). The page connects on its own and reconnects if the stream drops. What each card and panel shows, what healthy looks like and what a dim card, a badge or a bar colour means is `DASHBOARD_GUIDE.md`: its section 1 walks the page and the six panels, section 2 the stale badge, section 3 the beacon sync card and its readout, section 4 the Spectrum tab and the converter range.
+The backend prints the URL as soon as it is listening:
+
+```
+[csi] dashboard at http://localhost:8080/  (SSH: -L 8080:localhost:8080)
+```
+
+Forward the port from your workstation (`ssh -L 8080:localhost:8080 <host>`,
+section 0, step 5) and open `http://localhost:8080/`. The page connects on its
+own and reconnects if the stream drops, so you can leave it open across
+sounder restarts. This is what you should see:
+
+![The whole dashboard on a replayed bench recording: the beacon sync card reads LOCKED above the sub-6 and X-band antenna cards, both on their Channel tab.](img/dashboard-replay-xband-bench.png)
+
+What each card and panel shows, what healthy looks like and what a dim card, a badge or a bar colour means is `DASHBOARD_GUIDE.md`: its section 1 walks the page and the six panels, section 2 the stale badge, section 3 the beacon sync card and its readout, section 4 the Spectrum tab and the converter range.
 
 ## 6. Confirming it is actually working
 

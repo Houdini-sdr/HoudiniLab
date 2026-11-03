@@ -504,57 +504,20 @@ Stop, pick one, Start: it plays in a loop with no radio, no setup check and no t
 again. Add more with `--replay <file>=<label>`. Without the dashboard's control, or on a laptop with
 Python only, replay by hand as below.
 
-A recording of the dashboard's input from a good run, played back into the
-dashboard with no radios: every panel shows real rig data (channel,
-constellation, CIR, ADC, beacon sync).
+The procedure (record during a run, replay by hand, the laptop copy, the
+ports a replay shares with a live run) is the walkthrough's section 4.5. What
+is particular to this bench:
 
-A recording starts when the dashboard starts, not at Start, and on freshly booted nodes the
-data can begin about 30 s after the page says running (the first radio opens are retried):
-time an event (a blockage, a hand on an antenna) from the first datagram, watching the file
-grow, not from the Start.
-
-1. Record during a good run: start the dashboard with `--record` added to
-   its A4 line (a scripted run takes the same `--record` on `demo_run.sh`,
-   `fstage_run.sh` or `run_rung.sh`):
-
-   ```sh
-   mkdir -p ~/demo_rec
-   python3 csi_gui/csi_server.py <the A4 arguments> --record ~/demo_rec/<name>.rec
-   ```
-
-   The dashboard prints `recording every datagram to ...` at start. A name
-   that already exists is refused, never overwritten (the dashboard prints
-   `NOT recording: ... exists` and runs on without recording), so give each run
-   its own name. It flushes
-   about once a second and stops at 2 GB (`--record-max-mb`).
-2. Replay, with no sounder running:
-
-   ```sh
-   python3 csi_gui/csi_server.py --conf files/houdini-dualband-xw.json &   # VL1_134.rec, FINAL_XW.rec; files/houdini-dualband.json for FINAL.rec
-   python3 csi_gui/replay_feed.py ~/demo_rec/<name>.rec --loop
-   ```
-
-   The `--conf` sets the page's |H| axis for the recorded
-   configuration (without it the dashboard falls back to a single-band config
-   and the dual-band |H| reads off scale). `--start` and `--duration` pick a window (seconds into the recording), for
-   example a stretch with steering settled. Each loop restarts the frame
-   counters, which the beacon-sync card shows as a new segment.
-3. The same replay on a laptop, independent of the rig host (the demo-day
-   fallback to carry): it needs only Python 3, no SoapySDR and no radios. Copy
-   the dashboard, the configs and a recording, then run step 2 there and browse
-   `http://localhost:8080`:
-
-   ```sh
-   mkdir -p ~/houdini_replay && cd ~/houdini_replay
-   scp -r <user>@<rig-host>:<checkout>/CC/Sounder/csi_gui .
-   scp -r <user>@<rig-host>:<checkout>/CC/Sounder/files .
-   scp <user>@<rig-host>:demo_rec/<name>.rec .
-   python3 csi_gui/csi_server.py --conf files/houdini-dualband-xw.json &
-   python3 csi_gui/replay_feed.py <name>.rec --loop
-   ```
-
-   On the rig host itself, never replay while a sounder run is live: the replay
-   and the run's dashboard use the same ports (UDP 9999, HTTP 8080).
+- The recordings live under `~/demo_rec` on the rig host: the four replays in
+  `replays/`, and the older full-length ones beside them (`VL1_134.rec` and
+  `FINAL_XW.rec` replay with `--conf files/houdini-dualband-xw.json`,
+  `FINAL.rec` with `files/houdini-dualband.json`; spares in `archive/`).
+- A scripted run takes the same `--record <file>` on `demo_run.sh`,
+  `fstage_run.sh` or `run_rung.sh`.
+- A recording starts when the dashboard starts, not at Start, and on freshly
+  booted nodes the data begins about 30 s after the page says running (the
+  first radio opens are retried): time a staged event from the first
+  datagram, watching the file grow.
 
 ### A8d. Over the air: antennas and the room (before the first run)
 

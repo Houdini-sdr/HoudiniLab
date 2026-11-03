@@ -4,23 +4,7 @@ What every panel of the live page shows, what healthy looks like and what a chan
 
 ## 1. The page and its cards
 
-The backend prints the URL as soon as it is listening:
-
-```
-[csi] dashboard at http://localhost:8080/  (SSH: -L 8080:localhost:8080)
-```
-
-If `<host>` is a remote machine, forward the port from your workstation:
-
-```sh
-ssh -L 8080:localhost:8080 <host>
-```
-
-Then open `http://localhost:8080/` in a browser. The page connects on its own
-and reconnects if the stream drops, so you can leave it open across sounder
-restarts.
-
-The page serves three routes: `/` is the dashboard itself, `/stream` is the
+Opening the page is the walkthrough's section 5. The page serves three routes: `/` is the dashboard itself, `/stream` is the
 Server Sent Events feed it reads, and `/vendor/tabler.min.css` is the
 stylesheet. You will not normally open the last two by hand.
 
