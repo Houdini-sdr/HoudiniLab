@@ -612,6 +612,19 @@ The cards fill the width of the window and reflow as you resize it, so a wider
 window gives you more cards side by side rather than more empty space. The panels
 inside a card stretch with it, so making the window wider makes every plot bigger.
 
+![The whole dashboard on a replayed bench recording: the beacon sync card reads LOCKED above the sub-6 and X-band antenna cards, both on their Channel tab.](img/dashboard-replay-xband-bench.png)
+
+The whole page on the "Replay, X-band bench" recording (a recording of the
+dashboard's input played back through the page with no radios, section 4.4),
+light theme: the beacon sync card, LOCKED, above the two antenna cards on
+their Channel tab. Every panel shows real bench data.
+
+![The header with its config list expanded: the demo configs by their labels, then the four replays, with the Check, Start, Restart and Stop buttons and the state line beside it.](img/header-config-list.png)
+
+With `--control` the header carries the config list (shown expanded here),
+the demo configs by their labels and the replays after them, then the
+buttons and the state line naming what runs.
+
 Each receive antenna gets one card. Once the sounder's channel metadata
 arrives the card is titled by its band, for example
 `Sub-6 · 2425 MHz (RX ch 0, antenna 0)` or
@@ -649,9 +662,30 @@ two values (for example 13,478 and 14,064): each constellation record carries a
 fixed number of points, and the one-second window holds one record more or less
 depending on when it closes. That is the averaging, not lost data.
 
+![The X-band antenna card up close: |H|, MER over the last 60 seconds, phase shape, waterfall, constellation and CIR, with the quality line under them.](img/card-xband-channel.png)
+
+The X-band card on the same replay, up close: the six panels in the order
+above and the quality line under them, a flat |H| across 97 MHz, a steady MER
+near 31 dB, four tight QPSK clusters and a single-mainlobe CIR.
+
 Guard band and DC null subcarriers are drawn as gaps in every per-subcarrier
 panel, never as zeros: nothing is transmitted there, so nothing is measured
 there. Expect gaps at the band edges and one at DC.
+
+What a fade looks like: the "Replay, over the air with blockage" recording
+has the X-band path blocked by hand for about nine seconds. The MER panel
+shows the dip to about 10 dB and the recovery, the waterfall shows the same
+seconds as a darker band, and the sub-6 card, on its own cable, does not move.
+
+![The whole dashboard on the blockage replay: the X-band card's MER trace dips and recovers while the sub-6 card holds steady.](img/dashboard-replay-ota-blockage.png)
+
+The page at the moment the X-band MER trace and waterfall show the dip and
+the recovery.
+
+![The X-band card up close during the blockage replay: the MER trace dips from 27 to about 10 dB and recovers, the waterfall carries a darker band over the same seconds, and the constellation has widened.](img/card-xband-blockage.png)
+
+The X-band card up close at the same moment: the MER trace, the darker band
+on the waterfall and the wider constellation are the one event.
 
 ### 5.1 When a card dims
 
@@ -716,6 +750,11 @@ itself: it measures the interval between the reports it actually receives and
 marks the card quiet at three times that, so the badge keeps its meaning
 whatever the cadence. Nothing to configure.
 
+![The beacon sync card: the resid trace flat on zero inside the shaded tolerance band, the LOCKED badge, and the readout line with the beacon SNR, the clock, residual and beacon figures in ppm and the locked count.](img/card-beacon-sync.png)
+
+The sync card on the bench replay: every detection on zero, well inside the
+band, and the readout line described next.
+
 The readout line carries three figures in ppm, and they are not three views of
 one number. Read them in this order.
 
@@ -751,6 +790,12 @@ Each card has two tabs. **Channel** is everything above. **Spectrum** shows
 the received pilot slot in frequency and how much of the converter it uses,
 which is where you look when the channel panels are strange and you suspect
 the front end rather than the algorithm.
+
+![Both antenna cards on their Spectrum tab: the sub-6 and X-band pilot spectra as flat shelves between the dashed band edges, the converter range bar under each.](img/dashboard-spectrum-tab.png)
+
+Both cards on the Spectrum tab, on the bench replay: a flat shelf between the
+dashed band edges on each, the floor well below it, and the converter range
+bar under each (both under-driven here, as the bar's colour says).
 
 The trace is the pilot slot's **spectrum in dBFS per bin** (the bin width is
 in the panel title) on a fixed 0 to -140 dB axis, so a full-scale complex tone
@@ -1253,3 +1298,20 @@ python3 csi_gui/teardown_framer.py --conf files/<config>.json   # or --topology 
 
 A framer left armed is the most common reason the next run fails to start, and
 the failure does not look like leftover state (section 8.4).
+
+## 10. Last tested
+
+The latest full dual-band run of this demo, as `DEMO_VERIFICATION.md` records
+it (its newest section 9 row is always the current one):
+
+| | |
+|---|---|
+| Date | 2026-10-26 |
+| Setup | "Demo, X-band chain": sub-6 on cables, X-band over the air between the two X-band front ends; 91 minutes on the dashboard |
+| Gateware (fpga) | 1.47, commit `86c011a5` |
+| SoapyHoudiniSDR (device and host) | 0.7.0, commit `f6a74e22` (develop after PR #55, `618cc955`) |
+| HoudiniLab | develop after PR #8, merge `fd4c5aa` |
+| Sub-6 MER | median 36.9 dB |
+| X-band MER | median 29.4 dB; 20.8 dB with the path blocked by hand, recovered each time with no pilot lost |
+
+The demo has not run on fpga 1.49 or SoapyHoudiniSDR 0.7.2 yet.
