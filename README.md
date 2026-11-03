@@ -1,146 +1,82 @@
-# RENEWLab
+# HoudiniLab: the Houdini channel sounder and dashboard
 
-[![Build Status](https://falcon.ecg.rice.edu:443/buildStatus/icon?job=github_public_renewlab%2Fmaster)](https://falcon.ecg.rice.edu:443/job/github_public_renewlab/job/master/)
+HoudiniLab is the RENEWLab software suite adapted for Houdini software-defined
+radios. Its centre is the C++ channel sounder in `CC/Sounder`, which drives
+two Houdini nodes, a base station and a client, through the SoapyHoudiniSDR
+driver, and a live web dashboard that shows each band's channel as it is
+measured. Its current use is the dual-band channel sounding demo: sub-6 at
+2425 MHz beside an X-band IF at 4380 MHz, one 5G-like numerology on both
+bands, the channel estimate and the equalized constellation of each band side
+by side.
 
-# HoudiniLab: the Houdini channel sounder
+## Start here
 
-This fork (HoudiniLab) extends the RENEWLab Sounder to drive two RFSoC
-"Houdini" radios, a base station and a client, through the SoapyHoudiniSDR
-driver, with a live web dashboard. Its current use is the dual-band demo:
-sub-6 at 2425 MHz beside an X-band IF at 4380 MHz, one 5G-like numerology on
-both bands. The rest of this README is the upstream RENEWLab one and describes
-the Iris hardware. Start here instead:
+| You want to | Read |
+|---|---|
+| Run the demo on your own bench, from an empty host to a live display | `CC/Sounder/CSI_DEMO_WALKTHROUGH.md` (its section map tells you what to skip) |
+| Run it on our lab bench | `CC/Sounder/DEMO_BENCH_RUNBOOK.md` |
+| See what was measured, and on which stack | `CC/Sounder/DEMO_VERIFICATION.md` (the newest row of its last section is the current state) |
+| Pick a configuration | `CC/Sounder/files/houdini-*.json`; each says what it runs in its `_description` |
+| Find your way around the sounder's code and tools | `CC/Sounder/README.md` |
+| Understand a design decision | `docs/README.md` |
 
-- `CC/Sounder/CSI_DEMO_WALKTHROUGH.md`: install, build, point the sounder at
-  your two radios, run it and read the dashboard, step by step, on any bench.
-- `CC/Sounder/DEMO_BENCH_RUNBOOK.md`: the lab bench's own runbook (its hosts,
-  cabling, launch and demo-day bring-up).
-- `CC/Sounder/DEMO_VERIFICATION.md`: the record of every measurement the
-  docs and configs cite.
-- `CC/Sounder/files/houdini-*.json`: the configs; each says what it runs in its
-  `_description` and notes.
-- `BACKLOG.md`: the work tracker (`AP-###` rows).
-- `docs/`: design notes and investigation records.
+## What is in the repository
 
-# Contents
- * [Description](#description)
- * [Components](#components)
- * [Collect and Process Channel Datasets](#collect-and-process-channel-datasets)
- * [Contributing and Support](#contributing-and-support)
- * [Documentation](#documentation)
- * [License](#license)
- * [Acknowledgement](#acknowledgement)
+| Path | What it is | Houdini state |
+|---|---|---|
+| `CC/Sounder/` | The channel sounder (C++), its configs, the dashboard (`csi_gui/`), the run and report tools, the tests | The Houdini work lives here |
+| `PYTHON/` | The RENEW Python development suite: offline processing and the Iris-era design flow | `IrisUtils/plot_hdf5.py` reads the sounder's recordings and knows the Houdini receive path (its spectral inversion, its timing jitter); the rest is upstream |
+| `MATLAB/` | The RENEW MATLAB development suite | Upstream, unchanged |
+| `WEBGUI/` | The RENEW Dashboard: a web application that monitors a RENEW base station's health | Upstream, unchanged; not the sounder's dashboard (that is `CC/Sounder/csi_gui/`) |
+| `docs/` | Design notes and, under `archive/`, finished investigations | See `docs/README.md` |
+| `tools/`, `probes/` | The lane's bench tools (shipping a branch to a rig host and testing it there) and the records of one-off probes | Houdini |
+| `BACKLOG.md` | The work tracker | |
+| `install_*.sh`, `config_ci.sh`, `Jenkinsfile` | RENEWLab's own installers and CI | Upstream; not used for Houdini, whose install is the walkthrough's section 2 |
 
-# Description
-RENEWLab is an open-source software toolbox for the [RENEW massive MIMO platform](https://renew-wireless.org). It provides a user interface through a set of APIs. Users can generate, manipulate, transmit, and receive RF signals on the RENEW hardware by calling these APIs. 
+## Collect and process channel datasets
 
-> The design goal of RENEWLab is to provide the RENEW software library and a quick starting point for users to design, program, and run their experiments on the RENEW massive MIMO platform. 
+The sounder has two modes. In **viewing mode** (`--view`) it streams each
+frame's channel estimate to the dashboard and writes no file; that is the
+demo, and the walkthrough covers it. In **recording mode**, without `--view`,
+it writes the measurements to an HDF5 trace file, which is what RENEWLab's
+sounder has always done and what dataset collection uses:
 
+1. Build the sounder and point a config at your radios as the walkthrough's
+   section 2 describes.
+2. If the config carries uplink or downlink data slots, generate the data
+   bits first: `./build/sounder --conf_file files/<config>.json --gen_data_bits`.
+3. Record: `./build/sounder --conf_file files/<config>.json --storepath <dir>`.
+   The trace file lands in `<dir>`, named with a time stamp. On Houdini
+   radios the file also carries a table of the sample ranges the receive path
+   marked as untrusted, so a recording is not evidence of a clean link until
+   that table is read.
+4. Inspect it with `PYTHON/IrisUtils/plot_hdf5.py`, whose options include the
+   Houdini-specific corrections. The RENEW documentation linked below
+   describes the file's layout and the rest of the processing tools.
 
-# Components
-The RENEWLab software suite consists of four components. 
+## RENEWLab heritage
 
-  1. [Python Development Suite](https://docs.renew-wireless.org/dev-suite/design-flows/python-design-flow/): 
-     It provides a Python-based library which allows users to rapidly program and test the physical layer and the radio layer in real time. It also provides tools for offline data processing. 
+RENEWLab is the open-source software toolbox of the
+[RENEW massive MIMO platform](https://renew-wireless.org): a Python
+development suite, a MATLAB development suite, the C++ Sounder framework and
+the RENEW Dashboard, written for the Faros base station and Iris radios of
+Skylark Wireless, with partial USRP support through SoapyUHD. HoudiniLab keeps
+that structure and that code: the Iris paths are intact, and the Houdini
+radio is one more backend behind the sounder's radio seam (`docs/README.md`).
 
-  2. [MATLAB Development Suite](https://docs.renew-wireless.org/dev-suite/design-flows/matlab-design-flow/): 
-     It provides a MATLAB-based library which allows users to rapidly develop physical layer algorithms using the MATLAB toolboxes with a highly simplified interface and to perform OTA tests.
+- Upstream repository: [renew-wireless/RENEWLab](https://github.com/renew-wireless/RENEWLab)
+- Upstream documentation: the [RENEW wiki](https://wiki.renew-wireless.org/)
+  and the design flows for the
+  [Python](https://docs.renew-wireless.org/dev-suite/design-flows/python-design-flow/),
+  [MATLAB](https://docs.renew-wireless.org/dev-suite/design-flows/matlab-design-flow/)
+  and [C++](https://docs.renew-wireless.org/dev-suite/design-flows/cpp/) suites
+- API documentation: `doxygen RENEWLab_doxygen.conf` from the repository root
 
-  3. [C++ Development Suite](https://docs.renew-wireless.org/dev-suite/design-flows/cpp/): 
-     It provides the Sounder framework for running channel sounding experiments.
+## License
 
-  4. RENEW Dashboard: 
-     It provides a web GUI for the RENEW base station health monitoring and for users to run different software frameworks with ease. Please refer to the README under the WEBGUI/ directory. 
+RENEWLab, and with it HoudiniLab, is used under the
+[RENEW open source license](https://renew-wireless.org/license).
 
-
-# Installation
-### Clone this repository: 
-```sh
-$ git clone https://github.com/renew-wireless/RENEWLab.git
-```
-
-### Install common dependencies: 
-```sh
-$ cd RENEWLab
-$ ./config_ci.sh  Note: You must run this command immediately after the cd command if you are a developer.
-$ ./install_soapy.sh
-```
-Note: This installs the SoapySDR app and its dependencies which include SoapySDR, SoapyRemote, and Sklk-SoapyIris. 
-Important for developers: Do not use _ in your branch name. Use - instead. Limit the branch name length to 18 characters or less. 
-
-### Install project-specific dependencies: 
-  1. If you are going to use the RENEW Python Development Suite, please install its library as below. 
-     ```sh
-     $ ./install_pylibs.sh
-     ```
-  2. If you are going to use the RENEW C++ Development Suite, please install its library and dependencies as below. 
-     ```sh
-     $ ./install_cclibs.sh
-     ```   
-  3. If you are going to use the RENEW MATLAB Development Suite, no dependency is needed.
-  4. If you are going to use the RENEW Dashboard, please follow the README in the WEBGUI/ directory to install dependencies.
-
-# Collect and Process Channel Datasets
-
-To collect channel dataset, use the Sounder software (C++ Development Suite). Currently the software works with Faros massive MIMO base station and Iris030 SDR Clients, both commercially available from [Skylark Wireless](https://www.skylarkwireless.com). The software partially supports USRP radios as well. For the software to work [SoapyUHD](https://github.com/pothosware/SoapyUHD) plugin is required.
-
- To start, first compile the Sounder C++ project:
-```sh
-$ cd CC/Sounder/mufft/
-$ git submodule update --init
-$ cmake -DCMAKE_POSITION_INDEPENDENT_CODE=ON ./ && make -j
-$ cd ../
-$ mkdir build
-$ cd build
-$ cmake .. -DCMAKE_BUILD_TYPE=Release -DLOG_LEVEL=info && make -j
-$ cd ../
-```
-If you wish to switch to use the UHD impelentation (install necessary UHD packages [here](https://kb.ettus.com/Building_and_Installing_the_USRP_Open-Source_Toolchain_(UHD_and_GNU_Radio)_on_Linux)):
-```sh
-$ cd build
-$ cmake .. -DRADIO_TYPE=PURE_UHD
-$ make
-$ cd ../
-```
-Once compiled successfully, the code can be run as the following.
-
- 1. If your JSON file includes uplink/downlink data transmission, first generate the files, including a random bits source file, as below:
-     ```sh
-     $ ./build/sounder --conf_file PATH_TO_JSON_CONFIG_FILE --gen_data_bits
-     ```   
- 2. Next, to start collecting channel measurement data, run the hardware discovery tool Pyfaros to create a file containing the serials of the boards to be used, and run the Sounder software as follows:
-     ```sh
-     $ cd ./files/
-     $ python3 -m pyfaros.discover --json-out
-     $ cd ../
-     $ ./build/sounder --conf_file PATH_TO_JSON_CONFIG_FILE
-     ```   
- 3. To store the dataset and bits source files in a specific directory use the `-storepath` switch:
-     ```sh
-     $ ./build/sounder --conf_file PATH_TO_JSON_CONFIG_FILE --storepath PATH_TO_DIRECTORY --gen_data_bits
-     $ ./build/sounder --conf_file PATH_TO_JSON_CONFIG_FILE --storepath PATH_TO_DIRECTORY
-     ```   
- 4. The dataset file generated in the specified directory with a software generated file name including a time stamp, e.g. `trace-uplink-2021-4-16-18-41-21_1x8x2_0_7.hdf5`. You can plot different dimension the dataset, such as the pilot of uplink data received on select base station antennas, or from select users, using the `plot_hdf5.py` tool in the PYTHON directory. For example:
-     ```sh
-     $ ../../PYTHON/IrisUtils/plot_hdf5.py PATH_TO_DATASET_FILE # add command line options
-     ```   
- 5. For more info on how to use these tools including all the options available for dataset processing as well as other tools available in the RENEWLab codebase, visit the [RENEW Documentation](https://wiki.renew-wireless.org/) website.
-
-# Contributing and Support
-
-Want to contribute? Great! Please email support@renew-wireless.org. 
-
-# Documentation
-
-Doxygen documentation generation for RENEWLab can be initiated by running the following command from the repository root directory:
-`doxygen RENEWLab_doxygen.conf`.  
-The latest hosted output is located at [RENEWLab Doxygen](https://renew-wireless.org/renewlab-doxy/html/index.html).  
-Other community resources can be found at the [RENEW Wireless Wiki](https://wiki.renew-wireless.org/)  
-
-# License
-
-RENEWLab shall be used under the [RENEW OPEN SOURCE LICENSE](https://renew-wireless.org/license).
-
-# Acknowledgement
+## Acknowledgement
 
 RENEW was funded by the NSF PAWR project.
