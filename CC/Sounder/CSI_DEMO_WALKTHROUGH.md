@@ -122,6 +122,24 @@ X-band front end board but no converter: the one converter serves both nodes,
 and the client's X-band IF and RF run to it by cable. The two nodes' antennas
 face each other across the bench or the room.
 
+### 1.1 Why two bands at once
+
+Different wavelengths see different channels, but a multi-band radio sends
+them through the same scene at the same moment, and that is what the demo
+measures: one OFDM pilot, transmitted on 2.4 GHz and near 10 GHz in the same
+frame from one time base, received and estimated side by side. Some features
+of the scene are the same in both bands (the arrival angles, where the paths
+sit in the impulse response, their relative strengths) and some are not (a
+hand in the X-band path takes 10 dB off that band and leaves 2.4 GHz alone;
+the absolute phase). Measuring both at once is the raw material for
+cross-band work: using the band you can see to predict the one you cannot,
+sensing in one band for communication in the other, or datasets that train a
+model on both. The demo is also the plainest proof that the two bands stream
+from one node coherently: the same beacon times both, and the dashboard shows
+them locked together.
+
+### 1.2 What happens in a run
+
 - The sounder normally records to HDF5. In **viewing mode** it does not write a
   file. Instead it computes a channel estimate from every received pilot and
   streams the result out as UDP datagrams, one per frame per antenna.
@@ -152,6 +170,51 @@ face each other across the bench or the room.
   however many antennas appear in the stream. Above them sits a single **beacon
   sync** card per client, which describes the LINK rather than any one antenna
   (section 5.2).
+
+### 1.3 The system
+
+The docs site's sounding page draws the whole layout; in words:
+
+- **Two nodes.** Each is a Houdini-4 board with a sub-6 front end on its
+  first channel pair. The base station also carries the X-band up-down
+  converter, which serves both nodes: the client's X-band IF reaches it by
+  cable, and the converted RF goes back by cable to the client's X-band front
+  end. Both X-band front ends sit at the end of a cable, their antennas
+  facing each other, so the X-band path itself is over the air (or through a
+  pad on a cabled bench).
+- **One host.** It runs the sounder and the dashboard backend. Each node's
+  100 G data port carries its samples to the host, directly or through a
+  switch; the host needs a data NIC the driver supports and the host plugin
+  of the nodes' release (section 2.4). The nodes' management ports and the
+  host share a control network, over which the sounder opens the radios,
+  sets them up and reads their status.
+- **Clocks.** The nodes share no reference. Each runs in calibrated hold and
+  the client steers its clock onto the beacon it receives (section 7.1), so
+  no cable carries timing between the nodes; a shared 10 MHz reference on
+  both nodes is the other arrangement.
+- **Frequencies.** The demo configurations place the sub-6 channel at
+  2425 MHz and the X-band IF at 4380 MHz, with the same converter settings
+  on both nodes; the FPGA design's `DEMO_FREQUENCY_PLAN.md` gives the plan
+  in full.
+
+### 1.4 The software path
+
+```mermaid
+flowchart LR
+  R[the two radios] -->|samples over 100 G| S[sounder --view]
+  S -->|one UDP datagram per frame per antenna| D[csi_gui/csi_server.py]
+  D -->|Server Sent Events| W[browser: the dashboard]
+  W -. Start, Stop, Check .-> D
+  D -. --record .-> F[(recording)]
+  F -. replay_feed.py .-> D
+```
+
+The sounder owns the radios and the frame schedule, and in viewing mode it
+sends each frame's result as one UDP datagram per antenna (the channel
+estimate, the constellation, the spectrum, the sync record). The backend
+turns those into a page and pushes it to the browser; with `--control` the
+page can also start, stop and check the sounder (section 4.4). The same
+datagrams can be recorded and played back with no radios (section 4.5).
 
 ## 2. Install everything (from nothing)
 
@@ -604,6 +667,58 @@ python3 csi_gui/csi_server.py --control --conf <config>
    that name.
 
 Ctrl+C on the backend still stops the sounder with it.
+
+### 4.5 Record and replay
+
+What a run leaves behind. In viewing mode the sounder writes no HDF5 file
+(its recording mode, without `--view`, does, with a gap table; this
+walkthrough covers viewing mode). A run's record is its log: the sounder
+prints the config it ran with and where each `sync` value came from, the
+`CSI view mode` line (section 6), and its end-of-run checks when it stops;
+with `--log-dir <dir>` the backend keeps one such log per Start. The third
+thing is optional and the most useful afterwards: a recording of the
+dashboard's input.
+
+1. **Record during a good run.** Add `--record` to the backend's command
+   line, whichever way you run it (section 4.1 or 4.2):
+
+   ```sh
+   python3 csi_gui/csi_server.py <your usual arguments> --record <dir>/<name>.rec
+   ```
+
+   The backend prints `recording every datagram to ...` at start. A name
+   that already exists is refused, never overwritten (the backend prints
+   `NOT recording: ... exists` and runs on without recording), so give each
+   run its own name. It flushes about once a second and stops at 2 GB
+   (`--record-max-mb`). A recording starts when the backend starts, not at
+   Start, so time an event you stage (a blockage, a hand on an antenna) from
+   the first datagram, watching the file grow.
+2. **Replay, with no sounder and no radios.** Start the backend with the
+   config the recording was made with (it sets the page's \|H\| axis), then
+   feed the recording in:
+
+   ```sh
+   python3 csi_gui/csi_server.py --conf files/<the recorded config>.json &
+   python3 csi_gui/replay_feed.py <dir>/<name>.rec --loop
+   ```
+
+   The datagrams go out as the sounder sent them, at their recorded pace,
+   so every panel shows real data. `--start` and `--duration` pick a window
+   (seconds from the first datagram) and `--speed` scales the pace. Each loop
+   restarts the frame counters, which the sync card shows as a new segment.
+3. **Offer replays on the page.** With `--control`, each `--replay
+   <file>=<label>` adds an entry to the header's config list under that
+   label. Start on one plays it in a loop with no radio, no setup check and
+   no teardown (a `--record` recording pauses while it plays); Stop ends it,
+   and a demo config's Start goes live again. The pictures in section 5 were
+   taken this way.
+4. **The same on a laptop.** A replay needs Python 3 only, no SoapySDR and no
+   radios: copy `csi_gui/`, `files/` and the recording, run step 2 there and
+   open `http://localhost:8080/`. It is the fallback to carry to a demo, and
+   the way to show the dashboard anywhere.
+
+Never replay on the host while a sounder run is live: the replay and the
+run's dashboard use the same ports (UDP 9999 and HTTP 8080 by default).
 
 ## 5. View the dashboard
 
