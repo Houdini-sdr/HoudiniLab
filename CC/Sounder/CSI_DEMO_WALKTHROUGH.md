@@ -28,6 +28,50 @@ Additional reference material lives in `../../docs/archive/UE_TX_FINE_GRID_TIMIN
 reference clock). The record of every measurement behind this walkthrough is
 `DEMO_VERIFICATION.md`.
 
+## How this walkthrough is organized
+
+This file is the run path, one level of detail: what to do, in order. Three
+companions hold the depth: `DASHBOARD_GUIDE.md` (what each panel shows),
+`SOUNDER_REFERENCE.md` (every option and knob) and `TROUBLESHOOTING.md`
+(each failure and its fix). Section 1 is the big picture and has no
+commands: why the demo exists, what happens in a run, what the system is
+made of and what the software does. Sections 2 to 9 are the run itself, in
+the order you do it, and each opens with what it does, when to skip it and
+the check that says it is done. Section 0 is the whole run on one screen for
+a host that is already set up. On a new bench take the sections in order; on
+a known bench section 0 is enough.
+
+| Section | What you do | What you have when it is done |
+|---|---|---|
+| 0 | The quick start: five commands for a provisioned host | A live page, if the bench and host are known |
+| 1 | Read: why two bands, what happens in a run, the system, the software path | The picture of what you are about to build |
+| 2 | Install the packages, SoapySDR and the plugin, build the sounder, point it at your two radios | `check_setup.py` prints `Ready.` |
+| 3 | Choose a config, climbing the ladder from one band to both at the demo numerology | A config that matches your bench |
+| 4 | Run: the dashboard launches the sounder, or you run both yourself; the page's controls; record and replay | The sounder running and the page connected |
+| 5 | Read the page; the panel-by-panel guide is `DASHBOARD_GUIDE.md` | You can tell a healthy run from a sick one by looking |
+| 6 | Confirm it is real: the log lines and checks of a good run | Evidence behind the numbers |
+| 7 | Tune, if the run asks for it; the option tables are `SOUNDER_REFERENCE.md` | A run adjusted to your bench |
+| 8 | When something goes wrong: the symptom index; the fixes are `TROUBLESHOOTING.md` | A way out of each known failure |
+| 9 | Clean up: stop, release the radios, confirm nothing is left | A bench ready for the next run |
+| 10 | The stack and results of the latest full run | What "it works" last meant |
+
+How long it takes. On a known bench, section 0 is about five minutes: the
+setup check takes up to a minute per radio, the sounder finds the beacon
+within seconds of starting (3 seconds in the latest full run; freshly booted
+nodes add about half a minute of retried radio opens), and the clock steering
+brings the MER to its final figures about three minutes after a cold start.
+On a new bench, from a host with nothing installed, plan on half a day to a
+day: the install (section 2) is an hour or two of it on a host with network
+access, and the rest is the RF, climbing the config ladder (section 3) one
+rung at a time while levels, cabling and antennas are sorted out; the X-band
+chain's own bring-up comes before any of it and is not part of this
+walkthrough. That range is our own bench history, not a timed measurement.
+
+Within the first minute of a good run the sync card reads `LOCKED`, each
+receive antenna's card fills with a steady channel and four tight
+constellation clusters, and the MER settles near the figures in section 10;
+`DASHBOARD_GUIDE.md` section 1's pictures show what that looks like.
+
 ## 0. Quick start
 
 If `<host>` already has the sounder built and the SoapyHoudiniSDR host plugin
@@ -81,12 +125,13 @@ display. Every command runs on `<host>` unless it says otherwise.
    of starting.
 
 7. What good looks like, usually within a minute:
-   - the beacon sync card reads `LOCKED` (section 5.2);
+   - the beacon sync card reads `LOCKED` (`DASHBOARD_GUIDE.md` section 3);
    - one card per receive antenna appears, and its channel estimate updates;
    - with an uplink config, the constellation shows tight clusters and the
      quality line shows the MER.
 
-   If the sync card stays at `NOT SYNCED`, go to section 8.6. Section 6 lists
+   If the sync card stays at `NOT SYNCED`, go to `TROUBLESHOOTING.md` section 7.
+   Section 6 lists
    the log lines of a healthy run.
 
 8. Press **Stop** when you are done, or **Restart** to run again, with the same
@@ -97,6 +142,48 @@ The rest of this document explains each step in detail and what to do when one
 fails.
 
 ## 1. What the demo does
+
+The demo runs on two Houdini nodes. This is the whole bench.
+
+![The demo bench: two Houdini-4 nodes with their sub-6 front ends and antennas, a network router between them, the X-band up-down converter beside the right node, and the two X-band front ends in front with their antennas facing each other.](img/bench-two-nodes-dual-band.jpg)
+
+The two nodes, each with its sub-6 front end and antennas on top; the router
+between them carries the control network. The X-band up-down converter sits
+beside the base station on the right, and the two X-band front ends in front
+are cabled to it, their antennas facing each other across the bench.
+
+Below, the base station on its own.
+
+![One Houdini-4 node set up for the dual-band demo: the sub-6 front end with its two antennas on the right, the X-band up-down converter in the middle with the X-band front end board and its wideband antenna on the left, the GPIO extender below, and the cables between them.](img/node-sub6-xband-front-ends.jpg)
+
+One node as the demo uses it. On the right, the sub-6 front end with its two
+antennas, cabled to the node's sub-6 channel pair through a band-pass
+filter. In the middle, the X-band up-down converter, fed from the node's
+second channel pair at the X-band IF. On the left, the X-band front end board
+with its power board and a wideband antenna. The ribbon cables from the GPIO
+extender at the bottom carry the control lines to the converter and the
+front end board. The client carries the same sub-6 front end and the same
+X-band front end board but no converter: the one converter serves both nodes,
+and the client's X-band IF and RF run to it by cable. The two nodes' antennas
+face each other across the bench or the room.
+
+### 1.1 Why two bands at once
+
+Different wavelengths see different channels, but a multi-band radio sends
+them through the same scene at the same moment, and that is what the demo
+measures: one OFDM pilot, transmitted on 2.4 GHz and near 10 GHz in the same
+frame from one time base, received and estimated side by side. Some features
+of the scene are the same in both bands (the arrival angles, where the paths
+sit in the impulse response, their relative strengths) and some are not (a
+hand in the X-band path takes 10 dB off that band and leaves 2.4 GHz alone;
+the absolute phase). Measuring both at once is the raw material for
+cross-band work: using the band you can see to predict the one you cannot,
+sensing in one band for communication in the other, or datasets that train a
+model on both. The demo is also the plainest proof that the two bands stream
+from one node coherently: the same beacon times both, and the dashboard shows
+them locked together.
+
+### 1.2 What happens in a run
 
 - The sounder normally records to HDF5. In **viewing mode** it does not write a
   file. Instead it computes a channel estimate from every received pilot and
@@ -111,7 +198,7 @@ fails.
   still works on a host with no network access.
 - Two radios take part. The base station arms a hardware TDD schedule built
   from the config frame (one slot per schedule character), transmits a short
-  beacon once per frame from its replay RAM (section 7.0), and receives its
+  beacon once per frame from its replay RAM (`SOUNDER_REFERENCE.md` section 3), and receives its
   receive slots: every slot but the beacon's, or, with `bs_rx_slots`, only the
   slots the schedule marks for receive. The client hunts for the
   beacon, confirms it twice on the frame grid behind a sync SNR floor, anchors
@@ -127,9 +214,60 @@ fails.
 - The dashboard draws one card per receive antenna and scales automatically to
   however many antennas appear in the stream. Above them sits a single **beacon
   sync** card per client, which describes the LINK rather than any one antenna
-  (section 5.2).
+  (`DASHBOARD_GUIDE.md` section 3).
+
+### 1.3 The system
+
+The docs site's sounding page draws the whole layout; in words:
+
+- **Two nodes.** Each is a Houdini-4 board with a sub-6 front end on its
+  first channel pair. The base station also carries the X-band up-down
+  converter, which serves both nodes: the client's X-band IF reaches it by
+  cable, and the converted RF goes back by cable to the client's X-band front
+  end. Both X-band front ends sit at the end of a cable, their antennas
+  facing each other, so the X-band path itself is over the air (or through a
+  pad on a cabled bench).
+- **One host.** It runs the sounder and the dashboard backend. Each node's
+  100 G data port carries its samples to the host, directly or through a
+  switch; the host needs a data NIC the driver supports and the host plugin
+  of the nodes' release (section 2.4). The nodes' management ports and the
+  host share a control network, over which the sounder opens the radios,
+  sets them up and reads their status.
+- **Clocks.** The nodes share no reference. Each runs in calibrated hold and
+  the client steers its clock onto the beacon it receives (`SOUNDER_REFERENCE.md` section 4), so
+  no cable carries timing between the nodes; a shared 10 MHz reference on
+  both nodes is the other arrangement.
+- **Frequencies.** The demo configurations place the sub-6 channel at
+  2425 MHz and the X-band IF at 4380 MHz, with the same converter settings
+  on both nodes; the FPGA design's `DEMO_FREQUENCY_PLAN.md` gives the plan
+  in full.
+
+### 1.4 The software path
+
+```mermaid
+flowchart LR
+  R[the two radios] -->|samples over 100 G| S[sounder --view]
+  S -->|one UDP datagram per frame per antenna| D[csi_gui/csi_server.py]
+  D -->|Server Sent Events| W[browser: the dashboard]
+  W -. Start, Stop, Check .-> D
+  D -. --record .-> F[(recording)]
+  F -. replay_feed.py .-> D
+```
+
+The sounder owns the radios and the frame schedule, and in viewing mode it
+sends each frame's result as one UDP datagram per antenna (the channel
+estimate, the constellation, the spectrum, the sync record). The backend
+turns those into a page and pushes it to the browser; with `--control` the
+page can also start, stop and check the sounder (section 4.4). The same
+datagrams can be recorded and played back with no radios (section 4.5).
 
 ## 2. Install everything (from nothing)
+
+**In brief.** Put the system packages, SoapySDR and the Houdini host plugin
+on `<host>`, build the sounder, point its topology file at your two radios,
+and set the levels. **Skip it if** the setup check in 2.2 already prints
+`Ready.`: go to section 3. **Done when** `check_setup.py` prints `Ready.`
+for the config you mean to run.
 
 ### 2.1 What you need before starting
 
@@ -225,7 +363,7 @@ prefix has a Houdini entry,
 stop here and complete the SoapyHoudiniSDR host install first. Nothing in this
 walkthrough can work without it.
 
-One more thing comes from that repository: the framer teardown in section 8.4
+One more thing comes from that repository: the framer teardown in `TROUBLESHOOTING.md` section 5
 imports `houdini_setup` from its host examples directory. The default location
 is `~/repos/SoapyHoudiniSDR/host/examples`. The checkout must be 0.7.0 or
 newer, the release this code needs (the setup check's `teardown` line WARNs on
@@ -238,8 +376,8 @@ setup check, the teardown, or the dashboard (which hands it to both):
 python3 csi_gui/csi_server.py --control --examples <path-to-SoapyHoudiniSDR>/host/examples --conf files/<config>.json
 ```
 
-The HIL tests under `tests/hil/` read the same path from the environment
-variable `HOUDINI_EXAMPLES` instead.
+The teardown's own test (`csi_gui/test_teardown.py`, run by `ctest`) reads the
+same path from the environment variable `HOUDINI_EXAMPLES` instead.
 
 ### 2.5 Get and build the sounder
 
@@ -349,7 +487,7 @@ Beyond the gain keys, signal level is set two ways:
 
 Judge the level from the receive side rather than guessing at it. Each card's
 Spectrum tab shows how much of the converter the pilot uses and counts clipped
-samples (section 5.3), and running the sounder with `--cl_rx_debug`
+samples (`DASHBOARD_GUIDE.md` section 4), and running the sounder with `--cl_rx_debug`
 makes it print the received RMS and absolute maximum periodically. Samples are
 16 bit, so an absolute maximum near 32767 means you are clipping and should
 attenuate; an RMS in the low tens means you are close to the noise floor and
@@ -364,6 +502,13 @@ driver's 384-tick grid (the `r1` and `r2` bring-up steps keep the legacy
 30 x 4096 frame); each config's `_numerology_note` shows the arithmetic.
 
 ## 3. Choose a config
+
+**In brief.** Sixteen configs ship; the demo is the first in the table, and
+the rows below it are the ladder a new bench climbs to reach it. **Skip it
+if** your bench is known and runs the demo config already: the dashboard's
+list offers the four demo entries by label (section 4.4). **Done when** you
+hold a config whose topology file names your two radios and whose rung below
+it has passed on this bench.
 
 Each config carries a one-line `_description`, which the dashboard's config
 list shows. All of them run one client. Each names its own topology file in
@@ -428,6 +573,14 @@ config gives the details.
 
 ## 4. Run the demo
 
+**In brief.** Mode A (4.1) is one command: the dashboard launches the
+sounder. Mode B (4.2) runs the two yourself, for debugging. 4.3 lists the
+backend's options, 4.4 the page's Start, Stop and Check, 4.5 recording a run
+and replaying it with no radios. **Skip to 4.1** on a normal day; you need
+4.2 only when you want the sounder's output in its own terminal. **Done
+when** the backend prints its `dashboard at` line and the sounder its `CSI
+view mode` line (section 6), and the page connects.
+
 You have two ways to start it. Mode A is one command and is the normal choice.
 Mode B keeps the sounder in its own terminal, which is better when you are
 debugging.
@@ -444,7 +597,7 @@ four attempts at the cold start, which matters because a radio open can time
 out on the first attempt.
 
 Before each attempt it also runs `csi_gui/teardown_framer.py` to release a
-framer that a previous run may have left armed (section 8.4). You will see its
+framer that a previous run may have left armed (`TROUBLESHOOTING.md` section 5). You will see its
 output prefixed `[teardown]`, and the sounder's prefixed `[sounder]`.
 
 Three defaults assume one particular layout. If yours differs, override them:
@@ -469,7 +622,7 @@ each start's sounder output in `<dir>/sounder_<UTC>.log`, including the
 end-of-run checks it prints at Stop.
 
 If you want the per frame diagnostics instead, pass them to the sounder with
-the backend's `--sounder-arg` (one flag each, repeatable). Section 7 describes
+the backend's `--sounder-arg` (one flag each, repeatable). `SOUNDER_REFERENCE.md` describes
 each one:
 
 ```sh
@@ -478,7 +631,7 @@ python3 csi_gui/csi_server.py --launch --conf files/<config>.json \
 ```
 
 Every beacon carrier estimate, rather than one in ten, is a config setting
-(`"sync": {"cfo": {"log_every": 1}}`, section 7.1), not a flag.
+(`"sync": {"cfo": {"log_every": 1}}`, `SOUNDER_REFERENCE.md` section 4), not a flag.
 
 On a healthy cabled bench this is a large difference in output and no
 difference in behaviour. Two back to back runs on the same bench measured 6,189
@@ -512,7 +665,7 @@ it instead of the venv's module directory, as the dashboard does:
 
 Note the flag names differ between the two programs. The sounder takes
 `--conf_file`; the dashboard backend takes `--conf`. The sounder's other
-settings (section 7) are flags on the same command line.
+settings (`SOUNDER_REFERENCE.md`) are flags on the same command line.
 
 You do **not** need to start a separate beacon transmitter. With
 `bs_hw_framer` set to true, the sounder arms the base station beacon itself.
@@ -521,37 +674,7 @@ from before that path existed, and it is not part of this demo.
 
 ### 4.3 Useful backend options
 
-| Option | Default | What it does |
-|---|---|---|
-| `--http-port` | 8080 | Web server port |
-| `--udp-port` | 9999 | Port the CSI datagrams arrive on |
-| `--fps` | 30 | How often the page is pushed new data |
-| `--stale-ms` | 1500 | Dim an antenna's plots when its last update is older than this (section 5.1) |
-| `--mag-top` | the config's `dashboard_mag_top`, else 90 | Where each card's \|H\| axis starts, in dB; the axis then steps by 10 dB when the trace leaves it (section 5) |
-| `--mag-span` | 40 | Height of the \|H\| axis, in dB below its top |
-| `--csi-fps` | sounder default (30) | Per antenna stream rate out of the sounder |
-| `--launch` | off | Start the sounder in viewing mode on this host at once |
-| `--control` | off | Start, Stop, Restart and Check buttons and a config list (the sounder's `files/houdini*.json`) in the page header; section 4.4 |
-| `--conf` | `files/houdini-1u.json` | The config to run (with `--launch` or `--control`), and the one the page's \|H\| axis top comes from (`dashboard_mag_top`) |
-| `--sounder-dir` | the checkout `csi_server.py` is in | Which checkout's `build/sounder` runs |
-| `--venv` | the activated venv, else `~/houdini_test` | The SoapySDR runtime the sounder runs with, and its Houdini plugin unless `--soapy-root` names a release prefix |
-| `--soapy-root` | none | The release's host-plugin prefix (section 2.4), for the sounder, the setup check and the teardown |
-| `--examples` | the teardown's own (`~/repos/SoapyHoudiniSDR/host/examples`) | The SoapyHoudiniSDR host examples the teardown imports (section 2.4) |
-| `--topology` | each config's `serial_file` | A topology file every run uses instead, for the sounder, the setup check and the teardown (section 2.6) |
-| `--sounder-arg=<flag>` | none | One more flag for the sounder's command line (repeatable), for example `--sounder-arg=--core_map=main=15`; section 7 lists them |
-| `--log-dir` | off | Write each start's sounder output to `<dir>/sounder_<UTC>.log` |
-| `--replay FILE=LABEL` | none | With `--control`, a recording offered in the config list under LABEL (repeatable); Start plays it in a loop into this dashboard with no radio, no setup check and no teardown |
-| `--configs` | `all` | With `--control`, the configs the list offers: every `files/houdini*.json` (`all`), or only those carrying a short `_label` (`labelled`: the demo's four) |
-| `--record` | off | Record every datagram to a new file for `replay_feed.py` (a name that exists is refused, never overwritten) |
-| `--record-max-mb` | 2048 | Stop recording at this size |
-| `--dest-host` | 127.0.0.1 | Where the sounder sends datagrams, when using `--launch` |
-| `--http-host` | 0.0.0.0, or 127.0.0.1 with `--control` | Web server bind address |
-
-`python3 csi_gui/csi_server.py --help` lists every option.
-
-Run the backend on the same host as the sounder unless you have a reason not
-to. If you split them, set `--dest-host` to the backend's address and make sure
-UDP port 9999 is open between the two.
+The backend's flags (ports, push rate, the stale threshold, the |H| axis, recording, replays) are tabled in `SOUNDER_REFERENCE.md` section 1. The ones a first run needs are on the command lines above.
 
 ### 4.4 Start and stop from the page
 
@@ -581,7 +704,69 @@ python3 csi_gui/csi_server.py --control --conf <config>
 
 Ctrl+C on the backend still stops the sounder with it.
 
+### 4.5 Record and replay
+
+What a run leaves behind. In viewing mode the sounder writes no HDF5 file
+(its recording mode, without `--view`, does, with a gap table; this
+walkthrough covers viewing mode). A run's record is its log: the sounder
+prints the config it ran with and where each `sync` value came from, the
+`CSI view mode` line (section 6), and its end-of-run checks when it stops;
+with `--log-dir <dir>` the backend keeps one such log per Start. The third
+thing is optional and the most useful afterwards: a recording of the
+dashboard's input.
+
+1. **Record during a good run.** Add `--record` to the backend's command
+   line, whichever way you run it (section 4.1 or 4.2):
+
+   ```sh
+   python3 csi_gui/csi_server.py <your usual arguments> --record <dir>/<name>.rec
+   ```
+
+   The backend prints `recording every datagram to ...` at start. A name
+   that already exists is refused, never overwritten (the backend prints
+   `NOT recording: ... exists` and runs on without recording), so give each
+   run its own name. It flushes about once a second and stops at 2 GB
+   (`--record-max-mb`). A recording starts when the backend starts, not at
+   Start, so time an event you stage (a blockage, a hand on an antenna) from
+   the first datagram, watching the file grow.
+2. **Replay, with no sounder and no radios.** Start the backend with the
+   config the recording was made with (it sets the page's \|H\| axis), then
+   feed the recording in:
+
+   ```sh
+   python3 csi_gui/csi_server.py --conf files/<the recorded config>.json &
+   python3 csi_gui/replay_feed.py <dir>/<name>.rec --loop
+   ```
+
+   The datagrams go out as the sounder sent them, at their recorded pace,
+   so every panel shows real data. `--start` and `--duration` pick a window
+   (seconds from the first datagram) and `--speed` scales the pace. Each loop
+   restarts the frame counters, which the sync card shows as a new segment.
+3. **Offer replays on the page.** With `--control`, each `--replay
+   <file>=<label>` adds an entry to the header's config list under that
+   label. Start on one plays it in a loop with no radio, no setup check and
+   no teardown (a `--record` recording pauses while it plays); Stop ends it,
+   and a demo config's Start goes live again. The pictures in `DASHBOARD_GUIDE.md` section 1 were
+   taken this way.
+4. **The same on a laptop.** A replay needs Python 3 only, no SoapySDR and no
+   radios: copy `csi_gui/`, `files/` and the recording, run step 2 there and
+   open `http://localhost:8080/`. It is the fallback to carry to a demo, and
+   the way to show the dashboard anywhere.
+
+Never replay on the host while a sounder run is live: the replay and the
+run's dashboard use the same ports (UDP 9999 and HTTP 8080 by default).
+
 ## 5. View the dashboard
+
+**In brief.** One card per receive antenna, six panels on its Channel tab
+and a Spectrum tab behind it, with the beacon sync card for the link above
+them; `DASHBOARD_GUIDE.md` says what each shows and what healthy looks
+like, with pictures. **Skip it if** you can already read the page; come back
+for a panel you do not understand: the guide's section 2 for a card that
+dims, its section 3 for the sync card's badges, its section 4 for the
+converter range. **Done when** you can tell a healthy run from a sick one at
+a glance: `LOCKED`, a steady channel, tight clusters, smooth streaks in the
+waterfall.
 
 The backend prints the URL as soon as it is listening:
 
@@ -589,203 +774,23 @@ The backend prints the URL as soon as it is listening:
 [csi] dashboard at http://localhost:8080/  (SSH: -L 8080:localhost:8080)
 ```
 
-If `<host>` is a remote machine, forward the port from your workstation:
+Forward the port from your workstation (`ssh -L 8080:localhost:8080 <host>`,
+section 0, step 5) and open `http://localhost:8080/`. The page connects on its
+own and reconnects if the stream drops, so you can leave it open across
+sounder restarts. This is what you should see:
 
-```sh
-ssh -L 8080:localhost:8080 <host>
-```
+![The whole dashboard on a replayed bench recording: the beacon sync card reads LOCKED above the sub-6 and X-band antenna cards, both on their Channel tab.](img/dashboard-replay-xband-bench.png)
 
-Then open `http://localhost:8080/` in a browser. The page connects on its own
-and reconnects if the stream drops, so you can leave it open across sounder
-restarts.
-
-The page serves three routes: `/` is the dashboard itself, `/stream` is the
-Server Sent Events feed it reads, and `/vendor/tabler.min.css` is the
-stylesheet. You will not normally open the last two by hand.
-
-The button at the top right switches between the dark and light theme. Your
-choice is stored in the browser, so it survives a reload and a restart of the
-backend. It is the same control, and the same two themes, as the RayNet
-compiler dashboard.
-
-The cards fill the width of the window and reflow as you resize it, so a wider
-window gives you more cards side by side rather than more empty space. The panels
-inside a card stretch with it, so making the window wider makes every plot bigger.
-
-Each receive antenna gets one card. Once the sounder's channel metadata
-arrives the card is titled by its band, for example
-`Sub-6 · 2425 MHz (RX ch 0, antenna 0)` or
-`X-band · IF 4380 MHz (RX ch 2, antenna 1)`. Its **Channel** tab carries:
-
-1. **\|H\| in dB** across subcarriers. This is the frequency response of the
-   channel. Nulls are real multipath fades, not faults. The axis starts at the
-   config's `dashboard_mag_top` (or `--mag-top`) and moves in 10 dB steps, at
-   most once every 3 seconds, and only when the trace has left the axis or sat
-   in its bottom quarter for that whole time; a steady trace never moves it.
-   Between steps an `off scale` badge marks a trace outside the axis.
-2. **MER over the last 60 seconds**, on a fixed 0 to 40 dB axis, from the
-   card's one-second MER. It shows steering, fades and interference as they
-   happen; a gap in the line is a stretch with no constellation.
-3. **Phase shape** in degrees, on a fixed plus or minus 10 degree axis: each
-   frame's phase with its measured delay (a straight line across the band) and
-   its common phase removed, averaged over half a second. The removed delay is
-   printed beside the title. On a cable what remains is the filters' ripple.
-4. **Waterfall of \|H\|**, time running downward. This is the panel that
-   shows stability: a steady link draws smooth vertical streaks, and a link
-   that keeps re-locking draws horizontal tearing.
-5. **Constellation**, equalized uplink data. Only populated when the frame
-   carries an uplink data slot (`U` in the schedule). Clean QPSK shows four
-   tight clusters.
-6. **CIR**, the impulse response of the same H: dB relative to the strongest
-   tap on a fixed 0 to -60 dB axis, delay in ns from that tap. A clean cable
-   reads as one mainlobe about 2/B wide (the Hann window), not a single tap.
-
-Under the panels the quality line gives the lane's IF (NCO) and transmission
-bandwidth (in resource blocks when the tones make whole NR resource blocks),
-the MER and EVM (decision directed, averaged over about a second, over the
-tones within 8 dB of the median \|H\|), and the delay spread figures with
-their threshold and resolution. The point count beside the MER steps between
-two values (for example 13,478 and 14,064): each constellation record carries a
-fixed number of points, and the one-second window holds one record more or less
-depending on when it closes. That is the averaging, not lost data.
-
-Guard band and DC null subcarriers are drawn as gaps in every per-subcarrier
-panel, never as zeros: nothing is transmitted there, so nothing is measured
-there. Expect gaps at the band edges and one at DC.
-
-### 5.1 When a card dims
-
-If an antenna stops producing updates, its plots dim and a `stale 2.3 s` badge
-appears next to the antenna name, counting up until fresh data arrives. The
-card then returns to normal on its own.
-
-This matters because the sounder refuses slots whose samples carry receive gaps
-(section 8.3), so a losing link stops sending rather than sending something
-untrue. Without the badge, the panels would simply hold their last good values,
-and on a stationary bench a frozen display and a healthy static channel look
-exactly the same. A dim card means "this is the last thing we knew, not what is
-happening now".
-
-The threshold is 1.5 seconds by default. If you lower `--csi-fps`, raise it to
-match with `--stale-ms`, or every card will read as stale.
-
-`--stale-ms` sets the refresh floor for BOTH card types. The sync card decides
-what to display using its own thresholds, but its age can only advance when the
-server pushes an event, and that decision uses `--stale-ms`. So raising it
-delays how quickly the sync card notices a quiet link too (section 5.2).
-
-### 5.2 The beacon sync card
-
-One card per client, above the antenna cards. It answers a different question
-from the channel panels: not "what does the channel look like" but "is the UE
-still locked to the base station's beacon, and how far off is it".
-
-The trace is `resid`: how many samples the detected beacon landed from where the
-anchored grid predicted it. The shaded band is the acceptance tolerance the
-sounder actually applies, carried on the wire rather than hardcoded in the page,
-so it always matches the running code. Healthy looks like a flat line on zero
-well inside the band.
-
-The x axis is the FRAME NUMBER, not the point index. Detections are irregularly
-spaced, and a wide gap is itself information, so an evenly spaced axis would
-hide it.
-
-The badge reads one of:
-
-| Badge | Meaning |
-|---|---|
-| `LOCKED` | Beacon found where the anchored grid predicted it. Normal. The UE still nudges its schedule on one of these, by a fraction of the measured residual, so a locked run is a tracking run and not a frozen one. |
-| `HOLD PENDING` | One off-grid detection seen. Deliberately NOT acted on: single large offsets are scatter, so the sounder waits for a second consistent one. |
-| `RE-ANCHORED` | The UE gave up tracking and re-acquired. The readout names the schedule step applied. This is the LARGE move; the small per detection nudge on a `LOCKED` record is the other one. |
-| `WEAK BEACON` | Something was detected but it failed the SNR floor. Different from no beacon at all, and usually means levels or cabling. |
-| `RE-ANCHOR FAILED` | An escalation ran and re-acquisition did not confirm. The previous anchor is being kept. |
-| `NOT SYNCED` | No detections at all, or the stream has been silent for a minute. |
-
-A badge may be suffixed `quiet 4.2s`. That is NOT a fault. The UE reports only
-when it makes a detection, and it only attempts one when the anchored grid
-predicts the beacon inside the read window, so seconds of silence between bursts
-are normal on a perfectly healthy link. The plot dims while quiet so you can see
-at a glance that you are looking at held data rather than live data.
-
-How long is normal depends on the cadence. The client looks at the beacon only
-as often as its tracked clock needs (seconds apart on a steady link;
-`sync.resync.residual_ppm` and `sync.resync.sync_tol_samples` set it, section
-7.1), so a healthy link is quiet most of the time, and the badge only means
-something if it is much longer than the cadence. The page works this out for
-itself: it measures the interval between the reports it actually receives and
-marks the card quiet at three times that, so the badge keeps its meaning
-whatever the cadence. Nothing to configure.
-
-The readout line carries three figures in ppm, and they are not three views of
-one number. Read them in this order.
-
-1. **clock** is the total offset the client's timing tracker currently holds. It
-   comes from the frame period the tracker has learned, and on a two board bench
-   running on internal references it reads several ppm. It is a filtered state
-   rather than a set of samples, so it is printed as a value with no error bar.
-2. **residual** is what is left after the tracker has done its work, fitted from
-   the slope of the resid trace. It should sit near zero. This is the number that
-   tells you the loop is closed.
-3. **beacon** is a separate instrument. It measures the same total offset from
-   the beacon's own carrier phase, independently of the timing channel, and it
-   carries a standard error because each detection is an independent reading.
-
-The cross check that means something is **clock against beacon**, because those
-two measure the same quantity two different ways. Do not compare clock against
-residual: residual is clock's own error term, so the two are meant to differ by
-whatever factor the tracker is winning by, and a large ratio there is the loop
-working rather than a fault.
-
-Expect the beacon figure to sit off the clock figure by a fixed amount on any
-given bench. The beacon estimator is precise but carries a configuration
-dependent bias, so treat it as a liveness and sanity instrument rather than the
-value to correct with. It is annotated when it falls inside the phase noise
-floor: a short correlation lag turns a tiny phase error into an apparently large
-frequency, so treat sub kilohertz beacon readings as instrument noise rather
-than a real offset. It reads `beacon n/a` when the visible segment holds no
-detection to estimate from.
-
-### 5.3 The Spectrum tab
-
-Each card has two tabs. **Channel** is everything above. **Spectrum** shows
-the received pilot slot in frequency and how much of the converter it uses,
-which is where you look when the channel panels are strange and you suspect
-the front end rather than the algorithm.
-
-The trace is the pilot slot's **spectrum in dBFS per bin** (the bin width is
-in the panel title) on a fixed 0 to -140 dB axis, so a full-scale complex tone
-reads 0 dBFS and a level change is a real change, not a rescale. The x axis is
-MHz from the lane's NCO on a 10 MHz grid, and two dashed lines mark the
-occupied band's edges. A healthy pilot is a flat shelf between the dashed
-lines with the floor well below it outside; a spur, an image or a filter edge
-shows up where it sits. A value above the top pins to it and lights an
-`off scale` badge.
-
-The absolute question, how much of the converter you are using, is answered
-underneath by a bar on a fixed full scale. The bar turns amber below 10
-percent, meaning under driven, and red at 95 percent or on any clipped
-sample. The status line reports the pilot peak in counts and as a percent of
-full scale, plus the peak and clipped count across every slot of the frame,
-not just the plotted one. A `clipping` badge appears next to the title when
-the clipped count is not zero.
-
-Aim for a peak somewhere around half to three quarters of full scale. Much
-lower wastes converter bits and the constellation gets noisy. At the rail
-the samples are simply wrong and every panel downstream inherits it.
-
-One caveat to know before you trust a reading of zero clipped samples. Full
-scale here means the rail of the 16 bit sample format the sounder uses
-throughout. If the converter ever delivers a narrower sample that is not
-shifted up into the top of those 16 bits, the true rail is lower, the
-clipped count stays at zero, and the peak reads as though there were
-headroom. The tell is the peak itself: a peak that reports the same value on
-every frame is the rail, whatever number it shows.
-
-The tabs are per card, so you can watch one antenna's converter while
-another shows its channel. That is how you find the single antenna that is
-clipping.
+What each card and panel shows, what healthy looks like and what a dim card, a badge or a bar colour means is `DASHBOARD_GUIDE.md`: its section 1 walks the page and the six panels, section 2 the stale badge, section 3 the beacon sync card and its readout, section 4 the Spectrum tab and the converter range.
 
 ## 6. Confirming it is actually working
+
+**In brief.** The log lines that prove the numbers are real: the sounder's
+viewing-mode line and its fields, the re-sync lines, the backend's datagram
+counter. **Skip it if** the page shows `LOCKED`, a steady channel and tight
+clusters and you do not need the evidence behind them. **Done when** the
+datagram count climbs steadily and the re-sync lines read a residual near
+zero.
 
 The sounder prints one line when viewing mode initializes:
 
@@ -803,10 +808,22 @@ Check each field:
   legacy configs (128 minus half of 16), -112 for the dual-band configs (32
   minus half of 288; negative is valid, the symbol body is read from the
   window start plus the cyclic prefix), and 96 for their `r1` and `r2`
-  bring-up steps (128 minus half of 64). Section 7 explains why.
+  bring-up steps (128 minus half of 64). `SOUNDER_REFERENCE.md` explains why.
 - `timing_fix=1` and `phase_fix=1`, on by default for Houdini.
 
-Other sounder lines worth recognizing on a healthy run:
+Before the radios open, the sounder prints every `sync` setting it will run
+with and where each value came from, so a knob you meant to set is confirmed
+in the log's first lines rather than inferred from the run:
+
+```
+sync configuration (value  provenance):
+  resync.residual_ppm = 0.1  [default]
+  resync.sync_tol_samples = 8  [derived]
+  steer.enable = true  [json]
+```
+
+A key you set in the config shows `[json]`; anything else is the default or
+derived from one. Other sounder lines worth recognizing on a healthy run:
 
 ```
 UE pilot burst: scheduled 97 frames up to <tick> (pad 148)
@@ -833,398 +850,35 @@ between the two is dropping UDP.
 
 ## 7. Tuning knobs
 
-All of these are flags of the sounder, its run options
-(`./build/sounder --helpon=main` lists every one). Put them on the sounder's
-command line (mode B), or pass each through the dashboard as
-`--sounder-arg=<flag>` (mode A). The sounder logs a `Run options:` line at
-start naming every one not at its default. The sync knobs (the SNR floor, the
-beacon carrier log rate, the tracker and the steering) are config keys
-instead, in the config's `sync` block (section 7.1).
+**In brief.** The sounder's run flags, the beacon waveform and the `sync`
+block of the config, tabled in `SOUNDER_REFERENCE.md`. The shipped demo configs carry the values
+that ran; nothing here is needed for a first run. **Skip it unless** the
+sync card or the MER says something is off, or you change the beacon, the
+clock plan or the bench. **Done when** the run's `Run options:` line and its
+sync configuration block (section 6) show the values you meant.
 
-| Flag | Default | What it does |
-|---|---|---|
-| `--csi_sym_start` | the zero prefix minus half the cyclic prefix (section 6) | Where the FFT window starts inside a received slot. An integer, or `auto` for the energy edge detector. |
-| `--csi_timing_fix` | on | `--csi_timing_fix=false` disables the per frame pilot re-alignment. |
-| `--csi_fps` | 30 | Per antenna datagram rate out of the sounder. |
-| `--max_frame` | from config `max_frame` | Frame count to run. Set large for continuous viewing. |
-| `--csi_udp` | `127.0.0.1:9999` with `--view` | Where datagrams go, as `host:port`. |
-| `--csi_dump=N` | off | One shot raw slot and H dump for offline analysis, per antenna after N frames (0 or 1: 30), under `--dump_dir`. |
-| `--pilot_horizon` | from config `ue_pilot_horizon` (96 in the legacy configs and the dual-band `r1` and `r2`, 10 in the other dual-band ones) | How many frames of client bursts are queued ahead of real time. Larger survives slower host loops; every extra frame delays a timing correction reaching the wire. |
-| `--bs_rx_debug` | off | Base station prints its rederivation of the client schedule: `pilot_grid_off` should sit within a few samples of zero and hold steady through a run, and `clamped` (slots placed past the capture's edge) should read 0. |
-| `--ue_tx_debug` | off | Client prints its burst scheduling (frames queued, pad). |
-| `--core_map` | unset | Where the sounder pins its own threads: `main=<core>,recorder=<core>,bsrx=<core>,ue=<core>`, each the base core of that role (thread i on base + i); a role not named keeps the default layout. Logged at start. For CPU isolation experiments. |
-| `--tx_cpu_affinity` | unset | `c0,c1,...`: the i-th live client TX stream gets the host plugin's `cpu_affinity=ci`, pinning its pacer worker (SH-427: keep the workers off the cores that take the data NIC's interrupts). Logged per stream at open. |
-| `--tx_stream_args` | unset | Extra host-plugin arguments for the client's live TX streams, `key=value,key=value` (for example `tx_target_frac=0.75`), each logged at open; `tx_mode`, `tdd` and `mts` are refused. A diagnostic and tuning knob: set it only when the host plugin's owners ask. |
-| `--csi_r_debug` | off | Recorder prints the per frame pilot re-alignment it chose (`r`, and the blind score behind it), one line per 30 corrections. |
-| `--tx_host_status` | off | Logs the client host plugin's pacer state (`TX_HOST_STATUS`, `TX_BANK_STATUS`) every link-health period (`--link_health_s`). Cheap; the demo runs with it. |
-| `--cns_dump_low` | unset | Directory for autopsy dumps of the first few low scoring constellations. The directory must already exist. |
-
-### 7.0 Choosing the beacon waveform
-
-The base station transmits a short burst at the top of every frame and the
-client finds it by correlation. Which burst it sends is the config key
-`sync.beacon.type` (the top-level `beacon_type` of older configs is still
-read, and the two may not disagree). Six are available:
-
-| value | what it is |
-| --- | --- |
-| `legacy` | The default. Fifteen repeats of a 16 sample training symbol, then two repeats of a 128 sample Gold sequence. |
-| `legacy_guard` | The same, with a 32 sample cyclic guard inserted before the Gold field, in the style of an 802.11 long training field. |
-| `dot11` | The 802.11a/g/n legacy preamble as the standard defines it: the short training field, then the guard and two long training symbols. |
-| `nr` | The 5G NR primary synchronisation signal, then a guard and two repeats of a tracking symbol built from the NR reference sequence. The client finds it on the repeated tracking symbol. |
-| `nr_pss` | The same burst as `nr`, sample for sample, but the client finds it the way an NR handset does: a plain matched filter on the primary synchronisation signal, with no repeat check. The log says `threshold form forced to coherence` when this is in effect. |
-| `nr_pss_bl` | The band-limited beacon of the dual-band configs: the NR primary synchronisation signal, then a guarded pair of tracking symbols on the central 96 tones, all inside the sub-6 channel filter's plus or minus 24 MHz. |
-
-The first four were measured on the bench, four rounds each with the order
-rotated, about 8000 detections apiece; the first five have been run end to end
-through the client (`nr_pss` in `DEMO_VERIFICATION.md` 8.154 to 8.162), and
-`nr_pss_bl` is the beacon of every dual-band run (section 9 of the record).
-The margin figures below were measured with an earlier comparison rule, so
-read them as a ranking rather than as absolute numbers. **Timing is the same
-for all of them**, within measurement error. What separates them is detection margin: the worst detection
-of the run cleared the threshold by 12x for `legacy` and `legacy_guard`, 7x for
-`dot11`, and only 2.3x for `nr`.
-
-**On the legacy configs, leave it at `legacy` unless you have a reason.** The
-margin is the best of the four, and it is the waveform every legacy
-measurement in this repository was taken against. **The dual-band configs need
-`nr_pss_bl`:** in mode V the sub-6 lanes are filtered to plus or minus 24 MHz,
-so the sounder refuses a wider beacon at load. If you set a value that is not
-in the table the client refuses to start rather than falling back, so a typo
-cannot quietly leave you on a different beacon than you think.
-
-The one thing the alternatives are better at is the beacon's own frequency
-estimate, where `dot11` is about a third more stable. That number is a
-secondary reading on the sync panel, not what the client actually tracks
-frequency with, so it does not currently justify the margin it costs.
-
-### 7.1 Sync knobs: the `sync` block of the config
-
-These belong to the timing tracker, the beacon detector, its SNR confirm, the
-beacon's own frequency estimate and the client's clock steering. They live in
-ONE place: a `sync` object in the JSON config, loaded into one validated structure whose
-every value is printed at startup with where it came from (`default`, `json`
-or `derived`). Every default below is a measured value, not a guess, and the run
-is expected to be correct with all of them left alone.
-
-Three things to know:
-
-1. The table is GENERATED from the code (`./build/sync_config_schema`) and
-   checked by `sync_config_test`, which fails when the committed copy
-   differs from the schema, so it cannot drift from what the client actually
-   reads. If you edit a knob in the code, regenerate this table.
-   `sync.detector.corr_scale` and `corr_scale_init` are the detection bars;
-   the legacy top-level `corr_scale` arrays are still read when the block
-   does not set them (the first client's value), so no old file needs a new
-   key.
-2. A key the loader does not know, or a value outside its range, stops the
-   client with a message naming the key. A typo cannot quietly leave a knob at
-   its default.
-3. There is no environment override: the config's `sync` block is the only
-   way to set these knobs, so a run's sync settings are all in its config.
-   Bench sweeps go through the JSON: `run_shape_campaign.sh` merges
-   `SYNC_OVERLAY` (a JSON object) into the `sync` block of every config it
-   writes.
-
-Example, the block of the demo config
-`files/houdini-dualband-xw-steer-slots.json`:
-
-```json
-"sync": {
-  "steer":    { "enable": true, "deadband_ppm": 0.12 },
-  "beacon":   { "type": "nr_pss_bl", "tx_full_scale": 0.34 },
-  "detector": { "pick": "argmax", "min_bar": 0.1 },
-  "confirm":  { "snr_floor_db": 25.0 }
-}
-```
-
-<!-- sync-knob-table:begin (generated by ./build/sync_config_schema; sync_config_test diffs it, do not edit by hand) -->
-| key | default | range | what it does |
-| --- | --- | --- | --- |
-| `sync.beacon.type` | `legacy` |  | Which beacon waveform the base station transmits (legacy, legacy_guard, dot11, nr, nr_pss, nr_pss_bl; nr_pss_bl is the band-limited mode-V beacon, AP-79). |
-| `sync.beacon.tx_full_scale` | 0.6 | 0.001 to 1 | Transmit peak of the beacon as a fraction of DAC full scale. 0.6 shipped; lower it to stand in for path loss on a cable. |
-| `sync.detector.threshold` | `auto` | auto, power, xcorr, coherence | Decision statistic: auto picks coherence for a single-copy replica and the normalised cross-correlation otherwise; power is the original level-dependent form (4th order in amplitude against 2nd) and the Iris/UHD default. |
-| `sync.detector.pfa_per_window` | 0.001 | 1e-09 to 0.5 | The coherence form's bar when set: the false-alarm probability per search window, turned into a bar by the replica and window lengths (8.163). Unset, corr_scale applies; ignored for the repeated-field forms. |
-| `sync.detector.pick` | `first_path` | first_crossing, cluster_refined, argmax, first_path | Which crossing is returned: first_path (the Houdini default), argmax, cluster_refined, or first_crossing (the Iris/UHD default; unsafe on a strong link). |
-| `sync.detector.first_path_window` | derived | -1 to 4095 | Samples the first-path search looks back from the peak; -1 (default) means half the replica length. Must stay inside the preamble's self-coherent plateau. A correlator quantity: samples, not scaled with the rate. |
-| `sync.detector.first_path_floor_db` | -9 | -30 to 0 | How much weaker, in dB of path power, an earlier arrival may be and still be taken as the first path. |
-| `sync.detector.first_path_guard` | 0 | 0 to 1 | Samples immediately before the peak the first-path search skips. A beacon between samples splits its peak over two adjacent taps and the earlier one is the SAME arrival, not an earlier one; 1 skips it. Only 0 and 1: 2 loses a genuine two-sample-earlier arrival and 3 a three-sample one (measured). 0 is the default (DEMO_VERIFICATION.md 8ak). |
-| `sync.detector.corr_scale` | 10 | 0.0001 to 1e+07 | Resync detection threshold: the bar is 1 / corr_scale, relaxed by one per retry. Read from the legacy per-client top-level array when absent. |
-| `sync.detector.corr_scale_init` | 10 | 0.0001 to 1e+07 | Acquisition detection threshold (bar 1 / corr_scale_init); defaults to corr_scale. |
-| `sync.detector.min_bar` | 0 | 0 to 1 | The lowest bar the resync retry relaxation (+1 on corr_scale per retry) may reach; 0 = no limit. Set it with a small corr_scale, where +1 per retry would walk the bar into the noise. |
-| `sync.detector.corr_threads` | 1 | 1 to 256 | Threads for the correlator's matched filter. 1 shipped; measured a net loss below ~4 on the rig host. |
-| `sync.confirm.snr_floor_db` | 30 | -10 to 80 | In-window SNR a detection must clear. A property of the link and the waveform: re-derive it when either changes. |
-| `sync.cfo.index_guard` | 8 | 0 to 64 | Samples the carrier estimator's windows slide later than the detected end (AP-39). A correlator quantity: samples, not scaled with the rate. |
-| `sync.cfo.window_margin` | 0 | 0 to 32 | Samples shrunk from both ends of each estimator window so neither touches the burst's edge (8.164). A correlator quantity: samples, not scaled with the rate. |
-| `sync.cfo.log_every` | 10 | 1 to 1e+06 | Print one beacon-CFO log line in this many. |
-| `sync.tracker.type` | `alpha_beta` | alpha_beta, kalman | Which estimator tracks the base station frame grid: alpha_beta (shipped) or kalman. |
-| `sync.tracker.alpha` | 0.5 | 0 to 1 | Fraction of each accepted residual applied to the schedule. |
-| `sync.tracker.beta` | 0.1 | 0 to 1 | Fraction of the residual applied to the frame period estimate. |
-| `sync.tracker.step_ppm` | 0.5 | 0 to 1000 | Most one detection may move the period estimate, ppm. 0 disables the limit. |
-| `sync.tracker.max_ppm` | 100 | 0.1 to 10000 | Absolute band the period estimate may occupy either side of nominal, ppm. |
-| `sync.tracker.trust_ppm` | 1 | 0 to 1000 | How far the tracked period and a fresh acquisition confirm may disagree before the confirm is preferred, ppm. |
-| `sync.tracker.kalman.meas_var` | 0.5 | 1e-06 to 1e+06 | Kalman only: assumed detector scatter variance, samples squared. |
-| `sync.tracker.kalman.rate_rw` | 1e-09 | 0 to 1 | Kalman only: how fast the frame period wanders, samples squared per frame cubed. |
-| `sync.tracker.kalman.innov_gate` | 4 | 0 to 100 | Kalman only: sigmas an observation may sit from the prediction before it is ignored. 0 disables. |
-| `sync.steer.enable` | false |  | Steer the UE's clock onto the beacon's with CLOCK_ADJ, from the tracked grid rate, inside the sounder. Needs the UE's clock_ref to be calibrated. Off by default; keep it off for A/B and regression runs of the TX path (SH-427): each CLOCK_ADJ RPC holds the device's stream lock about 200 ms, and each push is a rate step the host pacer re-learns. |
-| `sync.steer.period_s` | 20 | 2 to 3600 | Seconds between steering decisions; the tracked rate is averaged over each. A held oscillator drifts slowly, so this need not be short. |
-| `sync.steer.gain` | 0.7 | 0.05 to 1 | Fraction of the averaged offset removed at each push. |
-| `sync.steer.deadband_ppm` | 0.06 | 0 to 10 | Offsets smaller than this are left alone: half the actuator quantum is the floor of what a push can fix. |
-| `sync.steer.max_offset` | 30 | 0 to 400 | Bounded authority: never steer further than this many counts from the calibration point. |
-| `sync.steer.max_push` | 2 | 1 to 4 | Most counts one push may move, so no single frequency step is large. At most 4: the step is fed forward when the push lands, about 0.2 s after the DAC moves (up to 0.4 s when a failed write is read back), so 4 counts (0.5 ppm) leave 12 to 25 samples of grid error, well inside the 246-sample re-sync gate; 50 would leave 150 to 300. |
-| `sync.steer.ppm_per_count` | 0.1251 | 0.001 to 10 | Actuator gain, ppm per CLOCK_ADJ count (magnitude; +1 count raises the UE clock). Measured 0.1251 (AP-48). |
-| `sync.steer.keep` | false |  | Leave the steered code in place when the sounder exits instead of releasing to the calibrated hold. |
-| `sync.resync.residual_ppm` | 0.1 | 0.0001 to 1000 | Assumed worst-case clock error after tracking; with sync_tol_samples it sets how often the beacon is looked at. |
-| `sync.resync.scatter_tol_us` | 2 | 0.01 to 1000 | How far a detection may land from the tracked grid and still count as the same beacon, microseconds. |
-| `sync.resync.confirm_tol_us` | 5.2083 | 0.01 to 1000 | The same tolerance during acquisition. Never applied looser than the tracking gate. |
-| `sync.resync.sync_tol_samples` | derived | 0.5 to 1e+06 | Timing slack budgeted to drift between looks, samples. Default: a quarter of the OFDM zero prefix. |
-| `sync.resync.retry_max` | 100 | 1 to 100000 | Misses in one resync period before the client logs an exhausted episode. |
-| `sync.resync.escalate_episodes` | 2 | 1 to 1000 | Consecutive exhausted episodes before the client abandons tracking and re-acquires. |
-| `sync.resync.hold_offgrid` | 2 | 1 to 1000 | Consecutive off-grid detections before the beacon counts as moved. |
-| `sync.resync.acq_refine_span` | 200 | 2 to 100000 | Frames of baseline acquisition wants before it trusts its rate estimate. |
-| `sync.resync.acq_max_ppm` | 100 | 0.1 to 10000 | Plausibility band applied to a rate that acquisition hands back, ppm. |
-<!-- sync-knob-table:end -->
-
-Diagnostics that dump files or print profiles (`--loop_profile`,
-`--rx_profile`, `--coalesce_slots`, `--csi_phase_fix`, `--bs_rx_every`, the
-dumps) are sounder flags like the rest of section 7, never `sync` keys: they
-are not configuration, and a dump switch in a shipped JSON is a trap. Every
-`--dump_beacon`, `--dump_gold`, `--dump_win` and `--csi_dump` file lands under
-`--dump_dir` (default `/tmp`), so a bench can keep its dumps out of `/tmp` with
-one flag. View mode (`--csi_udp`, set by `--view`) writes NO HDF5 file and says
-so at startup, so a stray `--csi_udp` cannot silently disable recording.
-
-`sync.resync.retry_max`, `sync.resync.escalate_episodes` and
-`sync.resync.hold_offgrid` are the escalation net. Their defaults were tuned
-for a client grid that drifts out of tolerance in about a second. With the
-clock steered it holds for minutes, so the defaults are conservative by a
-wide margin. Change them one at a time against a known good baseline run, and
-keep the net rather than removing it: it is what stands between a lost beacon
-and a client that flies on stale timing without saying so.
-
-`--csi_sym_start` is the one worth understanding. The cyclic prefix guard
-is one sided. A window placed early, still inside the prefix, is a valid
-circular shift and produces a pure phase ramp that the timing fix recovers. A
-window even one sample late pulls the next symbol into the FFT and produces
-inter symbol interference that no correction recovers. A window placed
-exactly on that cliff edge lets beacon re-lock jitter tip runs into
-interference at random. Backing the window off by half the cyclic prefix
-centers it in the guard and gives margin on both sides. Measured on a window
-interference run, this moved blind error vector magnitude from 19.8 percent to
-3.2 percent.
-
-The energy edge auto detector is opt in for a reason. Its 15 percent threshold
-can trigger on pre symbol leakage and misalign the windows, so prefer a fixed
-integer once you know the right value for your bench.
+The tables are `SOUNDER_REFERENCE.md`: section 2 the sounder's run flags (where the FFT window starts, the datagram rate, the pilot horizon, the debug prints, the core pinning), section 3 the beacon waveforms and how they were chosen, section 4 every key of the config's `sync` block with its default and what moves it.
 
 ## 8. If something goes wrong
 
-### 8.0 The run produces almost no output, or says it cannot find a radio
+Find the symptom, go to its section of `TROUBLESHOOTING.md`. When in doubt, run the setup check first (section 2.2): every FAIL line names its fix.
 
-This is the most common failure on a busy bench and it is almost never the
-radio. Look for a line like this early in the log:
-
-```
-setSampleRate(RX): an RX stream is open; a rate change is NOT live
-```
-
-A previous run left a receive stream open on the board. The board will refuse
-every new run until that stream is released, and a refused run writes almost
-nothing to its log, so it looks like nothing happened rather than like an error.
-If you are running several captures in a row, the first one that fails this way
-makes all the rest fail too.
-
-The usual cause is how the previous run ended. A sounder started by the
-launcher ends when the launcher ends, however the launcher was killed, and
-a sounder you started yourself releases both boards when you stop it. What can
-still hold a board is a sounder started some other way (another window, another
-user, a test harness) that is still running.
-
-Release it, from `<host>`, in the sounder directory:
-
-```sh
-python3 tools/rig_release_holders.py
-python3 csi_gui/teardown_framer.py --conf files/<config>.json   # or --topology <its serial_file>
-```
-
-The first command stops EVERY sounder, dashboard backend and teardown on
-`<host>`, including a dashboard someone else left running, so ask first on a
-shared host. The second confirms the boards are clear; it prints
-`all 2 radio(s) clear` when they are (section 8.4 explains the topology
-argument). Then start your run again.
-
-If the release tool finds nothing and the boards are still held, something
-outside your session is holding them, and the board's own server has to be
-restarted, on each held board:
-
-```sh
-ssh <user>@<radio-ip> 'sudo systemctl restart SoapySDRServer'
-```
-
-That needs a password, so on a shared bench it is worth asking whether a
-colleague is using the boards before reaching for it.
-
-### 8.1 The dashboard shows "connecting" and never populates
-
-The page is reaching the backend but no datagrams have arrived. Confirm the
-sounder printed its `CSI view mode` line, then confirm the backend datagram
-count is climbing (section 6). If the sounder never printed that line, it is
-not in viewing mode: check that you passed `--view`, or `--csi_udp`.
-
-### 8.2 Panels appear but the waterfall tears horizontally
-
-The client is losing and re-acquiring the beacon. Confirm from the log before
-guessing: escalations print `Re-sync ESCALATION` with a reason, and the base
-station prints `UE PILOT LOST` during the outage. Usual causes, most likely
-first: the clock plan (section 2.1: no shared reference and no steering, or a
-board out of its calibrated hold, which the full setup check's `clock` line
-reports), the RF level is wrong so detections fall under the sync SNR floor
-(the re-sync lines print the measured SNR; compare it against the config's
-`sync.confirm.snr_floor_db`), or the detection bar (`corr_scale`) needs
-adjusting for your path.
-
-### 8.3 Channel estimate looks fine but the constellation is a smear
-
-Confirm the config's frame carries an uplink data slot (`U` in the schedule:
-`houdini-ul.json` or any dual-band config); without one there is nothing to
-equalize. If it does, work through the three causes below in order.
-
-**Cause 1: the FFT window is sitting late and taking in interference.** Try
-the sounder's `--csi_sym_start` a few samples lower and watch the constellation
-tighten. Section 7 explains the asymmetry: early is recoverable, late is not.
-
-**Cause 2: dropped receive packets.** When a receive packet is lost,
-`RadioHoudini::recv` zero-pads the hole so the rest of the window keeps its
-true timing. Those zeros are not signal, and an FFT taken across them produces
-a wrong channel estimate, which would then equalize every following uplink
-data slot until the next clean pilot.
-
-Viewing mode therefore refuses those slots instead of rendering them. When a slot
-arrives carrying padded samples it is dropped, that antenna's card dims with a
-`stale` badge (section 5.1), and the sounder logs, at most once every five
-seconds:
-
-```
-CSI view: dropped 12 slot(s) with RX gaps (latest 848 padded samples, ant 0)
-```
-
-So the display holds its last good estimate rather than showing a false one,
-and marks it as old rather than passing it off as current. **A dimmed card plus
-that warning means the link is losing packets**, and the fix is on the link, not
-in the viewer. Recording mode keeps every sample and records the damaged
-ranges in the file's gap table (`/Data/Gaps`), so a recording is not evidence
-of a clean link until its gap table is read. To confirm the loss rate, record
-a capture over the same link and compare its gap table against how often the
-warning appears.
-
-**Cause 3: a failed transmission at the client.** The pilot and the uplink
-data ride one composed burst per frame, and its transmit return is checked:
-watch the sounder log for `BAD Write` and `unexpected writeStream error`. The
-client also drains the driver's asynchronous transmit status once per queue
-top-up, so a burst that was accepted but later reported late or dropped is
-surfaced rather than lost.
-
-If the constellation is a ring or smears differently from one restart to the
-next with none of the above logged: that class of fault (timing offsets
-between the pilot and data paths) is fixed (`DEMO_VERIFICATION.md` rows 4.36
-to 4.48). A persistent smear points at RF level, clipping, receive gaps or,
-on the dual-band configs, the carrier offset (section 2.1), not at restart
-luck.
-
-### 8.4 The sounder will not start, and discovery looks broken
-
-A run that was killed rather than stopped can leave the base station framer
-armed and the transmit RAM loaded. The next run then fails to start, and it
-usually looks like a discovery or network problem rather than leftover state.
-
-Clear it:
-
-```sh
-cd <path-to-HoudiniLab>/CC/Sounder
-grep serial_file files/<config>.json          # the topology your config runs
-python3 csi_gui/teardown_framer.py --topology <that file>
-```
-
-It reads the radio addresses from the topology file, opens each one, issues
-the framer abort, clears the transmit RAM, and releases the gate. Name the
-radios one of three ways: `--conf files/<config>.json` (the topology that
-config's `serial_file` names), `--topology <file>`, or `--node <addr>`
-(repeatable). With none of them it refuses rather than guess. With the
-plugin in a prefix of its own (section 2.4), add `--soapy-root
-<host-plugin-prefix>` to every teardown command in this document.
-
-Read the exit status, not just the output. It is 0 only when every radio was
-cleared, and non-zero when one could not be opened or torn down, which is
-normally the actual reason the sounder then fails. `--launch` runs this for you
-before each attempt and prefixes its output `[teardown]`.
-
-This script opens a connection to each radio, so it is a device-touching
-operation. Do not run it against boards someone else is using.
-
-If it cannot import `houdini_setup`, pass
-`--examples <path-to-SoapyHoudiniSDR>/host/examples` (section 2.4).
-
-If the teardown itself reports that an RX stream is still open, a dead process
-left one behind and no teardown can close another process's stream. Restart the
-server on that node and try again:
-
-```sh
-ssh <user>@<radio-ip> 'sudo systemctl restart SoapySDRServer'
-```
-
-That is also the recovery when a radio open fails with
-`SoapyRPCUnpacker::recv() TIMEOUT`.
-
-### 8.5 A radio is discoverable but still will not open
-
-This one costs the most time if you do not know it, because the tool that
-reassures you is testing the wrong thing.
-
-**The two planes are independent.** `SoapySDRUtil --find` talks to the radio's
-control plane over TCP. Streaming uses a separate data-plane network, and the
-host needs a route to the address the radio advertises there. A radio can list
-perfectly in `--find` and still fail to open, and the error you get names the
-open failure, not the routing:
-
-```
-Ignoring houdini radio <addr>: FindLocalAddrForRemote: no interface routes to <data-ip>
-ERROR: the above base station radio(s) could not be opened.
-```
-
-Check the route rather than the discovery:
-
-```sh
-ip route get <the data-plane IP from the error>   # want a real data interface
-ip -br addr                                       # is that interface UP with an address?
-cat /sys/class/net/<iface>/carrier                # 1 = cable and link partner present
-```
-
-`NO-CARRIER` means the data cable is not plugged in or the far end is down. An
-interface with no address on that subnet means it needs one; the two radios may
-sit on different data subnets and need one host port each.
-
-**Do not use ping to test this.** The radios do not answer ICMP on their
-data-plane addresses even while streaming perfectly, because that address is a
-raw UDP egress engine in the FPGA, not a full IP stack. A failed ping proves
-nothing here. The route existing is the check that matters.
-
-### 8.6 Client never finds the beacon
-
-Check in this order: the clock plan (section 2.1), the RF path is actually
-connected and at a sane level, `frequency` and `nco_frequency` match each other
-in the config, and the beacon board is really the one named under
-`BaseStations` in the topology file.
-
-Acquisition requires more than a correlation peak: the detection must clear
-the sync SNR floor (`sync.confirm.snr_floor_db`: 30 dB of true link SNR by
-default, 25 dB in the dual-band configs for their beacon) and then repeat
-twice at exactly one frame spacing before the client anchors. A
-marginal RF path can therefore correlate occasionally yet never acquire. The
-re-sync and acquisition log lines print the measured SNR; on a cabled bench
-expect the mid 40s dB, and treat much less as an RF level or cabling problem
-rather than a software one.
+| You see | Go to |
+|---|---|
+| Almost no output, or "cannot find a radio" | `TROUBLESHOOTING.md` section 1 |
+| The page says "connecting" and never fills | section 2 |
+| Panels appear, but the waterfall tears horizontally | section 3 |
+| A clean channel estimate, but the constellation is a smear | section 4 |
+| The sounder will not start and discovery looks broken | section 5 |
+| A radio is discoverable but will not open | section 6 |
+| The sync card stays at `NOT SYNCED` | section 7 |
+| Something the bench owes you (roles, the X-band chain, node state) | `DEMO_BENCH_RUNBOOK.md` A7 and A8 |
 
 ## 9. Clean up
+
+**In brief.** Stop the sounder the way it expects, confirm none is left, and
+release the framer after an abnormal end. **Done when** `pgrep -cx sounder`
+reads 0 and the next Start needs no second try.
 
 Press **Stop** on the page, or Ctrl+C in the backend terminal. In mode A the
 backend stops the sounder with SIGINT, the sounder's own stop: it ends its
@@ -1252,4 +906,21 @@ python3 csi_gui/teardown_framer.py --conf files/<config>.json   # or --topology 
 ```
 
 A framer left armed is the most common reason the next run fails to start, and
-the failure does not look like leftover state (section 8.4).
+the failure does not look like leftover state (`TROUBLESHOOTING.md` section 5).
+
+## 10. Last tested
+
+The latest full dual-band run of this demo, as `DEMO_VERIFICATION.md` records
+it (its newest section 9 row is always the current one):
+
+| | |
+|---|---|
+| Date | 2026-10-26 |
+| Setup | "Demo, X-band chain": sub-6 on cables, X-band over the air between the two X-band front ends; 91 minutes on the dashboard |
+| Gateware (fpga) | 1.47, commit `86c011a5` |
+| SoapyHoudiniSDR (device and host) | 0.7.0, commit `f6a74e22` (develop after PR #55, `618cc955`) |
+| HoudiniLab | develop after PR #8, merge `fd4c5aa` |
+| Sub-6 MER | median 36.9 dB |
+| X-band MER | median 29.4 dB; 20.8 dB with the path blocked by hand, recovered each time with no pilot lost |
+
+The demo has not run on fpga 1.49 or SoapyHoudiniSDR 0.7.2 yet.

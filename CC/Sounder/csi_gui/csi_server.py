@@ -2453,8 +2453,11 @@ async function pollCtl(){
     if(st.attempt>1 && st.state!=='stopped' && st.state!=='queued') t+=', attempt '+st.attempt;
     // A refused command is shown for a few seconds in place of the state line;
     // the next poll would otherwise overwrite it before it could be read.
+    // The running entry by its label when it has one (a replay's key is its file's
+    // path, which the page should not show), else by its file name.
+    const running=(st.labels&&st.labels[st.conf])||String(st.conf).replace(/^files\//,'');
     document.getElementById('ctl-state').textContent=(ctlMsg && Date.now()<ctlMsg.until)?ctlMsg.text
-      :t+' · '+String(st.conf).replace(/^files\//,'');
+      :t+' · '+running;
   }catch(err){}
 }
 // The last setup check, as a list with the fix under each problem. Shown after
