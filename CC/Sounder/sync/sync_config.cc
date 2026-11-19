@@ -168,7 +168,7 @@ const std::vector<SyncConfig::Spec>& SyncConfig::schema() {
   static const std::vector<Spec> kSchema = {
       // beacon
       {"beacon.type", 0, 0,
-       "Which beacon waveform the base station transmits (legacy, legacy_guard, dot11, nr, nr_pss, nr_pss_bl; nr_pss_bl is the band-limited mode-V beacon, AP-79).",
+       "Which beacon waveform the base station transmits (legacy, legacy_guard, dot11, nr, nr_pss, nr_pss_bl; nr_pss_bl is the band-limited beacon of the dual-band configs).",
        KNOB_ACCESS(std::string, beacon.type), nullptr},
       {"beacon.tx_full_scale", 1e-3, 1.0,
        "Transmit peak of the beacon as a fraction of DAC full scale. 0.6 shipped; lower it to stand in for path loss on a cable.",
@@ -210,7 +210,7 @@ const std::vector<SyncConfig::Spec>& SyncConfig::schema() {
        KNOB_ACCESS(double, confirm.snr_floor_db), nullptr},
       // cfo
       {"cfo.index_guard", 0, 64,
-       "Samples the carrier estimator's windows slide later than the detected end (AP-39). A correlator quantity: samples, not scaled with the rate.",
+       "Samples the carrier estimator's windows slide later than the detected end. A correlator quantity: samples, not scaled with the rate.",
        KNOB_ACCESS(int, cfo.index_guard), nullptr},
       {"cfo.window_margin", 0, 32,
        "Samples shrunk from both ends of each estimator window so neither touches the burst's edge (8.164). A correlator quantity: samples, not scaled with the rate.",
@@ -265,7 +265,7 @@ const std::vector<SyncConfig::Spec>& SyncConfig::schema() {
        "Most counts one push may move, so no single frequency step is large. At most 4: the step is fed forward when the push lands, about 0.2 s after the DAC moves (up to 0.4 s when a failed write is read back), so 4 counts (0.5 ppm) leave 12 to 25 samples of grid error, well inside the 246-sample re-sync gate; 50 would leave 150 to 300.",
        KNOB_ACCESS(int, steer.max_push), nullptr},
       {"steer.ppm_per_count", 0.001, 10.0,
-       "Actuator gain, ppm per CLOCK_ADJ count (magnitude; +1 count raises the UE clock). Measured 0.1251 (AP-48).",
+       "Actuator gain, ppm per CLOCK_ADJ count (magnitude; +1 count raises the UE clock). Measured 0.1251 on the bench.",
        KNOB_ACCESS(double, steer.ppm_per_count), nullptr},
       {"steer.keep", 0, 0,
        "Leave the steered code in place when the sounder exits instead of releasing to the calibrated hold.",
