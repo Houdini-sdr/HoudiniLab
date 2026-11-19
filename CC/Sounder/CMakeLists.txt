@@ -270,7 +270,7 @@ option(SOUNDER_BUILD_TESTS "Build the radio-free tests and bench tools (ctest)" 
 if (SOUNDER_BUILD_TESTS)
 add_executable(sync_config_test tests/comms-func/sync_config_test.cc)
 target_link_libraries(sync_config_test houdini_sync -lpthread)
-add_test(NAME sync_config COMMAND sync_config_test ${CMAKE_CURRENT_SOURCE_DIR}/CSI_DEMO_WALKTHROUGH.md)
+add_test(NAME sync_config COMMAND sync_config_test ${CMAKE_CURRENT_SOURCE_DIR}/SOUNDER_REFERENCE.md)
 
 add_executable(sync_config_schema tests/comms-func/sync_config_schema.cc)
 target_link_libraries(sync_config_schema houdini_sync -lpthread)

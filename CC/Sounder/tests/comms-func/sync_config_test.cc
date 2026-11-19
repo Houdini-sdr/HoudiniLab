@@ -39,13 +39,13 @@ bool throws(const std::string& json) {
 }
 }  // namespace
 
-// The walkthrough's knob table is generated from the schema and committed;
+// The reference's knob table (SOUNDER_REFERENCE.md) is generated from the schema and committed;
 // this diff is what keeps the two from drifting. The path comes from CMake;
 // without it the check is skipped, loudly.
 void checkWalkthroughTable(const char* path) {
   std::ifstream in(path);
   if (!in) {
-    check(false, std::string("walkthrough table: cannot open ") + path);
+    check(false, std::string("reference table: cannot open ") + path);
     return;
   }
   std::string line, block;
@@ -56,8 +56,8 @@ void checkWalkthroughTable(const char* path) {
     if (inside) block += line + "\n";
   }
   const std::string generated = SyncConfig::schemaMarkdown();
-  check(seen, "walkthrough table: begin/end markers present");
-  check(block == generated, "walkthrough table matches the generated schema (regenerate with "
+  check(seen, "reference table: begin/end markers present");
+  check(block == generated, "reference table matches the generated schema (regenerate with "
                             "./build/sync_config_schema if this fails)");
 }
 
