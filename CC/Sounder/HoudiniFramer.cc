@@ -19,7 +19,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <map>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -33,7 +32,6 @@
 #include "include/macros.h"
 #include "include/rx_gap_sink.h"
 #include "include/utils.h"
-#include "houdini/link_health.h"
 #include "houdini/replay_strobe.h"
 #include "houdini/bs_slots.h"
 #include "houdini/slot_align.h"
@@ -244,62 +242,20 @@ namespace {
 // RadioHoudini::txTimeNs: both must move together if the driver grid changes.
 constexpr long long kTddGridTicks = houdini::sync::kHoudiniStrobeOffsetTicks;
 constexpr long long kTddArmMargin = 36864000;  // ~300 ms of ticks
-constexpr int kClearEpochReads = 5;
-
-// Every TX bank's clear epoch into `epochs` (HS-220: the bank's CLEAR_EPOCH,
-// +1 per clear envelope, in TX_BANK_STATUS as "epoch=<before>:<after>"). A read
-// that a clear lands in fails the read protocol, so it is read again, up to
-// kClearEpochReads times. Returns "" or, when no read gives a usable epoch for
-// every bank (or a read throws), why not; never throws, so the ladder's pulse
-// and gate release still run.
-std::string readClearEpochs(SoapySDR::Device* dev, std::map<int, long long>& epochs) {
-  std::string raw;
-  for (int i = 0; i < kClearEpochReads; ++i) {
-    if (i > 0) std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    try {
-      raw = dev->readSetting("TX_BANK_STATUS");
-    } catch (const std::exception& e) {
-      return std::string("the TDD ladder cannot check its TX clear: the TX_BANK_STATUS read threw (") + e.what() +
-             ")";
-    }
-    epochs = houdini::health::txClearEpochs(raw);
-    if (!epochs.empty() &&
-        std::all_of(epochs.begin(), epochs.end(), [](const auto& e) { return e.second >= 0; }))
-      return "";
-  }
-  return "the TDD ladder cannot check its TX clear: TX_BANK_STATUS gave no usable clear epoch for every TX "
-         "bank in " + std::to_string(kClearEpochReads) + " reads ('" + raw + "')";
-}
-
-// The ladder's TX clear: TDD_CMD tx_clear (SH-573), which the device runs on
-// its own register map and judges on every TX bank's CLEAR_EPOCH, throwing when
-// it refuses or a bank does not take it. The same epochs are read here as a
-// second check, so a clear the device reports done must have moved them
-// (AP-123). Returns "" when the clear landed, else why it did not or cannot be
-// judged; never throws, so the gate release still runs.
+// The ladder's TX clear: TDD_CMD tx_clear, which the device runs on its own
+// register map and judges itself on every TX bank's clear_busy (it rose, then
+// fell once the clear's flush completed), throwing by name when it refuses the
+// command or a bank does not take it. That verdict is the whole check: the
+// bank counters never clear and no register counts clears, so there is nothing
+// here to read a second time. Returns "" when the clear landed, else why it
+// did not; never throws, so the gate release still runs.
 std::string clearTxBanks(SoapySDR::Device* dev) {
-  std::map<int, long long> before, after;
-  const std::string unread = readClearEpochs(dev, before);
   try {
     dev->writeSetting("TDD_CMD", "tx_clear");
   } catch (const std::exception& e) {
-    const std::string what = e.what();
-    return "the TDD ladder's TX clear failed: " + what +
-           (what.find("unknown command") != std::string::npos
-                ? " (TDD_CMD tx_clear needs the radio's SoapyHoudiniSDR 0.7.0 or newer)"
-                : "");
+    return std::string("the TDD ladder's TX clear failed: ") + e.what();
   }
-  if (!unread.empty()) return unread;
-  if (const std::string why = readClearEpochs(dev, after); !why.empty()) return why;
-  std::string stuck;
-  for (const auto& b : before) {
-    const auto a = after.find(b.first);
-    if (a == after.end() || a->second == b.second)
-      stuck += " ch" + std::to_string(b.first) + "=" + std::to_string(b.second);
-  }
-  if (stuck.empty()) return "";
-  return "the TDD ladder's TX clear did not land: the device accepted TDD_CMD tx_clear, but the clear epoch did not "
-         "move on" + stuck;
+  return "";
 }
 }  // namespace
 

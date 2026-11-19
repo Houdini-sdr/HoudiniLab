@@ -277,11 +277,15 @@ for the config you mean to run.
   Houdini server, on a firmware stack your team has blessed. Board bring up is
   owned by the SoapyHoudiniSDR and Houdini-Streaming projects and is not
   covered here. If you did not set the boards up yourself, ask whoever did.
-  This code needs SoapyHoudiniSDR 0.7.0, one release throughout: its device
+  This code needs SoapyHoudiniSDR 0.8.0 or newer, one release throughout: its device
   module on both nodes and its host plugin's prefix on `<host>`. A host plugin
   of another release than the radios' draws a warning at best and a refusal
-  at worst, so the setup check FAILs that pair on its `lockstep` line, and a radio older than 0.7.0
+  at worst, so the setup check FAILs that pair on its `lockstep` line, and a radio older than 0.8.0
   on its `release` line; its `stack` lines show the release each side runs.
+  The radios' gateware and device module must also be a pair that writes the
+  status texts this code reads. A release number cannot tell an older pair
+  apart, so the setup check FAILs one on its `egress` line, naming the field
+  its status lacks.
 - **A clock plan for the two boards.** Each board's reference is a device
   setting (`clock_ref`) that whoever provisions the boards sets; the full
   setup check (section 2.2) prints it on its `clock` line for each radio. One
@@ -365,11 +369,10 @@ walkthrough can work without it.
 
 One more thing comes from that repository: the framer teardown in `TROUBLESHOOTING.md` section 5
 imports `houdini_setup` from its host examples directory. The default location
-is `~/repos/SoapyHoudiniSDR/host/examples`. The checkout must be 0.7.0 or
+is `~/repos/SoapyHoudiniSDR/host/examples`. The checkout must be 0.8.0 or
 newer, the release this code needs (the setup check's `teardown` line WARNs on
-an older one), and is best kept at the radios' release: the teardown reads each
-TX channel's clear count with its parser, and an older parser cannot read a
-newer radio's, so the teardown then skips that check. If you keep it somewhere else, pass the path as `--examples` to the
+an older one), and is best kept at the radios' release: the teardown opens each
+radio with it, and an older one may not open a newer radio. If you keep it somewhere else, pass the path as `--examples` to the
 setup check, the teardown, or the dashboard (which hands it to both):
 
 ```sh

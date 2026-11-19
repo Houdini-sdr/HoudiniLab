@@ -38,7 +38,7 @@ cites their output. Every `*_test.py` here is a unit test that `ctest` runs.
 | `freeze_watch.py` | The run's log, on the rig host, for a transmit playout freeze |
 | `irq_sampler.py` | The data NIC's interrupt rate per core |
 | `pacer_core_check.py` | Whether a NIC receive flow landed on one of the sounder's pinned cores (run it in the first minute of a run, after every host boot) |
-| `reg_snap.py` | The packet gate's fault registers on each node, with no stream open, before and after a run |
+| `reg_snap.py` | The packet gate's fault counts on each node, with no stream open, before and after a run |
 
 ## Shared by the tools
 

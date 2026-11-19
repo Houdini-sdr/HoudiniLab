@@ -2,8 +2,8 @@
  * @file link_health_test.cc
  * @brief houdini/link_health.h against the software lane's link-alarm contract
  *        (SoapyHoudiniSDR shared/HOUDINI_PROTOCOL.md section 2.7), clause by
- *        clause, and against a real capture of a streaming demo session
- *        (fixtures/link_health/demo_stack_fi1.txt). NO hardware. Each check
+ *        clause, and against the driver's own golden renders of the keys
+ *        (fixtures/link_health/driver_golden.txt). NO hardware. Each check
  *        names the mutation that breaks it.
  *
  * Build: CMake target link_health_test. Run: ./link_health_test <fixture> (or ctest).
@@ -34,11 +34,13 @@ std::string replaceAll(std::string s, const std::string& a, const std::string& b
 struct FakeNode {
   std::map<std::string, std::string> keys = {
       {"TX_BANK_STATUS",
-       "ch0:acked=9,late=0,under=0,seqerr=0,zerofill=0,drops=0,efault=0,smiss=0,clkerr=0,aclose=0,fill=3,epoch=1:1"},
-      {"RX_BANK_STATUS", "ch0:gated=0,aborts=0,hwm=12"},
+       "ch0:acked=9,late=0,under=0,seqerr=0,zerofill=0,fill=3,hwm=3,drops=0,last_seq=8,active=1,cap=64,gated=0,"
+       "smiss=0,aclose=0,parked=0,late_seen=0,efault=0,played=9,clear_drops=0,clear_busy=0,tick=100:130,"
+       "malformed=0,cancels=0,flushed=0,clock_aborts=0"},
+      {"RX_BANK_STATUS", "ch0:gated=0,aborts=0,hwm=12,halted=0,stop=none"},
       {"TX_HOST_STATUS", "eob_recloses=0 eob_recloses_ch0=0"},
       {"RX_HOST_STATUS", "rxq_ovfl=0 rxq_ovfl_ch0=0 ring_ovfl=0 ring_ovfl_ch0=0"},
-      {"EGRESS_STATUS", "drop=p0:0,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=0;marked=0"},
+      {"EGRESS_STATUS", "drop=p0:0,p1:0,p2:0,p3:0;stalls=0;marked=0;link_down=0"},
       {"RFDC_INTR_FIRE_COUNT", "1000"},
       {"RFDC_PREFLIGHT", "ok known DAC0.0:FIFO_OVR(HS-207)\ndetail"}};
   double t = 0.0;
@@ -63,26 +65,61 @@ std::map<std::string, std::string> loadFixture(const char* path) {
 
 int main(int argc, char** argv) {
   {  // the parsers
-    const auto g = parseEgressStatus("drop=p0:3,p1:0,p2:0,p3:255;stall_seen=1,stall_evt=2;marked=5");
-    check(g.at("drop_p0") == 3 && g.at("drop_p3") == 255 && g.at("marked") == 5 && g.at("stall_seen") == 1 &&
-              g.at("stall_evt") == 2 && g.size() == 7 && parseEgressStatus("").empty() &&
+    const auto g = parseEgressStatus("drop=p0:3,p1:0,p2:0,p3:4294967296;stalls=2;marked=18446744073709551615;link_down=7");
+    check(g.at("drop_p0") == 3 && g.at("drop_p3") == 4294967296ULL && g.at("marked") == 18446744073709551615ULL &&
+              g.at("stalls") == 2 && g.at("link_down") == 7 && g.size() == 7 && parseEgressStatus("").empty() &&
               parseEgressStatus("junk;x").empty(),
-          "egress: per-port drops beside flat counters, seven in all; junk yields nothing (mutation: marked split "
-          "as per-port, or the per-port test dropped)");
-    const auto f = parseFlatCounts("rxq_ovfl=2 rxq_ovfl_ch0=2 junk x=y z=-1");
+          "egress: per-port drops beside flat counters, seven in all, a 64-bit count read whole; junk yields nothing "
+          "(mutations: marked split as per-port; a signed 64-bit parse, which throws or drops the count at its "
+          "ceiling)");
+    const auto f = parseFlatCounts("rxq_ovfl=2 rxq_ovfl_ch0=2 junk x=y z=-1 big=18446744073709551616");
     check(f.size() == 2 && f.at("rxq_ovfl") == 2 && f.at("rxq_ovfl_ch0") == 2,
-          "flat counts skip malformed tokens (mutation: a non-digit value accepted)");
-    const auto e = txClearEpochs("ch0:acked=1,epoch=3:3;ch1:late=0,epoch=3:4;ch2:acked=1;ch3:epoch=65536:65536");
-    check(e == std::map<int, long long>{{0, 3}, {1, -1}, {3, -1}},
-          "clear epochs: a matched pair is the epoch, a torn pair or one past 16 bits is -1, a bank with no epoch "
-          "is left out (mutation: the before half taken alone, which reads the torn ch1 as 3)");
+          "flat counts skip malformed tokens and a value past 64 bits (mutations: a non-digit value accepted; the "
+          "overflow guard dropped, which wraps 2^64 to 0)");
   }
-  {  // 2.7 "A fall": a counter without an epoch that fell was cleared; its current value is the rise
+  {  // 2.7 "A fall": a host counter that fell was cleared; a device counter never clears
     check(counterIncreases({{"rx0.gated", 1}, {"host.rxq_ovfl_ch0", 5}, {"egress.drop_p0", 9}},
-                           {{"rx0.gated", 3}, {"host.rxq_ovfl_ch0", 2}, {"egress.drop_p0", 0}, {"rx1.aborts", 2}}) ==
-              Counters{{"rx0.gated", 2}, {"host.rxq_ovfl_ch0", 2}, {"rx1.aborts", 2}},
-          "a rise alarms, a fall reports the current value (5 -> 2 is +2, 9 -> 0 is nothing), a new key counts from "
-          "zero (mutation: a fall re-based silently, the old plain rule)");
+                           {{"rx0.gated", 3}, {"host.rxq_ovfl_ch0", 2}, {"egress.drop_p0", 9}, {"host.rxq_ovfl_ch2", 4}}) ==
+              Counters{{"rx0.gated", 2}, {"host.rxq_ovfl_ch0", 2}, {"host.rxq_ovfl_ch2", 4}},
+          "a rise alarms, a host counter's fall reports its current value (5 -> 2 is +2), a new host key counts "
+          "from zero (mutation: a host fall re-based silently)");
+    check(counterIncreases({{"rx0.gated", 1}}, {{"rx0.gated", 1}, {"rx1.aborts", 2}, {"tx0.late", 7}, {"egress.marked", 3}})
+              .empty(),
+          "a device counter with no previous read is a baseline: it counts from the PL load, not from the session "
+          "(mutation: a new device key counted from zero, the whole standing total a false alarm)");
+    const Counters before{{"tx0.late", 500}, {"tx0.drops", 2}, {"rx0.gated", 40}, {"egress.drop_p0", 9},
+                          {"egress.stalls", 3}, {"host.rxq_ovfl_ch0", 1}};
+    const Counters after{{"tx0.late", 7}, {"tx0.drops", 5}, {"rx0.gated", 41}, {"egress.drop_p0", 12},
+                         {"egress.stalls", 0}, {"host.rxq_ovfl_ch0", 4}};
+    check(plReload(before, after) == "tx0.late 500 -> 7" && plReload(before, before).empty() &&
+              plReload({{"host.rxq_ovfl_ch0", 5}, {"tx0.smiss", 1}, {"egress.stalls", 9}, {"tx0.clock_aborts", 9}},
+                       {{"host.rxq_ovfl_ch0", 2}, {"tx0.smiss", 0}, {"egress.stalls", 1}, {"tx0.clock_aborts", 1}})
+                  .empty(),
+          "a 64-bit device counter below its previous read is a PL reload, named with both reads; a host counter, a "
+          "sticky flag or a 32-bit count that fell is not (mutation: every fall read as a reload)");
+    check(counterIncreases(before, after) == Counters{{"host.rxq_ovfl_ch0", 3}},
+          "after a PL reload no device counter is differenced, the ones that rose included, and the host's still "
+          "are (mutations: a fall's value reported as the rise, tx0.late +7; only the fallen counter skipped, "
+          "tx0.drops +3 across two PL loads)");
+    check(counterIncreases({{"egress.marked", 18446744073709551000ULL}}, {{"egress.marked", 18446744073709551615ULL}}) ==
+              Counters{{"egress.marked", 615}} &&
+              counterIncreases({{"tx0.late", 65530}}, {{"tx0.late", 65540}}) == Counters{{"tx0.late", 10}} &&
+              counterIncreases({{"rx0.aborts", 4294967290ULL}}, {{"rx0.aborts", 4294967300ULL}}) == Counters{{"rx0.aborts", 10}},
+          "a 64-bit count differences plainly across 2^16, 2^32 and up to its ceiling (mutations: the retired mod "
+          "2^16 or a mod 2^32 on a bank counter; a signed difference)");
+    check(counterIncreases({{"egress.stalls", 4294967294ULL}, {"tx0.clock_aborts", 4294967295ULL}},
+                           {{"egress.stalls", 1}, {"tx0.clock_aborts", 2}}) ==
+              Counters{{"egress.stalls", 3}, {"tx0.clock_aborts", 3}},
+          "the 32-bit counts wrap: their rise is the change mod 2^32 (mutation: differenced as 64-bit, which reads "
+          "the wrap as a fall or as 2^64 - 4294967293)");
+    for (const char* f : {"efault", "smiss"}) {
+      const std::string key = std::string("tx0.") + f;
+      check(counterIncreases({{key, 1}}, {{key, 0}}).empty() && plReload({{key, 1}}, {{key, 0}}).empty() &&
+                counterIncreases({{key, 0}}, {{key, 1}}) == Counters{{key, 1}} &&
+                counterIncreases({}, {{key, 1}}) == Counters{{key, 1}},
+            std::string("the sticky flag ") + f + " alarms when it sets, and its clearing is neither a rise nor a PL "
+            "reload (mutation: " + f + " differenced as a 64-bit counter)");
+    }
   }
   {  // an empty or partial read between two full ones must not erase the baseline
     const Counters full{{"a.x", 10}, {"b.y", 7}};
@@ -94,19 +131,21 @@ int main(int argc, char** argv) {
     check(counterIncreases(carryCounters(kept, Counters{{"b.y", 7}}, HostRead{}), later) == Counters{{"a.x", 2}},
           "a partial read keeps the missing counter's last value (mutation: prev = cur, a +12 false alarm)");
   }
-  {  // 2.7 "Egress counters" and "No other alarm": standing at a ceiling or a sticky bit is not an alarm
+  {  // 2.7 "Egress counters" and "No other alarm": a count standing nonzero is not an alarm
     FakeNode n;
-    n.keys["EGRESS_STATUS"] = "drop=p0:255,p1:0,p2:0,p3:0;stall_seen=1,stall_evt=4;marked=255";
+    n.keys["EGRESS_STATUS"] = "drop=p0:1148909,p1:0,p2:0,p3:0;stalls=4;marked=13;link_down=2";
     LinkHealth h(n.read(), "bs", n.clock());
     check(h.check().alarms().empty(),
-          "a counter saturated, and a sticky stall_seen set, before the session began are not alarms (mutation: the "
-          "blind-counter alarm restored)");
-    n.keys["EGRESS_STATUS"] = "drop=p0:3,p1:0,p2:0,p3:0;stall_seen=0,stall_evt=4;marked=255";
-    check(eq(h.check().alarms(), {"egress.drop_p0 +3"}),
-          "an eth reset then 3 new drops (255 -> 3) reports +3 (mutation: a fall re-based)");
-    n.keys["EGRESS_STATUS"] = "drop=p0:3,p1:0,p2:0,p3:0;stall_seen=1,stall_evt=5;marked=255";
-    check(eq(h.check().alarms(), {"egress.stall_evt +1", "egress.stall_seen +1"}),
-          "a new stall alarms once, stall_seen and stall_evt both rising (mutation: stall_seen not collected)");
+          "drops and stalls counted since the PL load, before the session began, are not alarms (mutation: a "
+          "nonzero stalls read as stalled now)");
+    n.keys["EGRESS_STATUS"] = "drop=p0:1148912,p1:0,p2:0,p3:0;stalls=4;marked=13;link_down=5";
+    check(eq(h.check().alarms(), {"egress.drop_p0 +3", "egress.link_down +3"}),
+          "new drops and frames drained with the link down each alarm by their rise (mutation: link_down not "
+          "collected)");
+    n.keys["EGRESS_STATUS"] = "drop=p0:1148912,p1:0,p2:0,p3:0;stalls=5;marked=13;link_down=5";
+    check(eq(h.check().alarms(), {"egress.stalls +1"}) && h.check().alarms().empty(),
+          "a new stall alarms once, by the stalls count's rise, and then stands (mutation: stalls not collected, "
+          "the retired stall_seen read instead)");
   }
   {  // 2.7 "Host fields come from the per-stream keys, never the totals"
     FakeNode c;
@@ -205,65 +244,62 @@ int main(int argc, char** argv) {
     std::map<std::string, std::string> k;
     Read rd = [&k](const std::string& key) { return k.count(key) != 0u ? k.at(key) : std::string(); };
     k["TX_BANK_STATUS"] =
-        "ch0:drops=1,late=2,under=3,seqerr=4,zerofill=5,efault=6,smiss=7,clkerr=8,aclose=9,malformed=10,acked=11,"
-        "epoch=0:0";
+        "ch0:drops=1,late=2,under=3,seqerr=4,zerofill=5,efault=1,smiss=1,aclose=9,malformed=10,acked=11,"
+        "clock_aborts=12,flushed=13,tick=5:6";
     const auto g = collectCounters(rd);
-    const std::vector<std::pair<std::string, long long>> want = {
-        {"drops", 1}, {"late", 2},   {"under", 3},  {"seqerr", 4}, {"zerofill", 5},
-        {"efault", 6}, {"smiss", 7}, {"clkerr", 8}, {"aclose", 9}, {"malformed", 10}};
+    const std::vector<std::pair<std::string, unsigned long long>> want = {
+        {"drops", 1},  {"late", 2},  {"under", 3},  {"seqerr", 4},     {"zerofill", 5},
+        {"efault", 1}, {"smiss", 1}, {"aclose", 9}, {"malformed", 10}, {"clock_aborts", 12}, {"acked", 11}};
     for (const auto& w : want) {
       const auto it = g.find("tx0." + w.first);
       check(it != g.end() && it->second == w.second,
-            "TX alarm field " + w.first + " is collected (mutation: " + w.first + " dropped from txAlarmFields)");
+            "TX field " + w.first + " is collected (mutation: " + w.first + " dropped from the TX fields)");
     }
-    check(g.count("tx0.acked") == 0, "acked is not an alarm field (mutation: every bank field collected)");
+    check(g.count("tx0.flushed") == 0 && g.count("tx0.tick") == 0 && g.size() == want.size(),
+          "flushed and the tick pair are not read (mutation: every bank field collected)");
+    check(counterIncreases({{"tx0.acked", 11}, {"tx0.played", 4}}, {{"tx0.acked", 900}, {"tx0.played", 800}}).empty(),
+          "acked and played are read as reload witnesses and never reported: a beacon's every burst moves them "
+          "(mutation: the witnesses differenced as alarm counters)");
+    const Counters clean{{"tx0.acked", 784}, {"tx0.late", 0}, {"tx0.clock_aborts", 13}, {"egress.stalls", 5},
+                         {"egress.drop_p0", 0}};
+    const Counters reloaded{{"tx0.acked", 3}, {"tx0.late", 0}, {"tx0.clock_aborts", 0}, {"egress.stalls", 0},
+                            {"egress.drop_p0", 0}};
+    check(plReload(clean, reloaded) == "tx0.acked 784 -> 3" && counterIncreases(clean, reloaded).empty(),
+          "a PL reload on a clean link, every alarm counter 0 before and after, shows on a witness, and the 32-bit "
+          "counts standing above 0 are not differenced across it (mutation: no witness collected, which reports "
+          "egress.stalls +4294967291 and tx0.clock_aborts +4294967283 and no reload)");
   }
-  {  // 2.7 "A fall": the TX bank re-baselines on an epoch change (HS-220)
-    for (const char* f : {"drops", "late", "under", "seqerr", "aclose", "malformed", "gated", "acked", "played"}) {
-      const std::string key = std::string("tx0.") + f;
-      check(counterIncreases({{"tx0.epoch", 3}, {key, 65530}}, {{"tx0.epoch", 3}, {key, 4}}) == Counters{{key, 10}},
-            std::string("HS-220: ") + f + " wraps mod 2^16 within an epoch, 65530 -> 4 is +10 (mutation: " + f +
-                " dropped from txWrapsMod16)");
-    }
-    for (const char* f : {"zerofill", "efault", "smiss", "clkerr"}) {
-      const std::string key = std::string("tx0.") + f;
-      check(counterIncreases({{"tx0.epoch", 3}, {key, 65530}}, {{"tx0.epoch", 3}, {key, 4}}) == Counters{{key, 4}},
-            std::string("HS-220: ") + f + " does not wrap: a fall within an epoch reports its value, 4 (mutation: " +
-                f + " added to txWrapsMod16, +10)");
-    }
-    check(counterIncreases({{"tx0.epoch", 3}, {"tx0.late", 500}}, {{"tx0.epoch", 4}, {"tx0.late", 7}}) ==
-              Counters{{"tx0.late", 7}},
-          "HS-220: after a clear (a new epoch) the values ARE the counts since it (mutation: differenced across the "
-          "epoch change, 65043)");
-    check(counterIncreases({{"tx0.epoch", 3}, {"tx0.late", 0}}, {{"tx0.epoch", 4}, {"tx0.late", 0}}).empty(),
-          "HS-220: the epoch itself is never an alarm (mutation: the epoch skip dropped)");
-    check(counterIncreases({{"tx0.late", 9}}, {{"tx0.epoch", 2}, {"tx0.late", 12}}).empty(),
-          "HS-220: the first usable poll after none is a baseline (mutation: differenced against no epoch)");
+  {  // 2.7 "A fall", the TX bank: used as read, with no clear count to gate it
     std::map<std::string, std::string> k;
     Read rd = [&k](const std::string& key) { return k.count(key) != 0u ? k.at(key) : std::string(); };
-    k["TX_BANK_STATUS"] = "ch0:late=3,zerofill=5,epoch=7:8";
-    const auto torn = collectCounters(rd);
-    k["TX_BANK_STATUS"] = "ch0:late=3,zerofill=5,epoch=65543:65543";
-    const auto busy = collectCounters(rd);
-    k["TX_BANK_STATUS"] = "ch0:late=3,zerofill=5";
-    const auto noepoch = collectCounters(rd);
-    check(torn.empty() && busy.empty(),
-          "HS-220: a poll caught in a clear (torn, or clear_busy set) is not used, zerofill included (mutation: only "
-          "the wrapping counters dropped)");
-    check(noepoch.empty(),
-          "a malformed TX bank status with no epoch field is not used (mutation: a missing epoch read as usable)");
     double t = 0.0;
-    k["TX_BANK_STATUS"] = "ch0:late=65530,zerofill=0,epoch=7:7";
+    FakeNode proto;
+    k["TX_BANK_STATUS"] = proto.keys["TX_BANK_STATUS"];
+    check(collectCounters(rd).count("tx0.late") == 1,
+          "a TX bank's counters are used as the device renders them, which carries no epoch field (mutation: the "
+          "retired epoch gate, which skips every bank and reads the session clean whatever its TX does)");
     LinkHealth h(rd, "ue", [&t] { return t += 5.0; });
-    k["TX_BANK_STATUS"] = "ch0:late=2,zerofill=0,epoch=7:8";  // torn: skipped
     const bool quiet = h.check().alarms().empty();
-    k["TX_BANK_STATUS"] = "ch0:late=4,zerofill=0,epoch=7:7";
+    k["TX_BANK_STATUS"] = replaceAll(replaceAll(k["TX_BANK_STATUS"], "late=0", "late=70000"), "zerofill=0", "zerofill=4294967297");
     const auto a = h.check().alarms();
-    k["TX_BANK_STATUS"] = "ch0:late=2,zerofill=0,epoch=8:8";  // a clear, 2 since
+    k["TX_BANK_STATUS"] = replaceAll(k["TX_BANK_STATUS"], "clock_aborts=0", "clock_aborts=1");
     const auto b = h.check().alarms();
-    check(quiet && a == std::vector<std::string>{"tx0.late +10"} && b == std::vector<std::string>{"tx0.late +2"},
-          "HS-220 end to end: a torn poll is skipped, a wrap counts +10, a clear then counts from zero (mutation: "
-          "the baseline reset on the torn poll)");
+    k["TX_BANK_STATUS"] = replaceAll(replaceAll(k["TX_BANK_STATUS"], "late=70000", "late=2"), "clock_aborts=1", "clock_aborts=0");
+    const auto c = h.check();
+    k["TX_BANK_STATUS"] = replaceAll(k["TX_BANK_STATUS"], "late=2", "late=3");
+    const auto d = h.check().alarms();
+    check(quiet && eq(a, {"tx0.late +70000", "tx0.zerofill +4294967297"}),
+          "end to end: a rise past 2^16 and one past 2^32 report whole (mutation: a modulus on the bank counters)");
+    check(eq(b, {"tx0.clock_aborts +1"}),
+          "a clock event that aborted the bank alarms by clock_aborts, the frames it took being in no other "
+          "counter (mutation: clock_aborts not collected)");
+    check(eq(c.alarms(), {"PL reloaded (tx0.late 70000 -> 2)"}) && c.line().find("PL reloaded (tx0.late 70000 -> 2)") != std::string::npos,
+          "a bank counter that went back is one PL-reload alarm, not a rise of its value and not a 2^32 - 1 rise "
+          "of clock_aborts (mutations: the fall's value as the rise; the 32-bit counts differenced across the "
+          "reload)");
+    check(eq(d, {"tx0.late +1"}),
+          "the read after a PL reload is the new baseline (mutation: the baseline kept from before the reload, a "
+          "second reload alarm)");
   }
   {  // clean, then each alarm class
     FakeNode n;
@@ -280,31 +316,33 @@ int main(int argc, char** argv) {
     ok = ok && eq(h.check().alarms(), {"preflight new FAIL ADC0.0:OVR_RANGE"});
     check(ok, "clean, then a counter rise, a quiet period, a new FAIL (mutation: an alarm class dropped)");
   }
-  {  // the real captures
-    if (argc > 1) {  // a demo session's capture, DEMO_VERIFICATION 9.83 FI1
+  {  // the driver's own renders
+    if (argc > 1) {
       auto keys = loadFixture(argv[1]);
-      check(keys.size() == 5, "the fixture has its 5 keys");
+      check(keys.size() == 7, "the fixture has its 7 keys");
       Read rd = [&keys](const std::string& k) { return keys.count(k) != 0u ? keys.at(k) : std::string(); };
       const auto g = collectCounters(rd);
-      check(g.at("tx0.epoch") == 587 && g.at("tx1.epoch") == 521 && g.at("tx0.late") == 0 && g.count("tx0.acked") == 0,
-            "the capture: the TX banks carry their epochs (587, 521) and are used (mutation: the epoch parse "
-            "broken)");
-      check(txClearEpochs(keys.at("TX_BANK_STATUS")) == std::map<int, long long>{{0, 587}, {1, 521}},
-            "the capture: the TDD ladder's clear-epoch read gives both banks' epochs from the device's own text "
-            "(mutation: a field split that misses the epoch)");
+      check(g.at("tx0.late") == 1 && g.at("tx1.late") == 101 && g.at("tx1.malformed") == 110 &&
+                g.at("tx0.clock_aborts") == 13 && g.at("tx0.acked") == 4294967299ULL && g.count("tx0.epoch") == 0,
+            "the golden render: both TX banks are used, each field under its own name (mutation: a substring "
+            "search for a field, which reads zerofill's value as fill's or the tick pair as a count)");
+      check(g.at("rx0.aborts") == 3 && g.at("rx1.gated") == 7 && g.count("rx1.hwm") == 0 && g.count("rx1.halted") == 0,
+            "the golden render: the RX banks' gated and aborts, not the high-water mark or the fail-stop state");
+      check(g.at("egress.drop_p3") == 4294967296ULL && g.at("egress.marked") == 18446744073709551615ULL &&
+                g.at("egress.stalls") == 5 && g.at("egress.link_down") == 4294967294ULL,
+            "the golden render: the egress counts whole, the 64-bit ceiling included (mutation: a signed parse)");
       check(g.count("host.tdd_straddle_ch0") == 1 && g.count("host.eob_recloses_ch1") == 1 &&
                 g.count("host.tdd_drop_ch0") == 0 && g.count("host.rxq_ovfl") == 0 &&
-                g.count("host.anchor_rejects_ch0") == 0,
-            "the capture: the host alarm fields per stream, not tdd_drop, the totals or the pacer's state");
+                g.count("host.anchor_rejects_ch1") == 0 && g.count("host.ring_bytes_ch0") == 0,
+            "the golden render: the host alarm fields per stream, not tdd_drop, the totals, the pacer's state or "
+            "the ring's size");
       double t = 0.0;
       LinkHealth h(rd, "ue", [&t] { return t += 5.0; });
-      const auto first = h.check().alarms();
-      const bool settled = h.check().alarms().empty();
-      keys["TX_BANK_STATUS"] = replaceAll(keys["TX_BANK_STATUS"], "acked=784,late=0", "acked=1284,late=2");
-      check(eq(first, {"preflight new FAIL ADC0.1:SUBADC_DCDR"}) && settled &&
-                eq(h.check().alarms(), {"tx0.late +2"}),
-            "the capture: the bring-up's ADC latch alarms once if not cleared, the beacon's acked rise is not "
-            "an alarm, a late rise within epoch 587 is");
+      const bool settled = h.check().alarms().empty() && h.check().alarms().empty();
+      keys["TX_BANK_STATUS"] = replaceAll(keys["TX_BANK_STATUS"], "acked=4294967299,late=1", "acked=4294967799,late=3");
+      check(settled && eq(h.check().alarms(), {"tx0.late +2"}),
+            "the golden render: counts standing since the PL load and a suppressed preflight item are no alarm, a "
+            "replay's acked rise is not one, a late rise is");
     }
   }
   std::printf("%s: %d failure(s)\n", g_fail == 0 ? "ALL PASS" : "FAILED", g_fail);

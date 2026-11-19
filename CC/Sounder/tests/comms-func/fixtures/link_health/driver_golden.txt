@@ -1,0 +1,20 @@
+# The device's and the host plugin's own renders of the keys houdini/link_health.h
+# reads, for link_health_test: each line is one row of SoapyHoudiniSDR's golden
+# report corpus (shared/testdata/report_golden.txt at f11a86b4, the row named in
+# the comment above it), which that repo's tests hold its formatters to. No
+# session produced these values: they are chosen to fill each field's width
+# (a 64-bit count at its ceiling, a count past 32 bits).
+# tx_bank_two
+TX_BANK_STATUS=ch0:acked=4294967299,late=1,under=2,seqerr=4,zerofill=16,fill=30,hwm=48,drops=5,last_seq=511,active=1,cap=64,gated=6,smiss=0,aclose=7,parked=1,late_seen=0,efault=0,played=8,clear_drops=9,clear_busy=0,tick=123456789012:123456789030,malformed=10,cancels=11,flushed=12,clock_aborts=13;ch1:acked=4294967399,late=101,under=102,seqerr=104,zerofill=116,fill=30,hwm=48,drops=105,last_seq=511,active=1,cap=64,gated=106,smiss=0,aclose=107,parked=1,late_seen=0,efault=0,played=108,clear_drops=109,clear_busy=0,tick=123456789012:123456789030,malformed=110,cancels=111,flushed=112,clock_aborts=113
+# rx_bank_two
+RX_BANK_STATUS=ch0:gated=0,aborts=3,hwm=12,halted=0,stop=none;ch1:gated=7,aborts=0,hwm=255,halted=1,stop=late+link
+# egress_dropping
+EGRESS_STATUS=drop=p0:1,p1:2,p2:3,p3:4294967296;stalls=5;marked=18446744073709551615;link_down=4294967294
+# tx_host_status_live
+TX_HOST_STATUS=eob_recloses=0 eob_recloses_ch1=0 offset_us_ch1=0.0 offset_samples_ch1=0 offset_implausible_ch1=0 anchor_rejects_ch1=0 rate_ppm_ch1=0.00 late_refusals_ch1=0 write_min_margin_us_ch1=inf release_min_margin_us_ch1=inf release_late_ch1=0 burst_refusals_ch1=0 cold_releases_ch1=0 cold_window_ms_ch1=inf count_refusals_ch1=0 ring_bytes_ch1=524288 ring_slots_ch1=64
+# rx_host_status_group
+RX_HOST_STATUS=rxq_ovfl=0 rxq_ovfl_ch0=0 rxq_ovfl_ch2=0 ring_ovfl=0 ring_ovfl_ch0=0 ring_ovfl_ch2=0 tdd_drop=0 tdd_drop_ch0=0 tdd_drop_ch2=0 tdd_straddle=0 tdd_straddle_ch0=0 tdd_straddle_ch2=0 ring_bytes_ch0=1048576 ring_slots_ch0=128 ring_bytes_ch2=1048576 ring_slots_ch2=128
+# preflight_known_suppressed
+RFDC_PREFLIGHT=ok known DAC0.0:FIFO_OVR(HS-207) suppressed ADC0.0:OVR_RANGE(46600/s,backoff=8s)
+# no golden row: the key is a bare count
+RFDC_INTR_FIRE_COUNT=4

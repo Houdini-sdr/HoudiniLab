@@ -77,9 +77,17 @@ def main():
           f"ADC NCO {adc_nco/1e6:.1f} MHz   comb tones (MHz): "
           f"{[round(f,1) for f in combf]}")
 
-    tx = None
+    tx = rx = None
     actual = [f * 1e6 for f in combf]                # expected bins (also for --no-tx)
     try:
+        # The device's run model: every stream is set up and configured from
+        # idle, then activated. On one board the RX rate and the RX stream's
+        # setup must therefore come before the TX replay's activation (after
+        # it the device refuses them by name); on two boards the order is
+        # harmless.
+        rxd.setSampleRate(SOAPY_SDR_RX, a.rx_ch, a.rate_mhz * 1e6)
+        rxd.setFrequency(SOAPY_SDR_RX, a.rx_ch, adc_nco)
+        rx = rxd.setupStream(SOAPY_SDR_RX, native, [a.rx_ch], {})
         if not a.no_tx:
             iq_a, actual = hs.tx_replay_comb([f * 1e6 for f in combf], dac_rate,
                                              a.n_addr, amp_frac=a.amp)
@@ -90,16 +98,19 @@ def main():
             if txd.activateStream(tx) != 0:
                 raise RuntimeError("activateStream(TX replay) refused (DS-19: a load must be a whole "
                                    "number of 16-sample beats)")
-        rxd.setSampleRate(SOAPY_SDR_RX, a.rx_ch, a.rate_mhz * 1e6)
-        rxd.setFrequency(SOAPY_SDR_RX, a.rx_ch, adc_nco)
         fs = float(rxd.getSampleRate(SOAPY_SDR_RX, a.rx_ch))
         buf, _ = hs.capture_rx(rxd, a.rx_ch, native, dtype, duration_sec=a.secs,
-                               capture_bytes=int(a.cap_mb * 1024 * 1024))
+                               capture_bytes=int(a.cap_mb * 1024 * 1024), rx=rx)
     finally:
         if tx is not None:
             try:
                 txd.deactivateStream(tx)
                 txd.closeStream(tx)
+            except Exception:  # noqa: BLE001
+                pass
+        if rx is not None:
+            try:
+                rxd.closeStream(rx)
             except Exception:  # noqa: BLE001
                 pass
 

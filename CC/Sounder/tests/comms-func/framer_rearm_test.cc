@@ -9,9 +9,13 @@
  * The reload must start at 0 on the host too: the device refuses an append at
  * a stale fill (past the RAM depth; from the software lane's F6b2, any append
  * at a stale fill), and the bring-up would then fail on the first refused arm
- * instead of retrying. SoapyHoudiniSDR 0.7.0's plugin rewinds the host fill on
- * tx_clear itself; the framer also deactivates the replay stream before the
- * reload, so the fresh load does not rest on that rewind alone.
+ * instead of retrying. The host plugin rewinds the host fill on tx_clear
+ * itself; the framer also deactivates the replay stream before the reload, so
+ * the fresh load does not rest on that rewind alone.
+ *
+ * The clear's verdict is the device's: TDD_CMD tx_clear throws by name when it
+ * is refused or a bank does not take it, and the ladder reads nothing after it
+ * (the bank counters never clear and no register counts clears).
  *
  * The fake radio models a host whose fill only deactivateXmit rewinds (the
  * case the deactivate covers) and the fake device the device side (its fill,
@@ -46,21 +50,17 @@ void check(bool ok, const std::string& what) {
 
 // The device side: the settings the framer writes, TDD_ARM refused the first
 // `refuse_arms` times, and the replay fill a TX clear rewinds. TDD_CMD tx_clear
-// clears and counts in both TX banks' clear epoch, read through
-// TX_BANK_STATUS, unless the device refuses it (it throws) or returns without
-// clearing (a device-side judge that passed a clear that never landed).
+// clears, unless the device refuses it or judges a bank not cleared (it throws
+// either way, as the device does). TX_BANK_STATUS answers in the device's
+// render, which carries no count of clears, and counts its reads.
 class FakeDevice : public SoapySDR::Device {
  public:
   int refuse_arms = 0;
   int arm_writes = 0;
   size_t level = 0;  // the device's replay fill
-  bool clear_lands = true;    // false: tx_clear returns without clearing
   bool clear_refused = false; // tx_clear throws, nothing written
-  bool clear_unknown = false; // tx_clear is an unknown command (a radio older than 0.7.0)
-  int epoch = 1;              // the power-up envelope
-  bool status_throws = false; // the TX_BANK_STATUS read fails
-  int tear_reads = 0;         // TX_BANK_STATUS reads torn after each clear
-  mutable int torn = 0;       // torn reads still to come
+  bool clear_stuck = false;   // tx_clear's pulse is written, a bank's clear_busy never falls: it throws
+  mutable int status_reads = 0;
   std::vector<std::string>* log = nullptr;
 
   void writeSetting(const std::string& key, const std::string& value) override {
@@ -69,30 +69,26 @@ class FakeDevice : public SoapySDR::Device {
       throw std::runtime_error("TDD_ARM: framer busy (state=running): abort first");
     if (key == "TDD_CMD" && value == "tx_clear") {
       if (clear_refused) throw std::runtime_error("TDD_CMD tx_clear: refused: the TDD framer is still engaged");
-      if (clear_unknown) throw std::runtime_error("TDD_CMD: unknown command \"tx_clear\"");
-      if (clear_lands) {
-        log->push_back("TX_CLEAR_ALL");
-        level = 0;
-        ++epoch;
-        torn = tear_reads;
-      }
+      log->push_back("TX_CLEAR_ALL");
+      if (clear_stuck) throw std::runtime_error("TDD_CMD tx_clear: TX ch1 clear_busy did not fall within 1 ms");
+      level = 0;
     }
   }
   std::string readSetting(const std::string& key) const override {
     if (key == "TX_BANK_STATUS") {
-      if (status_throws) throw std::runtime_error("TX_BANK_STATUS: SoapyRPCUnpacker type check FAIL");
-      // A torn read: the envelope landed between the two epoch reads.
-      const std::string e = torn > 0 ? std::to_string(epoch - 1) + ":" + std::to_string(epoch)
-                                     : std::to_string(epoch) + ":" + std::to_string(epoch);
-      if (torn > 0) --torn;
-      return "ch0:acked=0,late=0,epoch=" + e + ";ch1:acked=0,late=0,epoch=" + e;
+      ++status_reads;
+      const std::string bank =
+          "acked=0,late=0,under=0,seqerr=0,zerofill=0,fill=0,hwm=0,drops=0,last_seq=0,active=0,cap=64,gated=0,"
+          "smiss=0,aclose=0,parked=0,late_seen=0,efault=0,played=0,clear_drops=0,clear_busy=0,tick=100:130,"
+          "malformed=0,cancels=0,flushed=0,clock_aborts=0";
+      return "ch0:" + bank + ";ch1:" + bank;
     }
     return key == "TDD_ARM" ? "accepted=1 epoch=5000" : "";
   }
 };
 
 // The host side: the replay stream's fill, which only a deactivate rewinds here
-// (the case the framer's deactivate covers; 0.7.0's plugin also rewinds it on
+// (the case the framer's deactivate covers; the host plugin also rewinds it on
 // tx_clear).
 class FakeRadio : public Radio {
  public:
@@ -155,6 +151,7 @@ std::string joined(const std::vector<std::string>& log) {
 struct Armed {
   std::string why;  // the arm's exception text, "" if it armed
   int arm_writes = 0;
+  int status_reads = 0;
   std::vector<std::string> log;
 };
 
@@ -179,6 +176,7 @@ Armed armWith(int refuse, const std::function<void(FakeDevice&)>& setup = {}) {
     }
   }
   a.arm_writes = r->dev.arm_writes;
+  a.status_reads = r->dev.status_reads;
   a.log = r->log;
   return a;
 }
@@ -198,24 +196,16 @@ int main() {
             "the fake: a load after a TX clear is refused at the stale fill and lands after a deactivate (an "
             "instrument that accepts both proves nothing below)");
     }
-    {  // the instrument: the epoch counts a clear that lands, and only that
-      FakeRadio r(RadioParams{});
-      const std::string at_start = r.dev.readSetting("TX_BANK_STATUS");
-      r.dev.clear_lands = false;
-      r.dev.writeSetting("TDD_CMD", "tx_clear");
-      const std::string after_lost = r.dev.readSetting("TX_BANK_STATUS");
-      r.dev.clear_lands = true;
-      r.dev.writeSetting("TDD_CMD", "tx_clear");
-      const std::string after_landed = r.dev.readSetting("TX_BANK_STATUS");
-      check(after_lost == at_start && after_landed != at_start,
-            "the fake: a tx_clear that does not land leaves the clear epoch, one that lands moves it (an epoch "
-            "that moves on any tx_clear lets the ladder's check pass a clear that never landed)");
-    }
     {
       const Armed a = armWith(0);
       check(a.why.empty() && a.arm_writes == 1 && count(a.log, "load at 0") == 1 && count(a.log, "deactivate") == 0,
             "arm accepted first time: one load at 0 and no deactivate, as the verified bring-up (" + joined(a.log) +
                 (a.why.empty() ? "" : "; threw: " + a.why) + ")");
+      check(a.why.empty() && a.status_reads == 0,
+            "the ladder takes the device's verdict on its TX clear and reads no TX_BANK_STATUS (mutation: the "
+            "clear-epoch second check restored, which finds no epoch in the device's render and throws at every "
+            "bring-up: " + std::to_string(a.status_reads) + " reads" + (a.why.empty() ? "" : "; threw: " + a.why) +
+                ")");
     }
     {
       const Armed a = armWith(0);
@@ -229,14 +219,6 @@ int main() {
             "which lets a strobe play the uncleared bank: " + joined(a.log) + ")");
     }
     {
-      const Armed a = armWith(0, [](FakeDevice& d) { d.clear_unknown = true; });
-      check(a.why.find("needs the radio's SoapyHoudiniSDR 0.7.0") != std::string::npos && a.arm_writes == 0 &&
-                count(a.log, "set TDD_CMD=gate_release") == 1,
-            "a radio that does not know tx_clear: the gates are released, then the bring-up throws naming the "
-            "release it needs (mutation: the hint dropped, which leaves only the device's 'unknown command': " +
-                (a.why.empty() ? std::string("armed") : "threw '" + a.why.substr(0, 140) + "'") + ")");
-    }
-    {
       const Armed a = armWith(1);
       check(a.why.empty() && a.arm_writes == 2,
             "first TDD_ARM refused: the retry re-arms and the bring-up completes (mutation: no deactivate before "
@@ -247,10 +229,11 @@ int main() {
             "the retry's reload is a fresh load at 0, after one deactivate (" + joined(a.log) + ")");
     }
     {
-      const Armed a = armWith(0, [](FakeDevice& d) { d.clear_lands = false; });
-      check(a.why.find("did not land") != std::string::npos && a.arm_writes == 0,
-            "a tx_clear the device accepts without clearing: the bring-up throws naming the clear and writes no "
-            "TDD_ARM (mutation: the ladder's epoch check removed, which arms over uncleared banks: " +
+      const Armed a = armWith(0, [](FakeDevice& d) { d.clear_stuck = true; });
+      check(a.why.find("TX clear failed") != std::string::npos && a.why.find("clear_busy did not fall") != std::string::npos &&
+                a.arm_writes == 0,
+            "a tx_clear the device judges not landed: the bring-up throws with the device's reason and writes no "
+            "TDD_ARM (mutation: the clear's throw swallowed, which arms over uncleared banks: " +
                 (a.why.empty() ? std::string("armed") : "threw '" + a.why.substr(0, 120) + "'") + ")");
       check(count(a.log, "set TDD_CMD=gate_release") == 1,
             "the failed clear still releases the gates before the throw (mutation: the throw before gate_release, "
@@ -259,33 +242,10 @@ int main() {
     {
       const Armed a = armWith(0, [](FakeDevice& d) { d.clear_refused = true; });
       check(a.why.find("TX clear failed") != std::string::npos && a.why.find("still engaged") != std::string::npos &&
-                a.why.find("needs the radio's SoapyHoudiniSDR") == std::string::npos && a.arm_writes == 0 &&
+                a.arm_writes == 0 && count(a.log, "TX_CLEAR_ALL") == 0 &&
                 count(a.log, "set TDD_CMD=gate_release") == 1,
             "a refused tx_clear: the gates are still released, then the bring-up throws with the device's reason "
-            "and no release hint (mutations: the refusal left to escape the ladder, which skips the gate release; "
-            "the hint on every refusal, which sends an engaged framer's operator to upgrade the radio: " +
-                joined(a.log) + ")");
-    }
-    {
-      const Armed a = armWith(0, [](FakeDevice& d) { d.tear_reads = 1; });
-      check(a.why.empty() && a.arm_writes == 1,
-            "a read torn by the clear is read again, not judged (mutation: one read only, which throws on a clear "
-            "that landed: " + (a.why.empty() ? std::string("armed") : "threw '" + a.why.substr(0, 120) + "'") + ")");
-    }
-    {
-      const Armed a = armWith(0, [](FakeDevice& d) { d.tear_reads = 5; });
-      check(a.why.find("cannot check") != std::string::npos && a.arm_writes == 0,
-            "every read torn: the bring-up throws that the clear cannot be checked (mutation: a torn read taken "
-            "as an epoch, which passes on the reads' disagreement alone: " +
-                (a.why.empty() ? std::string("armed") : "threw '" + a.why.substr(0, 120) + "'") + ")");
-    }
-    {
-      const Armed a = armWith(0, [](FakeDevice& d) { d.status_throws = true; });
-      check(a.why.find("cannot check") != std::string::npos && a.arm_writes == 0 &&
-                count(a.log, "TX_CLEAR_ALL") == 1 && count(a.log, "set TDD_CMD=gate_release") == 1,
-            "a TX_BANK_STATUS read that throws: the pulse and the gate release still run, then the bring-up throws "
-            "that the clear cannot be checked (mutation: the read's throw left to escape, which skips both: " +
-                joined(a.log) + ")");
+            "(mutation: the refusal left to escape the ladder, which skips the gate release: " + joined(a.log) + ")");
     }
   } catch (const std::exception& e) {
     check(false, std::string("unexpected exception: ") + e.what());

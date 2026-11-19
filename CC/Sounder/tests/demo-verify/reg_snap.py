@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
-"""The fpga 1.34 packet gate's fault registers on each node, read with no stream
-open (before and after a run; compare as deltas):
+"""The packet gate's fault counts on each node, read with no stream open (before
+and after a run; compare as differences):
 reg_snap.py <label> <node address> [<node address> ...] [--port 55132] [--soapy-root DIR]
 
-RFCORE (0xA007_0000): RX bank k at 0x1000 + 0x80*k, ABORT_COUNT +0x18 (must
-not move; survives RX_CLEAR), FIFO_HWM +0x14, GATED_DROPS +0x38 (stays 0 for a
-continuous arm); the bank offsets are the same in register map v3. TDD_STAT
-(state, epoch_late, gates_held, edge_late) is read through its setting, which
-the device plugin resolves on its own register map (v3 moved the register from
-0xAC to 0x31C, and the old offset on a v3 bitstream reads 0, which decodes as
-idle). The egress stall watchdog is not read here: it moved too (FHCORE
-EGRESS_STALL_WD, +0x28 to +0x80 in map v3), and check_setup's EGRESS_STATUS
-reads it through the driver on either map. Opened
-as check_setup opens a node, and closed cleanly. DEMO_VERIFICATION.md 9.70
-(SM1) is this tool's before/after reading of fpga 1.34.
+Each RX channel's bank through RX_BANK_STATUS: aborts (the timed starts the
+bus late-aborted: must not move), hwm (the FIFO's high-water mark) and gated
+(stays as it was for a continuous arm), with the fail-stop state beside them.
+The two counts are 64-bit, counted from the gateware load and never cleared,
+so a run's count is the difference of its two readings. TDD_STAT (state,
+epoch_late, gates_held, edge_late) is read through its setting too. Every read
+is a setting, which the device resolves on its own register map: no register
+offset is written here, since an offset from another map reads some other
+word without an error. The egress stall count is check_setup's (EGRESS_STATUS).
+Opened as check_setup opens a node, and closed cleanly. DEMO_VERIFICATION.md
+9.70 (SM1) is this tool's before/after reading of fpga 1.34, taken when it
+read the registers raw.
 """
 import argparse
 import os
@@ -35,12 +36,17 @@ for ip in args.nodes:
                            "remote:driver": "houdinisdr-device", "remote:type": "houdinisdr",
                            "timeout": "3000000"})
     try:
-        r = lambda core, off: int(sdr.readRegister(core, off))
+        raw = sdr.readSetting("RX_BANK_STATUS")
         banks = []
-        for k in range(4):
-            b = 0x1000 + 0x80 * k
-            banks.append("rx%d abort=%d hwm=%d gated=%d" % (k, r("RFCORE", b + 0x18), r("RFCORE", b + 0x14),
-                                                          r("RFCORE", b + 0x38)))
+        for group in raw.split(";"):
+            ch, _, body = group.partition(":")
+            f = dict(t.split("=", 1) for t in body.split(",") if "=" in t)
+            missing = [k for k in ("aborts", "hwm", "gated", "halted", "stop") if k not in f]
+            if not ch.startswith("ch") or missing:
+                raise SystemExit("%s %s: RX_BANK_STATUS is not the per-channel form this tool reads (%r)"
+                                 % (args.label, ip, raw))
+            banks.append("rx%s abort=%s hwm=%s gated=%s halted=%s stop=%s"
+                         % (ch[2:], f["aborts"], f["hwm"], f["gated"], f["halted"], f["stop"]))
         st = dict(t.split("=", 1) for t in sdr.readSetting("TDD_STAT").split() if "=" in t)
         print("%s %s: %s | TDD_STAT state %s, epoch_late %s, gates_held %s, edge_late %s"
               % (args.label, ip, "; ".join(banks), st.get("state"), st.get("epoch_late"), st.get("gates_held"),
