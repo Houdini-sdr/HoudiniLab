@@ -926,4 +926,7 @@ it (its newest section 9 row is always the current one):
 | Sub-6 MER | median 36.9 dB |
 | X-band MER | median 29.4 dB; 20.8 dB with the path blocked by hand, recovered each time with no pilot lost |
 
-The demo has not run on fpga 1.49 or SoapyHoudiniSDR 0.7.2 yet.
+This code now reads the status texts of a later gateware and SoapyHoudiniSDR
+pair (fpga 1.56, SoapyHoudiniSDR 0.8.0), on which the full two-node demo has
+not run yet: single-node checks on two boards have (the setup check, the
+teardown, a base-station bring-up with the link monitor).
