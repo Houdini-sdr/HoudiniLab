@@ -201,16 +201,16 @@ The XUD1A is the reworked board (RF 9.5 GHz, LO 13.88 GHz). It needs:
   which hands it to its Check, Start and teardown; `demo_run.sh` takes the
   prefix as its fourth argument. Without it no radio opens. The setup check's
   stack line shows which one loaded: `host_version` must equal
-  `device_version` and be 0.7.0 or later (else a FAIL on the `lockstep` or
+  `device_version` and be 0.8.0 or later (else a FAIL on the `lockstep` or
   `release` line), and `host_build` should equal `device_build`
   (else a WARN; the build in that prefix differs from the nodes' only by
   documentation commits, so both nodes WARN on it). Read SoapyHoudiniSDR's
   `docs/RELEASE_NOTES.md` for the release before a deploy changes it.
 - **Host examples.** The teardown before each Start imports the SoapyHoudiniSDR
   host examples (`--examples`, default `~/repos/SoapyHoudiniSDR/host/examples`),
-  which must be 0.7.0 or newer, the release this code needs (the setup check's
-  `teardown` line WARNs on an older one): an older parser cannot read a 0.7.0
-  radio's TX channel status, so the teardown skips its check of the clear.
+  which must be 0.8.0 or newer, the release this code needs (the setup check's
+  `teardown` line WARNs on an older one): the teardown opens each radio with
+  the examples' `houdini_setup`, and an older one may not open a newer radio.
   Keep the checkout at the radios' release as they move past it.
 - **Cores.** The sounder's `--core_map` places its threads by role and the
   main thread pins itself only after the radios start, so the plugin's BS
@@ -228,7 +228,7 @@ source ~/houdini_test/bin/activate
 cd ~/repos/HoudiniLab-rxwin/CC/Sounder
 cat /sys/devices/system/cpu/isolated   # 15-19 when A9 stage 1 is in force
 python3 csi_gui/check_setup.py --soapy-root $HOME/houdini_hil \
-  --conf files/houdini-dualband-xw-steer-slots-fe.json   # must print Ready, egress PASS on both nodes
+  --conf files/houdini-dualband-xw-steer-slots-fe.json   # must print Ready, no egress FAIL on either node
 tests/demo-verify/demo_dashboard.sh --no-topology        # Ctrl+C stops the dashboard and its sounder
 ```
 
@@ -314,8 +314,8 @@ sample or with stale samples for most of the run; a dashboard session log has
 no samples, so there a tenth or more of the constellation records low is what
 fails a dead antenna. Underneath, `run_rung.sh` and `fstage_run.sh` (each taking `--soapy-root`, and `--sounder-arg=<flag>` for any further sounder
 flag) launch one sounder run with the logs and dumps that `rung_report.py` and
-`fstage_report.py` read; `reg_snap.py` reads the fpga 1.34 gate's fault
-registers before and after a run, and `gate_runs.py` the BS landing dumps
+`fstage_report.py` read; `reg_snap.py` reads the packet gate's fault
+counts before and after a run, and `gate_runs.py` the BS landing dumps
 (9.70).
 
 `demo_run.sh` starts the freeze watcher itself. HS-227 is fixed from fpga 1.32
@@ -412,14 +412,18 @@ steered, cabled):
   with the pinning unchecked, the demo run had 25 such events, 63 frames in
   71 min (9.82): run `pacer_core_check.py` after every boot (A8c step 5). The
   durable guard is keeping every NIC receive queue off the pacer cores (AP-106).
-- **Egress drop counters.** Each radio's per-port egress drop counts, and
-  its one marked-frame count (a single count after the ports merge), are 32
-  bits and wrap, so a throughput test cannot fill them. Judge a run by each count's change
+- **Egress counters.** Each radio's per-port egress drop counts, its one
+  marked-frame count (a single count after the ports merge) and its count of
+  frames drained while the data link was down are 64 bits, so nothing fills or
+  wraps them. Judge a run by each count's change
   over the run, not its value: a marked frame at a stream's teardown is the
-  designed cleanup. check_setup names nonzero counts on its egress line and
-  fails only the stall bit. They clear only on an egress reset: a PL load (a
-  node boot loads the bitstream again), a `GT_RESET`, or a GT TX reset or
-  power-good drop in the node; a data-link loss leaves them counting. With
+  designed cleanup. They count from the PL load (a node boot loads the
+  bitstream again) and nothing else clears them: not a `GT_RESET`, not a
+  data-link loss. The stall count beside them (`stalls`) runs from the PL load
+  too, and no healthy radio counts one. check_setup names nonzero counts on
+  its egress line, passes the drop counts at any value and WARNs on a stall
+  count above 0: that is a stall at some time since the load, not proof the
+  egress is stalled now, and it stays until the next PL load. With
   an XUD1A attached, a boot follows A2b step 1: its 12 V off through the boot,
   on only after the PL has loaded, then the role.
 - **The pilot seat and `tx_advance`.** `tx_advance` 198 seats the UE's
@@ -468,18 +472,21 @@ steered, cabled):
   healthy within four attempts; the recovery itself is inferred, not tested).
 - A bring-up that stops with `the TDD ladder's TX clear failed`, or a teardown
   that prints `TDD_CMD tx_clear: ...` and FAILs: the radio did not clear its
-  TX channels, and its text says why. `unknown command "tx_clear"` is a radio
-  older than SoapyHoudiniSDR 0.7.0 (the setup check's stack line shows its
-  release): put the radio on the release this checkout needs. A refusal
+  TX channels, and its text says why. The radio judges the clear itself and
+  that verdict is the whole check. A refusal
   (the framer still engaged, a clear held elsewhere, the RF clock tree held
   or unlocked) names its cause: clear that cause (a setup check, then the
-  teardown) and Start again. `did not land` means the radio accepted the clear
-  but its channels' clear count did not move: stop and report it, since no
+  teardown) and Start again. A text that says the clear was written but a
+  channel did not finish clearing: stop and report it, since no
   run is valid over uncleared channels.
-- After a rig-host reboot, run the setup check before anything else. The
-  link's return clears an egress stall, so an `egress` FAIL that names a stall
-  is one since that node's link last came up: reload that node's PL or reboot
-  it, and report it. A FAIL on the status read itself: run the check again.
+- After a rig-host reboot, run the setup check before anything else. An
+  `egress` WARN that names a stall count is a stall at some time since that
+  node's PL was loaded, and the count stays until the next load, so it does
+  not say the node is stalled now: report it, and if a run then shows no
+  samples from that node although its link is up, reload its PL or reboot it.
+  An `egress` FAIL that says the status lacks a field is a radio on an older
+  gateware and device software than this code reads. A FAIL on the status
+  read itself: run the check again.
 - A radio still held by an old sounder: the setup check names its pid; stop that
   run or `kill -INT <pid>`, the sounder's own stop (a plain `kill` skips its
   end-of-run checks and leaves the clock steered). Only if it has not exited
@@ -585,7 +592,8 @@ lacks (A1), so here steps 3 and 4 run by hand.
      --topology files/topology-houdini-dualband-swap.json --conf files/houdini-dualband-xw-steer-slots.json
    ```
 
-   Ready, egress PASS on both nodes, the stacks match (A3 says which
+   Ready, no egress FAIL on either node (an egress WARN on a stall count is
+   history, see the caveats), the stacks match (A3 says which
    `plugin build` WARNs to expect). A stack FAIL reading
    `SoapyRPCUnpacker::recv() TIMEOUT` is a slow first open after a server
    restart: run it again (twice in a row has happened, 9.70). An egress FAIL
@@ -650,10 +658,10 @@ arm has a record row yet; the steps stay here for when one is run.
 4. Reboot only when no comparison run still needs the old kernel.
 5. Verify after the reboot: `cat /sys/devices/system/cpu/isolated` prints
    `15-19`; `cat /proc/cmdline` shows the arguments. Then run `check_setup.py`
-   (A4) before anything else: a host reboot bounces the data ports. The
-   link's return clears an egress stall, so a node that fails the `egress`
-   line stalled since its link last came up, and its run would get no samples
-   at all: reload that node's PL or reboot it, and report it.
+   (A4) before anything else: a host reboot bounces the data ports. A node
+   whose `egress` line WARNs on a stall count stalled at some time since its
+   PL was loaded: report it, and if its run gets no samples at all, reload
+   that node's PL or reboot it.
 6. Before the first run: `grep CONFIG_NO_HZ_FULL /boot/config-$(uname -r)`
    (stage 2 needs it), and `sudo apt install rt-tests` for cyclictest.
 7. Undo: remove the arguments, `sudo update-grub`, reboot.

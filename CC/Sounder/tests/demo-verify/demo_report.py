@@ -2,7 +2,8 @@
 """One demo-length run's END report from its log (AP-79 D runs).
 usage: demo_report.py <run dir>   (the log is <run dir>/<basename>.log)
 Prints: UE/BS TX totals, the TX status timeline about every 60 s of device
-time, saturation and watchdog lines with their device time, CNS low per 300 s,
+time (each count as its rise since the run's first TX status line: the
+radio's counts run from its gateware load, not from the run), saturation and watchdog lines with their device time, CNS low per 300 s,
 late-release forensic statistics, the wake-jitter close lines, warning classes,
 and the tracked carrier offset about every 5 min."""
 import collections, os, re, sys
@@ -20,11 +21,12 @@ for i, l in enumerate(L):
     m = re.search(r"TX status: .*? at (\d+) ns.*?ch0:acked=\d+,late=(\d+),under=(\d+),seqerr=\d+,zerofill=(\d+).*?ch1:acked=\d+,late=(\d+),under=(\d+)", l)
     if m:
         ev.append((i, int(m.group(1)) / 1e9) + tuple(int(g) for g in m.groups()[1:]))
-print("TX status events: %d" % len(ev))
+print("TX status events: %d (counts since the first one)" % len(ev))
 last = -1e9
 for e in ev:
     if e[1] - last >= 60 or e is ev[-1]:
-        print("  dev %7.1f s  ch0 late %6d under %6d zerofill %10d | ch1 late %5d under %5d" % e[1:])
+        print("  dev %7.1f s  ch0 late %6d under %6d zerofill %10d | ch1 late %5d under %5d"
+              % ((e[1],) + tuple(v - v0 for v, v0 in zip(e[2:], ev[0][2:]))))
         last = e[1]
 
 def tdev(i):

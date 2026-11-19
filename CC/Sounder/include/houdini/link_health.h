@@ -6,18 +6,24 @@
  *        section 2.7 "Link alarms on a long session"; their Python twin is gone.
  *
  * Every read is passive, and each counter is judged by its change since its
- * previous read. A rise alarms. The RX bank, host and egress counters carry no
- * epoch, so a fall means the counter was cleared and its current value is the
- * rise; the TX bank re-baselines on its clear epoch instead (HS-220), and a poll
- * caught in a clear is not used. Host fields come from the per-stream
- * '<field>_ch<N>' keys, never the totals, which fall when a stream closes. A
- * preflight item is keyed on its text before the first '=' and alarms on the
- * first read it appears in, a standing item at the session's start included.
- * Nothing else alarms: no configuration drift, and no counter merely standing
- * at its ceiling or a sticky bit merely standing set.
+ * previous read. A rise alarms. The device's counters (the TX and RX banks',
+ * the egress drop, marked and link_down counts) are 64-bit, counted from the PL
+ * load and never cleared, each bank's read at one instant: their rise is the
+ * plain difference, and one that reads below its previous read means the PL
+ * was reloaded, which alarms once as that and not as a rise. The egress stalls
+ * and a TX bank's clock_aborts are 32-bit counts whose rise is taken mod 2^32.
+ * A host counter that fell was cleared and its current value is the rise, and
+ * so is a TX bank's sticky flag (efault, smiss). Host fields come from the
+ * per-stream '<field>_ch<N>' keys, never the totals, which fall when a stream
+ * closes. A preflight item is keyed on its text before the first '=' and
+ * alarms on the first read it appears in, a standing item at the session's
+ * start included. Nothing else alarms: no configuration drift, and no counter
+ * merely standing nonzero or a sticky bit merely standing set.
  *
  * What this cannot see, the application counts itself: readStream flags, short
- * reads, timestamp jumps, writeStream returns.
+ * reads, timestamp jumps, writeStream returns. Nor can it see a sticky flag
+ * that was cleared and set again between two reads (a TX clear in a re-arm,
+ * then a new miss): it reads set both times.
  *
  * RENEW OPEN SOURCE LICENSE: http://renew-wireless.org/license
  */
@@ -37,7 +43,7 @@
 namespace houdini {
 namespace health {
 
-using Counters = std::map<std::string, long long>;
+using Counters = std::map<std::string, unsigned long long>;
 using Read = std::function<std::string(const std::string&)>;
 
 namespace detail {
@@ -57,6 +63,19 @@ inline bool isInt(const std::string& v) {
   if (v.empty()) return false;
   size_t i = (v[0] == '-' || v[0] == '+') ? 1 : 0;
   return i < v.size() && isDigits(v.substr(i));
+}
+/// A decimal count of up to 64 bits into `out`; false, `out` untouched, for
+/// anything else (a sign, a non-digit, a value past 2^64 - 1).
+inline bool parseCount(const std::string& v, unsigned long long& out) {
+  if (!isDigits(v) || v.size() > 20) return false;
+  unsigned long long n = 0;
+  for (char c : v) {
+    const unsigned long long d = static_cast<unsigned long long>(c - '0');
+    if (n > (~0ULL - d) / 10) return false;
+    n = n * 10 + d;
+  }
+  out = n;
+  return true;
 }
 }  // namespace detail
 
@@ -79,8 +98,8 @@ inline std::map<int, std::map<std::string, std::string>> parseBankStatus(const s
   return out;
 }
 
-/// TX_HOST_STATUS / RX_HOST_STATUS 'k=v k_ch0=v ..' -> {k: int}; a token without
-/// '=' or with a non-digit value is skipped.
+/// TX_HOST_STATUS / RX_HOST_STATUS 'k=v k_ch0=v ..' -> {k: count}; a token
+/// without '=' or whose value is not a count of up to 64 bits is skipped.
 inline Counters parseFlatCounts(const std::string& raw) {
   Counters out;
   std::istringstream is(raw);
@@ -88,15 +107,15 @@ inline Counters parseFlatCounts(const std::string& raw) {
   while (is >> tok) {
     const auto eq = tok.find('=');
     if (eq == std::string::npos) continue;
-    const std::string v = tok.substr(eq + 1);
-    if (detail::isDigits(v)) out[tok.substr(0, eq)] = std::stoll(v);
+    unsigned long long n = 0;
+    if (detail::parseCount(tok.substr(eq + 1), n)) out[tok.substr(0, eq)] = n;
   }
   return out;
 }
 
-/// EGRESS_STATUS 'drop=p0:a,p1:b;stall_seen=s,stall_evt=e;marked=m' ->
-/// {'drop_p0': a, .., 'stall_seen': s, 'stall_evt': e, 'marked': m}. A group
-/// of 'p<k>:<n>' items is per port ('<group>_p<k>'), any other is flat.
+/// EGRESS_STATUS 'drop=p0:a,p1:b,p2:c,p3:d;stalls=s;marked=m;link_down=l' ->
+/// {'drop_p0': a, .., 'stalls': s, 'marked': m, 'link_down': l}. A group of
+/// 'p<k>:<n>' items is per port ('<group>_p<k>'), any other is flat.
 inline Counters parseEgressStatus(const std::string& raw) {
   Counters out;
   for (const auto& group : detail::split(raw, ';')) {
@@ -109,8 +128,8 @@ inline Counters parseEgressStatus(const std::string& raw) {
       for (const auto& item : detail::split(rest, ',')) {
         const auto c = item.find(':');
         if (c == std::string::npos) continue;
-        const std::string v = item.substr(c + 1);
-        if (detail::isDigits(v)) out[key + "_" + item.substr(0, c)] = std::stoll(v);
+        unsigned long long n = 0;
+        if (detail::parseCount(item.substr(c + 1), n)) out[key + "_" + item.substr(0, c)] = n;
       }
     } else {
       std::string g = group;
@@ -144,50 +163,52 @@ inline std::set<std::string> preflightItems(const std::string& line) {
   return out;
 }
 
-// The alarm fields (HOUDINI_PROTOCOL 2.7): the TX bank's event counters, the RX
-// bank's gated windows and timed-start aborts, the host's per-stream drops,
-// re-closes and slot straddles. tdd_drop is the slot cut itself, not a fault.
+// The alarm fields (HOUDINI_PROTOCOL 2.7): the TX bank's event counters and
+// sticky flags, the RX bank's gated windows and timed-start aborts, the host's
+// per-stream drops, re-closes and slot straddles. tdd_drop is the slot cut
+// itself, not a fault.
 inline const std::vector<std::string>& txAlarmFields() {
-  static const std::vector<std::string> f = {"drops", "late",  "under",  "seqerr", "zerofill",
-                                             "efault", "smiss", "clkerr", "aclose", "malformed"};
+  static const std::vector<std::string> f = {"drops", "late",  "under", "seqerr", "zerofill",
+                                             "efault", "smiss", "aclose", "malformed"};
   return f;
 }
+/// A TX bank's clock_aborts (TX_CLOCK_ABORTS): the clock events that aborted
+/// the bank whole. Collected beside the alarm fields: its flush is not counted
+/// frame by frame in any of them, so its move is the only trace of the frames
+/// such an event took.
+inline const char* txClockAborts() { return "clock_aborts"; }
+/// A TX bank's counters that move in every healthy run and are never an
+/// alarm: collected only so that a PL reload shows on a clean link, where
+/// every alarm counter reads 0 before and after it (plReload).
+inline const std::vector<std::string>& txReloadWitnesses() {
+  static const std::vector<std::string> f = {"acked", "played"};
+  return f;
+}
+/// Whether '<group>.<field>' is a reload witness: read, never reported.
+inline bool isReloadWitness(const std::string& name) {
+  if (name.rfind("tx", 0) != 0) return false;
+  const auto dot = name.rfind('.');
+  const std::string field = dot == std::string::npos ? name : name.substr(dot + 1);
+  return std::find(txReloadWitnesses().begin(), txReloadWitnesses().end(), field) != txReloadWitnesses().end();
+}
 
-/// HS-220: the TX event counters WRAP mod 2^16, and the CLEAR_EPOCH register,
-/// read before and after them (TX_BANK_STATUS "epoch=<before>:<after>", [16]
-/// clear_busy, [15:0] clears since the PL load), says whether a clear came
-/// between two polls. The TX_STREAM_CONTRACT section 2 rule, as the host
-/// plugin's shared/houdini_tx_counter_delta.h applies it: a poll is usable only
-/// if both reads match with bit 16 clear; within one epoch a wrapping counter's
-/// delta is taken mod 2^16; after an epoch change the values ARE the counts
-/// since the clear.
-inline bool txWrapsMod16(const std::string& field) {
-  // All nine HS-220 wrapping counters, so a field added to txAlarmFields later
-  // is read right; zerofill is saturating (48-bit) and efault/smiss/clkerr are
-  // sticky flags, so those difference plainly within an epoch.
-  return field == "drops" || field == "late" || field == "under" || field == "seqerr" || field == "aclose" ||
-         field == "malformed" || field == "gated" || field == "acked" || field == "played";
-}
-/// The usable epoch of an "epoch=<before>:<after>" value, or -1 when the poll
-/// fails the read protocol (reads differ, clear_busy set, malformed).
-inline long long txUsableEpoch(const std::string& v) {
-  const auto c = v.find(':');
-  if (c == std::string::npos) return -1;
-  const std::string b = v.substr(0, c), a = v.substr(c + 1);
-  if (!detail::isDigits(b) || !detail::isDigits(a) || b.size() > 10 || a.size() > 10) return -1;
-  const long long eb = std::stoll(b), ea = std::stoll(a);
-  return (eb == ea && eb >= 0 && eb <= 0xFFFF) ? eb : -1;
-}
-/// {chan: usable clear epoch} of one TX_BANK_STATUS read: -1 for a bank whose
-/// epoch fails the read protocol (txUsableEpoch), and a bank with no epoch
-/// field left out.
-inline std::map<int, long long> txClearEpochs(const std::string& raw) {
-  std::map<int, long long> out;
-  for (const auto& ch : parseBankStatus(raw)) {
-    const auto ep = ch.second.find("epoch");
-    if (ep != ch.second.end()) out[ch.first] = txUsableEpoch(ep->second);
+/// How a counter named '<group>.<field>' is differenced.
+enum class CounterKind {
+  kDevice64,  ///< 64-bit from the PL load, never cleared: a plain rise; a fall is a PL reload
+  kDevice32,  ///< 32-bit from the PL load, never cleared, wraps: the rise mod 2^32
+  kClearable, ///< a host counter or a sticky flag: a fall is a clear, its value the rise
+};
+inline CounterKind counterKind(const std::string& name) {
+  const auto dot = name.rfind('.');
+  const std::string field = dot == std::string::npos ? name : name.substr(dot + 1);
+  if (name.rfind("host.", 0) == 0) return CounterKind::kClearable;
+  if (name.rfind("tx", 0) == 0) {
+    if (field == "efault" || field == "smiss") return CounterKind::kClearable;
+    if (field == txClockAborts()) return CounterKind::kDevice32;
+    return CounterKind::kDevice64;
   }
-  return out;
+  if (name == "egress.stalls") return CounterKind::kDevice32;
+  return CounterKind::kDevice64;  // the RX bank's and the egress drop, marked and link_down counts
 }
 inline const std::vector<std::string>& rxAlarmFields() {
   static const std::vector<std::string> f = {"gated", "aborts"};
@@ -207,25 +228,21 @@ struct HostRead {
 };
 
 /// The alarm counters from one pass over the status keys, flattened to
-/// {'tx0.late', 'rx0.gated', 'host.rxq_ovfl_ch0', 'egress.drop_p0', ..}.
+/// {'tx0.late', 'tx0.clock_aborts', 'rx0.gated', 'host.rxq_ovfl_ch0',
+/// 'egress.drop_p0', ..}, with each TX bank's reload witnesses beside them.
 inline Counters collectCounters(const Read& read, HostRead* host_read = nullptr) {
   Counters out;
-  auto bank = [&out](const std::string& raw, const std::string& pre, const std::vector<std::string>& fields) {
+  auto bank = [&out](const std::string& raw, const std::string& pre, std::vector<std::string> fields) {
+    if (pre == "tx") {
+      fields.push_back(txClockAborts());
+      fields.insert(fields.end(), txReloadWitnesses().begin(), txReloadWitnesses().end());
+    }
     for (const auto& ch : parseBankStatus(raw)) {
       const std::string key = pre + std::to_string(ch.first) + ".";
-      // HS-220: a TX bank counts only from a usable poll, whose epoch rides
-      // along as "<key>epoch"; an unusable one (torn, mid-clear, or malformed)
-      // is not used, so the previous baseline stands until a usable one (the
-      // interval just widens).
-      if (pre == "tx") {
-        const auto ep = ch.second.find("epoch");
-        const long long epoch = ep == ch.second.end() ? -1 : txUsableEpoch(ep->second);
-        if (epoch < 0) continue;
-        out[key + "epoch"] = epoch;
-      }
       for (const auto& f : fields) {
         const auto it = ch.second.find(f);
-        if (it != ch.second.end() && detail::isInt(it->second)) out[key + f] = std::stoll(it->second);
+        unsigned long long n = 0;
+        if (it != ch.second.end() && detail::parseCount(it->second, n)) out[key + f] = n;
       }
     }
   };
@@ -247,32 +264,49 @@ inline Counters collectCounters(const Read& read, HostRead* host_read = nullptr)
   return out;
 }
 
-/// {name: increase} for every counter that changed. A counter new since `prev`
-/// counts from zero. A TX bank counter is differenced only within one epoch
-/// (mod 2^16 if it wraps); after an epoch change its value IS the count since
-/// the clear, and with no usable baseline epoch the poll is the baseline. Any
-/// other counter that fell was cleared, so its current value is the rise.
+/// The first 64-bit device counter (in name order) that reads below its
+/// previous read, as '<name> <before> -> <after>', or "" when none does. Such a
+/// counter never clears and cannot wrap, so the PL was reloaded between the
+/// two reads. The reload witnesses count here: on a clean link they are the
+/// only 64-bit counts above 0. A reload of a radio that has sent nothing at
+/// all since its load shows in none of them, and a 32-bit count standing
+/// above 0 then reads as a rise of nearly 2^32: an alarm either way.
+inline std::string plReload(const Counters& prev, const Counters& cur) {
+  for (const auto& kv : cur) {
+    if (counterKind(kv.first) != CounterKind::kDevice64) continue;
+    const auto it = prev.find(kv.first);
+    if (it != prev.end() && kv.second < it->second)
+      return kv.first + " " + std::to_string(it->second) + " -> " + std::to_string(kv.second);
+  }
+  return "";
+}
+
+/// {name: increase} for every counter that rose. A device counter (64- or
+/// 32-bit) counts from the PL load, so one with no previous read is a baseline
+/// and reports nothing; a 64-bit one differences plainly and a 32-bit one mod
+/// 2^32. After a PL reload (plReload) no device counter is differenced: the
+/// reload is the alarm, and this read is their baseline. A host counter new
+/// since `prev` counts from zero, and one that fell (or a sticky flag that
+/// did) was cleared, so its current value is the rise.
 inline Counters counterIncreases(const Counters& prev, const Counters& cur) {
   Counters out;
+  const bool reloaded = !plReload(prev, cur).empty();
   for (const auto& kv : cur) {
-    const std::string& k = kv.first;
-    const auto dot = k.rfind('.');
-    const std::string field = dot == std::string::npos ? k : k.substr(dot + 1);
-    if (field == "epoch") continue;  // the clear count, not an event
-    const auto it = prev.find(k);
-    const long long p = it == prev.end() ? 0 : it->second;
-    if (k.rfind("tx", 0) == 0) {
-      const auto ec = cur.find(k.substr(0, dot + 1) + "epoch");
-      const auto ep = prev.find(k.substr(0, dot + 1) + "epoch");
-      if (ec == cur.end() || ep == prev.end()) continue;  // no usable baseline yet: this poll becomes it
-      long long d = kv.second;                            // after a clear: the count since it
-      if (ep->second == ec->second) d = txWrapsMod16(field) ? ((kv.second - p) % 65536 + 65536) % 65536
-                                                           : (kv.second >= p ? kv.second - p : kv.second);
-      if (d > 0) out[k] = d;
-      continue;
+    if (isReloadWitness(kv.first)) continue;  // read for plReload only
+    const auto it = prev.find(kv.first);
+    const CounterKind kind = counterKind(kv.first);
+    unsigned long long d = 0;
+    if (kind == CounterKind::kClearable) {
+      const unsigned long long p = it == prev.end() ? 0 : it->second;
+      d = kv.second >= p ? kv.second - p : kv.second;  // a fall is a clear
+    } else if (it == prev.end() || reloaded) {
+      continue;  // no baseline from this PL load yet: this read becomes it
+    } else if (kind == CounterKind::kDevice32) {
+      d = (kv.second - it->second) & 0xFFFFFFFFULL;
+    } else {
+      d = kv.second - it->second;  // never below: a fall is a reload
     }
-    const long long d = kv.second >= p ? kv.second - p : kv.second;  // a fall is a clear
-    if (d > 0) out[k] = d;
+    if (d > 0) out[kv.first] = d;
   }
   return out;
 }
@@ -309,10 +343,12 @@ struct Report {
   double irq_per_s = 0.0;
   std::string preflight;
   Counters increases;
+  std::string pl_reload;  ///< plReload's '<name> <before> -> <after>', "" when the PL was not reloaded
   std::vector<std::string> new_failures;
 
   std::vector<std::string> alarms() const {
     std::vector<std::string> out;
+    if (!pl_reload.empty()) out.push_back("PL reloaded (" + pl_reload + ")");
     for (const auto& kv : increases) out.push_back(kv.first + " +" + std::to_string(kv.second));
     for (const auto& i : new_failures) out.push_back("preflight new FAIL " + i);
     return out;
@@ -373,6 +409,7 @@ class LinkHealth {
     standing_.clear();
     for (const auto& i : now_items) standing_.insert(preflightKey(i));
     first_ = false;
+    r.pl_reload = plReload(prev_, cur);
     r.increases = counterIncreases(prev_, cur);
     prev_ = carryCounters(prev_, cur, host_read);
     prev_irq_ = ir;

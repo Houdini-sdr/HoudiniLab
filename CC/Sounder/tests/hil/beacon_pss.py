@@ -119,8 +119,16 @@ def main():
     print(f"  replay rate {dac_rate/1e6:.2f} MSPS -> SCS {scs/1e3:.0f} kHz, "
           f"occupied {a.n_sc*scs/1e6:.2f} MHz")
 
-    tx = None
+    tx = rx = None
     try:
+        # The device's run model: every stream is set up and configured from
+        # idle, then activated. On one board the RX rate and the RX stream's
+        # setup must therefore come before the TX replay's activation (after
+        # it the device refuses them by name); on two boards the order is
+        # harmless.
+        rxd.setSampleRate(SOAPY_SDR_RX, a.rx_ch, a.rx_rate * 1e6)
+        rxd.setFrequency(SOAPY_SDR_RX, a.rx_ch, a.adc_nco * 1e6)
+        rx = rxd.setupStream(SOAPY_SDR_RX, native, [a.rx_ch], {})
         if not a.no_tx:
             sym = beacon_symbol(a.n_fft, a.tx_center * 1e6, dac_rate, a.n_sc)
             sym = sym / np.max(np.abs(sym))
@@ -140,17 +148,20 @@ def main():
                 raise RuntimeError("activateStream(TX replay) refused (DS-19: a load must be a whole "
                                    "number of 16-sample beats)")
 
-        rxd.setSampleRate(SOAPY_SDR_RX, a.rx_ch, a.rx_rate * 1e6)
-        rxd.setFrequency(SOAPY_SDR_RX, a.rx_ch, a.adc_nco * 1e6)
         fs = float(rxd.getSampleRate(SOAPY_SDR_RX, a.rx_ch))
         print(f"RX {fs/1e6:.3f} MSPS -- capturing {a.secs}s ...")
         buf, summ = hs.capture_rx(rxd, a.rx_ch, native, dtype, duration_sec=a.secs,
-                                  capture_bytes=int(a.cap_mb * 1024 * 1024))
+                                  capture_bytes=int(a.cap_mb * 1024 * 1024), rx=rx)
     finally:
         if tx is not None:
             try:
                 txd.deactivateStream(tx)
                 txd.closeStream(tx)
+            except Exception:  # noqa: BLE001
+                pass
+        if rx is not None:
+            try:
+                rxd.closeStream(rx)
             except Exception:  # noqa: BLE001
                 pass
 

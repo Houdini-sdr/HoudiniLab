@@ -108,8 +108,7 @@ old = ["Exception: Radios Not Found. Will attempt a retry... Re-Try Now!"] + GOO
 check(all("FAIL" not in levels(x) and any("retried" in t for lv, t in rs.verdict(x) if lv == "WARN") for x in (rnf, old)),
       "a radio open that was retried and recovered is a warning, not a failure, in the banner's new form and its old "
       "(mutation: the open failure as an error, or the old form not read)")
-why = ("the TDD ladder's TX clear did not land: the device accepted TDD_CMD tx_clear, but the clear epoch did not "
-       "move on ch0=5")
+why = "the TDD ladder's TX clear failed: TDD_CMD tx_clear: TX ch0 clear_busy did not fall within 1 ms"
 last = GOOD + ["Radio open failed (attempt 2 of 2): the radios did not come up: " + why +
                "; no retry left, the run did not start"]
 v = rs.verdict(last)
@@ -125,6 +124,14 @@ K = rs.alarm_kinds([
 check(dict(K) == {"egress.drop_p0 +N": 1, "host.rxq_ovfl_ch2 +N": 1},
       "an egress rise and a per-stream host rise get their kinds, and the retired blind and drift forms none "
       "(mutation: the old 'saturated' or 'config' pattern kept): %s" % dict(K))
+K = rs.alarm_kinds([
+    "57:4 WARNG: BS x link health: [BS x] 5.0 s: irq 1/s, preflight ok: PL reloaded (tx0.late 70000 -> 2); "
+    "host.rxq_ovfl_ch2 +7 | app: rx_err +0, rx_short +0, rx_pad +0, tx_short +0, tx_sat +0",
+    "57:5 WARNG: BS x link health: [BS x] 5.0 s: irq 1/s, preflight ok: PL reloaded (rx1.gated 9 -> 0); "
+    "tx0.clock_aborts +1 | app: rx_err +0, rx_short +0, rx_pad +0, tx_short +0, tx_sat +0"])
+check(dict(K) == {"PL reloaded": 2, "host.rxq_ovfl_ch2 +N": 1, "tx0.clock_aborts +N": 1},
+      "a gateware reload is one kind whichever counter showed it, and a clock event its own (mutation: the reload "
+      "form not read, which leaves a reloaded radio out of the run's alarm kinds): %s" % dict(K))
 lr2 = GOOD + ["57:%d INFOR: UE 192.168.10.21 TX_HOST_STATUS: late_refusals_ch0=%d late_refusals_ch1=0 release_late_ch0=0" % (i, i)
                for i in range(3)] + ["57:9 WARNG: Write rejected: HAS_TIME stamp 123 behind by 50 ms"]
 w = [t for lv, t in rs.verdict(lr2) if lv == "WARN"]

@@ -27,7 +27,6 @@ Run on the DGX (after: source houdini_test/bin/activate):
 import argparse
 import os
 import sys
-import time
 
 import numpy as np
 
@@ -79,62 +78,27 @@ def _cmd(sdr, c):
     sdr.writeSetting("TDD_CMD", c)
 
 
-def _clear_epochs(sdr):
-    """{ch: clear epoch} of every TX bank, through the driver's setting_reports
-    (TX_BANK_STATUS and its read protocol, HS-220), read again while a clear is
-    in flight; never raises, and gives a string saying why when no read has a
-    usable epoch for every bank."""
-    try:
-        import setting_reports as sr  # beside houdini_setup in the host examples
-    except ImportError as e:
-        return f"setting_reports not importable ({e})"
-    why = ""
-    for i in range(5):
-        if i:
-            time.sleep(0.001)
-        try:
-            banks = sr.parse_tx_bank(sdr.readSetting("TX_BANK_STATUS"))
-            ep = {ch: sr.tx_epoch(f) for ch, f in banks.items()}
-        except Exception as e:  # noqa: BLE001
-            return f"TX_BANK_STATUS unreadable ({e})"
-        if ep and None not in ep.values():
-            return ep
-        why = f"no usable clear epoch on every TX bank in 5 reads ({ep})"
-    return why
-
-
 def _teardown(sdr):
     """Abort, TDD_CMD tx_clear (the device's TX_CLEAR_ALL on its own register
-    map, SoapyHoudiniSDR 0.7.0), gate release. Every exception is caught and
-    printed; False when a write raised or the clear was refused or did not
-    land, True otherwise (a clear that cannot be checked here warns and counts
-    as done: the device judged it already)."""
+    map), gate release. The device judges the clear itself, on every TX bank's
+    clear_busy, and raises by name when it refuses the command or a bank does
+    not take it: that verdict is the whole check (the bank counters never clear
+    and nothing counts clears). Every exception is caught and printed; False
+    when a write raised, the clear's included, True otherwise. The gates are
+    released whether or not the clear raised."""
     refused = None
     try:
         _cmd(sdr, "abort")
-        before = _clear_epochs(sdr)
         try:
             _cmd(sdr, "tx_clear")
         except Exception as e:  # noqa: BLE001  the gates are released regardless
             refused = e
-        after = _clear_epochs(sdr)
         _cmd(sdr, "gate_release")
     except Exception as e:  # noqa: BLE001
         print(f"  [tdd] teardown warn: {e}")
         return False
     if refused is not None:
         print(f"  [tdd] teardown warn: TDD_CMD tx_clear: {refused}")
-        return False
-    # A second check on the device's own: the clear must have moved every
-    # bank's epoch.
-    unchecked = next((r for r in (before, after) if isinstance(r, str)), None)
-    if unchecked is not None:
-        print(f"  [tdd] teardown warn: TX clear not checked here: {unchecked}")
-        return True
-    stuck = [f"ch{c}" for c, e in before.items() if after.get(c, e) == e]
-    if stuck:
-        print(f"  [tdd] teardown warn: TDD_CMD tx_clear was accepted but did not land on {','.join(stuck)} "
-              f"(clear epoch unmoved)")
         return False
     return True
 

@@ -20,7 +20,7 @@ What it checks, in order:
   6. each radio's server answers on the config's remote port;
   7. (full form only) each radio's stack: gateware, firmware and plugin
      versions, which must agree between the nodes; each radio's data egress,
-     which must not have stalled (EGRESS_STATUS stall_seen); and each radio's
+     whose stall count is read (EGRESS_STATUS stalls); and each radio's
      clock steering offset (CLOCK_ADJ), which should be 0.
 
 Checks 1 to 6 touch no radio. Check 7 opens each radio and reads its hardware
@@ -51,10 +51,12 @@ from teardown_framer import DEFAULT_EXAMPLES, roles_from_topology  # noqa: E402 
 MUST_MATCH = ("fpga_version", "fpga_commit", "fpga_board", "device_version",
               "device_build", "host_version", "host_build")
 # The oldest SoapyHoudiniSDR release this code runs on (CSI_DEMO_WALKTHROUGH
-# 2.1): the TDD ladder and the teardown clear TX with TDD_CMD tx_clear, which
-# 0.7.0 brought (an older radio refuses it), and the egress check reads 32-bit
-# counts, which saturate at 255 before 0.6.0.
-MIN_RELEASE = (0, 7, 0)
+# 2.1). The release number is a floor only: this code reads the status texts
+# of the radio's current register map (EGRESS_STATUS with its stalls count,
+# TX_BANK_STATUS without a clear count), which a 0.8.0 build from before that
+# map does not write, and the egress check names such a radio by the field it
+# lacks.
+MIN_RELEASE = (0, 8, 0)
 
 
 def release_tuple(v):
@@ -217,15 +219,15 @@ def check_examples(rep, ex):
                 "The framer teardown before each start needs it: pass --examples "
                 "<path-to-SoapyHoudiniSDR>/host/examples (walkthrough section 2.4).")
         return
-    # The teardown parses TX_BANK_STATUS with these examples' parser, which
-    # refuses a newer radio's keys: on an older checkout it cannot check the
-    # TX clear's epochs and only warns, the device having judged the clear.
+    # The teardown opens each radio with these examples' houdini_setup, which
+    # is written against one release's settings: an older checkout may not
+    # open a newer radio.
     rel, need = examples_release(ex), ".".join(map(str, MIN_RELEASE))
     if rel is None or rel < MIN_RELEASE:
         what = ("are SoapyHoudiniSDR %s, older than this code's %s" % (".".join(map(str, rel)), need) if rel
                 else "carry no release this check can read (the checkout's shared/houdini_version.h)")
-        rep.add("WARN", "teardown", "the host examples in %s %s, so the teardown may not read a %s radio's TX "
-                "channel status to check its TX clear" % (ex, what, need),
+        rep.add("WARN", "teardown", "the host examples in %s %s, so the teardown may not open a %s radio"
+                % (ex, what, need),
                 "Pass --examples <a SoapyHoudiniSDR %s or newer checkout>/host/examples (walkthrough section "
                 "2.4)." % need)
     else:
@@ -372,54 +374,51 @@ def hwinfo(ip, port):
 
 
 def check_egress(rep, ip, raw, err=None):
-    # stall_seen (REGISTERS.md, EGRESS_STALL_WD) records that the egress merge
-    # sat in a frame without progress, after which the radio sends nothing
-    # over a link that reads up; a PL reload or a reboot recovers it. On
-    # gateware before HS-329 F1c the bit stays until a reload, and a bounce of
-    # this host's data port (a host reboot, a cable pull) sets it. From F1c
-    # (in every map v3 build) the link's return clears it, so a set bit is a
-    # stall since the link last came up. The same change added LINK_DOWN_DROPS,
-    # which the radio reports as link_down, so that field tells the two apart;
-    # a version string cannot (1.45 names both). The per-port drop counts
-    # alone are not a stall.
+    # EGRESS_STATUS is 'drop=p0:N,p1:N,p2:N,p3:N;stalls=N;marked=N;link_down=N'.
+    # Every count runs from the gateware (PL) load and nothing else clears one:
+    # not a link loss, not a core reset. So each is history, not a state: the
+    # drop, marked and link_down counts standing at any value are no fault (the
+    # run's link health alarms on a change between its reads), and nonzero ones
+    # are named. stalls counts the times the egress stall watchdog fired, which
+    # no healthy radio does at all; a nonzero count says it happened since the
+    # load, not that the egress is wedged now, and only a PL reload returns it
+    # to 0, so it is a warning with that advice rather than a failure a healthy
+    # radio could not clear.
     if err is not None:
         rep.add("FAIL", "egress %s" % ip, "the EGRESS_STATUS read failed (%s)" % err[:160],
                 "Run the check again; if it persists, ask whoever maintains the boards.")
         return
-    m = re.search(r"stall_seen=(\d+)", raw)
-    drop = re.search(r"drop=([^;]*)", raw)
-    marked = re.search(r"marked=(\d+)", raw)
-    link_down = re.search(r"link_down=(\d+)", raw)
-    lacks = [f for f, g in (("stall_seen", m), ("drop", drop), ("marked", marked)) if g is None]
+    stalls = re.search(r"(?:^|;)stalls=(\d+)(?:;|$)", raw)
+    drop = re.search(r"(?:^|;)drop=([^;]*)", raw)
+    marked = re.search(r"(?:^|;)marked=(\d+)(?:;|$)", raw)
+    link_down = re.search(r"(?:^|;)link_down=(\d+)(?:;|$)", raw)
+    lacks = [f for f, g in (("drop", drop), ("stalls", stalls), ("marked", marked), ("link_down", link_down))
+             if g is None]
     if lacks:
+        # The retired stall_seen names a radio from before the current register
+        # map; any other miss (an empty or cut read) may be one bad read.
         rep.add("FAIL", "egress %s" % ip, "EGRESS_STATUS lacks %s (%s)" % (", ".join(lacks), (raw or "empty")[:120]),
-                "Run the check again; if it persists, the radio does not run the plugin's release (ask whoever "
-                "maintains the boards).")
-    elif int(m.group(1)):
-        rep.add("FAIL", "egress %s" % ip, "the radio's data egress has stalled (%s); it will send no samples although its link is up" % raw,
-                "Reload the radio's gateware (PL) or reboot the radio, and tell whoever maintains the boards: on "
-                "this gateware the link's return clears a stall, so this one happened since the link last came up."
-                if link_down else
-                "Reload the radio's gateware (PL) or reboot the radio. On this gateware a bounce of this host's data "
-                "port (a host reboot, a cable pull) causes it, and it stays until then.")
+                "The radio reports the retired stall_seen: its gateware and device software are older than this "
+                "code reads. Deploy the current pair to both radios (ask whoever maintains the boards)."
+                if "stall_seen=" in raw else
+                "Run the check again; if it persists, the radio's gateware and device software are not the pair "
+                "this code reads (ask whoever maintains the boards).")
+        return
+    seen = ["drop %s %s" % (port, v) for port, v in re.findall(r"(p\d+):(\d+)", drop.group(1)) if int(v)]
+    if int(marked.group(1)):
+        seen.append("marked %s" % marked.group(1))
+    if int(link_down.group(1)):
+        seen.append("link_down %s" % link_down.group(1))
+    counts = "; counts since the gateware load: %s" % ", ".join(seen) if seen else ""
+    if int(stalls.group(1)):
+        rep.add("WARN", "egress %s" % ip, "the radio's data egress stalled %s time(s) since its gateware was loaded%s"
+                % (stalls.group(1), counts),
+                "The count is history and does not say the egress is stalled now. If a run shows no samples from "
+                "this radio although its link is up, reload its gateware (PL) or reboot it. Either way tell "
+                "whoever maintains the boards: no healthy radio counts a stall, and only a gateware reload "
+                "returns the count to 0.")
     else:
-        # The per-port drop counts and the one marked-frame count are 32 bits
-        # and wrap from SoapyHoudiniSDR 0.6.0 on (its HOUDINI_PROTOCOL section
-        # 2.7; MIN_RELEASE fails an older radio), and only an egress reset
-        # clears them: a PL load, or the core's reset, which from HS-329 F1c a
-        # GT_RESET reaches and a link loss does not (before F1c a long data-link
-        # loss reset it too). So does the link_down count of frames drained
-        # while the link was down, where the radio reports it (from F1c). A
-        # count standing at any value is history, not a
-        # fault: the run's link health alarms on a change between its reads.
-        # Nonzero ones are named.
-        seen = ["drop %s %s" % (port, v) for port, v in re.findall(r"(p\d+):(\d+)", drop.group(1)) if int(v)]
-        if int(marked.group(1)):
-            seen.append("marked %s" % marked.group(1))
-        if link_down and int(link_down.group(1)):
-            seen.append("link_down %s" % link_down.group(1))
-        rep.add("PASS", "egress %s" % ip, "no data-path stall recorded" +
-                ("; counts since the last egress reset: %s" % ", ".join(seen) if seen else ""))
+        rep.add("PASS", "egress %s" % ip, "no data-path stall since the gateware load" + counts)
 
 
 def release_cmd(ip, port, root=None):

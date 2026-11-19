@@ -80,9 +80,23 @@ def main():
     nco = (args.nco_mhz * 1e6 if args.nco_mhz is not None
            else hs.zone1_nco_hz(rxd, rx_ch=args.rx_ch, tx_ch=args.rx_ch))
 
-    tx = None
+    tx = rx = None
     f_act = f_bb
     try:
+        # The device's run model: every stream is set up and configured from
+        # idle, then activated. On one board the RX rate and the RX stream's
+        # setup must therefore come before the TX replay's activation (after
+        # it the device refuses them by name); on two boards the order is
+        # harmless.
+        try:
+            rxd.setSampleRate(SOAPY_SDR_RX, args.rx_ch, args.rate_mhz * 1e6)
+        except Exception as e:  # noqa: BLE001
+            print(f"  setSampleRate warn: {e}")
+        if args.mix == "nco":
+            rxd.setFrequency(SOAPY_SDR_RX, args.rx_ch, nco)
+        else:
+            rxd.writeSetting("RFDC_RX_COARSE_MIX", "fs4")
+        rx = rxd.setupStream(SOAPY_SDR_RX, rx_ctx["native_fmt"], [args.rx_ch], {})
         if not args.no_tx:
             iq_a, f_act = hs.tx_iq_tone(f_bb, dac_rate, args.n_addr, amp_frac=args.amp)
             print(f"TX tone baseband {f_act/1e6:.4f} MHz amp={args.amp}  "
@@ -101,24 +115,21 @@ def main():
                 raise RuntimeError("activateStream(TX replay) refused (DS-19: a load must be a whole "
                                    "number of 16-sample beats)")
 
-        try:
-            rxd.setSampleRate(SOAPY_SDR_RX, args.rx_ch, args.rate_mhz * 1e6)
-        except Exception as e:  # noqa: BLE001
-            print(f"  setSampleRate warn: {e}")
-        if args.mix == "nco":
-            rxd.setFrequency(SOAPY_SDR_RX, args.rx_ch, nco)
-        else:
-            rxd.writeSetting("RFDC_RX_COARSE_MIX", "fs4")
         fs = float(rxd.getSampleRate(SOAPY_SDR_RX, args.rx_ch))
         print(f"RX rate {fs/1e6:.3f} MSPS -- capturing {args.secs}s ...")
         buf, summ = hs.capture_rx(rxd, args.rx_ch, rx_ctx["native_fmt"],
                                   rx_ctx["dtype"], duration_sec=args.secs,
-                                  capture_bytes=int(args.cap_mb * 1024 * 1024))
+                                  capture_bytes=int(args.cap_mb * 1024 * 1024), rx=rx)
     finally:
         if tx is not None:
             try:
                 txd.deactivateStream(tx)
                 txd.closeStream(tx)
+            except Exception:  # noqa: BLE001
+                pass
+        if rx is not None:
+            try:
+                rxd.closeStream(rx)
             except Exception:  # noqa: BLE001
                 pass
 

@@ -44,12 +44,10 @@ class HoudiniFramer : public BeaconFramer {
   /// 4096-deep RAM, peak-scaled to sync.beacon.tx_full_scale.
   void buildBeacon(std::vector<int16_t>& iq);
   /// The teardown ladder for one device, in order: TDD_CMD abort, tx_clear
-  /// (the device's TX_CLEAR_ALL on its own register map, SoapyHoudiniSDR
-  /// 0.7.0), gate_release. Throws, after the gate release, when the clear is
-  /// refused, does not move every TX bank's clear epoch, or its epochs cannot
-  /// be read: a bring-up never arms over a clear it cannot check (the
-  /// dashboard's teardown, beacon_tdd._teardown, warns on an unreadable epoch
-  /// and counts the clear done, the device having judged it). An abort that
+  /// (the device's TX_CLEAR_ALL on its own register map, judged by the device
+  /// on every TX bank's clear_busy), gate_release. Throws, after the gate
+  /// release, when the device refuses the clear or judges a bank not cleared:
+  /// a bring-up never arms over a clear that did not land. An abort that
   /// throws skips the rest; a gate_release that throws replaces the clear's
   /// reason with its own.
   static void tddLadder(SoapySDR::Device* dev, bool skip_tx_clear);

@@ -4,8 +4,9 @@ prints it is named, so a change to a log line is one change here.
 
   link health   RadioHoudini.cc's health thread: "<UE|BS> <id> link health: ...".
                 A counter that moved in the period prints as "<name> +<increment>"
-                (tx<ch>.<counter> for a TX stream); link_health.h line() gives
-                the other item forms alarm_kinds reads.
+                (tx<ch>.<counter> for a TX stream), a gateware reload between
+                two reads as "PL reloaded (<name> <before> -> <after>)";
+                link_health.h line() gives the other item forms alarm_kinds reads.
   CNS summary   recorder_worker.cc: "CNS score ... at frame F (D datagrams, L low)".
                 D and L are cumulative, so the last summary is the run's total.
                 The per-event warning's "low occurrence K of D" is throttled on
@@ -19,6 +20,7 @@ LINK_HEALTH = re.compile(r"\b(UE|BS) \S+ link health: .*")
 TX_INCREMENT = re.compile(r"(tx\d\.\w+) \+(\d+)")
 CNS_SUMMARY = re.compile(r"\((\d+) datagrams, (\d+) low\)")
 ALARM_ITEM = re.compile(r"((?:tx|rx)\d\.\w+ \+\d+|(?:egress|host)\.\w+ \+\d+|preflight new FAIL [^|;]+"
+                        r"|PL reloaded(?= \()"
                         r"|(?:rx|tx)_\w+ \+[1-9]\d*)")
 
 
@@ -55,7 +57,8 @@ def cns_total(lines):
 
 def alarm_kinds(lines):
     """Counter of the alarm kinds in link-health lines, one entry per item, in
-    the forms link_health.h writes them: a counter rise '<name> +N', a new
+    the forms link_health.h writes them: a counter rise '<name> +N', a
+    gateware reload ('PL reloaded', whichever counter showed it), a new
     preflight FAIL, and the app counters."""
     out = Counter()
     for l in lines:

@@ -270,7 +270,7 @@ option(SOUNDER_BUILD_TESTS "Build the radio-free tests and bench tools (ctest)" 
 if (SOUNDER_BUILD_TESTS)
 add_executable(sync_config_test tests/comms-func/sync_config_test.cc)
 target_link_libraries(sync_config_test houdini_sync -lpthread)
-add_test(NAME sync_config COMMAND sync_config_test ${CMAKE_CURRENT_SOURCE_DIR}/CSI_DEMO_WALKTHROUGH.md)
+add_test(NAME sync_config COMMAND sync_config_test ${CMAKE_CURRENT_SOURCE_DIR}/SOUNDER_REFERENCE.md)
 
 add_executable(sync_config_schema tests/comms-func/sync_config_schema.cc)
 target_link_libraries(sync_config_schema houdini_sync -lpthread)
@@ -371,7 +371,6 @@ add_test(NAME csi_gui_control COMMAND python3 test_control.py WORKING_DIRECTORY 
 add_test(NAME csi_gui_check_setup COMMAND python3 test_check_setup.py WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/csi_gui)
 add_test(NAME csi_gui_record_replay COMMAND python3 test_record_replay.py WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/csi_gui)
 add_test(NAME csi_gui_teardown COMMAND python3 test_teardown.py WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/csi_gui)
-set_tests_properties(csi_gui_teardown PROPERTIES SKIP_RETURN_CODE 77)  # no host examples checked out
 add_test(NAME rung_report COMMAND python3 rung_report_test.py WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/tests/demo-verify)
 add_test(NAME freeze_watch COMMAND python3 freeze_watch_test.py WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/tests/demo-verify)
 add_test(NAME pacer_core_check COMMAND python3 pacer_core_check_test.py WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/tests/demo-verify)
@@ -393,7 +392,7 @@ endif()
 add_executable(link_health_test tests/comms-func/link_health_test.cc)
 target_include_directories(link_health_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 add_test(NAME link_health COMMAND link_health_test
-         ${CMAKE_CURRENT_SOURCE_DIR}/tests/comms-func/fixtures/link_health/demo_stack_fi1.txt)
+         ${CMAKE_CURRENT_SOURCE_DIR}/tests/comms-func/fixtures/link_health/driver_golden.txt)
 
 # AP-79: the replay strobe offs/len in the driver's units.
 add_executable(replay_strobe_test tests/comms-func/replay_strobe_test.cc)
